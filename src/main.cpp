@@ -217,6 +217,8 @@ struct App {
     int colorAxis = 0, colorGradient = 0;
     float colorMin = 0, colorMax = 1;
     int active = 3, propertyAxis = 2, tab = 0;
+    int viewportTool = 2; // 0 zoom, 1 pan, 2 orbit, 3 perspective
+    bool animationSettings = false, autoKey = false;
     Camera cameras[4];
     Target targets[4];
     std::future<Loaded> job;
@@ -573,17 +575,19 @@ struct App {
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
                 active = i;
-            if (ImGui::IsMouseDragging(0)) {
+            if (ImGui::IsMouseDragging(0) && viewportTool == 2) {
                 cam.yaw -= ImGui::GetIO().MouseDelta.x * .008f;
                 cam.pitch =
                     std::clamp(cam.pitch + ImGui::GetIO().MouseDelta.y * .008f, -1.55f, 1.55f);
                 if (cam.mode < 6)
                     cam.mode = 6;
             }
-            if (ImGui::IsMouseDragging(1) || ImGui::IsMouseDragging(2)) {
+            if ((ImGui::IsMouseDragging(1) || ImGui::IsMouseDragging(2)) || (ImGui::IsMouseDragging(0) && viewportTool == 1)) {
                 cam.panX += ImGui::GetIO().MouseDelta.x / std::max(avail.x, 1.f) * cam.zoom;
                 cam.panY -= ImGui::GetIO().MouseDelta.y / std::max(avail.y, 1.f) * cam.zoom;
             }
+            if (viewportTool == 0 && ImGui::GetIO().MouseWheel == 0 && ImGui::IsMouseDragging(0))
+                cam.zoom = std::clamp(cam.zoom * powf(.985f, ImGui::GetIO().MouseDelta.y), .01f, 50.f);
             cam.zoom = std::clamp(cam.zoom * powf(.85f, ImGui::GetIO().MouseWheel), .01f, 50.f);
         }
         auto *draw = ImGui::GetWindowDrawList();
@@ -624,8 +628,11 @@ struct App {
             if (cellLabels) { draw->AddText(corners[0], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "O"); draw->AddText(corners[1], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "A"); draw->AddText(corners[2], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "B"); draw->AddText(corners[4], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "C"); }
             draw->PopClipRect();
         }
-        if (ImGui::IsItemHovered()) draw->AddText({p.x + U(12), p.y + avail.y - U(25)}, IM_COL32(190, 202, 215, 255),
-                      "LMB orbit   RMB pan   Wheel zoom");
+        if (ImGui::IsItemHovered()) {
+            const char* toolHint = viewportTool == 0 ? "Zoom" : viewportTool == 1 ? "Pan" : viewportTool == 2 ? "Orbit" : "FOV";
+            draw->AddText({p.x + U(12), p.y + avail.y - U(25)}, IM_COL32(190, 202, 215, 255),
+                          (std::string("Tool: ") + toolHint + "   Wheel zoom").c_str());
+        }
         if (i == active)
             draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(95, 180, 255, 255));
         ImGui::EndChild();
@@ -675,6 +682,29 @@ struct App {
         ImGui::EndDisabled();
         ImGui::SameLine(); ImGui::Text("/ %d", last);
         ImGui::SameLine(); ImGui::TextDisabled("  %s", playing ? "Playing" : "Paused");
+        ImGui::SameLine();
+        auto toolButton = [&](const char* label, int tool, const char* tip) {
+            bool selectedTool = viewportTool == tool;
+            if (selectedTool) ImGui::PushStyleColor(ImGuiCol_Button, accent);
+            bool pressed = ImGui::SmallButton(label);
+            if (selectedTool) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            if (pressed) viewportTool = tool;
+        };
+        toolButton("Zoom", 0, "Zoom active viewport (drag or wheel)"); ImGui::SameLine();
+        toolButton("Pan", 1, "Pan active viewport"); ImGui::SameLine();
+        toolButton("Orbit", 2, "Orbit active viewport"); ImGui::SameLine();
+        toolButton("FOV", 3, "Adjust perspective field of view"); ImGui::SameLine();
+        if (ImGui::SmallButton(quad ? "Max" : "Views")) quad = !quad;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", quad ? "Maximize active viewport" : "Show four viewports");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clock")) animationSettings = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Animation settings");
+        ImGui::SameLine();
+        if (autoKey) ImGui::PushStyleColor(ImGuiCol_Button, accent);
+        if (ImGui::SmallButton("Key")) autoKey = !autoKey;
+        if (autoKey) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle auto-key mode");
         if (ImGui::GetContentRegionAvail().x > U(220)) {
             ImGui::SameLine();
             ImGui::TextDisabled(frames.size()>1 ? "  Drag ruler to scrub" : "  Single frame");
@@ -1232,6 +1262,17 @@ struct App {
         ImGui::End();
         catalog();
         settings();
+        if (animationSettings) {
+            ImGui::OpenPopup("Animation settings");
+            animationSettings = false;
+        }
+        if (ImGui::BeginPopupModal("Animation settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextDisabled("Trajectory playback");
+            ImGui::SliderFloat("Frames/sec", &fps, 1.f, 60.f, "%.0f");
+            ImGui::TextWrapped("Playback repeats the loaded trajectory. Use the timeline ruler or frame field to scrub.");
+            if (ImGui::Button("Close", {U(110), 0})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
         if (busy && indexing)
             ImGui::OpenPopup("Loading trajectory");
         if (ImGui::BeginPopupModal("Loading trajectory", nullptr,
