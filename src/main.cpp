@@ -209,6 +209,10 @@ struct App {
     float radius = .23f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
     int renderMode = 0;
+    float cellColor[4] = {0.82f,0.9f,1.f,0.88f};
+    float cellWidth = 1.25f, cellGlow = 0.35f;
+    bool cellDashed = false, cellLabels = false;
+    int cellDimension = 3;
     bool colorCoding = false, colorDiscrete = false, colorSelectedOnly = false, colorSymmetric = false, colorReverse = false;
     int colorAxis = 0, colorGradient = 0;
     float colorMin = 0, colorMax = 1;
@@ -610,8 +614,14 @@ struct App {
             draw->PushClipRect(p, {p.x + avail.x, p.y + avail.y}, true);
             for (int j = 0; j < 8; j++)
                 for (int k = 1; k <= 4; k *= 2)
-                    if (!(j & k) && valid[j] && valid[j | k])
-                        draw->AddLine(corners[j], corners[j | k], IM_COL32(126, 145, 164, 145));
+                    if (!(j & k) && valid[j] && valid[j | k] && (cellDimension==3 || (!(j&4) && !(j|k&4)))) {
+                        auto c = ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]*cellGlow});
+                        auto hi = ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]});
+                        draw->AddLine(corners[j], corners[j | k], c, cellWidth+4.f);
+                        if (!cellDashed) draw->AddLine(corners[j], corners[j | k], hi, cellWidth);
+                        else { auto a=corners[j], b=corners[j|k]; for(int q=0;q<8;q+=2){float t0=q/8.f,t1=(q+1)/8.f;draw->AddLine({a.x+(b.x-a.x)*t0,a.y+(b.y-a.y)*t0},{a.x+(b.x-a.x)*t1,a.y+(b.y-a.y)*t1},hi,cellWidth);} }
+                    }
+            if (cellLabels) { draw->AddText(corners[0], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "O"); draw->AddText(corners[1], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "A"); draw->AddText(corners[2], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "B"); draw->AddText(corners[4], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "C"); }
             draw->PopClipRect();
         }
         if (ImGui::IsItemHovered()) draw->AddText({p.x + U(12), p.y + avail.y - U(25)}, IM_COL32(190, 202, 215, 255),
@@ -897,6 +907,14 @@ struct App {
                 heading("Scene visibility");
                 ImGui::Checkbox("Particles", &particles); ImGui::SameLine();
                 ImGui::Checkbox("Simulation cell", &cell);
+                if (cell) {
+                    ImGui::Combo("Cell dimensionality", &cellDimension, "2D\0" "3D\0"); cellDimension=cellDimension?3:2;
+                    ImGui::ColorEdit4("Cell line color", cellColor, ImGuiColorEditFlags_AlphaBar);
+                    ImGui::SliderFloat("Line width", &cellWidth, .5f, 4.f, "%.1f px");
+                    ImGui::SliderFloat("Glow", &cellGlow, 0.f, 1.f, "%.2f");
+                    ImGui::Checkbox("Dashed secondary edges", &cellDashed); ImGui::Checkbox("Show cell labels", &cellLabels);
+                    ImGui::TextDisabled("PBC: %s %s %s", source.pbc[0]?"X":"-", source.pbc[1]?"Y":"-", source.pbc[2]?"Z":"-");
+                }
                 heading("Data source");
                 ImGui::TextWrapped("%s", path.empty() ? "Generated FCC crystal"
                                                       : utf8(path.wstring()).c_str());
