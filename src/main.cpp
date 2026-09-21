@@ -207,6 +207,7 @@ struct App {
     bool playing = false, quad = true, particles = true, cell = true, showTable = false,
          showCatalog = false;
     float radius = .23f, bg[4] = {0, 0, 0, 1}, fps = 12;
+    int particleShape = 0;
     int active = 3, propertyAxis = 2, tab = 0;
     Camera cameras[4];
     Target targets[4];
@@ -304,15 +305,17 @@ struct App {
         status = "Reading trajectory...";
         auto known = p == path ? frames : std::vector<Frame>{};
         auto b = budget;
-        job =
-            std::async(std::launch::async, [this, p, frame, known = std::move(known), b]() mutable {
-                if (known.empty())
-                    known = indexXYZ(p, &progress, &cancel);
-                if (frame < 0 || frame >= int(known.size()))
-                    throw std::runtime_error("Frame out of range");
-                auto d = readXYZ(p, known[frame], b, &progress, &cancel);
-                return Loaded{std::move(d), std::move(known), p, frame};
-            });
+        job = std::async(std::launch::async, [this, p, frame, known = std::move(known), b]() mutable {
+            auto ext = lowerExtension(p);
+            if (ext == ".poscar" || ext == ".contcar" || ext == ".vasp" || ext == ".cif" || ext == ".data" || ext == ".lmp") {
+                auto d = readInput(p, b, &progress, &cancel);
+                return Loaded{std::move(d), std::vector<Frame>{Frame{1,0,"ASE/native format"}}, p, 0};
+            }
+            if (known.empty()) known = indexXYZ(p, &progress, &cancel);
+            if (frame < 0 || frame >= int(known.size())) throw std::runtime_error("Frame out of range");
+            auto d = readXYZ(p, known[frame], b, &progress, &cancel);
+            return Loaded{std::move(d), std::move(known), p, frame};
+        });
     }
     void poll() {
         if (analyzing &&
@@ -363,7 +366,7 @@ struct App {
         }
     }
     void open() {
-        load(dialog(window, false, L"XYZ trajectory\0*.xyz;*.extxyz\0All files\0*.*\0", L"xyz"));
+        load(dialog(window, false, L"Atom structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;*.cif;*.data;*.lmp\0All files\0*.*\0", L"xyz"));
     }
     void exportImage() {
         auto p = dialog(window, true, L"PNG image\0*.png\0", L"png");
@@ -371,7 +374,7 @@ struct App {
             return;
         Target t;
         gpu.target(t, exportW, exportH);
-        gpu.draw(t, result.data, cameras[active], radius, bg, particles);
+            gpu.draw(t, result.data, cameras[active], radius, particleShape, bg, particles);
         gpu.png(t, p);
         status = "Rendered " + utf8(p.filename().wstring());
     }
@@ -533,7 +536,7 @@ struct App {
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();
         gpu.target(targets[i], int(avail.x), int(avail.y));
-        gpu.draw(targets[i], result.data, cam, radius, bg, particles);
+            gpu.draw(targets[i], result.data, cam, radius, particleShape, bg, particles);
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
@@ -863,7 +866,9 @@ struct App {
                 ImGui::TextDisabled("Trajectory: %zu frame(s)", std::max<size_t>(frames.size(), 1));
                 heading("Particle appearance");
                 ImGui::SliderFloat("Radius", &radius, .02f, 2.f, "%.2f");
+                ImGui::Combo("Shape", &particleShape, "Sphere / Ellipsoid\0Circle\0Cube / Box\0Cylinder\0Spherocylinder\0");
                 ImGui::TextDisabled("Color: particle type / selection");
+                ImGui::TextWrapped("Shape and radius apply to the active particle visual. Type-specific appearance editing is planned next.");
                 heading("Position statistics");
                 ImGui::Combo("Property", &propertyAxis, "Position X\0Position Y\0Position Z\0");
                 auto s = cachedStats[propertyAxis];
@@ -899,10 +904,10 @@ struct App {
                                        ? "Exports the processed preview, not all source atoms."
                                        : "Exports the processed particle dataset.");
                 if (ImGui::Button("Export XYZ", {-1, U(32)})) {
-                    auto p = dialog(window, true, L"XYZ file\0*.xyz\0", L"xyz");
+                    auto p = dialog(window, true, L"Atom structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.cif;*.data;*.lmp\0XYZ\0*.xyz\0POSCAR\0*.vasp;*.poscar\0CIF\0*.cif\0LAMMPS data\0*.data;*.lmp\0", L"xyz");
                     if (!p.empty()) {
-                        writeXYZ(p, result.data);
-                        status = "XYZ exported";
+                        auto ext = lowerExtension(p); if (ext == ".poscar" || ext == ".vasp") writePOSCAR(p, result.data); else if (ext == ".cif") writeCIF(p, result.data); else if (ext == ".data" || ext == ".lmp") writeLammpsData(p, result.data); else writeXYZ(p, result.data);
+                        status = "Exported " + utf8(p.filename().wstring());
                     }
                 }
                 ImGui::EndTabItem();

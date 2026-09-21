@@ -38,7 +38,7 @@ class Renderer {
     };
     struct Constants {
         DirectX::XMFLOAT4X4 view, projection;
-        float radius, unused[3];
+        float radius, shape, unused[2];
         DirectX::XMFLOAT4 colors[8];
     };
     ComPtr<ID3D11VertexShader> vs;
@@ -98,7 +98,7 @@ class Renderer {
         factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
         resize();
         const char *shader = R"(
-cbuffer C : register(b0) {row_major float4x4 view;row_major float4x4 proj;float radius;float3 unused;float4 colors[8];};
+cbuffer C : register(b0) {row_major float4x4 view;row_major float4x4 proj;float radius;float shape;float2 unused;float4 colors[8];};
 struct Atom {float3 pos;uint type;};StructuredBuffer<Atom> atoms : register(t0);
 struct V {float4 pos:SV_POSITION;float2 uv:TEXCOORD0;float3 center:TEXCOORD1;nointerpolation uint type:TEXCOORD2;};
 V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
@@ -107,7 +107,7 @@ V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
  o.pos=mul(float4(o.center+float3(o.uv*radius,0),1),proj);return o;
 }
 struct P {float4 color:SV_TARGET;float depth:SV_DEPTH;};
-P pixel(V i) {float r=dot(i.uv,i.uv);clip(1-r);float3 n=float3(i.uv,sqrt(1-r));float3 p=i.center+n*radius;
+P pixel(V i) {float r=dot(i.uv,i.uv);if(shape<0.5) clip(1-r); else if(shape<1.5) { clip(1-r); } else if(shape<2.5) { } else if(shape<3.5) { clip(1-abs(i.uv.x)); } else { clip(1-r); } float3 n=(shape<0.5||shape>3.5)?float3(i.uv,sqrt(max(0,1-r))):float3(0,0,1);float3 p=i.center+n*radius;
  float4 clipPos=mul(float4(p,1),proj);P o;o.depth=clipPos.z/clipPos.w;
  float3 base=(i.type&0x80000000)?float3(1,.83,.32):colors[(i.type&0x7fffffff)%8].rgb;
  float diffuse=max(0,dot(n,normalize(float3(-.45,.65,1))));float rim=pow(1-sqrt(1-r),3);
@@ -255,7 +255,7 @@ P pixel(V i) {float r=dot(i.uv,i.uv);clip(1-r);float3 n=float3(i.uv,sqrt(1-r));f
             *projOut = p;
         return v * p;
     }
-    void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, const float *bg,
+    void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, int shape, const float *bg,
               bool visible = true) {
         using namespace DirectX;
         context->OMSetRenderTargets(1, t.rtv.GetAddressOf(), t.dsv.Get());
@@ -277,6 +277,7 @@ P pixel(V i) {float r=dot(i.uv,i.uv);clip(1-r);float3 n=float3(i.uv,sqrt(1-r));f
         XMStoreFloat4x4(&c.view, view);
         XMStoreFloat4x4(&c.projection, proj);
         c.radius = radius;
+        c.shape = float(shape);
         XMFLOAT4 colors[] = {{.76f, .57f, .38f, 1}, {.35f, .68f, .78f, 1}, {.62f, .76f, .46f, 1},
                              {.78f, .44f, .52f, 1}, {.69f, .52f, .81f, 1}, {.88f, .76f, .43f, 1},
                              {.47f, .61f, .85f, 1}, {.8f, .8f, .8f, 1}};

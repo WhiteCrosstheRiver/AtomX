@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <iomanip>
 
 namespace atomx {
 struct Vec3 {
@@ -197,6 +198,50 @@ inline Dataset readXYZ(const std::filesystem::path &path, const Frame &fr,
         *progress = 1;
     return d;
 }
+inline std::string lowerExtension(const std::filesystem::path &p) {
+    auto s = p.extension().string();
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return s;
+}
+inline Dataset readPOSCAR(const std::filesystem::path &path) {
+    std::ifstream f(path); if (!f) throw std::runtime_error("Cannot open POSCAR");
+    Dataset d; std::string line; std::getline(f,d.comment); if (!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR");
+    double scale=std::stod(line); for (int r=0;r<3;r++) { if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR lattice"); std::istringstream ss(line); for(int c=0;c<3;c++) ss>>d.cell[r*3+c]; }
+    if (scale < 0) throw std::runtime_error("Negative POSCAR scale is not supported"); for(auto& v:d.cell)v*=scale;
+    if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR species"); std::istringstream names(line); std::string s; while(names>>s)d.species.push_back(s);
+    if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR counts"); std::istringstream counts(line); std::vector<int> nums; int n; while(counts>>n)nums.push_back(n);
+    if(nums.size()!=d.species.size()) { // VASP 4: the first line is counts and species are synthetic.
+        std::istringstream maybe(line); nums.clear(); while(maybe>>n)nums.push_back(n); d.species.clear(); for(size_t i=0;i<nums.size();i++)d.species.push_back("X"+std::to_string(i+1));
+    }
+    if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR coordinate mode");
+    if(!line.empty()&&(line[0]=='S'||line[0]=='s')) { if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR selective mode"); }
+    bool direct=line.find_first_of("Dd")!=std::string::npos; uint64_t total=0; for(int x:nums)total+=x;
+    auto basis=[&](double a,double b,double c){ return Vec3{float(a*d.cell[0]+b*d.cell[3]+c*d.cell[6]),float(a*d.cell[1]+b*d.cell[4]+c*d.cell[7]),float(a*d.cell[2]+b*d.cell[5]+c*d.cell[8])}; };
+    for(size_t type=0;type<nums.size();type++) for(int i=0;i<nums[type];i++){ if(!std::getline(f,line))throw std::runtime_error("Truncated POSCAR"); std::istringstream ss(line); double a,b,c;ss>>a>>b>>c;Vec3 p=direct?basis(a,b,c):Vec3{float(a),float(b),float(c)};d.atoms.push_back({p.x,p.y,p.z,uint32_t(type)}); }
+    d.sourceCount=d.atoms.size(); d.pbc={true,true,true}; d.bounds(); return d;
+}
+inline Dataset readCIF(const std::filesystem::path &path) {
+    std::ifstream f(path); if(!f)throw std::runtime_error("Cannot open CIF"); Dataset d; std::string line; double a=0,b=0,c=0,alpha=90,beta=90,gamma=90; std::vector<std::array<std::string,4>> rows; bool loop=false;
+    while(std::getline(f,line)){std::istringstream ss(line);std::string key;ss>>key;if(key=="_cell_length_a")ss>>a;else if(key=="_cell_length_b")ss>>b;else if(key=="_cell_length_c")ss>>c;else if(key=="_cell_angle_alpha")ss>>alpha;else if(key=="_cell_angle_beta")ss>>beta;else if(key=="_cell_angle_gamma")ss>>gamma;else if(key=="loop_")loop=true;else if(loop&&!line.empty()&&line[0]!='_'){std::array<std::string,4> r{};ss>>r[0]>>r[1]>>r[2]>>r[3];if(!r[0].empty())rows.push_back(r);}}
+    if(a<=0||b<=0||c<=0)throw std::runtime_error("CIF cell lengths are missing"); double pi=3.141592653589793/180, ca=std::cos(alpha*pi),cb=std::cos(beta*pi),cg=std::cos(gamma*pi),sg=std::sin(gamma*pi); d.cell={a,b*cg,c*cb,0,b*sg,c*(ca-cb*cg)/std::max(sg,1e-12),0,0,c*std::sqrt(std::max(0.0,1-cb*cb-std::pow((ca-cb*cg)/std::max(sg,1e-12),2)))};std::unordered_map<std::string,uint32_t> types;
+    for(auto&r:rows){
+        try { std::string symbol=r[0]; double x,y,z; if(r[3].empty()){symbol="X";x=std::stod(r[0]);y=std::stod(r[1]);z=std::stod(r[2]);}else{x=std::stod(r[1]);y=std::stod(r[2]);z=std::stod(r[3]);} auto[it,ins]=types.emplace(symbol,uint32_t(types.size())); if(ins)d.species.push_back(symbol); Vec3 p{float(x*d.cell[0]+y*d.cell[3]+z*d.cell[6]),float(x*d.cell[1]+y*d.cell[4]+z*d.cell[7]),float(x*d.cell[2]+y*d.cell[5]+z*d.cell[8])}; d.atoms.push_back({p.x,p.y,p.z,it->second}); }
+        catch(const std::exception&) { if(r[0].find("_atom_site") == 0 || r[0] == "loop_") continue; throw std::runtime_error("Invalid CIF atom coordinate: " + r[0] + " " + r[1] + " " + r[2] + " " + r[3]); }
+    }
+    d.sourceCount=d.atoms.size();d.pbc={true,true,true};d.comment="CIF import";d.bounds();return d;
+}
+inline Dataset readLammpsData(const std::filesystem::path &path) {
+    std::ifstream f(path);if(!f)throw std::runtime_error("Cannot open LAMMPS data");Dataset d;std::string line;uint64_t natoms=0;double loX=0,hiX=0,loY=0,hiY=0,loZ=0,hiZ=0;bool atoms=false;
+    while(std::getline(f,line)){std::istringstream ss(line);double x,y,z;std::string a,b;if(atoms){std::istringstream row(line);int id,type; if(row>>id>>type>>x>>y>>z){if(size_t(type)>d.species.size())d.species.resize(type,"X");d.species[type-1]=d.species[type-1]==""?"X"+std::to_string(type):d.species[type-1];d.atoms.push_back({float(x),float(y),float(z),uint32_t(type-1)});}continue;}if(ss>>natoms>>a&&a=="atoms")continue;if(ss.clear(),ss.str(line),ss>>loX>>hiX>>a>>b&&a=="xlo"&&b=="xhi")continue;if(ss.clear(),ss.str(line),ss>>loY>>hiY>>a>>b&&a=="ylo"&&b=="yhi")continue;if(ss.clear(),ss.str(line),ss>>loZ>>hiZ>>a>>b&&a=="zlo"&&b=="zhi")continue;if(line.find("Atoms")!=std::string::npos){atoms=true;std::getline(f,line);continue;}}
+    if(d.atoms.empty())throw std::runtime_error("No atomic coordinates found in LAMMPS data");d.cell={hiX-loX,0,0,0,hiY-loY,0,0,0,hiZ-loZ};d.pbc={true,true,true};d.sourceCount=d.atoms.size();d.bounds();return d;
+}
+inline Dataset readInput(const std::filesystem::path& path, uint64_t budget=2000000, std::atomic<float>* progress=nullptr, std::atomic<bool>* cancel=nullptr) {
+    auto ext=lowerExtension(path); if(ext==".poscar"||ext==".contcar"||ext==".vasp")return readPOSCAR(path); if(ext==".cif")return readCIF(path); if(ext==".data"||ext==".lmp")return readLammpsData(path);
+    auto frames=indexXYZ(path,progress,cancel); return readXYZ(path,frames.front(),budget,progress,cancel);
+}
+inline void writePOSCAR(const std::filesystem::path& p,const Dataset& d){std::ofstream f(p);if(!f)throw std::runtime_error("Cannot write POSCAR");f<<"AtomX export\n1.0\n";for(int r=0;r<3;r++)f<<d.cell[r*3]<<' '<<d.cell[r*3+1]<<' '<<d.cell[r*3+2]<<'\n';for(auto&s:d.species)f<<s<<' ';f<<"\n";for(size_t i=0;i<d.species.size();i++){size_t n=std::count_if(d.atoms.begin(),d.atoms.end(),[&](auto&a){return a.type==i;});f<<n<<' ';}f<<"\nDirect\n";for(auto&a:d.atoms){double det=d.cell[0]*(d.cell[4]*d.cell[8]-d.cell[5]*d.cell[7])-d.cell[1]*(d.cell[3]*d.cell[8]-d.cell[5]*d.cell[6])+d.cell[2]*(d.cell[3]*d.cell[7]-d.cell[4]*d.cell[6]);double x=(a.x*(d.cell[4]*d.cell[8]-d.cell[5]*d.cell[7])+a.y*(d.cell[2]*d.cell[7]-d.cell[1]*d.cell[8])+a.z*(d.cell[1]*d.cell[5]-d.cell[2]*d.cell[4]))/det;double y=(a.x*(d.cell[5]*d.cell[6]-d.cell[3]*d.cell[8])+a.y*(d.cell[0]*d.cell[8]-d.cell[2]*d.cell[6])+a.z*(d.cell[2]*d.cell[3]-d.cell[0]*d.cell[5]))/det;double z=(a.x*(d.cell[3]*d.cell[7]-d.cell[4]*d.cell[6])+a.y*(d.cell[1]*d.cell[6]-d.cell[0]*d.cell[7])+a.z*(d.cell[0]*d.cell[4]-d.cell[1]*d.cell[3]))/det;f<<std::setprecision(10)<<x<<' '<<y<<' '<<z<<'\n';}}
+inline void writeCIF(const std::filesystem::path&p,const Dataset&d){std::ofstream f(p);if(!f)throw std::runtime_error("Cannot write CIF");f<<"data_atomx\n_cell_length_a "<<d.cell[0]<<"\n_cell_length_b "<<d.cell[4]<<"\n_cell_length_c "<<d.cell[8]<<"\n_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\nloop_\n_atom_site_type_symbol\n_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n";for(auto&a:d.atoms)f<<d.species[a.type]<<' '<<a.x/d.cell[0]<<' '<<a.y/d.cell[4]<<' '<<a.z/d.cell[8]<<'\n';}
+inline void writeLammpsData(const std::filesystem::path&p,const Dataset&d){std::ofstream f(p);if(!f)throw std::runtime_error("Cannot write LAMMPS data");f<<d.atoms.size()<<" atoms\n"<<d.species.size()<<" atom types\n\n0 "<<d.cell[0]<<" xlo xhi\n0 "<<d.cell[4]<<" ylo yhi\n0 "<<d.cell[8]<<" zlo zhi\n\nMasses\n\n";for(size_t i=0;i<d.species.size();i++)f<<i+1<<" 1.0 # "<<d.species[i]<<'\n';f<<"\nAtoms # atomic\n\n";for(size_t i=0;i<d.atoms.size();i++)f<<i+1<<' '<<d.atoms[i].type+1<<' '<<d.atoms[i].x<<' '<<d.atoms[i].y<<' '<<d.atoms[i].z<<'\n';}
 inline Dataset crystal(int n = 32) {
     Dataset d;
     d.species = {"Cu", "Ni"};

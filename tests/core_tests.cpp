@@ -103,7 +103,19 @@ int main() {
             failed = true;
         }
         require(failed, "sampled analysis rejected");
-        std::filesystem::remove(p);
+        auto poscar = p.parent_path() / "atomx-test.POSCAR";
+        writePOSCAR(poscar, fcc);
+        auto pos = readPOSCAR(poscar);
+        require(pos.atoms.size() == fcc.atoms.size() && pos.species.size() == fcc.species.size(), "POSCAR roundtrip");
+        auto cif = p.parent_path() / "atomx-test.cif";
+        writeCIF(cif, fcc);
+        auto cifData = readCIF(cif);
+        require(cifData.atoms.size() == fcc.atoms.size(), "CIF roundtrip");
+        auto lmp = p.parent_path() / "atomx-test.data";
+        writeLammpsData(lmp, fcc);
+        auto lmpData = readLammpsData(lmp);
+        require(lmpData.atoms.size() == fcc.atoms.size(), "LAMMPS data roundtrip");
+        std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice, wrap, "
                      "scale, histogram, roundtrip, malformed input, FCC coordination, periodic "
                      "clusters, sampled analysis rejection\n";

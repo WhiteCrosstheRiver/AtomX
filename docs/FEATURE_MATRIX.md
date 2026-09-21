@@ -19,6 +19,7 @@
 | 修改器堆栈 | 已实现 | 添加、开关、删除、前移、128 步撤销/重做 |
 | 多个数据管线 | 待实现 | 当前同时加载一个数据源 |
 | XYZ / Extended XYZ | 部分 | 多帧、Lattice、pbc、Properties 中的 species/type 和 pos；额外粒子属性尚不保留 |
+| POSCAR / CONTCAR / CIF / LAMMPS data | 部分 | 单结构读取与导出，晶胞、元素和笛卡尔/分数坐标；复杂键拓扑、电荷和约束尚不保留 |
 | 文件序列 / 搜索模式 | 待实现 | 支持单文件多帧；不支持目录通配符序列 |
 | 多时间步 / 轨迹播放 | 已实现 | 64 位偏移索引、后台载入、播放、暂停、首尾帧、帧滑块 |
 | Detect reduced coordinates | 待实现 | 当前位置按文件中的笛卡尔坐标读取 |
@@ -67,6 +68,7 @@
 | Ambient occlusion | 待实现 | 当前仅球体解析法线、漫反射与高光 |
 | Assign color | 待实现 | 尚无用户自定义逐粒子颜色 |
 | Color by type | 已实现 | 默认 8 色循环，选中粒子高亮 |
+| 粒子形状 | 部分 | 全局选择 Sphere、Circle、Cube、Cylinder、Spherocylinder；按类型的独立半径/颜色/形状编辑待做 |
 | Color coding | 待实现 | 属性色带、范围、图例 |
 | Affine transformation | 部分 | 按轴平移、统一比例缩放、旋转坐标与晶胞；不是完整 3x4 仿射矩阵 |
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
