@@ -657,12 +657,12 @@ struct App {
         return pressed;
     }
     void timeline() {
-        ImGui::BeginChild("Trajectory timeline", {-1,U(104)}, ImGuiChildFlags_Borders,
+        ImGui::BeginChild("Trajectory timeline", {-1,U(128)}, ImGuiChildFlags_Borders,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         int last = std::max(0,int(frames.size())-1);
         int selected = pendingFrame >= 0 ? pendingFrame : current;
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Trajectory"); ImGui::SameLine();
+        ImGui::TextColored(accent, "TRAJECTORY"); ImGui::SameLine();
         ImGui::BeginDisabled(frames.size()<2 || indexing && busy);
         if (transport("##first",0,"First frame (Home)")) seekFrame(0); ImGui::SameLine();
         if (transport("##previous",1,"Previous frame (Left)")) seekFrame(selected-1); ImGui::SameLine();
@@ -674,12 +674,13 @@ struct App {
         if (ImGui::InputInt("##frame number", &edit, 0, 0)) seekFrame(edit);
         ImGui::EndDisabled();
         ImGui::SameLine(); ImGui::Text("/ %d", last);
+        ImGui::SameLine(); ImGui::TextDisabled("  %s", playing ? "Playing" : "Paused");
         if (ImGui::GetContentRegionAvail().x > U(220)) {
             ImGui::SameLine();
             ImGui::TextDisabled(frames.size()>1 ? "  Drag ruler to scrub" : "  Single frame");
         }
         auto p = ImGui::GetCursorScreenPos();
-        float width = ImGui::GetContentRegionAvail().x, height = U(47);
+        float width = ImGui::GetContentRegionAvail().x, height = U(65);
         ImGui::InvisibleButton("##frame ruler", {width,height}, ImGuiButtonFlags_EnableNav);
         bool hovered = ImGui::IsItemHovered(), focused = ImGui::IsItemFocused();
         auto *d = ImGui::GetWindowDrawList();
@@ -687,7 +688,8 @@ struct App {
         auto text = ImGui::GetColorU32(ImGuiCol_Text);
         auto tick = ImGui::GetColorU32(ImGuiCol_TextDisabled);
         auto marker = ImGui::GetColorU32(accent);
-        d->AddLine({left,baseline},{right,baseline},tick);
+        d->AddRectFilled({left,p.y+U(21)},{right,p.y+U(38)},IM_COL32(35,42,54,180),U(4));
+        d->AddLine({left,baseline},{right,baseline},tick, U(1));
         // Choose 1/2/5 decade steps so labels remain separated at every frame count.
         int64_t major = 1;
         double desired = std::max(1.0, double(last)*U(72)/std::max(1.f,right-left));
@@ -704,6 +706,7 @@ struct App {
             }
         }
         float x=xFor(selected);
+        d->AddRectFilled({left,p.y+U(21)},{x,p.y+U(38)},IM_COL32(92,145,205,90),U(4));
         d->AddLine({x,p.y},{x,baseline+U(14)},marker,U(2));
         d->AddTriangleFilled({x-U(5),baseline-U(5)},{x+U(5),baseline-U(5)},{x,baseline+U(1)},marker);
         if (last>0 && ImGui::IsItemActive() && ImGui::IsMouseDown(0))
@@ -728,7 +731,7 @@ struct App {
         auto avail = ImGui::GetContentRegionAvail();
         float dataH = showTable ? U(170) : 0;
         float gap = ImGui::GetStyle().ItemSpacing.y;
-        float sceneH = std::max(U(150), avail.y - dataH - U(104) - ImGui::GetFrameHeight() - gap*(showTable ? 4 : 3));
+        float sceneH = std::max(U(150), avail.y - dataH - U(128) - ImGui::GetFrameHeight() - gap*(showTable ? 4 : 3));
         if (quad) {
             float vw = (avail.x - ImGui::GetStyle().ItemSpacing.x) * .5f, vh = (sceneH - gap) * .5f;
             viewport(0, vw, vh);
