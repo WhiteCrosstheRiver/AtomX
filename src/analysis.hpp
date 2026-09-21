@@ -12,6 +12,13 @@ struct NeighborAnalysis {
     float cutoff = 0;
     bool rdfValid = false;
 };
+struct DXAResult {
+    bool approximate = true;
+    uint64_t analyzed = 0, defectAtoms = 0;
+    std::vector<uint32_t> coreAtoms;
+    std::unordered_map<std::string,uint64_t> structures;
+    std::string message;
+};
 struct Bin {
     int64_t x, y, z;
     bool operator==(const Bin &) const = default;
@@ -150,6 +157,20 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
             r.rdf[i] = float(2.0*r.pairHistogram[i] / (d.atoms.size()*density*shell));
         }
     }
+    return r;
+}
+inline DXAResult dxaApproximate(const Dataset &d, float cutoff, bool selectedOnly=false,
+                                const std::vector<uint8_t>* selection=nullptr) {
+    if (d.sampled()) throw std::runtime_error("DXA requires full-resolution data; increase the import budget.");
+    if (d.atoms.size() > 2000000) throw std::runtime_error("DXA currently limited to 2 million atoms.");
+    auto n = neighbors(d, cutoff);
+    DXAResult r; r.analyzed=d.atoms.size(); r.structures["Other"]=0; r.structures["FCC"]=0; r.structures["HCP"]=0; r.structures["BCC"]=0; r.structures["Cubic diamond"]=0;
+    for (size_t i=0;i<d.atoms.size();++i) {
+        if (selectedOnly && (!selection || !(*selection)[i])) continue;
+        auto c=n.coordination[i]; if(c==12) r.structures["FCC"]++; else if(c==8) r.structures["BCC"]++; else if(c==4) r.structures["Cubic diamond"]++; else {r.structures["Other"]++;r.coreAtoms.push_back(uint32_t(i));}
+    }
+    r.defectAtoms=r.coreAtoms.size();
+    r.message="Approximate DXA prepass: coordination-based defect cores. Burgers vectors, line network and defect mesh are not computed yet.";
     return r;
 }
 } // namespace atomx

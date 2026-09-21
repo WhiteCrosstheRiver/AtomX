@@ -230,6 +230,10 @@ struct App {
     std::future<NeighborAnalysis> analysisJob;
     bool analyzing = false;
     uint64_t revision = 0, analysisRevision = 0;
+    std::optional<DXAResult> dxa;
+    std::future<DXAResult> dxaJob;
+    bool dxaRunning = false;
+    float dxaCutoff = .8f;
     App(HWND w, Renderer &r) : window(w), gpu(r) {
         preferences.load();
         theme(preferences.theme);
@@ -251,6 +255,7 @@ struct App {
             job.wait();
         if (analysisJob.valid())
             analysisJob.wait();
+        if (dxaJob.valid()) dxaJob.wait();
     }
     void update() {
         try {
@@ -323,6 +328,10 @@ struct App {
         });
     }
     void poll() {
+        if (dxaRunning && dxaJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            dxaRunning=false;
+            try { dxa= dxaJob.get(); status="DXA prepass completed"; } catch(const std::exception&e){error=e.what();}
+        }
         if (analyzing &&
             analysisJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             analyzing = false;
@@ -953,6 +962,20 @@ struct App {
             }
             if (ImGui::BeginTabItem("Analysis", nullptr, selectAnalysis ? ImGuiTabItemFlags_SetSelected : 0)) {
                 selectAnalysis = false;
+                heading("DISLOCATION ANALYSIS (DXA)");
+                ImGui::TextWrapped("Runs a coordination-based DXA prepass and reports candidate defect-core atoms. Full Burgers circuit tracing and a dislocation mesh are planned for the next DXA stage.");
+                ImGui::InputFloat("DXA cutoff", &dxaCutoff, .05f, .1f, "%.3f");
+                if (ImGui::Button("Run DXA prepass", {-1, U(32)}) && !dxaRunning) {
+                    auto d=result.data; auto c=dxaCutoff; auto selected=result.selected;
+                    dxaRunning=true; dxaJob=std::async(std::launch::async,[d=std::move(d),c,selected=std::move(selected)](){return dxaApproximate(d,c,false,&selected);});
+                }
+                if (dxaRunning) ImGui::TextDisabled("Analyzing neighbor coordination...");
+                if (dxa) {
+                    ImGui::Text("Analyzed: %llu", dxa->analyzed); ImGui::Text("Candidate core atoms: %llu", dxa->defectAtoms);
+                    for (auto& [name,count] : dxa->structures) ImGui::Text("%s: %llu", name.c_str(), count);
+                    ImGui::TextWrapped("%s", dxa->message.c_str());
+                    if (ImGui::Button("Export DXA prepass CSV", {-1,U(30)})) { auto p=dialog(window,true,L"CSV file\0*.csv\0",L"csv"); if(!p.empty()){std::ofstream out(p);out<<"atom_index,coordination\n"; auto n=neighbors(result.data,dxaCutoff); for(auto i:dxa->coreAtoms)out<<i<<","<<n.coordination[i]<<"\n"; status="DXA prepass exported";} }
+                }
                 heading("NEIGHBOR ANALYSIS");
                 ImGui::TextWrapped("Coordination number and connected clusters using spatial bins "
                                    "and minimum-image periodic distances.");
@@ -1118,7 +1141,8 @@ struct App {
                 beginCard("Analysis");
                 analysisItem("Cluster analysis"); analysisItem("Coordination analysis"); analysisItem("Radial distribution function (RDF)"); analysisItem("Neighbor distance distribution");
                 if (matches("Histogram") && ImGui::Selectable("Histogram")) { selectPipeline=true; status="Position histogram is shown below the pipeline"; ImGui::CloseCurrentPopup(); }
-                for (auto name : {"Atomic strain", "Bond angle distribution", "Bond length distribution", "Bond order", "Difference between frames", "Dislocation analysis (DXA)", "Displacement vectors", "Elastic strain calculation", "Find rings", "Grain segmentation", "Reduce property", "Scatter plot", "Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
+                for (auto name : {"Atomic strain", "Bond angle distribution", "Bond length distribution", "Bond order", "Difference between frames", "Displacement vectors", "Elastic strain calculation", "Find rings", "Grain segmentation", "Reduce property", "Scatter plot", "Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
+                analysisItem("Dislocation analysis (DXA)");
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Modification");

@@ -103,6 +103,8 @@ int main() {
             failed = true;
         }
         require(failed, "sampled analysis rejected");
+        auto dxa = dxaApproximate(fcc, .8f);
+        require(dxa.analyzed == fcc.atoms.size() && dxa.structures["FCC"] == fcc.atoms.size() && dxa.defectAtoms == 0, "DXA FCC prepass");
         auto poscar = p.parent_path() / "atomx-test.POSCAR";
         writePOSCAR(poscar, fcc);
         auto pos = readPOSCAR(poscar);
