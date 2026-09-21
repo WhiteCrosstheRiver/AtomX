@@ -1,0 +1,172 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Data inspector &mdash; OVITO User Manual 3.16.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../../_static/style.css?v=6f9e186f" />
+
+  
+    <link rel="shortcut icon" href="../../_static/ovito.ico"/>
+    <link rel="canonical" href="https://docs.ovito.org/reference/data_inspector/index.html" />
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5c62bcdb"></script>
+      <script src="../../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script async="async" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Particles" href="particles.html" />
+    <link rel="prev" title="VisRTX renderer pro" href="../rendering/visrtx_renderer.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+<a href="../../index.html">
+  
+    <img src="../../_static/ovito_logo.png" class="logo" alt="Logo"/>
+</a>
+<div class="version" style="margin-bottom: 1em;">
+  3.16.1
+</div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../introduction.html">About OVITO</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../new_features.html">What's new</a></li>
+</ul>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../usage/index.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorials/index.html">Tutorials</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../advanced_topics/index.html">Advanced topics</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Reference</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/index.html">Pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../viewports/index.html">Viewports</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../rendering/index.html">Rendering</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Data inspector</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="particles.html">Particles</a></li>
+<li class="toctree-l3"><a class="reference internal" href="bonds.html">Bonds</a></li>
+<li class="toctree-l3"><a class="reference internal" href="types.html">Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="simulation_cell.html">Simulation cell</a></li>
+<li class="toctree-l3"><a class="reference internal" href="attributes.html">Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="data_tables.html">Data tables</a></li>
+<li class="toctree-l3"><a class="reference internal" href="voxel_grids.html">Voxel grids</a></li>
+<li class="toctree-l3"><a class="reference internal" href="dislocations.html">Dislocations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="coding_agent.html">AI Agent <span class="ovito-pro-tag-role"><a class="ovito-pro-tag" href="https://www.ovito.org/#proFeatures" data-tooltip="This program feature is only available in OVITO Pro and not OVITO Basic. Click to learn more." data-tooltip-position="right">pro</a></span></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../app_settings/index.html">Application settings</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../ovito_pro.html">OVITO Pro</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../development/index.html">Developer instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../licenses/index.html">License information</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">OVITO User Manual</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          
+
+<div role="navigation" aria-label="Breadcrumbs">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home"></a> &raquo;</li>
+          <li><a href="../index.html">Reference</a> &raquo;</li>
+      <li>Data inspector</li>
+      <li class="wy-breadcrumbs-aside" style="text-align: right;">
+          <a href="https://www.ovito.org" style="padding: 1px;"">www.ovito.org&nbsp;<span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a><br>
+          <a href="../../python/index.html" style="padding: 1px;">Python&nbsp;Reference&nbsp;<span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="data-inspector">
+<span id="id1"></span><h1>Data inspector<a class="headerlink" href="#data-inspector" title="Link to this heading"></a></h1>
+<a class="reference internal image-reference" href="../../_images/data_inspector.png"><img alt="../../_images/data_inspector.png" class="align-right" src="../../_images/data_inspector.png" style="width: 50%;" />
+</a>
+<p>The data inspector is a panel located below the viewport area, providing a comprehensive view of the data
+loaded from the input file and/or dynamically computed by the data pipeline. The data inspector panel is initially
+in a collapsed state, with only the tab bar visible. It can be expanded by clicking anywhere in the tab bar.
+The panel consists of several pages, each being dynamically shown depending on the kinds of
+data that are present in the current dataset. For example, there is a page
+listing all particles and their property data in tabular form.</p>
+<p>The following pages are part of the data inspector and are shown only if the corresponding type
+of data is present in the pipeline output:</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="particles.html#data-inspector-particles"><span class="std std-ref">Particles</span></a></p></li>
+<li><p><a class="reference internal" href="bonds.html#data-inspector-bonds"><span class="std std-ref">Bonds</span></a></p></li>
+<li><p>Angles</p></li>
+<li><p>Dihedrals</p></li>
+<li><p>Impropers</p></li>
+<li><p><a class="reference internal" href="types.html#data-inspector-types"><span class="std std-ref">Types</span></a></p></li>
+<li><p><a class="reference internal" href="simulation_cell.html#data-inspector-simulation-cell"><span class="std std-ref">Simulation cell</span></a></p></li>
+<li><p><a class="reference internal" href="attributes.html#data-inspector-attributes"><span class="std std-ref">Attributes</span></a></p></li>
+<li><p><a class="reference internal" href="data_tables.html#data-inspector-data-tables"><span class="std std-ref">Data tables</span></a></p></li>
+<li><p><a class="reference internal" href="voxel_grids.html#data-inspector-voxel-grids"><span class="std std-ref">Voxel grids</span></a></p></li>
+<li><p>Surfaces</p></li>
+<li><p><a class="reference internal" href="dislocations.html#data-inspector-dislocations"><span class="std std-ref">Dislocations</span></a></p></li>
+</ul>
+<p>One additional page, <a class="reference internal" href="coding_agent.html#data-inspector-coding-agent"><span class="std std-ref">AI Agent </span></a>, is always shown, since it is independent of the
+data loaded into the current dataset.</p>
+<div class="toctree-wrapper compound">
+</div>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../rendering/visrtx_renderer.html" class="btn btn-neutral float-left" title="VisRTX renderer pro" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="particles.html" class="btn btn-neutral float-right" title="Particles" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026 OVITO GmbH, Germany.</p>
+  </div>
+
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

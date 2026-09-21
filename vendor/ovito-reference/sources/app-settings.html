@@ -1,0 +1,188 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Application settings &mdash; OVITO User Manual 3.16.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../../_static/style.css?v=6f9e186f" />
+
+  
+    <link rel="shortcut icon" href="../../_static/ovito.ico"/>
+    <link rel="canonical" href="https://docs.ovito.org/reference/app_settings/index.html" />
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5c62bcdb"></script>
+      <script src="../../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="General settings" href="general_settings.html" />
+    <link rel="prev" title="AI Agent pro" href="../data_inspector/coding_agent.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+<a href="../../index.html">
+  
+    <img src="../../_static/ovito_logo.png" class="logo" alt="Logo"/>
+</a>
+<div class="version" style="margin-bottom: 1em;">
+  3.16.1
+</div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../../introduction.html">About OVITO</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../new_features.html">What's new</a></li>
+</ul>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../usage/index.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../tutorials/index.html">Tutorials</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../advanced_topics/index.html">Advanced topics</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Reference</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../pipelines/index.html">Pipelines</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../viewports/index.html">Viewports</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../rendering/index.html">Rendering</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../data_inspector/index.html">Data inspector</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Application settings</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="general_settings.html">General</a></li>
+<li class="toctree-l3"><a class="reference internal" href="viewport_settings.html">Viewports</a></li>
+<li class="toctree-l3"><a class="reference internal" href="video_encoder_settings.html">Video encoding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modifier_templates.html">Modifier templates</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modifier_templates.html#viewport-layer-templates">Viewport layer templates</a></li>
+<li class="toctree-l3"><a class="reference internal" href="particle_settings.html">Particles</a></li>
+<li class="toctree-l3"><a class="reference internal" href="python_settings.html">Python</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#application-settings-storage-location">Where does OVITO store its settings?</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../ovito_pro.html">OVITO Pro</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../development/index.html">Developer instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../licenses/index.html">License information</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">OVITO User Manual</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          
+
+<div role="navigation" aria-label="Breadcrumbs">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home"></a> &raquo;</li>
+          <li><a href="../index.html">Reference</a> &raquo;</li>
+      <li>Application settings</li>
+      <li class="wy-breadcrumbs-aside" style="text-align: right;">
+          <a href="https://www.ovito.org" style="padding: 1px;"">www.ovito.org&nbsp;<span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a><br>
+          <a href="../../python/index.html" style="padding: 1px;">Python&nbsp;Reference&nbsp;<span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="application-settings">
+<span id="id1"></span><h1>Application settings<a class="headerlink" href="#application-settings" title="Link to this heading"></a></h1>
+<a class="reference internal image-reference" href="../../_images/general_settings.png"><img alt="../../_images/general_settings.png" class="align-right" src="../../_images/general_settings.png" style="width: 40%;" />
+</a>
+<p>To access the application settings dialog, choose <span class="menuselection">Edit ‣ Application settings</span> from the main menu.
+The settings dialog has several tabs:</p>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="general_settings.html">General</a></li>
+<li class="toctree-l1"><a class="reference internal" href="viewport_settings.html">Viewports</a></li>
+<li class="toctree-l1"><a class="reference internal" href="video_encoder_settings.html">Video encoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="modifier_templates.html">Modifier templates</a></li>
+<li class="toctree-l1"><a class="reference internal" href="modifier_templates.html#viewport-layer-templates">Viewport layer templates</a></li>
+<li class="toctree-l1"><a class="reference internal" href="particle_settings.html">Particles</a></li>
+<li class="toctree-l1"><a class="reference internal" href="python_settings.html">Python</a></li>
+</ul>
+</div>
+<section id="application-settings-storage-location">
+<span id="where-does-ovito-store-its-settings"></span><h2>Where does OVITO store its settings?<a class="headerlink" href="#application-settings-storage-location" title="Link to this heading"></a></h2>
+<p>OVITO stores the user’s settings in a platform-dependent location to preserve them across program sessions. On Windows, the information
+is saved in the system registry. On Linux and macOS, it is stored in a text-based configuration file under the user’s home directory.
+The precise storage location on your computer is displayed at the bottom of the application settings dialog.</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operating system</p></th>
+<th class="head"><p>Storage location</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Windows</p></td>
+<td><p><code class="file docutils literal notranslate"><span class="pre">\HKEY_CURRENT_USER\SOFTWARE\Ovito\Ovito\</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Linux</p></td>
+<td><p><code class="file docutils literal notranslate"><span class="pre">$HOME/.config/Ovito/Ovito.conf</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>macOS</p></td>
+<td><p><code class="file docutils literal notranslate"><span class="pre">$HOME/Library/Preferences/org.ovito.Ovito.plist</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<p>To reset OVITO to its factory default settings, close the program first. Then delete the configuration file on Linux/macOS or remove the registry branch
+on Windows using the <a class="reference external" href="https://support.microsoft.com/en-us/windows/how-to-open-registry-editor-in-windows-10-deab38e6-91d6-e0aa-4b7c-8878d9e07b11">Windows Registry Editor</a> program.</p>
+<div class="admonition attention">
+<p class="admonition-title">Attention</p>
+<p>On macOS, preferences are cached by the operating system. After deleting the <code class="docutils literal notranslate"><span class="pre">org.ovito.Ovito.plist</span></code> file, you need to reboot your computer or run
+the command <strong class="command">killall -u $USER cfprefsd</strong> in the terminal before restarting OVITO.</p>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../data_inspector/coding_agent.html" class="btn btn-neutral float-left" title="AI Agent pro" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="general_settings.html" class="btn btn-neutral float-right" title="General settings" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026 OVITO GmbH, Germany.</p>
+  </div>
+
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

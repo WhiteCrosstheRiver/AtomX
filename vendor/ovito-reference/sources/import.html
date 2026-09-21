@@ -1,0 +1,228 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Data import &mdash; OVITO User Manual 3.16.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../_static/style.css?v=6f9e186f" />
+
+  
+    <link rel="shortcut icon" href="../_static/ovito.ico"/>
+    <link rel="canonical" href="https://docs.ovito.org/usage/import.html" />
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5c62bcdb"></script>
+      <script src="../_static/doctools.js?v=9a2dae69"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Viewport windows" href="viewports.html" />
+    <link rel="prev" title="Introduction" href="index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+<a href="../index.html">
+  
+    <img src="../_static/ovito_logo.png" class="logo" alt="Logo"/>
+</a>
+<div class="version" style="margin-bottom: 1em;">
+  3.16.1
+</div>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="../introduction.html">About OVITO</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../new_features.html">What's new</a></li>
+</ul>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Introduction</a><ul class="current">
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Data import</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#usage-import-command-line">Command line usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#usage-import-sequence">Simulation trajectories</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#usage-import-multiple-datasets">Visualizing multiple datasets <span class="ovito-pro-tag-role"><a class="ovito-pro-tag" href="https://www.ovito.org/#proFeatures" data-tooltip="This program feature is only available in OVITO Pro and not OVITO Basic. Click to learn more." data-tooltip-position="right">pro</a></span></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#usage-import-positioning-objects">Positioning objects in the scene</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="viewports.html">Viewport windows</a></li>
+<li class="toctree-l2"><a class="reference internal" href="data_model.html">Data model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="pipeline.html">Pipeline concept</a></li>
+<li class="toctree-l2"><a class="reference internal" href="rendering.html">Rendering</a></li>
+<li class="toctree-l2"><a class="reference internal" href="miscellaneous.html">Miscellaneous</a></li>
+<li class="toctree-l2"><a class="reference internal" href="export.html">Exporting data</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../tutorials/index.html">Tutorials</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../advanced_topics/index.html">Advanced topics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../ovito_pro.html">OVITO Pro</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../development/index.html">Developer instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../licenses/index.html">License information</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">OVITO User Manual</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          
+
+<div role="navigation" aria-label="Breadcrumbs">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home"></a> &raquo;</li>
+          <li><a href="index.html">Introduction</a> &raquo;</li>
+      <li>Data import</li>
+      <li class="wy-breadcrumbs-aside" style="text-align: right;">
+          <a href="https://www.ovito.org" style="padding: 1px;"">www.ovito.org&nbsp;<span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a><br>
+          <a href="../python/index.html" style="padding: 1px;">Python&nbsp;Reference&nbsp;<span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="usage-import">
+<span id="data-import"></span><h1>Data import<a class="headerlink" href="#usage-import" title="Link to this heading"></a></h1>
+<figure class="align-right" id="id1" style="width: 30%">
+<img alt="../_images/file_wildcard_pattern.png" src="../_images/file_wildcard_pattern.png" />
+<figcaption>
+<p><span class="caption-text">File source panel</span><a class="headerlink" href="#id1" title="Link to this image"></a></p>
+</figcaption>
+</figure>
+<p>To load a simulation file or structure, select <span class="menuselection">File ‣ Load File</span> from the menu or use the corresponding toolbar button. OVITO automatically detects the file format (see <a class="reference internal" href="../reference/file_formats/file_formats_input.html#file-formats-input"><span class="std std-ref">list of supported formats</span></a>). Compressed files with a <code class="file docutils literal notranslate"><span class="pre">.gz</span></code> or <code class="file docutils literal notranslate"><span class="pre">.zst</span></code> suffix can be opened directly if the contained format is supported. To import data in a custom format, you can write your own <a class="reference external" href="../python/introduction/custom_file_readers.html#writing-custom-file-readers" title="(in OVITO Python Reference v3.16.1)"><span class="xref std std-ref">file reader in Python</span></a> <span class="ovito-pro-tag-role"><a class="ovito-pro-tag" href="https://www.ovito.org/#proFeatures" data-tooltip="This program feature is only available in OVITO Pro and not OVITO Basic. Click to learn more." data-tooltip-position="right">pro</a></span>.</p>
+<p>After import, the dataset appears in the 3D viewport(s) as a visual object and as a <cite>data source</cite> in the <a class="reference internal" href="pipeline.html#usage-modification-pipeline-pipeline-listbox"><span class="std std-ref">pipeline editor</span></a> (see screenshot).</p>
+<p>The <a class="reference internal" href="../reference/pipelines/data_sources/external_file.html#scene-objects-file-source"><span class="std std-ref">External file</span></a> panel below the pipeline editor provides tools for reloading the imported data file or picking a different file as the source of the <a class="reference internal" href="pipeline.html#usage-modification-pipeline"><span class="std std-ref">data pipeline</span></a>. This is useful if you want to reuse a complex data analysis pipeline with a different simulation.</p>
+<section id="usage-import-command-line">
+<span id="command-line-usage"></span><h2>Command line usage<a class="headerlink" href="#usage-import-command-line" title="Link to this heading"></a></h2>
+<p>When launching OVITO from the terminal, you can specify the file(s) to load directly. This works for local files and <a class="reference internal" href="../advanced_topics/remote_file_access.html#usage-import-remote"><span class="std std-ref">files stored in remote locations</span></a>:</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>ovito<span class="w"> </span>/path/filename
+ovito<span class="w"> </span>sftp://hostname/path/filename
+ovito<span class="w"> </span>https://www.website.org/path/filename
+</pre></div>
+</div>
+<p>You can import multiple files at once. If they have the same format, they will be concatenated into an animatable trajectory. If they have different formats, OVITO will detect if they represent a pair of topology/trajectory files (see next section).
+Otherwise, they will be inserted as <a class="reference internal" href="#usage-import-multiple-datasets"><span class="std std-ref">separate objects into the scene</span></a> <span class="ovito-pro-tag-role"><a class="ovito-pro-tag" href="https://www.ovito.org/#proFeatures" data-tooltip="This program feature is only available in OVITO Pro and not OVITO Basic. Click to learn more." data-tooltip-position="right">pro</a></span>.</p>
+<p>You can also specify a directory instead of a file:</p>
+<div class="highlight-shell notranslate"><div class="highlight"><pre><span></span>ovito<span class="w"> </span>/path/directory
+ovito<span class="w"> </span>.
+</pre></div>
+</div>
+<p>The path will be set as current working directory and the file import dialog will open in that directory.</p>
+</section>
+<section id="usage-import-sequence">
+<span id="simulation-trajectories"></span><h2>Simulation trajectories<a class="headerlink" href="#usage-import-sequence" title="Link to this heading"></a></h2>
+<p>OVITO supports loading simulation trajectories that consist of a series of snapshots:</p>
+<dl>
+<dt>A series of separate files:</dt><dd><p>OVITO detects if the file is part of a numbered sequence of files with similar names in the same directory. For example, if you open <code class="file docutils literal notranslate"><span class="pre">anim1c_5000.dump</span></code>, OVITO generates the search pattern <code class="file docutils literal notranslate"><span class="pre">anim1c_*.dump</span></code> to find more files (e.g., <code class="file docutils literal notranslate"><span class="pre">anim1c_0.dump</span></code>, <code class="file docutils literal notranslate"><span class="pre">anim1c_1000.dump</span></code>). The search pattern is generated by replacing the last numeric sequence in the filename you’ve picked with the wildcard character <cite>*</cite>. You can manually override the generated pattern or turn off the automatic file discovery by toggling the <span class="guilabel">auto-generate</span> box.</p>
+</dd>
+<dt>A file containing a trajectory:</dt><dd><p>OVITO detects if the imported file contains more than one simulation frame and loads all of them as an animation sequence. For some file types, e.g., <a class="reference internal" href="../reference/file_formats/input/xyz.html#file-formats-input-xyz"><span class="std std-ref">XYZ</span></a> and <a class="reference internal" href="../reference/file_formats/input/lammps_dump.html#file-formats-input-lammps-dump"><span class="std std-ref">LAMMPS dump</span></a>, this is indicated by the <span class="guilabel">Contains multiple timesteps</span> checkbox. Note that OVITO typically keeps only the current trajectory frame in memory at a time to reduce the memory footprint.</p>
+</dd>
+<dt>A pair of topology and trajectory files:</dt><dd><p>Some MD simulation codes use separate files for the topology and the simulation trajectory of a molecular structure. The topology file contains static definitions of atoms and bond connectivity, while the trajectory file contains the computed trajectories and other time-dependent simulation data. You should pick both files in the file selection dialog to import them simultaneously. OVITO recognizes which file is the topology file and which one is the trajectory file based on the following table:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Topology format</p></th>
+<th class="head"><p>Trajectory format</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>LAMMPS data</p></td>
+<td><p>LAMMPS dump</p></td>
+</tr>
+<tr class="row-odd"><td><p>Gromacs GRO</p></td>
+<td><p>Gromacs XTC/TRR</p></td>
+</tr>
+<tr class="row-even"><td><p>CASTEP cell</p></td>
+<td><p>CASTEP md/geom</p></td>
+</tr>
+<tr class="row-odd"><td><p><em>any other supported format</em></p></td>
+<td><p>XYZ</p></td>
+</tr>
+</tbody>
+</table>
+<p>The topology file is loaded as pipeline data source, and a <a class="reference internal" href="../reference/pipelines/modifiers/load_trajectory.html#particles-modifiers-load-trajectory"><span class="std std-ref">Load trajectory</span></a> modifier is inserted into the data pipeline to load the time-dependent atomic positions from the trajectory file. This pipeline stage merges the static topology with the dynamic trajectories into a combined animated dataset.</p>
+</dd>
+</dl>
+<p>OVITO displays a timeline and a time slider below the viewports if a simulation sequence with more than one frame is loaded. See <a class="reference internal" href="../advanced_topics/animation.html#usage-animation"><span class="std std-ref">Animating the camera and other parameters</span></a> to learn more about OVITO’s animation capabilities.</p>
+</section>
+<section id="usage-import-multiple-datasets">
+<span id="visualizing-multiple-datasets-ovito-pro"></span><h2>Visualizing multiple datasets <span class="ovito-pro-tag-role"><a class="ovito-pro-tag" href="https://www.ovito.org/#proFeatures" data-tooltip="This program feature is only available in OVITO Pro and not OVITO Basic. Click to learn more." data-tooltip-position="right">pro</a></span><a class="headerlink" href="#usage-import-multiple-datasets" title="Link to this heading"></a></h2>
+<figure class="align-right" id="id2" style="width: 40%">
+<img alt="../_images/datasets_side_by_side.png" src="../_images/datasets_side_by_side.png" />
+<figcaption>
+<p><span class="caption-text">Side-by-side visualization example</span><a class="headerlink" href="#id2" title="Link to this image"></a></p>
+</figcaption>
+</figure>
+<p>OVITO Pro allows you to insert multiple objects or datasets into the same 3D scene. You can visualize multiple simulations together in one picture or visualize the same dataset in different ways. The <a class="reference internal" href="../advanced_topics/clone_pipeline.html#clone-pipeline"><span class="std std-ref">branched data pipelines</span></a> feature of OVITO Pro lets you duplicate the imported dataset and dynamically process each copy in different ways.</p>
+<p>To insert multiple simulations into one scene, use the <span class="menuselection">File ‣ Load File</span> menu function multiple times. When importing the second dataset, select the <span class="guilabel">Add to scene</span> option to insert subsequent datasets as additional objects instead of replacing the existing one.</p>
+<figure class="align-right" id="id3" style="width: 60%">
+<img alt="../_images/pipeline_selector.png" src="../_images/pipeline_selector.png" />
+<figcaption>
+<p><span class="caption-text">The pipeline selector widget in OVITO’s toolbar lets you switch between pipelines.</span><a class="headerlink" href="#id3" title="Link to this image"></a></p>
+</figcaption>
+</figure>
+<p>The <em>pipeline selector</em> in the top right corner of the OVITO window lists all simulation files and other objects in the current scene. Each imported file has its own data pipeline, allowing you to manipulate the data. The currently selected data pipeline is displayed in the <a class="reference internal" href="pipeline.html#usage-modification-pipeline-pipeline-listbox"><span class="std std-ref">pipeline editor</span></a> in the right command panel.</p>
+</section>
+<section id="usage-import-positioning-objects">
+<span id="positioning-objects-in-the-scene"></span><h2>Positioning objects in the scene<a class="headerlink" href="#usage-import-positioning-objects" title="Link to this heading"></a></h2>
+<p>OVITO places all imported simulation files in the same scene coordinate space. You can move individual datasets around if needed. In the <a class="reference internal" href="#usage-import-multiple-datasets"><span class="std std-ref">example picture above</span></a>, the second dataset was translated along the x-axis to place it side by side with the first dataset. Use the <em>Translate</em> tool in the top toolbar to move objects:</p>
+<a class="reference internal image-reference" href="../_images/translate_tool.png"><img alt="../_images/translate_tool.png" src="../_images/translate_tool.png" style="width: 35%;" />
+</a>
+<a class="reference internal image-reference" href="../_images/translate_tool_numeric_fields.png"><img alt="../_images/translate_tool_numeric_fields.png" src="../_images/translate_tool_numeric_fields.png" style="width: 35%;" />
+</a>
+<p>While the <em>Translate</em> mode is active, drag datasets in the viewports using the mouse or enter the desired XYZ position in the status bar input fields. To move only parts of a dataset, e.g., just a subset of particles, insert the <a class="reference internal" href="../reference/pipelines/modifiers/affine_transformation.html#particles-modifiers-affine-transformation"><span class="std std-ref">Affine transformation</span></a> modifier in the <a class="reference internal" href="pipeline.html#usage-modification-pipeline"><span class="std std-ref">data pipeline</span></a>.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="index.html" class="btn btn-neutral float-left" title="Introduction" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="viewports.html" class="btn btn-neutral float-right" title="Viewport windows" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2026 OVITO GmbH, Germany.</p>
+  </div>
+
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
