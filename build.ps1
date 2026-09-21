@@ -9,7 +9,9 @@ $batch = @"
 @echo off
 call "$vcvars" >nul
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /I third_party\imgui src\main.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\backends\imgui_impl_win32.cpp third_party\imgui\backends\imgui_impl_dx11.cpp /Fo:build\ /Fe:build\AtomX.exe /link /SUBSYSTEM:WINDOWS
+rc /nologo /fo build\atomx.res src\atomx.rc
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /I third_party\imgui src\main.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\backends\imgui_impl_win32.cpp third_party\imgui\backends\imgui_impl_dx11.cpp /Fo:build\ /Fe:build\AtomX.exe /link build\atomx.res /SUBSYSTEM:WINDOWS
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\core_tests.cpp /Fo:build\ /Fe:build\core_tests.exe
 if errorlevel 1 exit /b 1

@@ -31,6 +31,19 @@ int main() {
         require(r.data.atoms.back().x == 1 && r.data.atoms.back().z == 9, "periodic wrapping");
         r = evaluate(d, {{Op::Scale, true, 2}});
         require(r.data.cell[0] == 20 && r.data.atoms[1].x == 6, "scale");
+        r = evaluate(d, {{Op::SelectRange, true, 2, 0, 0, 7}, {Op::EditType,true,0,2,0}});
+        require(r.selected[1] && r.selected[2] && !r.selected[0] && r.data.atoms[1].type == 0,
+                "range selection and selected type assignment");
+        r = evaluate(d, {{Op::SelectType,true,0,2,1}, {Op::Replicate,true,0,0,3}});
+        require(r.data.atoms.size() == 12 && r.data.cell[0] == 30 &&
+                r.data.atoms[8].x == 20 && r.selected[9], "replication cell positions selection");
+        r = evaluate(d, {{Op::Rotate,true,90,2}});
+        require(std::abs(r.data.atoms[1].x + 4) < 1e-5 &&
+                std::abs(r.data.atoms[1].y - 3) < 1e-5 &&
+                std::abs(r.data.cell[1] - 10) < 1e-5, "rotation transforms cell and particles");
+        bool invalidScale = false;
+        try { evaluate(d, {{Op::Scale,true,-1}}); } catch (...) { invalidScale = true; }
+        require(invalidScale, "invalid scale rejected");
         auto s = statistics(d, 0);
         require(s.min == 0 && s.max == 11 && s.mean == 5, "statistics");
         float sum = 0;
@@ -61,6 +74,14 @@ int main() {
         fcc.pbc = {true, true, true};
         auto n = neighbors(fcc, .8f);
         require(n.clusters == 1 && n.meanCoordination == 12, "periodic FCC coordination");
+        double pairs = 0, integral = 0;
+        for (int i=0;i<128;++i) {
+            pairs += n.pairHistogram[i];
+            double lo=double(n.cutoff)*i/128, hi=double(n.cutoff)*(i+1)/128;
+            integral += n.rdf[i]*(4.0/3.0)*3.141592653589793*(hi*hi*hi-lo*lo*lo)*4;
+        }
+        require(n.rdfValid && pairs == n.bonds && std::abs(integral-12) < 1e-4,
+                "RDF integral recovers FCC coordination and histogram pair count");
         for (auto c : n.coordination)
             require(c == 12, "FCC nearest neighbors");
         Dataset pair;

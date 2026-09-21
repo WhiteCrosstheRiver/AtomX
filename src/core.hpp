@@ -223,7 +223,11 @@ enum class Op {
     Translate,
     Scale,
     Wrap,
-    ColorType
+    ColorType,
+    Rotate,
+    Replicate,
+    EditType,
+    SelectRange
 };
 struct Modifier {
     Op op;
@@ -231,9 +235,14 @@ struct Modifier {
     float value = 0;
     int axis = 2;
     int type = 0;
+    float upper = 1;
 };
 inline const char *opName(Op op) {
     switch (op) {
+    case Op::Rotate: return "Rotate";
+    case Op::Replicate: return "Replicate";
+    case Op::EditType: return "Edit particle types";
+    case Op::SelectRange: return "Coordinate range selection";
     case Op::Slice:
         return "Slice";
     case Op::SelectType:
@@ -264,6 +273,33 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
     PipelineResult r{source, std::vector<uint8_t>(source.atoms.size())};
     for (auto m : mods)
         if (m.enabled) {
+            if (m.axis < 0 || m.axis > 2 || !std::isfinite(m.value) || !std::isfinite(m.upper))
+                throw std::runtime_error("Invalid modifier parameters");
+            if (m.op == Op::Scale && m.value <= 0)
+                throw std::runtime_error("Scale must be positive");
+            if (m.op == Op::EditType && (m.type < 0 || size_t(m.type) >= r.data.species.size()))
+                throw std::runtime_error("Particle type is out of range");
+            if (m.op == Op::SelectRange && m.upper < m.value)
+                throw std::runtime_error("Upper bound must be at least the lower bound");
+            if (m.op == Op::Replicate) {
+                if (m.type < 1 || m.type > 32 || r.data.atoms.size() > 20000000 / size_t(m.type))
+                    throw std::runtime_error("Replication exceeds the 20 million atom budget");
+                size_t n = r.data.atoms.size();
+                auto offset = m.axis * 3;
+                if (r.data.cell[offset] == 0 && r.data.cell[offset+1] == 0 && r.data.cell[offset+2] == 0)
+                    throw std::runtime_error("Replication requires a nonzero simulation cell vector");
+                r.data.atoms.reserve(n * m.type); r.selected.reserve(n * m.type);
+                for (int copy = 1; copy < m.type; ++copy)
+                    for (size_t i = 0; i < n; ++i) {
+                        auto a = r.data.atoms[i];
+                        a.x += float(copy * r.data.cell[offset]);
+                        a.y += float(copy * r.data.cell[offset+1]);
+                        a.z += float(copy * r.data.cell[offset+2]);
+                        r.data.atoms.push_back(a); r.selected.push_back(r.selected[i]);
+                    }
+                for (int k=0;k<3;++k) r.data.cell[offset+k] *= m.type;
+                continue;
+            }
             if (m.op == Op::Wrap &&
                 (r.data.cell[1] != 0 || r.data.cell[2] != 0 || r.data.cell[3] != 0 ||
                  r.data.cell[5] != 0 || r.data.cell[6] != 0 || r.data.cell[7] != 0))
@@ -273,6 +309,20 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
                 auto a = r.data.atoms[i];
                 bool sel = r.selected[i], keep = true;
                 switch (m.op) {
+                case Op::SelectRange:
+                    sel = coordinate(a,m.axis) >= m.value && coordinate(a,m.axis) <= m.upper;
+                    break;
+                case Op::EditType:
+                    if (sel) a.type = uint32_t(m.type);
+                    break;
+                case Op::Rotate: {
+                    int u = (m.axis+1)%3, v = (m.axis+2)%3;
+                    float angle = m.value * 0.0174532925199433f;
+                    float x=coordinate(a,u), y=coordinate(a,v);
+                    coordinate(a,u)=x*std::cos(angle)-y*std::sin(angle);
+                    coordinate(a,v)=x*std::sin(angle)+y*std::cos(angle);
+                    break;
+                }
                 case Op::Slice:
                     keep = coordinate(a, m.axis) <= m.value;
                     break;
@@ -316,6 +366,15 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
             }
             r.data.atoms.resize(out);
             r.selected.resize(out);
+            if (m.op == Op::Rotate) {
+                int u = (m.axis+1)%3, v = (m.axis+2)%3;
+                double angle = m.value * 0.0174532925199433;
+                for (int row=0;row<3;++row) {
+                    double x=r.data.cell[row*3+u], y=r.data.cell[row*3+v];
+                    r.data.cell[row*3+u]=x*std::cos(angle)-y*std::sin(angle);
+                    r.data.cell[row*3+v]=x*std::sin(angle)+y*std::cos(angle);
+                }
+            }
             if (m.op == Op::Scale)
                 for (auto &v : r.data.cell)
                     v *= m.value;

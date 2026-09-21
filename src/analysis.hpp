@@ -8,6 +8,9 @@ struct NeighborAnalysis {
     uint32_t clusters = 0;
     uint64_t bonds = 0;
     double meanCoordination = 0;
+    std::array<float, 128> pairHistogram{}, rdf{};
+    float cutoff = 0;
+    bool rdfValid = false;
 };
 struct Bin {
     int64_t x, y, z;
@@ -64,6 +67,7 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
     for (uint32_t i = 0; i < d.atoms.size(); i++)
         grid[bin(d.atoms[i])].push_back(i);
     NeighborAnalysis r;
+    r.cutoff = cutoff;
     r.coordination.resize(d.atoms.size());
     r.cluster.resize(d.atoms.size());
     std::iota(r.cluster.begin(), r.cluster.end(), 0);
@@ -114,6 +118,8 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
                                 r.coordination[i]++;
                                 r.coordination[j]++;
                                 r.bonds++;
+                                auto binIndex = std::min(127, int(std::sqrt(r2) / cutoff * 128));
+                                r.pairHistogram[binIndex]++;
                                 auto ri = root(i), rj = root(j);
                                 if (ri != rj)
                                     r.cluster[std::max(ri, rj)] = std::min(ri, rj);
@@ -132,6 +138,18 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
         c = ids.at(c);
     r.clusters = uint32_t(ids.size());
     r.meanCoordination = d.atoms.empty() ? 0 : 2. * r.bonds / d.atoms.size();
+    // Bulk RDF normalization is meaningful here only for a fully periodic box.
+    // Count directed neighbors (2 per pair), normalized by N * density * shell volume.
+    double volume = d.cell[0] * d.cell[4] * d.cell[8];
+    r.rdfValid = d.pbc[0] && d.pbc[1] && d.pbc[2] && volume > 0 && !d.atoms.empty();
+    if (r.rdfValid) {
+        double density = d.atoms.size() / volume;
+        for (int i = 0; i < 128; ++i) {
+            double lo = double(cutoff)*i/128, hi = double(cutoff)*(i+1)/128;
+            double shell = (4.0/3.0)*3.141592653589793*(hi*hi*hi-lo*lo*lo);
+            r.rdf[i] = float(2.0*r.pairHistogram[i] / (d.atoms.size()*density*shell));
+        }
+    }
     return r;
 }
 } // namespace atomx

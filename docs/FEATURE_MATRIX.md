@@ -40,7 +40,7 @@
 | Atomic strain | 待实现 | 参考构型、邻居映射、局部变形梯度与应变 |
 | Bond analysis | 待实现 | 显式键拓扑与键角/长度分布 |
 | Cluster analysis | 部分 | Analysis 面板：按距离 cutoff 的连通分量、CSV；不超过 200 万原子 |
-| Coordination analysis | 部分 | Analysis 面板：邻域配位数；正交周期最小镜像；尚无 RDF |
+| Coordination analysis | 部分 | Analysis 面板：邻域配位数；正交周期最小镜像；新增邻域距离分布及全周期正交晶胞 RDF |
 | Difference between frames | 待实现 | 持久 ID 匹配与属性差值 |
 | Dislocation analysis (DXA) | 待实现 | 晶格识别、Burgers 回路和位错网络 |
 | Displacement vectors | 待实现 | 参考帧匹配、周期展开与矢量显示 |
@@ -68,14 +68,14 @@
 | Assign color | 待实现 | 尚无用户自定义逐粒子颜色 |
 | Color by type | 已实现 | 默认 8 色循环，选中粒子高亮 |
 | Color coding | 待实现 | 属性色带、范围、图例 |
-| Affine transformation | 部分 | 按轴平移、统一比例缩放；不是完整 3x4 仿射矩阵 |
+| Affine transformation | 部分 | 按轴平移、统一比例缩放、旋转坐标与晶胞；不是完整 3x4 仿射矩阵 |
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
 | Compute property | 待实现 | 表达式求值与属性存储 |
 | Delete selected | 已实现 | 非破坏性管线过滤 |
 | Freeze property | 待实现 | 按稳定 ID 保存参考属性 |
 | Load trajectory | 部分 | 单个 XYZ 多帧文件；未支持拓扑和轨迹文件合并 |
 | Python script | 待实现 | 尚无嵌入式 Python 或插件 API |
-| Replicate | 待实现 | 周期复制、ID 扩展和资源预算 |
+| Replicate | 部分 | 按晶胞向量复制、选区同步、2000 万原子预算；尚无持久 ID |
 | Slice | 部分 | 轴向半空间切片，保留坐标小于阈值的原子；任意平面与厚度待做 |
 | Smooth trajectory | 待实现 | 时间窗口及周期展开 |
 | Unwrap trajectories | 待实现 | 稳定 ID、跨帧周期跳跃处理 |
@@ -118,3 +118,14 @@
 4. 优先补齐 CNA / PTM / DXA / Voronoi / 应变等用户关心的分析，与 OVITO 对照结果和容差。
 5. 输出管线、抗锯齿 / AO / 透明度、电影导出、离线高质量渲染和插件系统。
 
+
+
+## 2026-09-21 界面与基础修改器更新
+
+- 原始用户 Logo 嵌入可执行文件、标题栏、任务栏和托盘，无外部图片路径依赖。
+- 三列分类、可搜索、非模态 Add modification 下拉；点击外部或 Esc 可收起。无 Pro 门槛；尚未实现的算法灰显。
+- 无系统标题栏；保留原生拖动、双击最大化、边缘缩放和任务栏最小化。X / Alt+F4 收到托盘，电源键彻底退出。
+- Slate dark / Classic light / Midnight、Segoe UI / Arial / Consolas、14–20 px 字体设置立即应用并持久化。
+- Rotate、Replicate、Coordinate range selection、Edit particle types 已实现，并支持现有撤销/重做及启停。
+- 邻域距离直方图与全周期正交晶胞 RDF 已实现，CSV 可导出。Cluster/RDF 等菜单项打开 Analysis 面板，设置 cutoff 后计算；目前不是可排序的管线节点。
+- 高级晶格识别、DXA、Voronoi、显式键拓扑、Python 等仍待实现，不能将这次改动视为 OVITO 全功能完成。

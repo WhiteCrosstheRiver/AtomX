@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include "analysis.hpp"
+#include "desktop.hpp"
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
@@ -33,9 +34,44 @@ static std::string utf8(const std::wstring &s) {
 static LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (ImGui_ImplWin32_WndProcHandler(h, msg, wp, lp))
         return 1;
+    if (msg == desktop::taskbarCreated && desktop::inTray) {
+        if (!Shell_NotifyIconW(NIM_ADD, &desktop::tray)) desktop::restore(h);
+        return 0;
+    }
     switch (msg) {
+    case WM_NCCALCSIZE:
+        if (wp) return 0;
+        break;
+    case WM_NCHITTEST:
+        return desktop::hitTest(h, lp);
+    case WM_CLOSE:
+        desktop::hide(h);
+        return 0;
+    case desktop::trayMessage:
+        if (lp == WM_LBUTTONDBLCLK) desktop::restore(h);
+        if (lp == WM_RBUTTONUP) {
+            auto menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, 1, L"Restore AtomX");
+            AppendMenuW(menu, MF_STRING, 2, L"Exit AtomX");
+            POINT p; GetCursorPos(&p); SetForegroundWindow(h);
+            int action = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, h, nullptr);
+            DestroyMenu(menu);
+            if (action == 1) desktop::restore(h);
+            if (action == 2) PostQuitMessage(0);
+            PostMessageW(h, WM_NULL, 0, 0);
+        }
+        return 0;
     case WM_GETMINMAXINFO:
         ((MINMAXINFO *)lp)->ptMinTrackSize = {1200, 820};
+        {
+            MONITORINFO monitor{sizeof(monitor)};
+            GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &monitor);
+            auto *m = (MINMAXINFO *)lp;
+            m->ptMaxPosition = {monitor.rcWork.left - monitor.rcMonitor.left,
+                                monitor.rcWork.top - monitor.rcMonitor.top};
+            m->ptMaxSize = {monitor.rcWork.right - monitor.rcWork.left,
+                            monitor.rcWork.bottom - monitor.rcWork.top};
+        }
         return 0;
     case WM_SIZE:
         if (wp != SIZE_MINIMIZED)
@@ -78,49 +114,71 @@ static std::string number(uint64_t n) {
         s.insert(i, ",");
     return s;
 }
-static ImVec4 accent{.45f, .68f, .91f, 1};
-static void theme() {
+static float uiScale = 1;
+static float U(float value) { return value * uiScale; }
+static ImFont *headingFont = nullptr;
+static ImVec4 accent{.10f,.34f,.62f,1};
+static void theme(int choice = 1) {
+    ImGui::GetStyle() = ImGuiStyle{};
+    if (choice == 1) ImGui::StyleColorsLight(); else ImGui::StyleColorsDark();
     auto &s = ImGui::GetStyle();
-    s.WindowPadding = {14, 12};
-    s.FramePadding = {9, 6};
-    s.ItemSpacing = {8, 9};
-    s.WindowRounding = 0;
-    s.ChildRounding = 3;
-    s.FrameRounding = 4;
-    s.PopupRounding = 5;
-    s.ScrollbarSize = 11;
-    s.WindowBorderSize = 0;
-    s.ChildBorderSize = 1;
-    s.FrameBorderSize = 0;
-    s.GrabRounding = 3;
+    s.WindowPadding = {10,8}; s.FramePadding = {8,5}; s.ItemSpacing = {8,7};
+    s.WindowRounding = 0; s.ChildRounding = 3; s.FrameRounding = 3; s.PopupRounding = 5;
+    s.ScrollbarSize = 13; s.WindowBorderSize = 0; s.ChildBorderSize = 1;
+    s.FrameBorderSize = 1; s.PopupBorderSize = 1; s.GrabRounding = 2;
+    s.DisabledAlpha = .72f;
     auto *c = s.Colors;
-    c[ImGuiCol_Text] = {.86f, .88f, .90f, 1};
-    c[ImGuiCol_TextDisabled] = {.53f, .57f, .63f, 1};
-    c[ImGuiCol_WindowBg] = {.157f, .173f, .2f, 1};
-    c[ImGuiCol_ChildBg] = {.157f, .173f, .2f, 1};
-    c[ImGuiCol_PopupBg] = {.184f, .204f, .243f, 1};
-    c[ImGuiCol_Border] = {.215f, .235f, .275f, 1};
-    c[ImGuiCol_FrameBg] = {.20f, .225f, .267f, 1};
-    c[ImGuiCol_FrameBgHovered] = {.25f, .29f, .35f, 1};
-    c[ImGuiCol_FrameBgActive] = {.27f, .33f, .42f, 1};
-    c[ImGuiCol_Button] = {.21f, .24f, .29f, 1};
-    c[ImGuiCol_ButtonHovered] = {.28f, .35f, .45f, 1};
-    c[ImGuiCol_ButtonActive] = {.29f, .40f, .55f, 1};
-    c[ImGuiCol_Header] = {.22f, .29f, .39f, 1};
-    c[ImGuiCol_HeaderHovered] = {.25f, .32f, .42f, 1};
-    c[ImGuiCol_HeaderActive] = {.29f, .38f, .5f, 1};
-    c[ImGuiCol_CheckMark] = accent;
-    c[ImGuiCol_SliderGrab] = accent;
-    c[ImGuiCol_Tab] = {.184f, .204f, .243f, 1};
-    c[ImGuiCol_TabSelected] = {.25f, .30f, .38f, 1};
+    if (choice == 1) {
+        accent = {.08f,.32f,.61f,1};
+        c[ImGuiCol_Text] = {.08f,.10f,.13f,1};
+        c[ImGuiCol_TextDisabled] = {.35f,.38f,.42f,1};
+        c[ImGuiCol_WindowBg] = {.935f,.945f,.955f,1};
+        c[ImGuiCol_ChildBg] = {1,1,1,1};
+        c[ImGuiCol_PopupBg] = {.95f,.96f,.97f,1};
+        c[ImGuiCol_Border] = {.64f,.68f,.73f,1};
+        c[ImGuiCol_FrameBg] = {1,1,1,1};
+        c[ImGuiCol_FrameBgHovered] = {.91f,.95f,1,1};
+        c[ImGuiCol_FrameBgActive] = {.84f,.91f,.99f,1};
+        c[ImGuiCol_Button] = {.97f,.98f,.99f,1};
+        c[ImGuiCol_ButtonHovered] = {.85f,.92f,1,1};
+        c[ImGuiCol_ButtonActive] = {.73f,.85f,.98f,1};
+        c[ImGuiCol_Header] = {.84f,.90f,.97f,1};
+        c[ImGuiCol_HeaderHovered] = {.80f,.88f,.98f,1};
+        c[ImGuiCol_HeaderActive] = {.73f,.84f,.96f,1};
+        c[ImGuiCol_Tab] = {.87f,.89f,.92f,1};
+        c[ImGuiCol_TabHovered] = {.79f,.87f,.97f,1};
+        c[ImGuiCol_TabSelected] = {1,1,1,1};
+        c[ImGuiCol_TitleBgActive] = {.86f,.90f,.95f,1};
+        c[ImGuiCol_TableHeaderBg] = {.86f,.89f,.93f,1};
+        c[ImGuiCol_TableRowBgAlt] = {.10f,.25f,.45f,.045f};
+    } else {
+        accent = {.48f,.74f,1,1};
+        c[ImGuiCol_Text] = {.95f,.96f,.98f,1};
+        c[ImGuiCol_TextDisabled] = {.70f,.74f,.80f,1};
+        c[ImGuiCol_WindowBg] = choice == 2 ? ImVec4{.07f,.08f,.10f,1} : ImVec4{.14f,.16f,.19f,1};
+        c[ImGuiCol_ChildBg] = {.10f,.12f,.15f,1};
+        c[ImGuiCol_PopupBg] = {.16f,.18f,.22f,1};
+        c[ImGuiCol_Border] = {.39f,.44f,.51f,1};
+        c[ImGuiCol_FrameBg] = {.09f,.11f,.14f,1};
+        c[ImGuiCol_Button] = {.23f,.27f,.33f,1};
+        c[ImGuiCol_Header] = {.25f,.34f,.45f,1};
+        c[ImGuiCol_TabSelected] = {.28f,.35f,.44f,1};
+    }
+    c[ImGuiCol_CheckMark] = accent; c[ImGuiCol_SliderGrab] = accent;
+    c[ImGuiCol_PlotHistogram] = accent; c[ImGuiCol_PlotLines] = accent;
     c[ImGuiCol_Separator] = c[ImGuiCol_Border];
-    c[ImGuiCol_PlotHistogram] = accent;
+    s.ScaleAllSizes(uiScale);
 }
 static void heading(const char *title) {
     ImGui::Spacing();
-    ImGui::TextDisabled("%s", title);
-    ImGui::Separator();
-    ImGui::Spacing();
+    auto p = ImGui::GetCursorScreenPos();
+    float width = ImGui::GetContentRegionAvail().x, height = ImGui::GetFontSize()+U(12);
+    auto *d = ImGui::GetWindowDrawList();
+    d->AddRectFilled(p,{p.x+width,p.y+height},ImGui::GetColorU32(ImGuiCol_Tab),U(3));
+    if (headingFont) ImGui::PushFont(headingFont);
+    d->AddText({p.x+U(8),p.y+U(6)},ImGui::GetColorU32(ImGuiCol_Text),title);
+    if (headingFont) ImGui::PopFont();
+    ImGui::Dummy({width,height});
 }
 struct Loaded {
     Dataset data;
@@ -130,6 +188,14 @@ struct Loaded {
 };
 struct App {
     HWND window;
+    desktop::Preferences preferences;
+    ComPtr<ID3D11ShaderResourceView> logo;
+    HICON icon = nullptr;
+    bool showSettings = false, refreshFont = false, selectAnalysis = false, selectPipeline = false;
+    ImVec2 catalogAnchor{};
+    char modifierSearch[128]{};
+    bool showWorkspace = false, indexing = false;
+    int pendingFrame = -1;
     Renderer &gpu;
     Dataset source = crystal(24);
     PipelineResult result;
@@ -138,9 +204,9 @@ struct App {
     std::filesystem::path path;
     std::vector<Frame> frames;
     int current = 0, budget = 2000000;
-    bool playing = false, quad = true, particles = true, cell = true, showTable = true,
+    bool playing = false, quad = true, particles = true, cell = true, showTable = false,
          showCatalog = false;
-    float radius = .23f, bg[4] = {.105f, .12f, .145f, 1}, fps = 12;
+    float radius = .23f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int active = 3, propertyAxis = 2, tab = 0;
     Camera cameras[4];
     Target targets[4];
@@ -160,12 +226,21 @@ struct App {
     bool analyzing = false;
     uint64_t revision = 0, analysisRevision = 0;
     App(HWND w, Renderer &r) : window(w), gpu(r) {
+        preferences.load();
+        theme(preferences.theme);
+        refreshFont = true;
+        logo = desktop::loadLogo(gpu.device.Get(), icon);
+        SendMessageW(window, WM_SETICON, ICON_BIG, (LPARAM)icon);
+        SendMessageW(window, WM_SETICON, ICON_SMALL, (LPARAM)icon);
+        desktop::initTray(window, icon);
         cameras[0].mode = 0;
-        cameras[1].mode = 6;
+        cameras[1].mode = 2;
         cameras[2].mode = 4;
         update();
     }
     ~App() {
+        Shell_NotifyIconW(NIM_DELETE, &desktop::tray);
+        if (icon) DestroyIcon(icon);
         cancel = true;
         if (job.valid())
             job.wait();
@@ -197,8 +272,12 @@ struct App {
         Modifier m{op};
         if (op == Op::Slice)
             m.value = (result.data.lo.z + result.data.hi.z) * .5f;
-        if (op == Op::Scale)
-            m.value = 1;
+        if (op == Op::Scale) m.value = 1;
+        if (op == Op::Replicate) m.type = 2;
+        if (op == Op::Rotate) m.value = 90;
+        if (op == Op::SelectRange) {
+            m.value = result.data.lo.z; m.upper = result.data.hi.z;
+        }
         mods.push_back(m);
         update();
         status = std::string("Added ") + opName(op);
@@ -216,6 +295,8 @@ struct App {
     void load(const std::filesystem::path &p, int frame = 0) {
         if (busy || p.empty())
             return;
+        indexing = p != path || frames.empty();
+        if (indexing) pendingFrame = -1;
         busy = true;
         cancel = false;
         progress = 0;
@@ -272,6 +353,10 @@ struct App {
                 status = "Load stopped";
             }
         }
+        if (!busy && pendingFrame >= 0) {
+            int requested = pendingFrame; pendingFrame = -1;
+            if (requested != current) load(path, requested);
+        }
         if (!dropped.empty()) {
             load(dropped);
             dropped.clear();
@@ -296,12 +381,51 @@ struct App {
         ImGui::Begin(name, nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                         ImGuiWindowFlags_NoSavedSettings);
+                         ImGuiWindowFlags_NoSavedSettings | ((std::string(name) == "Title" || std::string(name) == "Status") ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
+    }
+    void control(const char *id, int kind, const char *tip) {
+        ImGui::PushStyleColor(ImGuiCol_Button, {0,0,0,0});
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
+        if (ImGui::Button(id, {U(42),U(30)})) {
+            if (kind == 0) ShowWindow(window, SW_MINIMIZE);
+            if (kind == 1) ShowWindow(window, IsZoomed(window) ? SW_RESTORE : SW_MAXIMIZE);
+            if (kind == 2) desktop::hide(window);
+            if (kind == 3) PostQuitMessage(0);
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+        auto p = ImGui::GetItemRectMin(); auto *d = ImGui::GetWindowDrawList();
+        ImVec2 c{p.x+U(21),p.y+U(15)};
+        auto color = ImGui::GetColorU32(kind == 3 ? ImVec4{.94f,.40f,.40f,1} : ImGui::GetStyleColorVec4(ImGuiCol_Text));
+        if (kind == 0) d->AddLine({c.x-6,c.y+3},{c.x+6,c.y+3},color,1.5f);
+        if (kind == 1) {
+            if (IsZoomed(window)) d->AddRect({c.x-3,c.y-7},{c.x+7,c.y+3},color);
+            d->AddRect({c.x-6,c.y-4},{c.x+4,c.y+6},color);
+        }
+        if (kind == 2) {
+            d->AddLine({c.x-5,c.y-5},{c.x+5,c.y+5},color,1.5f);
+            d->AddLine({c.x+5,c.y-5},{c.x-5,c.y+5},color,1.5f);
+        }
+        if (kind == 3) {
+            d->PathArcTo(c,7,-.9f,4.04f,24); d->PathStroke(color,0,1.7f);
+            d->AddLine({c.x,c.y-9},{c.x,c.y},color,1.7f);
+        }
     }
     void top(float w) {
-        fixed("Top", 0, 0, w, 58);
-        ImGui::TextColored(accent, "A T O M X");
-        ImGui::SameLine(140);
+        fixed("Title", 0, 0, w, U(42));
+        ImGui::SetCursorPosY(U(4));
+        ImGui::Image((ImTextureID)(intptr_t)logo.Get(), {U(32),U(32)});
+        ImGui::SameLine(); ImGui::SetCursorPosY(U(9));
+        ImGui::TextUnformatted("AtomX");
+        ImGui::SameLine(); ImGui::TextDisabled(" / Atomic visualization");
+        ImGui::SameLine(w-U(210)); ImGui::SetCursorPosY(U(5));
+        control("##minimize",0,"Minimize to taskbar"); ImGui::SameLine();
+        control("##maximize",1,"Maximize / restore"); ImGui::SameLine();
+        control("##tray",2,"Close to system tray (keep running)"); ImGui::SameLine();
+        control("##exit",3,"Power off: exit AtomX completely");
+        ImGui::End();
+        fixed("Top", 0, U(42), w, U(48));
         if (ImGui::Button("Open trajectory"))
             open();
         ImGui::SameLine();
@@ -323,11 +447,15 @@ struct App {
         if (ImGui::Button("Render PNG"))
             exportImage();
         ImGui::SameLine();
-        ImGui::TextDisabled("  C++ / GPU workspace");
+        if (ImGui::Button("Settings")) showSettings = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Workspace")) showWorkspace = !showWorkspace;
         ImGui::End();
     }
+    float leftWidth() const { return showWorkspace ? U(220) : 0.f; }
+    float rightWidth() const { return U(preferences.size >= 19 ? 400.f : 370.f); }
     void left(float h) {
-        fixed("Workspace", 0, 58, 220, h - 88);
+        fixed("Workspace", 0, U(90), leftWidth(), h - U(120));
         heading("WORKSPACE");
         ImGui::TextColored(accent, "ATOMIC STRUCTURES");
         ImGui::Spacing();
@@ -336,7 +464,7 @@ struct App {
                           true);
         ImGui::TextDisabled("    %s", path.empty() ? "Generated dataset" : "XYZ trajectory");
         ImGui::Spacing();
-        if (ImGui::Button("+ Import dataset", {-1, 32}))
+        if (ImGui::Button("+ Import dataset", {-1, U(32)}))
             open();
         heading("SCENE");
         ImGui::Checkbox("Particles", &particles);
@@ -356,16 +484,16 @@ struct App {
         ImGui::TextDisabled("Frames");
         ImGui::Text("%zu", std::max<size_t>(frames.size(), 1));
         heading("QUICK ACTIONS");
-        if (ImGui::Button("Slice specimen", {-1, 30}))
+        if (ImGui::Button("Slice specimen", {-1, U(30)}))
             add(Op::Slice);
-        if (ImGui::Button("Select particle type", {-1, 30}))
+        if (ImGui::Button("Select particle type", {-1, U(30)}))
             add(Op::SelectType);
-        if (ImGui::Button("Reset pipeline", {-1, 30})) {
+        if (ImGui::Button("Reset pipeline", {-1, U(30)})) {
             checkpoint();
             mods.clear();
             update();
         }
-        if (ImGui::Button("Load demo crystal", {-1, 30}) && !busy) {
+        if (ImGui::Button("Load demo crystal", {-1, U(30)}) && !busy) {
             source = crystal(24);
             path.clear();
             frames.clear();
@@ -380,10 +508,19 @@ struct App {
     const char *views = "Top\0Bottom\0Front\0Back\0Left\0Right\0Ortho\0Perspective\0";
     void viewport(int i, float w, float h) {
         ImGui::PushID(i);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{U(4),U(4)});
+        ImGui::PushStyleColor(ImGuiCol_ChildBg,{0,0,0,1});
         ImGui::BeginChild("view", {w, h}, ImGuiChildFlags_Borders,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         auto &cam = cameras[i];
-        ImGui::SetNextItemWidth(140);
+        ImGui::PushStyleColor(ImGuiCol_Text,{.95f,.97f,1,1});
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled,{.73f,.78f,.85f,1});
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,{.035f,.045f,.06f,1});
+        ImGui::PushStyleColor(ImGuiCol_Button,{.10f,.13f,.17f,1});
+        ImGui::PushStyleColor(ImGuiCol_PopupBg,{.055f,.07f,.095f,1});
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered,{.16f,.26f,.39f,1});
+        ImGui::PushStyleColor(ImGuiCol_Header,{.12f,.21f,.34f,1});
+        ImGui::SetNextItemWidth(U(140));
         ImGui::Combo("##camera", &cam.mode, views);
         ImGui::SameLine();
         ImGui::TextDisabled(i == active ? "ACTIVE" : "");
@@ -392,6 +529,7 @@ struct App {
             cam.zoom = 1;
             cam.panX = cam.panY = 0;
         }
+        ImGui::PopStyleColor(7);
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();
         gpu.target(targets[i], int(avail.x), int(avail.y));
@@ -445,23 +583,113 @@ struct App {
                         draw->AddLine(corners[j], corners[j | k], IM_COL32(126, 145, 164, 145));
             draw->PopClipRect();
         }
-        draw->AddText({p.x + 12, p.y + avail.y - 25}, IM_COL32(130, 148, 169, 255),
+        if (ImGui::IsItemHovered()) draw->AddText({p.x + U(12), p.y + avail.y - U(25)}, IM_COL32(190, 202, 215, 255),
                       "LMB orbit   RMB pan   Wheel zoom");
         if (i == active)
-            draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(90, 141, 192, 210));
+            draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(95, 180, 255, 255));
         ImGui::EndChild();
+        ImGui::PopStyleColor(); ImGui::PopStyleVar();
         ImGui::PopID();
     }
+    void seekFrame(int frame) {
+        if (frames.empty()) return;
+        playing = false;
+        pendingFrame = std::clamp(frame, 0, int(frames.size())-1);
+    }
+    bool transport(const char *id, int kind, const char *tip) {
+        bool pressed = ImGui::Button(id, {U(34),U(30)});
+        auto p = ImGui::GetItemRectMin();
+        auto *d = ImGui::GetWindowDrawList();
+        auto color = ImGui::GetColorU32(ImGuiCol_Text);
+        ImVec2 c{p.x+U(17),p.y+U(15)};
+        if (kind == 2 && playing) {
+            d->AddRectFilled({c.x-U(5),c.y-U(6)},{c.x-U(2),c.y+U(6)},color);
+            d->AddRectFilled({c.x+U(2),c.y-U(6)},{c.x+U(5),c.y+U(6)},color);
+        } else {
+            float direction = kind < 2 ? -1.f : 1.f;
+            d->AddTriangleFilled({c.x+direction*U(5),c.y},{c.x-direction*U(4),c.y-U(6)},
+                                 {c.x-direction*U(4),c.y+U(6)},color);
+            if (kind == 0 || kind == 4)
+                d->AddLine({c.x+direction*U(8),c.y-U(7)}, {c.x+direction*U(8),c.y+U(7)},color,U(2));
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
+        return pressed;
+    }
+    void timeline() {
+        ImGui::BeginChild("Trajectory timeline", {-1,U(104)}, ImGuiChildFlags_Borders,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        int last = std::max(0,int(frames.size())-1);
+        int selected = pendingFrame >= 0 ? pendingFrame : current;
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Trajectory"); ImGui::SameLine();
+        ImGui::BeginDisabled(frames.size()<2 || indexing && busy);
+        if (transport("##first",0,"First frame (Home)")) seekFrame(0); ImGui::SameLine();
+        if (transport("##previous",1,"Previous frame (Left)")) seekFrame(selected-1); ImGui::SameLine();
+        if (transport("##play",2,"Play / pause")) playing = !playing; ImGui::SameLine();
+        if (transport("##next",3,"Next frame (Right)")) seekFrame(selected+1); ImGui::SameLine();
+        if (transport("##last",4,"Last frame (End)")) seekFrame(last);
+        ImGui::SameLine(); ImGui::SetNextItemWidth(U(90));
+        int edit = selected;
+        if (ImGui::InputInt("##frame number", &edit, 0, 0)) seekFrame(edit);
+        ImGui::EndDisabled();
+        ImGui::SameLine(); ImGui::Text("/ %d", last);
+        if (ImGui::GetContentRegionAvail().x > U(220)) {
+            ImGui::SameLine();
+            ImGui::TextDisabled(frames.size()>1 ? "  Drag ruler to scrub" : "  Single frame");
+        }
+        auto p = ImGui::GetCursorScreenPos();
+        float width = ImGui::GetContentRegionAvail().x, height = U(47);
+        ImGui::InvisibleButton("##frame ruler", {width,height}, ImGuiButtonFlags_EnableNav);
+        bool hovered = ImGui::IsItemHovered(), focused = ImGui::IsItemFocused();
+        auto *d = ImGui::GetWindowDrawList();
+        float left = p.x+U(15), right = p.x+width-U(18), baseline = p.y+U(29);
+        auto text = ImGui::GetColorU32(ImGuiCol_Text);
+        auto tick = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+        auto marker = ImGui::GetColorU32(accent);
+        d->AddLine({left,baseline},{right,baseline},tick);
+        // Choose 1/2/5 decade steps so labels remain separated at every frame count.
+        int64_t major = 1;
+        double desired = std::max(1.0, double(last)*U(72)/std::max(1.f,right-left));
+        double decade = std::pow(10.,std::floor(std::log10(desired)));
+        for (int step : {1,2,5,10}) if (step*decade >= desired) { major=int64_t(step*decade); break; }
+        int64_t minor = major >= 5 ? major/5 : 1;
+        auto xFor = [&](int frame) { return left+(right-left)*(last ? float(frame)/last : 0.f); };
+        for (int64_t frame=0;frame<=last;frame+=minor) {
+            float x=xFor(int(frame)); bool labeled=frame%major==0;
+            d->AddLine({x,baseline},{x,baseline+U(labeled?12.f:6.f)},tick,U(1));
+            if (labeled) {
+                auto label=std::to_string(frame); auto size=ImGui::CalcTextSize(label.c_str());
+                d->AddText({x-size.x*.5f,p.y+U(3)},text,label.c_str());
+            }
+        }
+        float x=xFor(selected);
+        d->AddLine({x,p.y},{x,baseline+U(14)},marker,U(2));
+        d->AddTriangleFilled({x-U(5),baseline-U(5)},{x+U(5),baseline-U(5)},{x,baseline+U(1)},marker);
+        if (last>0 && ImGui::IsItemActive() && ImGui::IsMouseDown(0))
+            seekFrame(int(std::lround(std::clamp((ImGui::GetIO().MousePos.x-left)/(right-left),0.f,1.f)*last)));
+        if (hovered && last>0) {
+            int frame=int(std::lround(std::clamp((ImGui::GetIO().MousePos.x-left)/(right-left),0.f,1.f)*last));
+            ImGui::SetTooltip("Frame %d / %d",frame,last);
+        }
+        if (focused && last>0) {
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) seekFrame(selected-1);
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) seekFrame(selected+1);
+            if (ImGui::IsKeyPressed(ImGuiKey_Home)) seekFrame(0);
+            if (ImGui::IsKeyPressed(ImGuiKey_End)) seekFrame(last);
+        }
+        ImGui::EndChild();
+    }
     void center(float w, float h) {
-        fixed("Viewport workspace", 220, 58, w - 558, h - 88);
-        ImGui::TextDisabled("SCENE  /  %s", path.empty() ? "Cu-Ni specimen"
+        fixed("Viewport workspace", leftWidth(), U(90), w - leftWidth() - rightWidth(), h - U(120));
+        ImGui::Text("%s", path.empty() ? "Cu-Ni specimen"
                                                          : utf8(path.filename().wstring()).c_str());
         ImGui::Separator();
         auto avail = ImGui::GetContentRegionAvail();
-        float dataH = showTable ? 175.f : 0;
-        float sceneH = std::max(150.f, avail.y - dataH - 67);
+        float dataH = showTable ? U(170) : 0;
+        float gap = ImGui::GetStyle().ItemSpacing.y;
+        float sceneH = std::max(U(150), avail.y - dataH - U(104) - ImGui::GetFrameHeight() - gap*(showTable ? 4 : 3));
         if (quad) {
-            float vw = (avail.x - 8) * .5f, vh = (sceneH - 8) * .5f;
+            float vw = (avail.x - ImGui::GetStyle().ItemSpacing.x) * .5f, vh = (sceneH - gap) * .5f;
             viewport(0, vw, vh);
             ImGui::SameLine();
             viewport(1, vw, vh);
@@ -470,26 +698,11 @@ struct App {
             viewport(3, vw, vh);
         } else
             viewport(active, avail.x, sceneH);
-        ImGui::BeginChild("Timeline", {-1, 57});
-        if (ImGui::Button("|<") && !frames.empty())
-            load(path, 0);
+        if (ImGui::Button(showTable ? "Hide data inspector" : "Data inspector")) showTable = !showTable;
         ImGui::SameLine();
-        if (ImGui::Button(playing ? "Pause" : "Play"))
-            playing = !playing;
-        ImGui::SameLine();
-        if (ImGui::Button(">|") && !frames.empty())
-            load(path, int(frames.size()) - 1);
-        ImGui::SameLine();
-        int next = current;
-        ImGui::SetNextItemWidth(std::max(120.f, avail.x - 290));
-        if (ImGui::SliderInt("##frame", &next, 0, int(std::max<size_t>(frames.size(), 1)) - 1) &&
-            !busy)
-            load(path, next);
-        ImGui::SameLine();
-        ImGui::Text("%d / %zu", current + 1, std::max<size_t>(frames.size(), 1));
-        ImGui::EndChild();
+        ImGui::Text("%s particles  |  %zu selected", number(result.data.atoms.size()).c_str(), selectedCount);
         if (showTable) {
-            ImGui::BeginChild("Inspector", {-1, 0}, ImGuiChildFlags_Borders);
+            ImGui::BeginChild("Inspector", {-1, dataH}, ImGuiChildFlags_Borders);
             if (ImGui::BeginTabBar("Data")) {
                 if (ImGui::BeginTabItem("Particles")) {
                     ImGui::TextDisabled("%s rows  |  %zu selected%s",
@@ -498,7 +711,7 @@ struct App {
                     if (ImGui::BeginTable("Atoms", 5,
                                           ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                               ImGuiTableFlags_BordersInnerV,
-                                          {-1, 83})) {
+                                          {-1, 0})) {
                         for (auto name :
                              {"Index", "Type", "Position X", "Position Y", "Position Z"})
                             ImGui::TableSetupColumn(name);
@@ -546,18 +759,25 @@ struct App {
             }
             ImGui::EndChild();
         }
+        timeline();
         ImGui::End();
     }
     void right(float w, float h) {
-        fixed("Properties", w - 338, 58, 338, h - 88);
+        fixed("Properties", w - rightWidth(), U(90), rightWidth(), h - U(120));
         if (ImGui::BeginTabBar("Settings")) {
-            if (ImGui::BeginTabItem("Pipeline")) {
-                heading("MODIFIER STACK");
-                if (ImGui::Button("+ Add modifier", {-1, 32}))
+            if (ImGui::BeginTabItem("Pipeline", nullptr, selectPipeline ? ImGuiTabItemFlags_SetSelected : 0)) {
+                selectPipeline = false;
+                heading("Pipeline editor");
+                if (ImGui::Button("Add modification...", {-1, U(32)}))
                     showCatalog = true;
-                ImGui::BeginChild("Stack", {-1, 230}, ImGuiChildFlags_Borders);
+                {
+                    auto p = ImGui::GetItemRectMax();
+                    ImGui::GetWindowDrawList()->AddTriangleFilled({p.x-U(18),p.y-U(18)},{p.x-U(10),p.y-U(18)},{p.x-U(14),p.y-U(13)},ImGui::GetColorU32(ImGuiCol_Text));
+                }
+                catalogAnchor = {ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + 2};
+                ImGui::BeginChild("Stack", {-1, U(205)}, ImGuiChildFlags_Borders);
                 if (mods.empty())
-                    ImGui::TextDisabled("No modifiers\nSource passes through unchanged.");
+                    ImGui::TextWrapped("Add a modification to start processing.");
                 for (int i = int(mods.size()) - 1; i >= 0; i--) {
                     ImGui::PushID(i);
                     auto &m = mods[i];
@@ -582,9 +802,9 @@ struct App {
                         std::swap(mods[i], mods[i - 1]);
                         update();
                     }
-                    if (m.op == Op::Slice || m.op == Op::Translate || m.op == Op::Scale) {
+                    if (m.op == Op::Slice || m.op == Op::Translate || m.op == Op::Scale || m.op == Op::Rotate || m.op == Op::SelectRange) {
                         float v = m.value;
-                        ImGui::SetNextItemWidth(140);
+                        ImGui::SetNextItemWidth(U(140));
                         if (ImGui::DragFloat("Value", &v, .1f)) {
                             checkpoint();
                             m.value = v;
@@ -592,7 +812,7 @@ struct App {
                         }
                         if (m.op != Op::Scale) {
                             int a = m.axis;
-                            ImGui::SetNextItemWidth(140);
+                            ImGui::SetNextItemWidth(U(140));
                             if (ImGui::Combo("Axis", &a, "X\0Y\0Z\0")) {
                                 checkpoint();
                                 m.axis = a;
@@ -600,7 +820,28 @@ struct App {
                             }
                         }
                     }
-                    if (m.op == Op::SelectType) {
+                    if (m.op == Op::SelectRange) {
+                        float upper = m.upper;
+                        if (ImGui::DragFloat("Upper bound", &upper, .1f)) {
+                            checkpoint(); m.upper = upper; update();
+                        }
+                    }
+                    if (m.op == Op::Replicate) {
+                        int count = m.type, axis = m.axis;
+                        if (ImGui::InputInt("Copies", &count)) {
+                            checkpoint(); m.type = std::clamp(count,1,32); update();
+                        }
+                        if (ImGui::Combo("Cell vector", &axis,"A\0B\0C\0")) {
+                            checkpoint(); m.axis = axis; update();
+                        }
+                    }
+                    if (m.op == Op::SelectIndex) {
+                        int index = m.type;
+                        if (ImGui::InputInt("Atom index", &index)) {
+                            checkpoint(); m.type = std::max(0,index); update();
+                        }
+                    }
+                    if (m.op == Op::SelectType || m.op == Op::EditType) {
                         int t = m.type;
                         if (ImGui::InputInt("Type index", &t)) {
                             checkpoint();
@@ -612,15 +853,18 @@ struct App {
                     ImGui::PopID();
                 }
                 ImGui::EndChild();
-                heading("DATA SOURCE");
+                heading("Scene visibility");
+                ImGui::Checkbox("Particles", &particles); ImGui::SameLine();
+                ImGui::Checkbox("Simulation cell", &cell);
+                heading("Data source");
                 ImGui::TextWrapped("%s", path.empty() ? "Generated FCC crystal"
                                                       : utf8(path.wstring()).c_str());
                 ImGui::TextDisabled("Reader: XYZ / Extended XYZ");
                 ImGui::TextDisabled("Trajectory: %zu frame(s)", std::max<size_t>(frames.size(), 1));
-                heading("PARTICLE APPEARANCE");
+                heading("Particle appearance");
                 ImGui::SliderFloat("Radius", &radius, .02f, 2.f, "%.2f");
                 ImGui::TextDisabled("Color: particle type / selection");
-                heading("PROPERTY STATISTICS");
+                heading("Position statistics");
                 ImGui::Combo("Property", &propertyAxis, "Position X\0Position Y\0Position Z\0");
                 auto s = cachedStats[propertyAxis];
                 ImGui::PlotHistogram("##hist", s.histogram.data(), 64, 0, nullptr, 0, FLT_MAX,
@@ -646,7 +890,7 @@ struct App {
                 ImGui::ColorEdit3("Background", bg);
                 ImGui::TextWrapped("PNG exports particles from the active camera. UI cell overlay "
                                    "is not included.");
-                if (ImGui::Button("Render active viewport", {-1, 35}))
+                if (ImGui::Button("Render active viewport", {-1, U(35)}))
                     exportImage();
                 heading("TRAJECTORY");
                 ImGui::SliderFloat("Frames/sec", &fps, 1, 60, "%.0f");
@@ -654,7 +898,7 @@ struct App {
                 ImGui::TextWrapped(source.sampled()
                                        ? "Exports the processed preview, not all source atoms."
                                        : "Exports the processed particle dataset.");
-                if (ImGui::Button("Export XYZ", {-1, 32})) {
+                if (ImGui::Button("Export XYZ", {-1, U(32)})) {
                     auto p = dialog(window, true, L"XYZ file\0*.xyz\0", L"xyz");
                     if (!p.empty()) {
                         writeXYZ(p, result.data);
@@ -663,12 +907,13 @@ struct App {
                 }
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Analysis")) {
+            if (ImGui::BeginTabItem("Analysis", nullptr, selectAnalysis ? ImGuiTabItemFlags_SetSelected : 0)) {
+                selectAnalysis = false;
                 heading("NEIGHBOR ANALYSIS");
                 ImGui::TextWrapped("Coordination number and connected clusters using spatial bins "
                                    "and minimum-image periodic distances.");
                 ImGui::InputFloat("Cutoff", &cutoff, .05f, .1f, "%.3f");
-                if (ImGui::Button("Compute neighbors", {-1, 32}) && !analyzing) {
+                if (ImGui::Button("Compute neighbors", {-1, U(32)}) && !analyzing) {
                     analysisRevision = revision;
                     auto d = result.data;
                     auto c = cutoff;
@@ -683,7 +928,26 @@ struct App {
                     ImGui::Text("Clusters: %u", analysis->clusters);
                     ImGui::Text("Neighbor pairs: %llu", analysis->bonds);
                     ImGui::Text("Mean coordination: %.4f", analysis->meanCoordination);
-                    if (ImGui::Button("Export analysis CSV", {-1, 32})) {
+                    ImGui::TextDisabled("Neighbor distances (0 to %.3f)", analysis->cutoff);
+                    ImGui::PlotHistogram("##distances", analysis->pairHistogram.data(),128,0,nullptr,0,FLT_MAX,{-1,75});
+                    if (analysis->rdfValid) {
+                        ImGui::TextUnformatted("Radial distribution g(r)");
+                        ImGui::PlotLines("##rdf",analysis->rdf.data(),128,0,nullptr,0,FLT_MAX,{-1,75});
+                    } else ImGui::TextWrapped("Bulk RDF requires a fully periodic orthogonal cell.");
+                    if (ImGui::Button("Export distributions CSV", {-1, U(30)})) {
+                        auto p = dialog(window, true, L"CSV file\0*.csv\0", L"csv");
+                        if (!p.empty()) {
+                            std::ofstream out(p); out << "r_min,r_max,pair_count,g_r\n";
+                            for (int i=0;i<128;++i) {
+                                out << analysis->cutoff*i/128 << ',' << analysis->cutoff*(i+1)/128
+                                    << ',' << analysis->pairHistogram[i] << ',';
+                                if (analysis->rdfValid) out << analysis->rdf[i];
+                                out << '\n';
+                            }
+                            if (!out) throw std::runtime_error("Cannot write distributions CSV");
+                        }
+                    }
+                    if (ImGui::Button("Export analysis CSV", {-1, U(32)})) {
                         auto p = dialog(window, true, L"CSV file\0*.csv\0", L"csv");
                         if (!p.empty()) {
                             std::ofstream out(p);
@@ -714,7 +978,7 @@ struct App {
                 ImGui::TextWrapped(
                     "Files larger than this budget use deterministic stride sampling. All records "
                     "are scanned; only preview atoms are retained.");
-                if (ImGui::Button("Reload with budget", {-1, 32}))
+                if (ImGui::Button("Reload with budget", {-1, U(32)}))
                     load(path, current);
                 heading("ENGINE");
                 ImGui::BulletText("16 bytes / displayed atom");
@@ -730,40 +994,123 @@ struct App {
         }
         ImGui::End();
     }
+    void rebuildFont() {
+        if (!refreshFont) return;
+        refreshFont = false;
+        ImGui_ImplDX11_InvalidateDeviceObjects();
+        auto &io = ImGui::GetIO();
+        io.Fonts->Clear();
+        const char *fonts[] = {"C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/consola.ttf"};
+        if (!io.Fonts->AddFontFromFileTTF(fonts[preferences.font], float(preferences.size)*uiScale))
+            io.Fonts->AddFontDefault();
+        headingFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeuib.ttf", float(preferences.size)*uiScale);
+        ImGui_ImplDX11_CreateDeviceObjects();
+    }
+    void settings() {
+        if (showSettings) { ImGui::OpenPopup("Settings"); showSettings = false; }
+        ImGui::SetNextWindowSize({U(540),U(preferences.size >= 19 ? 480.f : 410.f)});
+        if (ImGui::BeginPopupModal("Settings", nullptr, ImGuiWindowFlags_NoResize)) {
+            heading("APPEARANCE");
+            bool changed = ImGui::Combo("Theme", &preferences.theme, "Slate dark\0Classic light\0Midnight\0");
+            bool fontChanged = ImGui::Combo("Font", &preferences.font, "Segoe UI\0Arial\0Consolas\0");
+            fontChanged |= ImGui::SliderInt("Font size", &preferences.size, 14,20,"%d px");
+            if (changed || fontChanged) {
+                theme(preferences.theme);
+                refreshFont |= fontChanged;
+                preferences.save();
+            }
+            ImGui::TextWrapped("Appearance is applied immediately and saved for the next launch.");
+            heading("WINDOW CONTROLS");
+            ImGui::BulletText("Minimize: collect in the taskbar");
+            ImGui::BulletText("X: keep running in the system tray");
+            ImGui::BulletText("Power: exit the application completely");
+            ImGui::TextWrapped("Double-click the tray logo to restore. Right-click for Restore / Exit.");
+            if (ImGui::Button("Done",{U(100),U(30)})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
     void catalog() {
         if (showCatalog) {
-            ImGui::OpenPopup("Modifier library");
+            ImGui::OpenPopup("Add modification");
             showCatalog = false;
         }
-        ImGui::SetNextWindowSize({650, 600}, ImGuiCond_FirstUseEver);
-        if (ImGui::BeginPopupModal("Modifier library", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
-            ImGui::TextColored(accent, "MODIFIER LIBRARY");
-            ImGui::TextDisabled("Implemented operations are available below.");
-            for (auto op : {Op::Slice, Op::SelectType, Op::Invert, Op::Clear, Op::Delete,
-                            Op::Translate, Op::Scale, Op::Wrap, Op::ColorType}) {
-                if (ImGui::Selectable(opName(op))) {
-                    add(op);
-                    ImGui::CloseCurrentPopup();
-                }
+        auto display = ImGui::GetIO().DisplaySize;
+        float width = std::min(U(1080), display.x - U(24));
+        ImGui::SetNextWindowPos({std::max(U(12),catalogAnchor.x-width),catalogAnchor.y}, ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize({width,std::min(U(790),display.y-catalogAnchor.y-U(36))}, ImGuiCond_Appearing);
+        if (ImGui::BeginPopup("Add modification", ImGuiWindowFlags_NoSavedSettings)) {
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##search", "Search modifications...", modifierSearch, sizeof(modifierSearch));
+            auto matches = [&](const char *name) {
+                std::string a=name, b=modifierSearch;
+                for (auto &c:a) c=char(std::tolower((unsigned char)c));
+                for (auto &c:b) c=char(std::tolower((unsigned char)c));
+                return a.find(b)!=std::string::npos;
+            };
+            auto operation = [&](Op op, const char *hint) {
+                if (!matches(opName(op))) return;
+                if (ImGui::Selectable(opName(op))) { add(op); ImGui::CloseCurrentPopup(); }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",hint);
+            };
+            auto analysisItem = [&](const char *name) {
+                if (!matches(name)) return;
+                if (ImGui::Selectable(name)) { selectAnalysis=true; ImGui::CloseCurrentPopup(); }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open Analysis to set cutoff and compute neighbor results.");
+            };
+            auto planned = [&](const char *name) {
+                if (!matches(name)) return;
+                ImGui::BeginDisabled(); ImGui::Selectable(name); ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Algorithm not implemented yet. No license or Pro restriction.");
+            };
+            auto beginCard = [&](const char *title) {
+                ImGui::BeginChild(title,{0,0},ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+                                  ImGuiWindowFlags_NoScrollbar);
+                heading(title);
+            };
+            auto endCard = [&] { ImGui::EndChild(); };
+            if (ImGui::BeginTable("Modifier categories",3,ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
+                ImGui::TableNextColumn();
+                beginCard("Analysis");
+                analysisItem("Cluster analysis"); analysisItem("Coordination analysis"); analysisItem("Radial distribution function (RDF)"); analysisItem("Neighbor distance distribution");
+                if (matches("Histogram") && ImGui::Selectable("Histogram")) { selectPipeline=true; status="Position histogram is shown below the pipeline"; ImGui::CloseCurrentPopup(); }
+                for (auto name : {"Atomic strain", "Bond angle distribution", "Bond length distribution", "Bond order", "Difference between frames", "Dislocation analysis (DXA)", "Displacement vectors", "Elastic strain calculation", "Find rings", "Grain segmentation", "Reduce property", "Scatter plot", "Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
+                endCard();
+                ImGui::TableNextColumn();
+                beginCard("Modification");
+                operation(Op::Translate,"Translate particle positions along an axis.");
+                operation(Op::Scale,"Scale positions and simulation cell uniformly.");
+                operation(Op::Rotate,"Rotate positions and cell vectors around an axis (degrees).");
+                operation(Op::Replicate,"Repeat the system along a cell vector.");
+                operation(Op::EditType,"Assign a particle type to selected atoms.");
+                operation(Op::Delete,"Remove selected particles.");
+                operation(Op::Slice,"Keep particles below the chosen coordinate plane.");
+                operation(Op::Wrap,"Wrap positions into an orthogonal periodic cell.");
+                for (auto name : {"Affine transformation", "Combine datasets", "Compute property", "Edit simulation cell", "Freeze property", "Load trajectory", "Python script", "Smooth trajectory", "Unwrap trajectories"}) planned(name);
+                endCard();
+                beginCard("Visualization");
+                for (auto name : {"Construct surface mesh", "Coordination polyhedra", "Create bonds", "Create isosurface", "Generate trajectory lines"}) planned(name);
+                endCard();
+                ImGui::TableNextColumn();
+                beginCard("Structure identification");
+                for (auto name : {"Ackland-Jones analysis", "Centrosymmetry parameter", "Chill+", "Common neighbor analysis", "Identify diamond structure", "Polyhedral template matching", "VoroTop analysis"}) planned(name);
+                endCard();
+                beginCard("Selection");
+                operation(Op::Clear,"Clear the current selection.");
+                operation(Op::Invert,"Invert selected and unselected particles.");
+                operation(Op::SelectIndex,"Select one atom by its current pipeline index.");
+                operation(Op::SelectType,"Select particles of a specified type.");
+                operation(Op::SelectRange,"Select particles in a coordinate interval.");
+                for (auto name : {"Expand selection", "Expression selection", "Select overlapping particles"}) planned(name);
+                endCard();
+                beginCard("Coloring");
+                operation(Op::ColorType,"Use the particle-type color palette.");
+                for (auto name : {"Ambient occlusion", "Assign color", "Color coding"}) planned(name);
+                endCard();
+                ImGui::EndTable();
             }
             ImGui::Separator();
-            ImGui::TextDisabled("PLANNED / NOT IMPLEMENTED");
-            ImGui::BeginChild("planned", {-1, -45});
-            ImGui::TextWrapped(
-                "Analysis: atomic strain, bond analysis, difference between frames, dislocation "
-                "analysis (DXA), displacement vectors, elastic strain, find rings, grain "
-                "segmentation, reduce property, scatter plot, spatial binning, spatial "
-                "correlation, structure factor, time averaging, time series, Voronoi, "
-                "Wigner-Seitz.\n\nStructure: Ackland-Jones, centrosymmetry, Chill+, CNA, diamond "
-                "identification, PTM, VoroTop.\n\nGeometry: surface mesh, coordination polyhedra, "
-                "bonds, isosurface, trajectory lines.\n\nOther: ambient occlusion, custom colors, "
-                "compute/freeze property, combine datasets, replicate, smooth/unwrap trajectories, "
-                "expression/manual/expanded selection, Python modifiers, animation export, offline "
-                "ray tracing.\n\nSee docs/FEATURE_MATRIX.md for the complete reference-image "
-                "mapping.");
-            ImGui::EndChild();
-            if (ImGui::Button("Close", {120, 30}))
-                ImGui::CloseCurrentPopup();
+            ImGui::TextWrapped("Muted items are in development. All available tools are unrestricted.");
             ImGui::EndPopup();
         }
     }
@@ -782,11 +1129,11 @@ struct App {
         }
         float w = io.DisplaySize.x, h = io.DisplaySize.y;
         top(w);
-        left(h);
+        if (showWorkspace) left(h);
         right(w, h);
         center(w, h);
-        fixed("Status", 0, h - 30, w, 30);
-        ImGui::SetCursorPosY(6);
+        fixed("Status", 0, h - U(30), w, U(30));
+        ImGui::SetCursorPosY(U(5));
         ImGui::TextColored(accent, "GPU");
         ImGui::SameLine();
         ImGui::TextDisabled("%s  |  %.1f FPS  |  %s drawn", utf8(gpu.adapterName).c_str(),
@@ -795,12 +1142,13 @@ struct App {
         ImGui::TextDisabled("  %s", status.c_str());
         ImGui::End();
         catalog();
-        if (busy)
+        settings();
+        if (busy && indexing)
             ImGui::OpenPopup("Loading trajectory");
         if (ImGui::BeginPopupModal("Loading trajectory", nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::Text("Indexing / reading XYZ records...");
-            ImGui::ProgressBar(progress, {400, 20});
+            ImGui::ProgressBar(progress, {U(400), U(20)});
             if (ImGui::Button("Cancel"))
                 cancel = true;
             if (!busy)
@@ -827,10 +1175,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         int argc;
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         int adapter = -1, smoke = 0;
+        bool smokeCatalog = false, smokeSettings = false, desktopTest = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
-            if (a == L"--adapter" && i + 1 < argc)
+            if (a == L"--catalog") smokeCatalog = true;
+            else if (a == L"--settings") smokeSettings = true;
+            else if (a == L"--desktop-test") desktopTest = true;
+            else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
             else if (a == L"--smoke" && i + 1 < argc)
                 smoke = _wtoi(argv[++i]);
@@ -843,10 +1195,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         WNDCLASSEXW wc{sizeof(wc), CS_CLASSDC, wndProc,  0,
                        0,          instance,   nullptr,  LoadCursor(nullptr, IDC_ARROW),
                        nullptr,    nullptr,    L"AtomX", nullptr};
+        wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(102));
+        wc.hIconSm = wc.hIcon;
         RegisterClassExW(&wc);
         HWND window = CreateWindowW(wc.lpszClassName, L"AtomX - Atomic visualization workspace",
                                     WS_OVERLAPPEDWINDOW, 80, 50, 1560, 1000, nullptr, nullptr,
                                     instance, nullptr);
+        uiScale = std::max(1.f,GetDpiForWindow(window)/96.f);
+        MONITORINFO workArea{sizeof(workArea)};
+        GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &workArea);
+        int initialW = std::min(int(U(1560)), int(workArea.rcWork.right-workArea.rcWork.left-40));
+        int initialH = std::min(int(U(1000)), int(workArea.rcWork.bottom-workArea.rcWork.top-40));
+        SetWindowPos(window,nullptr,workArea.rcWork.left+20,workArea.rcWork.top+20,
+                     initialW,initialH,SWP_NOZORDER | SWP_FRAMECHANGED);
         Renderer gpu;
         renderer = &gpu;
         gpu.init(window, adapter);
@@ -855,15 +1216,55 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         io.IniFilename = nullptr;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", 17);
+        uiScale = std::max(1.f, GetDpiForWindow(window)/96.f);
         theme();
         ImGui_ImplWin32_Init(window);
         ImGui_ImplDX11_Init(gpu.device.Get(), gpu.context.Get());
+        SetWindowPos(window, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         ShowWindow(window, SW_SHOWDEFAULT);
+        if (smoke) ShowWindow(window, SW_SHOWNORMAL);
         DragAcceptFiles(window, TRUE);
         {
             App app(window, gpu);
+            app.showCatalog = smokeCatalog;
+            app.showSettings = smokeSettings;
+            if (desktopTest) {
+                auto requireWindow = [](bool ok, const char *message) {
+                    if (!ok) throw std::runtime_error(message);
+                };
+                ShowWindow(window, SW_MINIMIZE);
+                requireWindow(IsIconic(window), "Minimize must use taskbar");
+                ShowWindow(window, SW_RESTORE);
+                ShowWindow(window, SW_MAXIMIZE);
+                requireWindow(IsZoomed(window), "Maximize failed");
+                SendMessageW(window, WM_CLOSE, 0, 0);
+                requireWindow(desktop::inTray && !IsWindowVisible(window), "Close must hide to tray");
+                desktop::restore(window);
+                requireWindow(IsWindowVisible(window) && IsZoomed(window), "Tray restore must preserve maximized state");
+                ShowWindow(window, SW_RESTORE);
+                requireWindow(!IsIconic(window) && !IsZoomed(window), "Restore failed");
+                RECT r{}; GetWindowRect(window, &r);
+                requireWindow(desktop::hitTest(window, MAKELPARAM(r.left+100,r.top+20)) == HTCAPTION,
+                              "Custom title must support native dragging");
+                std::ofstream("build/desktop-test.txt") << "PASS: minimize, maximize, close-to-tray, restore, title drag hit test\n";
+            }
             if (!input.empty())
                 app.load(input);
+            if (desktopTest && !input.empty()) {
+                app.job.wait(); app.poll();
+                if (app.frames.size() < 2) throw std::runtime_error("Timeline test needs at least two frames");
+                app.seekFrame(1); app.poll();
+                app.seekFrame(int(app.frames.size())+100); // Replace request while the prior frame loads.
+                app.job.wait(); app.poll();
+                if (app.busy) { app.job.wait(); app.poll(); }
+                if (app.current != int(app.frames.size())-1 || !app.error.empty())
+                    throw std::runtime_error("Queued trajectory seek failed");
+                app.seekFrame(-10); app.poll(); app.job.wait(); app.poll();
+                if (app.current != 0) throw std::runtime_error("First-frame seek failed");
+                app.seekFrame(int(app.frames.size())-1); app.poll(); app.job.wait(); app.poll();
+                std::ofstream("build/desktop-test.txt",std::ios::app)
+                    << "PASS: trajectory seek, latest-request wins, first/last bounds\n";
+            }
             bool done = false;
             int ticks = 0;
             while (!done) {
@@ -876,7 +1277,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 }
                 if (done)
                     break;
-                if (IsIconic(window)) {
+                if (IsIconic(window) || !IsWindowVisible(window)) {
+                    app.poll();
                     Sleep(20);
                     continue;
                 }
@@ -884,6 +1286,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     gpu.resize();
                     resized = false;
                 }
+                app.rebuildFont();
                 ImGui_ImplDX11_NewFrame();
                 ImGui_ImplWin32_NewFrame();
                 ImGui::NewFrame();
