@@ -394,7 +394,7 @@ struct App {
             return;
         Target t;
         gpu.target(t, exportW, exportH);
-            gpu.draw(t, result.data, cameras[active], radius, particleShape, renderMode, colorAxis, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
+            gpu.draw(t, result.data, cameras[active], radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
         gpu.png(t, p);
         status = "Rendered " + utf8(p.filename().wstring());
     }
@@ -570,7 +570,7 @@ struct App {
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();
         gpu.target(targets[i], int(avail.x), int(avail.y));
-            gpu.draw(targets[i], result.data, cam, radius, particleShape, renderMode, colorAxis, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
+            gpu.draw(targets[i], result.data, cam, radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
@@ -925,7 +925,7 @@ struct App {
                     }
                     if (m.op == Op::ColorType) {
                         ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
-                        ImGui::Combo("Color gradient", &colorGradient, "Blue-Cyan-Yellow-Red\0Blue-White-Red\0Grayscale\0Hot\0Viridis\0");
+                        ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0");
                         if (ImGui::Checkbox("Automatic range", &colorSymmetric)) {
                             colorMin = colorAxis==0?result.data.lo.x:colorAxis==1?result.data.lo.y:result.data.lo.z;
                             colorMax = colorAxis==0?result.data.hi.x:colorAxis==1?result.data.hi.y:result.data.hi.z;
@@ -961,7 +961,7 @@ struct App {
                 if (colorCoding) {
                     heading("COLOR CODING");
                     ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
-                    ImGui::Combo("Color gradient", &colorGradient, "Blue-Cyan-Yellow-Red\0Blue-White-Red\0Grayscale\0Hot\0Viridis\0");
+                    ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0");
                     if (ImGui::Checkbox("Automatic range", &colorSymmetric)) { colorMin = colorAxis==0?result.data.lo.x:colorAxis==1?result.data.lo.y:result.data.lo.z; colorMax = colorAxis==0?result.data.hi.x:colorAxis==1?result.data.hi.y:result.data.hi.z; }
                     if (!colorSymmetric) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
                     ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse);

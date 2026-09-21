@@ -39,7 +39,7 @@ class Renderer {
     struct Constants {
         DirectX::XMFLOAT4X4 view, projection;
         float radius, shape, colorAxis, colorMin;
-        float colorMax, colorMode, colorDiscrete, unused;
+        float colorMax, colorMode, colorDiscrete, colorGradient;
         DirectX::XMFLOAT4 colors[8];
     };
     ComPtr<ID3D11VertexShader> vs;
@@ -100,7 +100,7 @@ class Renderer {
         factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
         resize();
         const char *shader = R"(
-cbuffer C : register(b0) {row_major float4x4 view;row_major float4x4 proj;float radius;float shape;float colorAxis;float colorMin;float colorMax;float colorMode;float colorDiscrete;float unused;float4 colors[8];};
+cbuffer C : register(b0) {row_major float4x4 view;row_major float4x4 proj;float radius;float shape;float colorAxis;float colorMin;float colorMax;float colorMode;float colorDiscrete;float colorGradient;float4 colors[8];};
 struct Atom {float3 pos;uint type;};StructuredBuffer<Atom> atoms : register(t0);
 struct V {float4 pos:SV_POSITION;float2 uv:TEXCOORD0;float3 center:TEXCOORD1;nointerpolation uint type:TEXCOORD2;nointerpolation float3 world:TEXCOORD3;};
 V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
@@ -112,7 +112,7 @@ struct P {float4 color:SV_TARGET;float depth:SV_DEPTH;};
 P pixel(V i) {float r=dot(i.uv,i.uv);if(shape<0.5) clip(1-r); else if(shape<1.5) { clip(1-r); } else if(shape<2.5) { } else if(shape<3.5) { clip(1-abs(i.uv.x)); } else { clip(1-r); } float3 n=(shape<0.5||shape>3.5)?float3(i.uv,sqrt(max(0,1-r))):float3(0,0,1);float3 p=i.center+n*radius;
  float4 clipPos=mul(float4(p,1),proj);P o;o.depth=clipPos.z/clipPos.w;
  float3 base=(i.type&0x80000000)?float3(1,.83,.32):colors[(i.type&0x7fffffff)%8].rgb;
- if(colorMode>0.5 && (colorMode<1.5 || (i.type&0x80000000))) { float value = colorAxis<0.5 ? i.world.x : colorAxis<1.5 ? i.world.y : i.world.z; float u=saturate((value-colorMin)/max(colorMax-colorMin,1e-12)); if(colorDiscrete>0.5) u=floor(u*12)/11; float3 c0=float3(0.10,.15,.85), c1=float3(.12,.85,.75), c2=float3(.98,.88,.08), c3=float3(.9,.08,.04); base=u<.5?lerp(c0,c1,u*2):u<.8?lerp(c1,c2,(u-.5)*3.333):lerp(c2,c3,(u-.8)*5); }
+ if(colorMode>0.5 && (colorMode<1.5 || (i.type&0x80000000))) { float value = colorAxis<0.5 ? i.world.x : colorAxis<1.5 ? i.world.y : i.world.z; float u=saturate((value-colorMin)/max(colorMax-colorMin,1e-12)); if(colorDiscrete>0.5) u=floor(u*12)/11; float3 c0=float3(0.10,.15,.85), c1=float3(.12,.85,.75), c2=float3(.98,.88,.08), c3=float3(.9,.08,.04); if(colorGradient<.5) base=u<.5?lerp(c0,c1,u*2):u<.8?lerp(c1,c2,(u-.5)*3.333):lerp(c2,c3,(u-.8)*5); else if(colorGradient<1.5) base=u<.5?lerp(float3(0.1,.15,.9),float3(1,1,1),u*2):lerp(float3(1,1,1),float3(.9,.05,.05),(u-.5)*2); else if(colorGradient<2.5) base=float3(.5+.5*cos(6.283*(u+float3(0,.33,.67)))); else if(colorGradient<3.5) base=lerp(float3(.02,.02,.02),float3(1,.95,.1),u); else if(colorGradient<4.5) base=float3(u,u,u); else if(colorGradient<5.5) base=lerp(float3(.02,.02,.15),float3(1,.02,.0),u); else if(colorGradient<6.5) base=float3(saturate(1.5-abs(4*u-3)),saturate(1.5-abs(4*u-2)),saturate(1.5-abs(4*u-1))); else if(colorGradient<7.5) base=lerp(float3(.05,.01,.2),float3(1,.3,.02),u); else base=lerp(float3(.27,.01,.33),float3(.99,.9,.14),u); }
  float diffuse=max(0,dot(n,normalize(float3(-.45,.65,1))));float rim=pow(1-sqrt(1-r),3);
  float spec=pow(max(0,dot(n,normalize(float3(-.22,.32,1)))),36);
  o.color=float4(base*(.28+.72*diffuse)+spec*.3+rim*.045,1);return o;}
@@ -260,7 +260,7 @@ P pixel(V i) {float r=dot(i.uv,i.uv);if(shape<0.5) clip(1-r); else if(shape<1.5)
             *projOut = p;
         return v * p;
     }
-    void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, int shape, int renderMode, int colorAxis, float colorMin, float colorMax, bool colorCoding, bool discrete, bool selectedOnly, const float *bg,
+    void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, int shape, int renderMode, int colorAxis, int colorGradient, float colorMin, float colorMax, bool colorCoding, bool discrete, bool selectedOnly, const float *bg,
               bool visible = true) {
         using namespace DirectX;
         context->OMSetRenderTargets(1, t.rtv.GetAddressOf(), t.dsv.Get());
@@ -283,7 +283,7 @@ P pixel(V i) {float r=dot(i.uv,i.uv);if(shape<0.5) clip(1-r); else if(shape<1.5)
         XMStoreFloat4x4(&c.projection, proj);
         c.radius = radius;
         c.shape = float(shape);
-        c.colorAxis = float(colorAxis); c.colorMin=colorMin; c.colorMax=colorMax; c.colorMode=colorCoding?(selectedOnly?2.f:1.f):0.f; c.colorDiscrete=discrete?1.f:0.f;
+        c.colorAxis = float(colorAxis); c.colorMin=colorMin; c.colorMax=colorMax; c.colorMode=colorCoding?(selectedOnly?2.f:1.f):0.f; c.colorDiscrete=discrete?1.f:0.f; c.colorGradient=float(colorGradient);
         XMFLOAT4 colors[] = {{.76f, .57f, .38f, 1}, {.35f, .68f, .78f, 1}, {.62f, .76f, .46f, 1},
                              {.78f, .44f, .52f, 1}, {.69f, .52f, .81f, 1}, {.88f, .76f, .43f, 1},
                              {.47f, .61f, .85f, 1}, {.8f, .8f, .8f, 1}};
