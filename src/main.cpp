@@ -212,7 +212,7 @@ struct App {
     float cellColor[4] = {0.82f,0.9f,1.f,0.88f};
     float cellWidth = 1.25f, cellGlow = 0.35f;
     bool cellDashed = false, cellLabels = false;
-    int cellDimension = 3;
+    int cellDimension = 1;
     bool colorCoding = false, colorDiscrete = false, colorSelectedOnly = false, colorSymmetric = false, colorReverse = false;
     int colorAxis = 0, colorGradient = 0;
     float colorMin = 0, colorMax = 1;
@@ -908,7 +908,7 @@ struct App {
                 ImGui::Checkbox("Particles", &particles); ImGui::SameLine();
                 ImGui::Checkbox("Simulation cell", &cell);
                 if (cell) {
-                    ImGui::Combo("Cell dimensionality", &cellDimension, "2D\0" "3D\0"); cellDimension=cellDimension?3:2;
+                    ImGui::Combo("Cell dimensionality", &cellDimension, "2D\0" "3D\0");
                     ImGui::ColorEdit4("Cell line color", cellColor, ImGuiColorEditFlags_AlphaBar);
                     ImGui::SliderFloat("Line width", &cellWidth, .5f, 4.f, "%.1f px");
                     ImGui::SliderFloat("Glow", &cellGlow, 0.f, 1.f, "%.2f");
