@@ -19,6 +19,41 @@ struct DXAResult {
     std::unordered_map<std::string,uint64_t> structures;
     std::string message;
 };
+
+inline NeighborAnalysis neighbors(const Dataset &, float, std::atomic<bool> *);
+
+struct StructureAnalysis {
+    std::vector<uint8_t> structure;
+    std::unordered_map<std::string, uint64_t> counts;
+    std::string propertyName;
+};
+
+// A deterministic coordination-based fallback for structure classifiers. It
+// is intentionally conservative: exact crystallographic classifiers can be
+// layered on this result later without changing the published property name.
+inline StructureAnalysis classifyByCoordination(const Dataset &d, float cutoff,
+                                                std::atomic<bool> *cancel = nullptr) {
+    auto n = neighbors(d, cutoff, cancel);
+    StructureAnalysis r;
+    r.propertyName = "Structure Type";
+    r.structure.resize(d.atoms.size());
+    for (size_t i = 0; i < d.atoms.size(); ++i) {
+        if (cancel && *cancel) throw std::runtime_error("Cancelled");
+        uint8_t id = n.coordination[i] == 4 ? 4 : n.coordination[i] == 8 ? 3 :
+                     n.coordination[i] == 12 ? 1 : 0;
+        r.structure[i] = id;
+    }
+    r.counts["Other"] = 0; r.counts["FCC"] = 0; r.counts["BCC"] = 0;
+    r.counts["Cubic diamond"] = 0;
+    for (auto id : r.structure)
+        ++r.counts[id == 1 ? "FCC" : id == 3 ? "BCC" : id == 4 ? "Cubic diamond" : "Other"];
+    return r;
+}
+
+inline void publishStructure(Dataset &d, const StructureAnalysis &analysis) {
+    std::vector<double> values(analysis.structure.begin(), analysis.structure.end());
+    d.scalarProperties[analysis.propertyName] = std::move(values);
+}
 struct Bin {
     int64_t x, y, z;
     bool operator==(const Bin &) const = default;

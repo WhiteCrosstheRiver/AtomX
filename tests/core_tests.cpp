@@ -105,6 +105,18 @@ int main() {
         require(failed, "sampled analysis rejected");
         auto dxa = dxaApproximate(fcc, .8f);
         require(dxa.analyzed == fcc.atoms.size() && dxa.structures["FCC"] == fcc.atoms.size() && dxa.defectAtoms == 0, "DXA FCC prepass");
+        auto structures = classifyByCoordination(fcc, .8f);
+        publishStructure(fcc, structures);
+        require(structures.counts["FCC"] == fcc.atoms.size() &&
+                    fcc.scalarProperties["Structure Type"].size() == fcc.atoms.size(),
+                "structure property publication");
+        PipelineGraph graph;
+        graph.insert({"source", "Source", "Data", true});
+        graph.insert({"color", "Color coding", "Coloring", true});
+        graph.move(1, 0);
+        require(graph.nodes[0].id == "color" && graph.nodes[1].dirty, "pipeline ordering and dirty state");
+        graph.erase(0);
+        require(graph.nodes.size() == 1 && graph.nodes[0].id == "source", "pipeline erase");
         auto poscar = p.parent_path() / "atomx-test.POSCAR";
         writePOSCAR(poscar, fcc);
         auto pos = readPOSCAR(poscar);

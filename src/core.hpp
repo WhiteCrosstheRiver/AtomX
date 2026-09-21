@@ -44,6 +44,13 @@ struct Dataset {
     Vec3 lo{}, hi{};
     uint64_t sourceCount = 0, stride = 1;
     std::string comment;
+    // Scalar/vector particle properties published by modifiers and readers.
+    // Positions and type remain in the compact Atom buffer for the renderer;
+    // auxiliary properties are kept separately so adding analysis columns does
+    // not change the GPU ABI.
+    std::unordered_map<std::string, std::vector<double>> scalarProperties;
+    std::unordered_map<std::string, std::vector<Vec3>> vectorProperties;
+    std::unordered_map<std::string, std::string> propertyComponents;
     bool sampled() const {
         return stride > 1;
     }
@@ -62,6 +69,56 @@ struct Dataset {
             hi.y = std::max(hi.y, a.y);
             hi.z = std::max(hi.z, a.z);
         }
+    }
+};
+
+struct DataObject {
+    enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels };
+    Kind kind = Kind::Particles;
+    std::string name;
+    bool visible = true;
+    size_t sourceNode = 0;
+};
+
+struct ModifierNode {
+    std::string id;
+    std::string displayName;
+    std::string category;
+    bool enabled = true;
+    bool dirty = true;
+    bool running = false;
+    std::string error;
+    std::vector<DataObject> outputs;
+};
+
+// Lightweight pipeline contract used by the UI and by asynchronous workers.
+// Concrete algorithms can remain in headers while sharing ordering, enabled
+// state, diagnostics and output-object publication.
+struct PipelineGraph {
+    std::vector<ModifierNode> nodes;
+    size_t selected = 0;
+    void markDirtyFrom(size_t index) {
+        for (size_t i = index; i < nodes.size(); ++i) nodes[i].dirty = true;
+    }
+    void insert(ModifierNode node, size_t at = SIZE_MAX) {
+        at = std::min(at, nodes.size());
+        nodes.insert(nodes.begin() + at, std::move(node));
+        markDirtyFrom(at);
+        selected = at;
+    }
+    void erase(size_t at) {
+        if (at >= nodes.size()) return;
+        nodes.erase(nodes.begin() + at);
+        selected = nodes.empty() ? 0 : std::min(selected, nodes.size() - 1);
+        markDirtyFrom(selected);
+    }
+    void move(size_t from, size_t to) {
+        if (from >= nodes.size() || to >= nodes.size() || from == to) return;
+        auto node = std::move(nodes[from]);
+        nodes.erase(nodes.begin() + from);
+        nodes.insert(nodes.begin() + to, std::move(node));
+        selected = to;
+        markDirtyFrom(std::min(from, to));
     }
 };
 inline std::string attribute(const std::string &s, const std::string &key) {
