@@ -46,6 +46,7 @@ class Renderer {
     ComPtr<ID3D11PixelShader> ps;
     ComPtr<ID3D11Buffer> constants;
     ComPtr<ID3D11RasterizerState> raster;
+    ComPtr<ID3D11RasterizerState> wireRaster;
     ComPtr<ID3D11DepthStencilState> depthState;
     std::vector<Chunk> chunks;
 
@@ -139,6 +140,8 @@ P pixel(V i) {float r=dot(i.uv,i.uv);if(shape<0.5) clip(1-r); else if(shape<1.5)
         rs.CullMode = D3D11_CULL_NONE;
         rs.DepthClipEnable = TRUE;
         check(device->CreateRasterizerState(&rs, &raster), "Rasterizer");
+        rs.FillMode = D3D11_FILL_WIREFRAME;
+        check(device->CreateRasterizerState(&rs, &wireRaster), "Wire rasterizer");
         D3D11_DEPTH_STENCIL_DESC ds{};
         ds.DepthEnable = TRUE;
         ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
@@ -257,7 +260,7 @@ P pixel(V i) {float r=dot(i.uv,i.uv);if(shape<0.5) clip(1-r); else if(shape<1.5)
             *projOut = p;
         return v * p;
     }
-    void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, int shape, int colorAxis, float colorMin, float colorMax, bool colorCoding, bool discrete, bool selectedOnly, const float *bg,
+    void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, int shape, int renderMode, int colorAxis, float colorMin, float colorMax, bool colorCoding, bool discrete, bool selectedOnly, const float *bg,
               bool visible = true) {
         using namespace DirectX;
         context->OMSetRenderTargets(1, t.rtv.GetAddressOf(), t.dsv.Get());
@@ -265,7 +268,7 @@ P pixel(V i) {float r=dot(i.uv,i.uv);if(shape<0.5) clip(1-r); else if(shape<1.5)
         context->ClearDepthStencilView(t.dsv.Get(), D3D11_CLEAR_DEPTH, 1, 0);
         D3D11_VIEWPORT vp{0, 0, float(t.w), float(t.h), 0, 1};
         context->RSSetViewports(1, &vp);
-        context->RSSetState(raster.Get());
+        context->RSSetState(renderMode == 1 ? wireRaster.Get() : raster.Get());
         context->OMSetDepthStencilState(depthState.Get(), 0);
         context->OMSetBlendState(nullptr, nullptr, ~0u);
         context->IASetInputLayout(nullptr);

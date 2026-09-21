@@ -30,7 +30,8 @@
 | 完整动画 / 范围 / Every Nth frame | 待实现 | 播放可用，动画文件导出不可用 |
 | 背景颜色 | 已实现 | RGB |
 | 透明背景 / 半透明粒子 / 抗锯齿等级 | 待实现 | 当前不透明单采样渲染 |
-| OpenGL / Tachyon / OSPRay / VisRTX | 未接入 | 当前是原生 Direct3D 11 GPU 渲染器；没有这些后端的空壳选项 |
+| Standard / Wireframe / Flat / Cinematic preview | 部分 | 已提供四种 Direct3D 11 实时预览模式；Wireframe 为独立光栅路径，尚未接入 OptiX/OSPRay/Tachyon |
+| OpenGL / Tachyon / OSPRay / VisRTX | 未接入 | OVITO 的这些后端需要独立渲染库；当前没有用空壳选项冒充已安装后端 |
 | Intel / NVIDIA / AMD | 部分 | 通用 D3D11 feature level 11.0 路径，Intel 与 NVIDIA 在本机实测；AMD 未实测 |
 | 几亿原子 | 未达到完整目标 | 流式扫描 + 有界采样；没有几亿原子全量显存驻留 / 全精度交互的验证 |
 

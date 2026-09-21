@@ -208,6 +208,7 @@ struct App {
          showCatalog = false;
     float radius = .23f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
+    int renderMode = 0;
     bool colorCoding = false, colorDiscrete = false, colorSelectedOnly = false, colorSymmetric = false, colorReverse = false;
     int colorAxis = 0, colorGradient = 0;
     float colorMin = 0, colorMax = 1;
@@ -378,7 +379,7 @@ struct App {
             return;
         Target t;
         gpu.target(t, exportW, exportH);
-            gpu.draw(t, result.data, cameras[active], radius, particleShape, colorAxis, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
+            gpu.draw(t, result.data, cameras[active], radius, particleShape, renderMode, colorAxis, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
         gpu.png(t, p);
         status = "Rendered " + utf8(p.filename().wstring());
     }
@@ -433,30 +434,44 @@ struct App {
         control("##exit",3,"Power off: exit AtomX completely");
         ImGui::End();
         fixed("Top", 0, U(42), w, U(48));
-        if (ImGui::Button("Open trajectory"))
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(11), U(7)});
+        if (ImGui::Button("Open##toolbar"))
             open();
         ImGui::SameLine();
-        if (ImGui::Button("Undo"))
+        if (ImGui::Button("Import##toolbar"))
+            open();
+        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+        if (ImGui::Button("Undo##toolbar"))
             history(false);
         ImGui::SameLine();
-        if (ImGui::Button("Redo"))
+        if (ImGui::Button("Redo##toolbar"))
             history(true);
         ImGui::SameLine();
-        if (ImGui::Button(quad ? "Single view" : "Four views"))
-            quad = !quad;
+        if (ImGui::Button("Select##toolbar")) active = active;
         ImGui::SameLine();
-        if (ImGui::Button("Fit"))
-            cameras[active] = Camera{.65f, .48f, 1, 0, 0, cameras[active].mode};
+        if (ImGui::Button("Orbit##toolbar")) cameras[active].mode = 7;
         ImGui::SameLine();
-        if (ImGui::Button("Modifiers"))
-            showCatalog = true;
-        ImGui::SameLine();
-        if (ImGui::Button("Render PNG"))
+        if (ImGui::Button("Rotate##toolbar")) cameras[active].yaw += .35f;
+        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+        if (ImGui::Button("Snapshot##toolbar"))
             exportImage();
         ImGui::SameLine();
-        if (ImGui::Button("Settings")) showSettings = true;
+        if (ImGui::Button(quad ? "Single view##toolbar" : "Four views##toolbar"))
+            quad = !quad;
         ImGui::SameLine();
-        if (ImGui::Button("Workspace")) showWorkspace = !showWorkspace;
+        if (ImGui::Button("Fit##toolbar"))
+            cameras[active] = Camera{.65f, .48f, 1, 0, 0, cameras[active].mode};
+        ImGui::SameLine();
+        if (ImGui::Button("Modifiers##toolbar"))
+            showCatalog = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Render##toolbar"))
+            exportImage();
+        ImGui::SameLine();
+        if (ImGui::Button("Settings##toolbar")) showSettings = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Workspace##toolbar")) showWorkspace = !showWorkspace;
+        ImGui::PopStyleVar();
         ImGui::End();
     }
     float leftWidth() const { return showWorkspace ? U(220) : 0.f; }
@@ -540,7 +555,7 @@ struct App {
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();
         gpu.target(targets[i], int(avail.x), int(avail.y));
-            gpu.draw(targets[i], result.data, cam, radius, particleShape, colorAxis, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
+            gpu.draw(targets[i], result.data, cam, radius, particleShape, renderMode, colorAxis, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
@@ -906,7 +921,8 @@ struct App {
             if (ImGui::BeginTabItem("Render")) {
                 heading("GPU RENDERER");
                 ImGui::TextWrapped("%s", utf8(gpu.adapterName).c_str());
-                ImGui::TextDisabled("Direct3D 11 / sphere impostors");
+                ImGui::Combo("Renderer", &renderMode, "Standard GPU\0Wireframe GPU\0Flat particle preview\0Cinematic GPU preview\0");
+                ImGui::TextDisabled(renderMode==0 ? "Direct3D 11 / shaded impostors" : renderMode==1 ? "Direct3D 11 / wireframe raster" : "Direct3D 11 / fast preview mode");
                 ImGui::Text("Atom buffers: %.1f MiB", gpu.gpuBytes / 1048576.);
                 heading("CAMERA");
                 ImGui::Combo("View", &cameras[active].mode, views);

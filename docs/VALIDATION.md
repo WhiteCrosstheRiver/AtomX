@@ -10,6 +10,8 @@
 
 ## 图形检查
 
+渲染模式现在提供 Standard GPU、Wireframe GPU、Flat particle preview 和 Cinematic GPU preview。它们共享 Direct3D 11 设备；Wireframe 使用独立光栅化状态，其余模式是不同的实时预览质量路径，不冒充未安装的 OptiX/OSPRay/Tachyon 后端。
+
 | 显卡 | 数据 | 布局 | 观测 UI 帧率 |
 |---|---|---|---|
 | NVIDIA GeForce RTX 5090 D v2 | 55,296 原子，全量 | 四视口 | 约 60 FPS |
