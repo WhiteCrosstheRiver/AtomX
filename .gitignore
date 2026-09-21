@@ -1,0 +1,7 @@
+build/
+vendor/
+third_party/imgui.zip
+*.obj
+*.pdb
+atomx-error.txt
+smoke-report.txt

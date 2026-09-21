@@ -1,0 +1,64 @@
+# AtomX
+
+C++20 原生 Windows 原子可视化工作区，使用 Direct3D 11。界面参考 `vendor/zed` 的 One Dark 色彩、紧凑标签与面板布局。当前版本是可运行的开发版，**尚未全面对齐 OVITO，也未实现几亿原子的全量高效渲染**。
+
+## 启动
+
+双击根目录 `Run AtomX.cmd`，或执行 `build\AtomX.exe`。启动后显示 FCC Cu/Ni 晶体，无需准备输入文件。
+
+```powershell
+.\build\AtomX.exe
+.\build\AtomX.exe "D:\simulation\trajectory.xyz"
+.\build\AtomX.exe --adapter 1
+```
+
+显卡索引在 System 面板可见，默认选择专用显存最大的可用硬件适配器。本机索引 0 为 NVIDIA，1 为 Intel；其他电脑的索引可能不同。没有偷偷切换到 CPU 软件渲染。
+
+## 已实现
+
+- 单 / 四视口、六个方向与正交 / 透视相机，粒子与晶胞开关。
+- XYZ / Extended XYZ 单文件多帧轨迹、拖入文件、后台索引 / 读取、取消、帧播放。
+- GPU 实例化球体 impostor，16 字节原子记录、每块最多 1,048,576 原子；共享原子缓冲供所有视口使用。
+- 原子预算内全量显示，超出时进行确定性 stride 采样，同时标示源数量、显示数量与 stride。
+- 非破坏性修改器：轴向 Slice、类型选择、反选、清空、删除选中、平移、统一缩放、正交周期 Wrap；管线开关、前移与撤销/重做。
+- 粒子坐标表、晶胞矩阵、原始注释、位置直方图 / min / max / mean。
+- 后台空间分箱邻域配位数与距离聚类、CSV 分析导出；禁止对采样数据给出邻域分析结果。
+- 活动相机 PNG 导出、处理后数据 XYZ 导出。
+
+详见 [完整功能对齐表](docs/FEATURE_MATRIX.md) 和 [架构说明](docs/ARCHITECTURE.md)。未实现的功能明确列在规划区，不提供虚假按钮。
+
+## 操作
+
+| 操作 | 方法 |
+|---|---|
+| 导入 | Open trajectory / Ctrl+O / 拖入 XYZ 文件 |
+| 旋转 | 视口内左键拖动 |
+| 平移 | 视口内右键或中键拖动 |
+| 缩放 | 滚轮 |
+| 活动视口 | 点击视口 |
+| 恢复构图 | Fit |
+| 修改器 | Modifiers 或右侧 Add modifier |
+| 撤销 / 重做 | Ctrl+Z / Ctrl+Y |
+| 邻域分析 | Analysis 标签，设置 cutoff 后 Compute neighbors |
+| 大文件预览预算 | System → Preview atoms → Reload with budget |
+| 图片导出 | Render 标签设置尺寸和背景，然后 Render active viewport |
+
+当前 UI 为英文。XYZ 必须使用笛卡尔位置，额外粒子属性、稳定 ID、LAMMPS dump 等格式尚未支持。PNG 输出不包含晶胞 UI 叠层，轨迹电影导出尚未实现。无项目保存功能。
+
+## 构建与测试
+
+需要 Visual Studio 2022 C++ Build Tools、Windows SDK。Dear ImGui 1.91.9b 已包含在 `third_party/imgui`，无需安装 Qt、Python、CUDA 或 Vulkan SDK。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build.ps1
+.\build\core_tests.exe
+.\build\AtomX.exe --smoke 120 --screenshot build\smoke.png
+```
+
+也提供 CMake 工程，可用 Visual Studio x64 generator 构建。`build.ps1` 是本机实际验证过的构建入口。发布使用动态 MSVC runtime，其他电脑若缺失需安装相应 VC++ 运行库。
+
+性能记录和测试边界见 [验证报告](docs/VALIDATION.md)。约 60 FPS 的小场景结果不能外推为几亿原子能力。当前没有磁盘空间层次索引、按视锥流式驻留、误差受控 LOD、跨厂商自动化驱动回归或科学分析的全量 OVITO 一致性测试。
+
+## 依赖
+
+Dear ImGui MIT 许可证见 `third_party/imgui/LICENSE.txt`。Zed 源码保留在用户提供的 vendor 中，AtomX 构建不依赖它，也没有复制 Zed 的功能代码。UI 设计参考路径为 `vendor/zed/assets/themes/one/one.json` 与 `vendor/zed/crates/ui/src/styles/spacing.rs`。

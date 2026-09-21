@@ -1,0 +1,120 @@
+# AtomX 功能对齐清单
+
+这份清单根据用户提供的五张 OVITO 截图整理。截图中的菜单文字是功能参考，不是额外的操作指令。vendor/zed 仅参考 UI 配色、密度与面板结构，没有移植它的业务功能。版本：0.1 开发版。
+
+状态定义：**已实现**表示程序内存在可执行实现；**部分**表示存在明确限制；**待实现**不代表可用，界面不提供伪实现。OVITO 功能定义参考 [官方修改器手册](https://www.ovito.org/manual/reference/pipelines/modifiers/index.html)。
+
+## 工作区、输入和渲染
+
+| 截图功能 | 状态 | 当前行为 / 下一步 |
+|---|---|---|
+| Top / Bottom / Front / Back / Left / Right | 已实现 | 六个固定相机方向 |
+| Ortho / Perspective | 已实现 | 正交与透视，左键旋转、右键平移、滚轮缩放 |
+| 多视口与 Window layout | 部分 | 单视口 / 四视口，活动视口切换；没有任意拆分 |
+| Preview mode / Adjust view | 部分 | Fit、PNG 尺寸设置；没有输出安全框 |
+| Constrain rotation | 待实现 | 当前俯仰角有限制，没有独立约束开关 |
+| Create camera | 待实现 | 尚无可保存的场景相机对象 |
+| Pipeline visibility | 部分 | 单数据源，粒子 / 晶胞可见性开关 |
+| Configure graphics | 部分 | 启动参数选择显卡、显示预算、背景、球体半径 |
+| 修改器堆栈 | 已实现 | 添加、开关、删除、前移、128 步撤销/重做 |
+| 多个数据管线 | 待实现 | 当前同时加载一个数据源 |
+| XYZ / Extended XYZ | 部分 | 多帧、Lattice、pbc、Properties 中的 species/type 和 pos；额外粒子属性尚不保留 |
+| 文件序列 / 搜索模式 | 待实现 | 支持单文件多帧；不支持目录通配符序列 |
+| 多时间步 / 轨迹播放 | 已实现 | 64 位偏移索引、后台载入、播放、暂停、首尾帧、帧滑块 |
+| Detect reduced coordinates | 待实现 | 当前位置按文件中的笛卡尔坐标读取 |
+| Generate bounding box | 部分 | 没有 Lattice 时显示粒子包围盒，不生成周期晶胞 |
+| Sort particles by ID | 待实现 | 当前保留加载顺序，未解析 ID 属性 |
+| Particles / Simulation cell / Global attributes | 部分 | 虚拟化坐标表、3x3 晶胞和 PBC、原始注释 |
+| 单帧 GPU 图片导出 | 已实现 | 活动相机 PNG，64–8192 像素，粒子与背景；晶胞 UI 叠层不进入 PNG |
+| 完整动画 / 范围 / Every Nth frame | 待实现 | 播放可用，动画文件导出不可用 |
+| 背景颜色 | 已实现 | RGB |
+| 透明背景 / 半透明粒子 / 抗锯齿等级 | 待实现 | 当前不透明单采样渲染 |
+| OpenGL / Tachyon / OSPRay / VisRTX | 未接入 | 当前是原生 Direct3D 11 GPU 渲染器；没有这些后端的空壳选项 |
+| Intel / NVIDIA / AMD | 部分 | 通用 D3D11 feature level 11.0 路径，Intel 与 NVIDIA 在本机实测；AMD 未实测 |
+| 几亿原子 | 未达到完整目标 | 流式扫描 + 有界采样；没有几亿原子全量显存驻留 / 全精度交互的验证 |
+
+## Analysis
+
+| 修改器 | 状态 | 实现范围 / 所需后续工作 |
+|---|---|---|
+| Atomic strain | 待实现 | 参考构型、邻居映射、局部变形梯度与应变 |
+| Bond analysis | 待实现 | 显式键拓扑与键角/长度分布 |
+| Cluster analysis | 部分 | Analysis 面板：按距离 cutoff 的连通分量、CSV；不超过 200 万原子 |
+| Coordination analysis | 部分 | Analysis 面板：邻域配位数；正交周期最小镜像；尚无 RDF |
+| Difference between frames | 待实现 | 持久 ID 匹配与属性差值 |
+| Dislocation analysis (DXA) | 待实现 | 晶格识别、Burgers 回路和位错网络 |
+| Displacement vectors | 待实现 | 参考帧匹配、周期展开与矢量显示 |
+| Elastic strain calculation | 待实现 | 晶格局部拟合与弹性变形 |
+| Find rings | 待实现 | 键图最短环分析 |
+| Grain segmentation | 待实现 | 局部晶体取向及晶粒聚类 |
+| Histogram | 部分 | 坐标 X/Y/Z 的 64 bin 直方图 |
+| Reduce property | 部分 | 坐标 min/max/mean；没有通用粒子属性表达式 |
+| Scatter plot | 待实现 | 属性选择、二维图与导出 |
+| Spatial binning | 待实现 | 空间网格统计与场数据 |
+| Spatial correlation function | 待实现 | 相关函数、周期性和误差控制 |
+| Structure factor | 待实现 | 倒空间采样和傅里叶计算 |
+| Time averaging | 待实现 | 流式跨帧聚合 |
+| Time series | 待实现 | 帧属性采样及曲线 |
+| Voronoi analysis | 待实现 | 周期 / 非正交晶胞下的多面体构造 |
+| Wigner-Seitz defect analysis | 待实现 | 参考晶格位点占据、空位与间隙原子 |
+
+邻域分析在采样数据上明确拒绝运行。截断邻居会损坏配位数与聚类结果，不能以可视化采样代替全数据科学分析。正交周期晶胞要求各周期长度至少为 cutoff 的两倍，非正交周期分析尚未实现。300,000,000 次候选比较的上限用于防止极大 cutoff 导致无界运行。
+
+## Coloring / Modification / Python
+
+| 修改器 | 状态 | 范围 |
+|---|---|---|
+| Ambient occlusion | 待实现 | 当前仅球体解析法线、漫反射与高光 |
+| Assign color | 待实现 | 尚无用户自定义逐粒子颜色 |
+| Color by type | 已实现 | 默认 8 色循环，选中粒子高亮 |
+| Color coding | 待实现 | 属性色带、范围、图例 |
+| Affine transformation | 部分 | 按轴平移、统一比例缩放；不是完整 3x4 仿射矩阵 |
+| Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
+| Compute property | 待实现 | 表达式求值与属性存储 |
+| Delete selected | 已实现 | 非破坏性管线过滤 |
+| Freeze property | 待实现 | 按稳定 ID 保存参考属性 |
+| Load trajectory | 部分 | 单个 XYZ 多帧文件；未支持拓扑和轨迹文件合并 |
+| Python script | 待实现 | 尚无嵌入式 Python 或插件 API |
+| Replicate | 待实现 | 周期复制、ID 扩展和资源预算 |
+| Slice | 部分 | 轴向半空间切片，保留坐标小于阈值的原子；任意平面与厚度待做 |
+| Smooth trajectory | 待实现 | 时间窗口及周期展开 |
+| Unwrap trajectories | 待实现 | 稳定 ID、跨帧周期跳跃处理 |
+| Wrap at periodic boundaries | 部分 | 正交晶胞、按文件 PBC 标记操作，原点固定为零 |
+| Assign shared visual element | 待实现 | 多管线共享外观 |
+| Calculate local entropy | 待实现 | 局部 RDF、积分与参数控制 |
+| Identify FCC planar faults | 待实现 | 局部结构、层错分类 |
+| Render LAMMPS regions | 待实现 | region 解析与几何可视化 |
+| Shrink-wrap simulation box | 待实现 | 更新晶胞并处理周期语义 |
+| Get more modifiers | 待实现 | 插件包发现与版本机制 |
+
+## Selection / Structure identification / Visualization
+
+| 修改器 | 状态 | 范围 |
+|---|---|---|
+| Clear selection | 已实现 | 清空选择掩码 |
+| Expand selection | 待实现 | 邻接扩展、层数/距离 |
+| Expression selection | 待实现 | 表达式解析及属性类型系统 |
+| Invert selection | 已实现 | 当前管线中的粒子选择取反 |
+| Manual selection | 部分 | 点击粒子表行选择；视口 picking、框选与套索待实现 |
+| Select type | 已实现 | species/type 映射后的类型索引 |
+| Ackland-Jones analysis | 待实现 | 邻居键角结构分类 |
+| Centrosymmetry parameter | 待实现 | 最近邻最优配对 |
+| Chill+ | 待实现 | 冰相局域键序参数 |
+| Common neighbor analysis | 待实现 | 固定 / 自适应 CNA |
+| Identify diamond structure | 待实现 | 多壳层邻域识别 |
+| Polyhedral template matching | 待实现 | 模板匹配、取向和 RMSD |
+| VoroTop analysis | 待实现 | Voronoi 拓扑签名及分类器 |
+| Construct surface mesh | 待实现 | 表面重建、周期网格、法向 |
+| Coordination polyhedra | 待实现 | 邻域凸包 |
+| Create bonds | 待实现 | 邻域计算已存在，键几何渲染未实现 |
+| Create isosurface | 待实现 | 体数据、等值面提取 |
+| Generate trajectory lines | 待实现 | 帧间匹配、周期分段和曲线绘制 |
+
+## 达到产品目标所需的后续里程碑
+
+1. 精确大数据引擎：磁盘缓存、空间层次块、按视锥 / 像素误差的 LOD、异步 GPU 驻留与淘汰、块级选择、量化坐标的精度界限。当前 stride 预览不是这套系统的替代品。
+2. 用 1 亿、3 亿、5 亿真实数据建立冷读时间、交互帧时间 P50/P95/P99、CPU 峰值内存、显存预算、IO 带宽的基准，并分别覆盖 Intel 核显、Intel Arc、AMD 和 NVIDIA。
+3. 完整属性 / ID / 键 / 体素类型系统，多格式读取和项目保存，构建经过物理参考数据验证的分析模块。
+4. 优先补齐 CNA / PTM / DXA / Voronoi / 应变等用户关心的分析，与 OVITO 对照结果和容差。
+5. 输出管线、抗锯齿 / AO / 透明度、电影导出、离线高质量渲染和插件系统。
+

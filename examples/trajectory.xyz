@@ -1,0 +1,30 @@
+8
+Lattice="4 0 0 0 4 0 0 0 4" Properties=species:S:1:pos:R:3 pbc="T T T" Time=0
+Cu 0 0 0
+Cu 0 2 2
+Cu 2 0 2
+Cu 2 2 0
+Ni 1 1 1
+Ni 1 3 3
+Ni 3 1 3
+Ni 3 3 1
+8
+Lattice="4 0 0 0 4 0 0 0 4" Properties=species:S:1:pos:R:3 pbc="T T T" Time=1
+Cu 0.1 0 0
+Cu 0.1 2 2
+Cu 2.1 0 2
+Cu 2.1 2 0
+Ni 1 1.1 1
+Ni 1 3.1 3
+Ni 3 1.1 3
+Ni 3 3.1 1
+8
+Lattice="4 0 0 0 4 0 0 0 4" Properties=species:S:1:pos:R:3 pbc="T T T" Time=2
+Cu 0.2 0 0
+Cu 0.2 2 2
+Cu 2.2 0 2
+Cu 2.2 2 0
+Ni 1 1.2 1
+Ni 1 3.2 3
+Ni 3 1.2 3
+Ni 3 3.2 1
