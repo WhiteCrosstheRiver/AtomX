@@ -208,6 +208,9 @@ struct App {
          showCatalog = false;
     float radius = .23f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
+    bool colorCoding = false, colorDiscrete = false, colorSelectedOnly = false, colorSymmetric = false, colorReverse = false;
+    int colorAxis = 0, colorGradient = 0;
+    float colorMin = 0, colorMax = 1;
     int active = 3, propertyAxis = 2, tab = 0;
     Camera cameras[4];
     Target targets[4];
@@ -279,6 +282,7 @@ struct App {
         if (op == Op::SelectRange) {
             m.value = result.data.lo.z; m.upper = result.data.hi.z;
         }
+        if (op == Op::ColorType) { colorCoding = true; colorAxis = 0; colorMin = result.data.lo.x; colorMax = result.data.hi.x; }
         mods.push_back(m);
         update();
         status = std::string("Added ") + opName(op);
@@ -374,7 +378,7 @@ struct App {
             return;
         Target t;
         gpu.target(t, exportW, exportH);
-            gpu.draw(t, result.data, cameras[active], radius, particleShape, bg, particles);
+            gpu.draw(t, result.data, cameras[active], radius, particleShape, colorAxis, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
         gpu.png(t, p);
         status = "Rendered " + utf8(p.filename().wstring());
     }
@@ -536,7 +540,7 @@ struct App {
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();
         gpu.target(targets[i], int(avail.x), int(avail.y));
-            gpu.draw(targets[i], result.data, cam, radius, particleShape, bg, particles);
+            gpu.draw(targets[i], result.data, cam, radius, particleShape, colorAxis, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles);
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
@@ -852,6 +856,16 @@ struct App {
                             update();
                         }
                     }
+                    if (m.op == Op::ColorType) {
+                        ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
+                        ImGui::Combo("Color gradient", &colorGradient, "Blue-Cyan-Yellow-Red\0Blue-White-Red\0Grayscale\0Hot\0Viridis\0");
+                        if (ImGui::Checkbox("Automatic range", &colorSymmetric)) {
+                            colorMin = colorAxis==0?result.data.lo.x:colorAxis==1?result.data.lo.y:result.data.lo.z;
+                            colorMax = colorAxis==0?result.data.hi.x:colorAxis==1?result.data.hi.y:result.data.hi.z;
+                        }
+                        if (!colorSymmetric) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
+                        ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse); ImGui::Checkbox("Color only selected", &colorSelectedOnly);
+                    }
                     ImGui::Separator();
                     ImGui::PopID();
                 }
@@ -869,6 +883,15 @@ struct App {
                 ImGui::Combo("Shape", &particleShape, "Sphere / Ellipsoid\0Circle\0Cube / Box\0Cylinder\0Spherocylinder\0");
                 ImGui::TextDisabled("Color: particle type / selection");
                 ImGui::TextWrapped("Shape and radius apply to the active particle visual. Type-specific appearance editing is planned next.");
+                if (colorCoding) {
+                    heading("COLOR CODING");
+                    ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
+                    ImGui::Combo("Color gradient", &colorGradient, "Blue-Cyan-Yellow-Red\0Blue-White-Red\0Grayscale\0Hot\0Viridis\0");
+                    if (ImGui::Checkbox("Automatic range", &colorSymmetric)) { colorMin = colorAxis==0?result.data.lo.x:colorAxis==1?result.data.lo.y:result.data.lo.z; colorMax = colorAxis==0?result.data.hi.x:colorAxis==1?result.data.hi.y:result.data.hi.z; }
+                    if (!colorSymmetric) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
+                    ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse);
+                    ImGui::Checkbox("Color only selected elements", &colorSelectedOnly);
+                }
                 heading("Position statistics");
                 ImGui::Combo("Property", &propertyAxis, "Position X\0Position Y\0Position Z\0");
                 auto s = cachedStats[propertyAxis];
