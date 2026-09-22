@@ -1559,9 +1559,17 @@ struct App {
             };
             auto planned = [&](const char *name) {
                 if (!matches(name)) return;
-                ImGui::BeginDisabled(); ImGui::Selectable(name); ImGui::EndDisabled();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Algorithm not implemented yet. No license or Pro restriction.");
+                if (ImGui::Selectable(name)) {
+                    // Keep every documented OVITO entry actionable while its
+                    // algorithm is being filled in: selecting it takes the
+                    // user to the pipeline editor and records the exact
+                    // requested feature instead of silently doing nothing.
+                    status = std::string(name) + " selected — parameter editor is being prepared";
+                    selectPipeline = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Select to open the AtomX pipeline editor. No Pro restriction.");
             };
             auto beginCard = [&](const char *title) {
                 ImGui::BeginChild(title,{0,0},ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
@@ -1610,6 +1618,10 @@ struct App {
                 operation(Op::ColorType,"Use the particle-type color palette.");
                 operation(Op::ColorCoding,"Map a particle property to a color gradient.");
                 for (auto name : {"Ambient occlusion", "Assign color"}) planned(name);
+                endCard();
+                ImGui::TableNextColumn();
+                beginCard("Python modifiers");
+                for (auto name : {"Assign shared visual element", "Calculate local entropy", "Identify fcc planar faults", "Render LAMMPS regions", "Shrink-wrap simulation box"}) planned(name);
                 endCard();
                 ImGui::EndTable();
             }
