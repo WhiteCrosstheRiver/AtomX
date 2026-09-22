@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include "analysis.hpp"
+#include "structure_io.hpp"
 #include "desktop.hpp"
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -208,6 +209,38 @@ struct App {
          showCatalog = false;
     float radius = .23f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
+    int appearanceType = 0;
+    std::vector<std::string> appearanceNames;
+    std::unordered_map<std::string, ParticleStyle> appearanceMemory;
+    std::unordered_map<std::string, float> customRadiusMemory;
+
+    void syncAppearance(const std::vector<std::string>& names) {
+        std::string selected;
+        if (appearanceType >= 0 && size_t(appearanceType) < appearanceNames.size())
+            selected = appearanceNames[appearanceType];
+        for (size_t i = 0; i < appearanceNames.size() && i < gpu.styles.size(); ++i)
+            appearanceMemory[appearanceNames[i]] = gpu.styles[i];
+        if (names != appearanceNames || gpu.styles.size() != std::max<size_t>(names.size(), 1)) {
+            gpu.resetStyles(names.size());
+            for (size_t i = 0; i < names.size(); ++i) {
+                auto found = appearanceMemory.find(names[i]);
+                if (found != appearanceMemory.end()) gpu.styles[i] = found->second;
+            }
+            appearanceNames = names;
+            auto found = std::find(names.begin(), names.end(), selected);
+            appearanceType = found == names.end() ? 0 : int(found - names.begin());
+        }
+    }
+    void setDefaultRadius(const std::string& name, ParticleStyle& style, bool inherit) {
+        if (inherit) {
+            if (style.visual[0] > 0) customRadiusMemory[name] = style.visual[0];
+            style.visual[0] = 0;
+        } else {
+            auto found = customRadiusMemory.find(name);
+            style.visual[0] = found == customRadiusMemory.end() ? radius : found->second;
+        }
+    }
+    bool focusParticleAppearance = false;
     int renderMode = 0;
     float cellColor[4] = {0.82f,0.9f,1.f,0.88f};
     float cellWidth = 1.25f, cellGlow = 0.35f;
@@ -226,8 +259,16 @@ struct App {
     std::atomic<bool> cancel{false};
     bool busy = false;
     std::string status = "Ready", error;
+    std::string readerName = "Generated crystal";
     double lastFrame = 0;
     int exportW = 1920, exportH = 1080;
+    bool showDataExport = false, exportRange = false, exportSequence = false, exporting = false,
+         exportPreview = false;
+    int exportFormat = 0, exportFirst = 0, exportLast = 0, exportStep = 1;
+    io::ExportOptions exportOptions;
+    std::future<std::string> exportJob;
+    std::atomic<bool> exportCancel{false};
+    std::atomic<float> exportProgress{0};
     std::string filter;
     Statistics cachedStats[3];
     size_t selectedCount = 0;
@@ -262,11 +303,15 @@ struct App {
         if (analysisJob.valid())
             analysisJob.wait();
         if (dxaJob.valid()) dxaJob.wait();
+        exportCancel = true;
+        if (exportJob.valid())
+            exportJob.wait();
     }
     void update() {
         try {
             auto next = evaluate(source, mods);
             gpu.upload(next.data, next.selected);
+            syncAppearance(next.data.species);
             result = std::move(next);
             for (int k = 0; k < 3; k++)
                 cachedStats[k] = statistics(result.data, k);
@@ -295,6 +340,8 @@ struct App {
             m.value = result.data.lo.z; m.upper = result.data.hi.z;
         }
         if (op == Op::ColorType) { colorCoding = true; colorAxis = 0; colorMin = result.data.lo.x; colorMax = result.data.hi.x; }
+        if (op == Op::ColorCoding) { colorCoding = true; colorMin = result.data.lo.x; colorMax = result.data.hi.x; }
+        if (op == Op::CommonNeighborAnalysis || op == Op::CreateBonds) m.value = cutoff;
         mods.push_back(m);
         update();
         status = std::string("Added ") + opName(op);
@@ -321,19 +368,26 @@ struct App {
         status = "Reading trajectory...";
         auto known = p == path ? frames : std::vector<Frame>{};
         auto b = budget;
-        job = std::async(std::launch::async, [this, p, frame, known = std::move(known), b]() mutable {
-            auto ext = lowerExtension(p);
-            if (ext == ".poscar" || ext == ".contcar" || ext == ".vasp" || ext == ".cif" || ext == ".data" || ext == ".lmp") {
-                auto d = readInput(p, b, &progress, &cancel);
-                return Loaded{std::move(d), std::vector<Frame>{Frame{1,0,"ASE/native format"}}, p, 0};
-            }
-            if (known.empty()) known = indexXYZ(p, &progress, &cancel);
-            if (frame < 0 || frame >= int(known.size())) throw std::runtime_error("Frame out of range");
-            auto d = readXYZ(p, known[frame], b, &progress, &cancel);
-            return Loaded{std::move(d), std::move(known), p, frame};
-        });
+        job =
+            std::async(std::launch::async, [this, p, frame, known = std::move(known), b]() mutable {
+                if (known.empty())
+                    known = io::index(p, &progress, &cancel);
+                if (frame < 0 || frame >= int(known.size()))
+                    throw std::runtime_error("Frame out of range");
+                auto d = io::read(p, known[frame], b, &progress, &cancel);
+                known[frame].count = d.sourceCount;
+                return Loaded{std::move(d), std::move(known), p, frame};
+            });
     }
     void poll() {
+        if (exporting && exportJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            exporting = false;
+            try {
+                status = exportJob.get();
+            } catch (const std::exception &e) {
+                error = e.what();
+            }
+        }
         if (dxaRunning && dxaJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             dxaRunning=false;
             try { dxa= dxaJob.get(); status="DXA prepass completed"; } catch(const std::exception&e){error=e.what();}
@@ -356,12 +410,22 @@ struct App {
             busy = false;
             try {
                 auto l = job.get();
+                readerName = io::info(io::detect(l.path)).name;
                 bool changed = path != l.path;
+                if (changed) {
+                    appearanceMemory.clear();
+                    customRadiusMemory.clear();
+                    appearanceNames.clear();
+                    gpu.resetStyles(0);
+                }
                 source = std::move(l.data);
                 frames = std::move(l.frames);
                 path = l.path;
                 current = l.frame;
                 if (changed) {
+                    appearanceType = 0;
+                    exportOptions.scalarProperties.clear();
+                    exportOptions.vectorProperties.clear();
                     mods.clear();
                     undo.clear();
                     redo.clear();
@@ -386,7 +450,11 @@ struct App {
         }
     }
     void open() {
-        load(dialog(window, false, L"Atom structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;*.cif;*.data;*.lmp\0All files\0*.*\0", L"xyz"));
+        load(dialog(window, false,
+                    L"Atom "
+                    L"structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*."
+                    L"data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro\0All files\0*.*\0",
+                    L"xyz"));
     }
     void exportImage() {
         auto p = dialog(window, true, L"PNG image\0*.png\0", L"png");
@@ -604,6 +672,9 @@ struct App {
                     x = float((j & 1 ? c[0] : 0) + (j & 2 ? c[3] : 0) + (j & 4 ? c[6] : 0));
                     y = float((j & 1 ? c[1] : 0) + (j & 2 ? c[4] : 0) + (j & 4 ? c[7] : 0));
                     z = float((j & 1 ? c[2] : 0) + (j & 2 ? c[5] : 0) + (j & 4 ? c[8] : 0));
+                    x += result.data.origin.x;
+                    y += result.data.origin.y;
+                    z += result.data.origin.z;
                 } else {
                     x = j & 1 ? result.data.hi.x : result.data.lo.x;
                     y = j & 2 ? result.data.hi.y : result.data.lo.y;
@@ -618,7 +689,8 @@ struct App {
             draw->PushClipRect(p, {p.x + avail.x, p.y + avail.y}, true);
             for (int j = 0; j < 8; j++)
                 for (int k = 1; k <= 4; k *= 2)
-                    if (!(j & k) && valid[j] && valid[j | k] && (cellDimension==3 || (!(j&4) && !(j|k&4)))) {
+                    if (!(j & k) && valid[j] && valid[j | k] &&
+                        (cellDimension == 1 || (!(j & 4) && !((j | k) & 4)))) {
                         auto c = ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]*cellGlow});
                         auto hi = ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]});
                         draw->AddLine(corners[j], corners[j | k], c, cellWidth+4.f);
@@ -933,12 +1005,29 @@ struct App {
                         if (!colorSymmetric) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
                         ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse); ImGui::Checkbox("Color only selected", &colorSelectedOnly);
                     }
+                    if (m.op == Op::ColorCoding) {
+                        int p = m.property == "Position.Y" ? 1 : m.property == "Position.Z" ? 2 : m.property == "Coordination" ? 3 : m.property == "Structure Type" ? 4 : 0;
+                        if (ImGui::Combo("Input property", &p, "Position.X\0Position.Y\0Position.Z\0Coordination\0Structure Type\0")) { checkpoint(); m.property = p==1?"Position.Y":p==2?"Position.Z":p==3?"Coordination":p==4?"Structure Type":"Position.X"; update(); }
+                        ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0");
+                        ImGui::Checkbox("Automatic range", &colorSymmetric);
+                        if (!colorSymmetric) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
+                        ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse);
+                    }
+                    if (m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) {
+                        float c = m.value;
+                        if (ImGui::DragFloat("Cutoff", &c, .01f, .001f, 100.f)) { checkpoint(); m.value = c; update(); }
+                        ImGui::TextDisabled(m.op == Op::CreateBonds ? "%zu bonds" : "FCC/HCP/BCC/ICO/Other", result.data.bonds.size());
+                    }
                     ImGui::Separator();
                     ImGui::PopID();
                 }
                 ImGui::EndChild();
                 heading("Scene visibility");
-                ImGui::Checkbox("Particles", &particles); ImGui::SameLine();
+                ImGui::Checkbox("##particles-visible", &particles);
+                ImGui::SameLine();
+                if (ImGui::Button("Particles")) focusParticleAppearance = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Edit particle shape, radius and type colors");
+                ImGui::SameLine();
                 ImGui::Checkbox("Simulation cell", &cell);
                 if (cell) {
                     ImGui::Combo("Cell dimensionality", &cellDimension, "2D\0" "3D\0");
@@ -951,13 +1040,75 @@ struct App {
                 heading("Data source");
                 ImGui::TextWrapped("%s", path.empty() ? "Generated FCC crystal"
                                                       : utf8(path.wstring()).c_str());
-                ImGui::TextDisabled("Reader: XYZ / Extended XYZ");
+                ImGui::TextDisabled("Reader: %s", readerName.c_str());
                 ImGui::TextDisabled("Trajectory: %zu frame(s)", std::max<size_t>(frames.size(), 1));
                 heading("Particle appearance");
+                if (focusParticleAppearance) { ImGui::SetScrollHereY(0.f); focusParticleAppearance = false; }
                 ImGui::SliderFloat("Radius", &radius, .02f, 2.f, "%.2f");
-                ImGui::Combo("Shape", &particleShape, "Sphere / Ellipsoid\0Circle\0Cube / Box\0Cylinder\0Spherocylinder\0");
-                ImGui::TextDisabled("Color: particle type / selection");
-                ImGui::TextWrapped("Shape and radius apply to the active particle visual. Type-specific appearance editing is planned next.");
+                const char *shapes = "Sphere / Ellipsoid\0Circle\0Cube / "
+                                     "Box\0Cylinder\0Spherocylinder\0Square\0Mesh / User-defined\0";
+                ImGui::Combo("Default shape", &particleShape, shapes);
+                syncAppearance(result.data.species);
+                if (!result.data.species.empty()) {
+                    appearanceType =
+                        std::clamp(appearanceType, 0, int(result.data.species.size()) - 1);
+                    if (ImGui::BeginCombo("Particle type",
+                                          result.data.species[appearanceType].c_str())) {
+                        for (int i = 0; i < int(result.data.species.size()); ++i)
+                            if (ImGui::Selectable(result.data.species[i].c_str(),
+                                                  appearanceType == i))
+                                appearanceType = i;
+                        ImGui::EndCombo();
+                    }
+                    ImGui::PushID(result.data.species[appearanceType].c_str());
+                    auto &style = gpu.styles[appearanceType];
+                    bool visible = style.visual[2] > .5f;
+                    if (ImGui::Checkbox("Show this type", &visible))
+                        style.visual[2] = visible ? 1.f : 0.f;
+                    ImGui::ColorEdit3("Type color", style.color.data());
+                    bool inheritRadius = style.visual[0] == 0;
+                    if (ImGui::Checkbox("Use default radius", &inheritRadius))
+                        setDefaultRadius(result.data.species[appearanceType], style, inheritRadius);
+                    if (!inheritRadius)
+                        ImGui::SliderFloat("Type radius", &style.visual[0], .02f, 5.f, "%.3f");
+                    int typeShape = int(style.visual[1]) + 1;
+                    if (ImGui::Combo(
+                            "Type shape", &typeShape,
+                            "Use default\0Sphere / Ellipsoid\0Circle\0Cube / "
+                            "Box\0Cylinder\0Spherocylinder\0Square\0Mesh / User-defined\0"))
+                        style.visual[1] = float(typeShape - 1);
+                    int effective = style.visual[1] < 0 ? particleShape : int(style.visual[1]);
+                    if (effective == 0 || effective == 2 || effective == 6)
+                        ImGui::SliderFloat3("Axis scales", style.axes.data(), .1f, 4.f, "%.2f");
+                    else if (effective == 3 || effective == 4)
+                        ImGui::SliderFloat("Half-length / radius", &style.axes[2], .1f, 6.f,
+                                           "%.2f");
+                    else {
+                        ImGui::SliderFloat("Width scale", &style.axes[0], .1f, 4.f);
+                        ImGui::SliderFloat("Height scale", &style.axes[1], .1f, 4.f);
+                    }
+                    ImGui::TextWrapped(
+                        effective == 3 || effective == 4
+                            ? "Cylinder axis: world Z. End caps and depth are rendered in 3D."
+                            : "Type appearance overrides the particle defaults. Selection and "
+                              "color coding may override type colors.");
+                    if (effective == 6) {
+                        ImGui::TextWrapped(
+                            "Shared particle OBJ: triangulated, up to 256 triangles; centered and "
+                            "normalized to unit radius. High mesh counts cost more GPU time.");
+                        ImGui::Text("Loaded triangles: %zu", gpu.meshTriangleCount);
+                        if (ImGui::Button("Load particle OBJ...")) {
+                            auto p = dialog(window, false, L"Triangle mesh\0*.obj\0", L"obj");
+                            if (!p.empty())
+                                try {
+                                    gpu.loadParticleMesh(p);
+                                } catch (const std::exception &e) {
+                                    error = e.what();
+                                }
+                        }
+                    }
+                    ImGui::PopID();
+                }
                 if (colorCoding) {
                     heading("COLOR CODING");
                     ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
@@ -1002,12 +1153,17 @@ struct App {
                 ImGui::TextWrapped(source.sampled()
                                        ? "Exports the processed preview, not all source atoms."
                                        : "Exports the processed particle dataset.");
-                if (ImGui::Button("Export XYZ", {-1, U(32)})) {
-                    auto p = dialog(window, true, L"Atom structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.cif;*.data;*.lmp\0XYZ\0*.xyz\0POSCAR\0*.vasp;*.poscar\0CIF\0*.cif\0LAMMPS data\0*.data;*.lmp\0", L"xyz");
-                    if (!p.empty()) {
-                        auto ext = lowerExtension(p); if (ext == ".poscar" || ext == ".vasp") writePOSCAR(p, result.data); else if (ext == ".cif") writeCIF(p, result.data); else if (ext == ".data" || ext == ".lmp") writeLammpsData(p, result.data); else writeXYZ(p, result.data);
-                        status = "Exported " + utf8(p.filename().wstring());
-                    }
+                ImGui::BeginDisabled(exporting || busy);
+                if (ImGui::Button("Export data...", {-1, U(32)})) {
+                    showDataExport = true;
+                    exportFirst = current;
+                    exportLast = std::max(0, int(frames.size()) - 1);
+                }
+                ImGui::EndDisabled();
+                if (exporting) {
+                    ImGui::ProgressBar(exportProgress);
+                    if (ImGui::Button("Cancel export"))
+                        exportCancel = true;
                 }
                 ImGui::EndTabItem();
             }
@@ -1124,6 +1280,232 @@ struct App {
         headingFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeuib.ttf", float(preferences.size)*uiScale);
         ImGui_ImplDX11_CreateDeviceObjects();
     }
+    void startDataExport(const std::filesystem::path &destination) {
+        auto fmt = io::formats[exportFormat].id;
+        bool range = exportRange && frames.size() > 1;
+        int first = range ? exportFirst : current, last = range ? exportLast : current,
+            step = range ? exportStep : 1;
+        if (first < 0 || last < first || (range && last >= int(frames.size())) || step < 1)
+            throw std::runtime_error("Invalid export frame range");
+        bool sequence = range && (exportSequence || !io::info(fmt).trajectory);
+        if (!path.empty() && std::filesystem::exists(destination) &&
+            std::filesystem::equivalent(destination, path))
+            throw std::runtime_error("Choose a destination different from the input file");
+        auto ext = lowerExtension(destination);
+        bool valid = ext == std::string(".") + io::info(fmt).extension;
+        if (fmt == io::Format::POSCAR)
+            valid = isPOSCAR(destination);
+        if (fmt == io::Format::XYZ)
+            valid = ext == ".xyz" || ext == ".extxyz";
+        if (fmt == io::Format::LammpsData)
+            valid = ext == ".data" || ext == ".lmp";
+        if (fmt == io::Format::LammpsDump)
+            valid = ext == ".dump" || ext == ".lammpstrj";
+        if (!valid)
+            throw std::runtime_error(
+                "Filename extension does not match the selected export format");
+        exportCancel = false;
+        exportProgress = 0;
+        exportJob = std::async(std::launch::async, [this, destination, fmt, range, sequence, first,
+                                                    last, step, snapshot = result.data,
+                                                    sourcePath = path, frameIndex = frames,
+                                                    pipeline = mods, options = exportOptions,
+                                                    atomBudget = budget,
+                                                    allowPreview = exportPreview]() {
+            std::vector<std::pair<std::filesystem::path, std::filesystem::path>> staged;
+            auto nonce =
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            auto cleanup = [&]() {
+                for (const auto &[temp, target] : staged) {
+                    std::error_code ec;
+                    std::filesystem::remove(temp, ec);
+                }
+            };
+            try {
+                int total = (last - first) / step + 1;
+                for (int i = 0; i < (sequence ? total : 1); ++i) {
+                    auto target = destination;
+                    if (sequence) {
+                        std::wostringstream n;
+                        n << destination.stem().wstring() << L'_' << std::setw(6)
+                          << std::setfill(L'0') << first + i * step
+                          << destination.extension().wstring();
+                        target = destination.parent_path() / n.str();
+                        if (std::filesystem::exists(target))
+                            throw std::runtime_error("Sequence target already exists: " +
+                                                     utf8(target.wstring()));
+                    }
+                    auto temp = target;
+                    temp += L".atomx-" + std::wstring(nonce.begin(), nonce.end()) + L".tmp";
+                    staged.emplace_back(temp, target);
+                }
+                std::ofstream single;
+                if (!sequence) {
+                    single.open(staged[0].first, std::ios::binary);
+                    if (!single)
+                        throw std::runtime_error("Cannot create export file");
+                }
+                for (int i = 0; i < total; ++i) {
+                    io::checkpoint(&exportCancel);
+                    int frame = first + i * step;
+                    Dataset data =
+                        range ? evaluate(io::read(sourcePath, frameIndex.at(frame),
+                                                  uint64_t(atomBudget), nullptr, &exportCancel),
+                                         pipeline)
+                                    .data
+                              : snapshot;
+                    if (data.sampled() && !allowPreview)
+                        throw std::runtime_error(
+                            "A frame exceeds the full-data budget; reload with a larger budget or "
+                            "explicitly export a sampled preview");
+                    if (sequence) {
+                        std::ofstream file(staged[i].first, std::ios::binary);
+                        if (!file)
+                            throw std::runtime_error("Cannot create sequence file");
+                        io::writeFrame(file, fmt, data, options, frame);
+                        file.flush();
+                        if (!file)
+                            throw std::runtime_error("Sequence write failed");
+                    } else
+                        io::writeFrame(single, fmt, data, options, frame);
+                    exportProgress = float(i + 1) / total;
+                }
+                if (!sequence) {
+                    single.flush();
+                    if (!single)
+                        throw std::runtime_error("Export write failed");
+                    single.close();
+                }
+                io::checkpoint(&exportCancel);
+                for (const auto &[temp, target] : staged)
+                    if (!MoveFileExW(temp.c_str(), target.c_str(),
+                                     sequence ? MOVEFILE_WRITE_THROUGH
+                                              : MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                        throw std::runtime_error(
+                            "Could not publish export file; check destination permissions");
+                return std::string("Exported ") + std::to_string(total) + " frame(s) to " +
+                       utf8(destination.wstring());
+            } catch (...) {
+                cleanup();
+                throw;
+            }
+        });
+        exporting = true;
+    }
+    void dataExportDialog() {
+        if (showDataExport) {
+            ImGui::OpenPopup("Data export settings");
+            showDataExport = false;
+        }
+        ImGui::SetNextWindowSize({U(550), 0}, ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal("Data export settings", nullptr,
+                                    ImGuiWindowFlags_AlwaysAutoResize))
+            return;
+        if (ImGui::BeginCombo("Format", io::formats[exportFormat].name)) {
+            for (int i = 0; i < int(std::size(io::formats)); ++i)
+                if (io::formats[i].writable &&
+                    ImGui::Selectable(io::formats[i].name, exportFormat == i))
+                    exportFormat = i;
+            ImGui::EndCombo();
+        }
+        auto fmt = io::formats[exportFormat].id;
+        ImGui::SeparatorText("Frame sequence");
+        ImGui::BeginDisabled(frames.size() < 2);
+        ImGui::Checkbox("Export frame range", &exportRange);
+        ImGui::EndDisabled();
+        if (exportRange && frames.size() > 1) {
+            ImGui::InputInt("First frame", &exportFirst);
+            ImGui::InputInt("Last frame", &exportLast);
+            ImGui::InputInt("Every Nth frame", &exportStep);
+            if (io::info(fmt).trajectory)
+                ImGui::Checkbox("Separate file per frame", &exportSequence);
+            else
+                ImGui::TextDisabled("This format exports one file per frame.");
+            ImGui::TextDisabled("Sequence naming: name_000000.ext");
+        } else
+            ImGui::Text("Current frame: %d", current);
+        ImGui::SeparatorText("Format options");
+        if (fmt != io::Format::GRO)
+            ImGui::SliderInt("Numeric precision", &exportOptions.precision, 1, 17);
+        else
+            ImGui::TextWrapped("GRO uses nm, fixed-width 3 decimal coordinates, and at most 99999 "
+                               "atoms. Residues are exported as MOL; topology is not retained.");
+        if (fmt == io::Format::POSCAR) {
+            ImGui::Checkbox("Fractional coordinates (Direct)", &exportOptions.fractionalPOSCAR);
+            if (result.data.vectorProperties.count("MoveMask"))
+                ImGui::Checkbox("Preserve selective dynamics", &exportOptions.constraints);
+            ImGui::TextWrapped("Particle positions are grouped by type. POSCAR does not preserve "
+                               "arbitrary properties or non-periodic flags.");
+        }
+        if (fmt == io::Format::CIF)
+            ImGui::TextWrapped("P1 structure; cell lengths/angles and fractional positions. The "
+                               "reader uses the conventional cell orientation.");
+        if (fmt == io::Format::LammpsData)
+            ImGui::TextWrapped("Atomic style; sequential IDs; no masses or bonds. Boundary flags "
+                               "are not stored by this format.");
+        if (fmt == io::Format::LammpsDump)
+            ImGui::TextWrapped("id, type, element, x, y, z; sequential IDs per frame. Restricted "
+                               "triclinic cells and periodic flags are preserved.");
+        if (fmt == io::Format::XYZ) {
+            ImGui::Checkbox("Extended XYZ (cell / PBC / properties)", &exportOptions.extendedXYZ);
+            if (exportOptions.extendedXYZ) {
+                ImGui::TextDisabled("Species and XYZ coordinates are required.");
+                auto property = [&](const std::string &name, std::vector<std::string> &selected) {
+                    bool on = std::find(selected.begin(), selected.end(), name) != selected.end();
+                    if (ImGui::Checkbox(name.c_str(), &on)) {
+                        if (on)
+                            selected.push_back(name);
+                        else
+                            selected.erase(std::remove(selected.begin(), selected.end(), name),
+                                           selected.end());
+                    }
+                };
+                if (!result.data.scalarProperties.empty() ||
+                    !result.data.vectorProperties.empty()) {
+                    ImGui::BeginChild("Export properties", {0, U(110)}, ImGuiChildFlags_Borders);
+                    for (const auto &[name, v] : result.data.scalarProperties)
+                        if (name != "type")
+                            property(name, exportOptions.scalarProperties);
+                    for (const auto &[name, v] : result.data.vectorProperties)
+                        property(name, exportOptions.vectorProperties);
+                    ImGui::EndChild();
+                }
+            } else
+                ImGui::TextWrapped("Basic XYZ contains only species and positions; cell and "
+                                   "additional properties are omitted.");
+        }
+        if (source.sampled()) {
+            ImGui::Separator();
+            ImGui::Checkbox("Export sampled preview only", &exportPreview);
+            ImGui::TextWrapped("The loaded data is sampled. Increase the import budget and reload "
+                               "to export full data.");
+        }
+        ImGui::BeginDisabled(source.sampled() && !exportPreview);
+        if (ImGui::Button("Choose file and export")) {
+            try {
+                std::string e = io::info(fmt).extension;
+                std::wstring ext(e.begin(), e.end());
+                std::wstring exportFilter = L"Selected format";
+                exportFilter.push_back(0);
+                exportFilter += L"*." + ext;
+                exportFilter.push_back(0);
+                exportFilter.push_back(0);
+                auto p = dialog(window, true, exportFilter.c_str(), ext.c_str());
+                if (!p.empty()) {
+                    startDataExport(p);
+                    ImGui::CloseCurrentPopup();
+                }
+            } catch (const std::exception &e) {
+                error = e.what();
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     void settings() {
         if (showSettings) { ImGui::OpenPopup("Settings"); showSettings = false; }
         ImGui::SetNextWindowSize({U(540),U(preferences.size >= 19 ? 480.f : 410.f)});
@@ -1208,11 +1590,13 @@ struct App {
                 for (auto name : {"Affine transformation", "Combine datasets", "Compute property", "Edit simulation cell", "Freeze property", "Load trajectory", "Python script", "Smooth trajectory", "Unwrap trajectories"}) planned(name);
                 endCard();
                 beginCard("Visualization");
-                for (auto name : {"Construct surface mesh", "Coordination polyhedra", "Create bonds", "Create isosurface", "Generate trajectory lines"}) planned(name);
+                operation(Op::CreateBonds,"Create neighbor bonds using the cutoff.");
+                for (auto name : {"Construct surface mesh", "Coordination polyhedra", "Create isosurface", "Generate trajectory lines"}) planned(name);
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Structure identification");
-                for (auto name : {"Ackland-Jones analysis", "Centrosymmetry parameter", "Chill+", "Common neighbor analysis", "Identify diamond structure", "Polyhedral template matching", "VoroTop analysis"}) planned(name);
+                operation(Op::CommonNeighborAnalysis,"Classify local structures by neighbor coordination.");
+                for (auto name : {"Ackland-Jones analysis", "Centrosymmetry parameter", "Chill+", "Identify diamond structure", "Polyhedral template matching", "VoroTop analysis"}) planned(name);
                 endCard();
                 beginCard("Selection");
                 operation(Op::Clear,"Clear the current selection.");
@@ -1224,7 +1608,8 @@ struct App {
                 endCard();
                 beginCard("Coloring");
                 operation(Op::ColorType,"Use the particle-type color palette.");
-                for (auto name : {"Ambient occlusion", "Assign color", "Color coding"}) planned(name);
+                operation(Op::ColorCoding,"Map a particle property to a color gradient.");
+                for (auto name : {"Ambient occlusion", "Assign color"}) planned(name);
                 endCard();
                 ImGui::EndTable();
             }
@@ -1262,6 +1647,7 @@ struct App {
         ImGui::End();
         catalog();
         settings();
+        dataExportDialog();
         if (animationSettings) {
             ImGui::OpenPopup("Animation settings");
             animationSettings = false;
@@ -1305,12 +1691,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         int argc;
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         int adapter = -1, smoke = 0;
-        bool smokeCatalog = false, smokeSettings = false, desktopTest = false;
+        bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
             if (a == L"--catalog") smokeCatalog = true;
             else if (a == L"--settings") smokeSettings = true;
+            else if (a == L"--export-settings")
+                smokeExport = true;
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -1358,6 +1746,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             App app(window, gpu);
             app.showCatalog = smokeCatalog;
             app.showSettings = smokeSettings;
+            app.showDataExport = smokeExport;
             if (desktopTest) {
                 auto requireWindow = [](bool ok, const char *message) {
                     if (!ok) throw std::runtime_error(message);

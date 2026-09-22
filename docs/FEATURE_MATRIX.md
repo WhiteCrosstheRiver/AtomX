@@ -35,6 +35,13 @@
 | Intel / NVIDIA / AMD | 部分 | 通用 D3D11 feature level 11.0 路径，Intel 与 NVIDIA 在本机实测；AMD 未实测 |
 | 几亿原子 | 未达到完整目标 | 流式扫描 + 有界采样；没有几亿原子全量显存驻留 / 全精度交互的验证 |
 
+## Wave1 functional OVITO parity
+
+- Color coding is a pipeline modifier for Position.X/Y/Z and scalar particle properties.
+- Common neighbor analysis publishes Coordination and conservative structure codes.
+- Create bonds publishes explicit cutoff neighbor pairs in the evaluated Dataset.
+- Wave2 leftovers: bond line/cylinder rendering, exact adaptive CNA HCP/ICO signatures, Assign color, and remaining OVITO menu algorithms.
+
 ## Analysis
 
 | 修改器 | 状态 | 实现范围 / 所需后续工作 |

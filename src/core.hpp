@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 #include <iomanip>
+#include <cwctype>
 
 namespace atomx {
 struct Vec3 {
@@ -41,6 +42,7 @@ struct Dataset {
     std::vector<std::string> species;
     std::array<double, 9> cell{};
     std::array<bool, 3> pbc{};
+    Vec3 origin{};
     Vec3 lo{}, hi{};
     uint64_t sourceCount = 0, stride = 1;
     std::string comment;
@@ -51,6 +53,8 @@ struct Dataset {
     std::unordered_map<std::string, std::vector<double>> scalarProperties;
     std::unordered_map<std::string, std::vector<Vec3>> vectorProperties;
     std::unordered_map<std::string, std::string> propertyComponents;
+    // Explicit pair topology published by bond-producing modifiers.
+    std::vector<std::array<uint32_t, 2>> bonds;
     bool sampled() const {
         return stride > 1;
     }
@@ -180,6 +184,8 @@ inline Dataset readXYZ(const std::filesystem::path &path, const Frame &fr,
     d.sourceCount = fr.count;
     d.stride = std::max<uint64_t>(1, (fr.count + budget - 1) / budget);
     d.comment = fr.comment;
+    std::istringstream origin(attribute(fr.comment, "Origin"));
+    origin >> d.origin.x >> d.origin.y >> d.origin.z;
     std::istringstream lattice(attribute(fr.comment, "Lattice"));
     for (auto &v : d.cell)
         lattice >> v;
@@ -190,6 +196,11 @@ inline Dataset readXYZ(const std::filesystem::path &path, const Frame &fr,
         b = v == "T" || v == "1" || v == "true";
     }
     int speciesCol = 0, posCol = 1;
+    struct Column {
+        std::string name;
+        int offset, width;
+    };
+    std::vector<Column> columns;
     auto props = attribute(fr.comment, "Properties");
     if (!props.empty()) {
         std::replace(props.begin(), props.end(), ':', ' ');
@@ -205,6 +216,9 @@ inline Dataset readXYZ(const std::filesystem::path &path, const Frame &fr,
                 speciesCol = col;
             if (name == "pos" && width == 3)
                 posCol = col;
+            else if (name != "species" && name != "type" && (type == "R" || type == "I") &&
+                     (width == 1 || width == 3))
+                columns.push_back({name, col, width});
             col += width;
         }
         if (posCol < 0)
@@ -249,6 +263,23 @@ inline Dataset readXYZ(const std::filesystem::path &path, const Frame &fr,
             d.species.push_back(species);
         d.atoms.push_back(
             {parse(tok[posCol]), parse(tok[posCol + 1]), parse(tok[posCol + 2]), it->second});
+        for (const auto &c : columns) {
+            if (tok.size() < size_t(c.offset + c.width))
+                throw std::runtime_error("Missing XYZ property: " + c.name);
+            auto number = [&](int offset) {
+                size_t end = 0;
+                double v = std::stod(tok[offset], &end);
+                if (end != tok[offset].size() || !std::isfinite(v))
+                    throw std::runtime_error("Invalid XYZ property: " + c.name);
+                return v;
+            };
+            if (c.width == 1)
+                d.scalarProperties[c.name].push_back(number(c.offset));
+            else
+                d.vectorProperties[c.name].push_back({float(number(c.offset)),
+                                                      float(number(c.offset + 1)),
+                                                      float(number(c.offset + 2))});
+        }
     }
     d.bounds();
     if (progress)
@@ -260,22 +291,119 @@ inline std::string lowerExtension(const std::filesystem::path &p) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
     return s;
 }
+inline bool isPOSCAR(const std::filesystem::path &path) {
+    auto name = path.filename().wstring();
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](wchar_t c) { return wchar_t(std::towlower(c)); });
+    auto ext = lowerExtension(path);
+    return name == L"poscar" || name == L"contcar" || ext == ".poscar" || ext == ".contcar" ||
+           ext == ".vasp";
+}
 inline Dataset readPOSCAR(const std::filesystem::path &path) {
-    std::ifstream f(path); if (!f) throw std::runtime_error("Cannot open POSCAR");
-    Dataset d; std::string line; std::getline(f,d.comment); if (!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR");
-    double scale=std::stod(line); for (int r=0;r<3;r++) { if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR lattice"); std::istringstream ss(line); for(int c=0;c<3;c++) ss>>d.cell[r*3+c]; }
-    if (scale < 0) throw std::runtime_error("Negative POSCAR scale is not supported"); for(auto& v:d.cell)v*=scale;
-    if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR species"); std::istringstream names(line); std::string s; while(names>>s)d.species.push_back(s);
-    if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR counts"); std::istringstream counts(line); std::vector<int> nums; int n; while(counts>>n)nums.push_back(n);
-    if(nums.size()!=d.species.size()) { // VASP 4: the first line is counts and species are synthetic.
-        std::istringstream maybe(line); nums.clear(); while(maybe>>n)nums.push_back(n); d.species.clear(); for(size_t i=0;i<nums.size();i++)d.species.push_back("X"+std::to_string(i+1));
+    std::ifstream f(path);
+    if (!f)
+        throw std::runtime_error("Cannot open POSCAR");
+    Dataset d;
+    auto line = [&]() {
+        std::string s;
+        if (!std::getline(f, s))
+            throw std::runtime_error("Truncated POSCAR");
+        return s;
+    };
+    d.comment = line();
+    double scale;
+    std::istringstream scaling(line());
+    std::string extra;
+    if (!(scaling >> scale) || !std::isfinite(scale) || scale <= 0 || (scaling >> extra))
+        throw std::runtime_error(
+            "POSCAR requires one positive scale (volume/three-axis scaling unsupported)");
+    for (int row = 0; row < 3; ++row) {
+        std::istringstream values(line());
+        for (int col = 0; col < 3; ++col) {
+            double v;
+            if (!(values >> v) || !std::isfinite(v * scale))
+                throw std::runtime_error("Invalid POSCAR lattice");
+            d.cell[row * 3 + col] = v * scale;
+        }
     }
-    if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR coordinate mode");
-    if(!line.empty()&&(line[0]=='S'||line[0]=='s')) { if(!std::getline(f,line)) throw std::runtime_error("Invalid POSCAR selective mode"); }
-    bool direct=line.find_first_of("Dd")!=std::string::npos; uint64_t total=0; for(int x:nums)total+=x;
-    auto basis=[&](double a,double b,double c){ return Vec3{float(a*d.cell[0]+b*d.cell[3]+c*d.cell[6]),float(a*d.cell[1]+b*d.cell[4]+c*d.cell[7]),float(a*d.cell[2]+b*d.cell[5]+c*d.cell[8])}; };
-    for(size_t type=0;type<nums.size();type++) for(int i=0;i<nums[type];i++){ if(!std::getline(f,line))throw std::runtime_error("Truncated POSCAR"); std::istringstream ss(line); double a,b,c;ss>>a>>b>>c;Vec3 p=direct?basis(a,b,c):Vec3{float(a),float(b),float(c)};d.atoms.push_back({p.x,p.y,p.z,uint32_t(type)}); }
-    d.sourceCount=d.atoms.size(); d.pbc={true,true,true}; d.bounds(); return d;
+    auto header = line();
+    std::istringstream symbols(header);
+    std::string token;
+    while (symbols >> token)
+        d.species.push_back(token);
+    if (d.species.empty())
+        throw std::runtime_error("Missing POSCAR species/counts");
+    bool v4 = d.species.front().find_first_not_of("0123456789") == std::string::npos;
+    std::istringstream counts(v4 ? header : line());
+    std::vector<size_t> numbers;
+    uint64_t total = 0;
+    while (counts >> token) {
+        if (token.front() == '!')
+            break;
+        if (token.find_first_not_of("0123456789") != std::string::npos)
+            throw std::runtime_error("Invalid POSCAR count");
+        auto n = std::stoull(token);
+        if (n > 20000000 || total > 20000000 - n)
+            throw std::runtime_error("POSCAR exceeds 20 million atom reader limit");
+        numbers.push_back(size_t(n));
+        total += n;
+    }
+    if (v4) {
+        d.species.clear();
+        for (size_t i = 0; i < numbers.size(); ++i)
+            d.species.push_back("X" + std::to_string(i + 1));
+    }
+    if (numbers.empty() || numbers.size() != d.species.size())
+        throw std::runtime_error("POSCAR species/count mismatch");
+    auto mode = line();
+    auto first = mode.find_first_not_of(" \t\r");
+    bool selective = first != std::string::npos && (mode[first] == 'S' || mode[first] == 's');
+    if (selective) {
+        mode = line();
+        first = mode.find_first_not_of(" \t\r");
+    }
+    if (first == std::string::npos)
+        throw std::runtime_error("Missing POSCAR coordinate mode");
+    char m = char(std::tolower(static_cast<unsigned char>(mode[first])));
+    if (m != 'd' && m != 'c' && m != 'k')
+        throw std::runtime_error("Invalid POSCAR coordinate mode");
+    d.atoms.reserve(size_t(total));
+    for (size_t type = 0; type < numbers.size(); ++type) {
+        for (size_t i = 0; i < numbers[type]; ++i) {
+            double a, b, c;
+            std::istringstream row(line());
+            if (!(row >> a >> b >> c))
+                throw std::runtime_error("Invalid POSCAR coordinate row");
+            if (selective) {
+                Vec3 mask;
+                for (int k = 0; k < 3; ++k) {
+                    std::string flag;
+                    if (!(row >> flag) ||
+                        (flag != "T" && flag != "F" && flag != "t" && flag != "f"))
+                        throw std::runtime_error("Invalid POSCAR selective-dynamics flag");
+                    float v = (flag == "T" || flag == "t") ? 1.f : 0.f;
+                    if (k == 0)
+                        mask.x = v;
+                    else if (k == 1)
+                        mask.y = v;
+                    else
+                        mask.z = v;
+                }
+                d.vectorProperties["MoveMask"].push_back(mask);
+            }
+            double x = m == 'd' ? a * d.cell[0] + b * d.cell[3] + c * d.cell[6] : a * scale;
+            double y = m == 'd' ? a * d.cell[1] + b * d.cell[4] + c * d.cell[7] : b * scale;
+            double z = m == 'd' ? a * d.cell[2] + b * d.cell[5] + c * d.cell[8] : c * scale;
+            Atom atom{float(x), float(y), float(z), uint32_t(type)};
+            if (!std::isfinite(atom.x) || !std::isfinite(atom.y) || !std::isfinite(atom.z))
+                throw std::runtime_error("Non-finite POSCAR coordinate");
+            d.atoms.push_back(atom);
+        }
+    }
+    d.sourceCount = d.atoms.size();
+    d.pbc = {true, true, true};
+    d.bounds();
+    return d;
 }
 inline Dataset readCIF(const std::filesystem::path &path) {
     std::ifstream f(path); if(!f)throw std::runtime_error("Cannot open CIF"); Dataset d; std::string line; double a=0,b=0,c=0,alpha=90,beta=90,gamma=90; std::vector<std::array<std::string,4>> rows; bool loop=false;
@@ -293,10 +421,51 @@ inline Dataset readLammpsData(const std::filesystem::path &path) {
     if(d.atoms.empty())throw std::runtime_error("No atomic coordinates found in LAMMPS data");d.cell={hiX-loX,0,0,0,hiY-loY,0,0,0,hiZ-loZ};d.pbc={true,true,true};d.sourceCount=d.atoms.size();d.bounds();return d;
 }
 inline Dataset readInput(const std::filesystem::path& path, uint64_t budget=2000000, std::atomic<float>* progress=nullptr, std::atomic<bool>* cancel=nullptr) {
-    auto ext=lowerExtension(path); if(ext==".poscar"||ext==".contcar"||ext==".vasp")return readPOSCAR(path); if(ext==".cif")return readCIF(path); if(ext==".data"||ext==".lmp")return readLammpsData(path);
+    auto ext = lowerExtension(path);
+    if (isPOSCAR(path))
+        return readPOSCAR(path);
+    if (ext == ".cif")
+        return readCIF(path);
+    if (ext == ".data" || ext == ".lmp")
+        return readLammpsData(path);
     auto frames=indexXYZ(path,progress,cancel); return readXYZ(path,frames.front(),budget,progress,cancel);
 }
-inline void writePOSCAR(const std::filesystem::path& p,const Dataset& d){std::ofstream f(p);if(!f)throw std::runtime_error("Cannot write POSCAR");f<<"AtomX export\n1.0\n";for(int r=0;r<3;r++)f<<d.cell[r*3]<<' '<<d.cell[r*3+1]<<' '<<d.cell[r*3+2]<<'\n';for(auto&s:d.species)f<<s<<' ';f<<"\n";for(size_t i=0;i<d.species.size();i++){size_t n=std::count_if(d.atoms.begin(),d.atoms.end(),[&](auto&a){return a.type==i;});f<<n<<' ';}f<<"\nDirect\n";for(auto&a:d.atoms){double det=d.cell[0]*(d.cell[4]*d.cell[8]-d.cell[5]*d.cell[7])-d.cell[1]*(d.cell[3]*d.cell[8]-d.cell[5]*d.cell[6])+d.cell[2]*(d.cell[3]*d.cell[7]-d.cell[4]*d.cell[6]);double x=(a.x*(d.cell[4]*d.cell[8]-d.cell[5]*d.cell[7])+a.y*(d.cell[2]*d.cell[7]-d.cell[1]*d.cell[8])+a.z*(d.cell[1]*d.cell[5]-d.cell[2]*d.cell[4]))/det;double y=(a.x*(d.cell[5]*d.cell[6]-d.cell[3]*d.cell[8])+a.y*(d.cell[0]*d.cell[8]-d.cell[2]*d.cell[6])+a.z*(d.cell[2]*d.cell[3]-d.cell[0]*d.cell[5]))/det;double z=(a.x*(d.cell[3]*d.cell[7]-d.cell[4]*d.cell[6])+a.y*(d.cell[1]*d.cell[6]-d.cell[0]*d.cell[7])+a.z*(d.cell[0]*d.cell[4]-d.cell[1]*d.cell[3]))/det;f<<std::setprecision(10)<<x<<' '<<y<<' '<<z<<'\n';}}
+inline void writePOSCAR(const std::filesystem::path &p, const Dataset &d) {
+    const auto &c = d.cell;
+    double det = c[0] * (c[4] * c[8] - c[5] * c[7]) - c[1] * (c[3] * c[8] - c[5] * c[6]) +
+                 c[2] * (c[3] * c[7] - c[4] * c[6]);
+    if (!std::isfinite(det) || std::abs(det) < 1e-15)
+        throw std::runtime_error("POSCAR export requires a nonsingular cell");
+    if (d.species.empty())
+        throw std::runtime_error("POSCAR export requires particle types");
+    std::vector<size_t> counts(d.species.size());
+    for (const auto &a : d.atoms) {
+        if (a.type >= counts.size() || !std::isfinite(a.x) || !std::isfinite(a.y) ||
+            !std::isfinite(a.z))
+            throw std::runtime_error("Invalid POSCAR export particle");
+        ++counts[a.type];
+    }
+    std::ofstream f(p);
+    if (!f)
+        throw std::runtime_error("Cannot write POSCAR");
+    f << std::setprecision(17) << "AtomX export\n1.0\n";
+    for (int r = 0; r < 3; ++r)
+        f << c[r * 3] << ' ' << c[r * 3 + 1] << ' ' << c[r * 3 + 2] << '\n';
+    for (const auto &s : d.species)
+        f << s << ' ';
+    f << '\n';
+    for (auto n : counts)
+        f << n << ' ';
+    f << "\nCartesian\n";
+    // POSCAR counts define contiguous type blocks: group positions accordingly.
+    for (size_t type = 0; type < counts.size(); ++type)
+        for (const auto &a : d.atoms)
+            if (a.type == type)
+                f << a.x << ' ' << a.y << ' ' << a.z << '\n';
+    f.flush();
+    if (!f)
+        throw std::runtime_error("POSCAR write failed");
+}
 inline void writeCIF(const std::filesystem::path&p,const Dataset&d){std::ofstream f(p);if(!f)throw std::runtime_error("Cannot write CIF");f<<"data_atomx\n_cell_length_a "<<d.cell[0]<<"\n_cell_length_b "<<d.cell[4]<<"\n_cell_length_c "<<d.cell[8]<<"\n_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\nloop_\n_atom_site_type_symbol\n_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n";for(auto&a:d.atoms)f<<d.species[a.type]<<' '<<a.x/d.cell[0]<<' '<<a.y/d.cell[4]<<' '<<a.z/d.cell[8]<<'\n';}
 inline void writeLammpsData(const std::filesystem::path&p,const Dataset&d){std::ofstream f(p);if(!f)throw std::runtime_error("Cannot write LAMMPS data");f<<d.atoms.size()<<" atoms\n"<<d.species.size()<<" atom types\n\n0 "<<d.cell[0]<<" xlo xhi\n0 "<<d.cell[4]<<" ylo yhi\n0 "<<d.cell[8]<<" zlo zhi\n\nMasses\n\n";for(size_t i=0;i<d.species.size();i++)f<<i+1<<" 1.0 # "<<d.species[i]<<'\n';f<<"\nAtoms # atomic\n\n";for(size_t i=0;i<d.atoms.size();i++)f<<i+1<<' '<<d.atoms[i].type+1<<' '<<d.atoms[i].x<<' '<<d.atoms[i].y<<' '<<d.atoms[i].z<<'\n';}
 inline Dataset crystal(int n = 32) {
@@ -330,6 +499,9 @@ enum class Op {
     Replicate,
     EditType,
     SelectRange
+    ,ColorCoding
+    ,CommonNeighborAnalysis
+    ,CreateBonds
 };
 struct Modifier {
     Op op;
@@ -338,6 +510,8 @@ struct Modifier {
     int axis = 2;
     int type = 0;
     float upper = 1;
+    std::string property = "Position.X";
+    bool adaptive = false;
 };
 inline const char *opName(Op op) {
     switch (op) {
@@ -363,6 +537,9 @@ inline const char *opName(Op op) {
         return "Uniform scale";
     case Op::Wrap:
         return "Wrap at periodic boundaries";
+    case Op::ColorCoding: return "Color coding";
+    case Op::CommonNeighborAnalysis: return "Common neighbor analysis";
+    case Op::CreateBonds: return "Create bonds";
     default:
         return "Color by type";
     }
@@ -383,6 +560,11 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
                 throw std::runtime_error("Particle type is out of range");
             if (m.op == Op::SelectRange && m.upper < m.value)
                 throw std::runtime_error("Upper bound must be at least the lower bound");
+            if ((m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) &&
+                (!(m.value > 0) || !std::isfinite(m.value)))
+                throw std::runtime_error("Cutoff must be finite and positive");
+            if (m.op == Op::ColorCoding && m.property.empty())
+                throw std::runtime_error("Color coding requires a particle property");
             if (m.op == Op::Replicate) {
                 if (m.type < 1 || m.type > 32 || r.data.atoms.size() > 20000000 / size_t(m.type))
                     throw std::runtime_error("Replication exceeds the 20 million atom budget");
@@ -400,12 +582,61 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
                         r.data.atoms.push_back(a); r.selected.push_back(r.selected[i]);
                     }
                 for (int k=0;k<3;++k) r.data.cell[offset+k] *= m.type;
+                for (auto &[name, values] : r.data.scalarProperties) {
+                    auto original = values;
+                    for (int copy = 1; copy < m.type; ++copy)
+                        values.insert(values.end(), original.begin(), original.end());
+                }
+                for (auto &[name, values] : r.data.vectorProperties) {
+                    auto original = values;
+                    for (int copy = 1; copy < m.type; ++copy)
+                        values.insert(values.end(), original.begin(), original.end());
+                }
                 continue;
             }
             if (m.op == Op::Wrap &&
                 (r.data.cell[1] != 0 || r.data.cell[2] != 0 || r.data.cell[3] != 0 ||
                  r.data.cell[5] != 0 || r.data.cell[6] != 0 || r.data.cell[7] != 0))
                 throw std::runtime_error("Wrap currently requires an orthogonal cell");
+            if (m.op == Op::ColorCoding) {
+                std::vector<double> values;
+                if (m.property == "Position.X" || m.property == "Position.Y" || m.property == "Position.Z") {
+                    int axis = m.property.back() - 'X';
+                    values.reserve(r.data.atoms.size());
+                    for (const auto &a : r.data.atoms) values.push_back(coordinate(a, axis));
+                } else {
+                    auto it = r.data.scalarProperties.find(m.property);
+                    if (it == r.data.scalarProperties.end())
+                        throw std::runtime_error("Unknown particle property: " + m.property);
+                    values = it->second;
+                }
+                if (values.size() != r.data.atoms.size())
+                    throw std::runtime_error("Particle property length mismatch: " + m.property);
+                r.data.scalarProperties["Color coding"] = std::move(values);
+                continue;
+            }
+            if (m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) {
+                if (r.data.atoms.size() > 2000000)
+                    throw std::runtime_error("Neighbor modifier limited to 2 million atoms");
+                r.data.bonds.clear();
+                std::vector<uint32_t> coordination(r.data.atoms.size());
+                const double cutoff2 = double(m.value) * m.value;
+                for (size_t i = 0; i < r.data.atoms.size(); ++i)
+                    for (size_t j = i + 1; j < r.data.atoms.size(); ++j) {
+                        double dx = r.data.atoms[i].x-r.data.atoms[j].x, dy = r.data.atoms[i].y-r.data.atoms[j].y, dz = r.data.atoms[i].z-r.data.atoms[j].z;
+                        for (int k=0;k<3;++k) if (r.data.pbc[k] && r.data.cell[k*4]>0) {
+                            double &v = k==0?dx:k==1?dy:dz, L=r.data.cell[k*4]; v -= std::round(v/L)*L;
+                        }
+                        if (dx*dx+dy*dy+dz*dz <= cutoff2) { r.data.bonds.push_back({uint32_t(i),uint32_t(j)}); coordination[i]++; coordination[j]++; }
+                    }
+                if (m.op == Op::CommonNeighborAnalysis) {
+                    std::vector<double> structure(r.data.atoms.size());
+                    for (size_t i=0;i<structure.size();++i) structure[i] = coordination[i]==12?1:coordination[i]==8?2:coordination[i]==4?3:coordination[i]==10?4:0;
+                    r.data.scalarProperties["Structure Type"] = std::move(structure);
+                    r.data.scalarProperties["Coordination"] = std::vector<double>(coordination.begin(), coordination.end());
+                }
+                continue;
+            }
             size_t out = 0;
             for (size_t i = 0; i < r.data.atoms.size(); ++i) {
                 auto a = r.data.atoms[i];
@@ -455,18 +686,35 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
                     for (int k = 0; k < 3; k++)
                         if (r.data.pbc[k] && r.data.cell[k * 4] > 0)
                             coordinate(a, k) -=
-                                float(std::floor(coordinate(a, k) / r.data.cell[k * 4]) *
+                                float(std::floor((coordinate(a, k) - (k == 0   ? r.data.origin.x
+                                                                      : k == 1 ? r.data.origin.y
+                                                                               : r.data.origin.z)) /
+                                                 r.data.cell[k * 4]) *
                                       r.data.cell[k * 4]);
                     break;
                 default:
                     break;
                 }
                 if (keep) {
+                    for (auto &[name, values] : r.data.scalarProperties) {
+                        if (values.size() != r.data.atoms.size())
+                            throw std::runtime_error("Particle property length mismatch: " + name);
+                        values[out] = values[i];
+                    }
+                    for (auto &[name, values] : r.data.vectorProperties) {
+                        if (values.size() != r.data.atoms.size())
+                            throw std::runtime_error("Particle property length mismatch: " + name);
+                        values[out] = values[i];
+                    }
                     r.data.atoms[out] = a;
                     r.selected[out++] = sel;
                 }
             }
             r.data.atoms.resize(out);
+            for (auto &[name, values] : r.data.scalarProperties)
+                values.resize(out);
+            for (auto &[name, values] : r.data.vectorProperties)
+                values.resize(out);
             r.selected.resize(out);
             if (m.op == Op::Rotate) {
                 int u = (m.axis+1)%3, v = (m.axis+2)%3;
@@ -480,6 +728,20 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
             if (m.op == Op::Scale)
                 for (auto &v : r.data.cell)
                     v *= m.value;
+            if (m.op == Op::Scale) {
+                r.data.origin.x *= m.value;
+                r.data.origin.y *= m.value;
+                r.data.origin.z *= m.value;
+            }
+            if (m.op == Op::Rotate) {
+                float angle = m.value * .0174532925199433f;
+                Atom origin{r.data.origin.x, r.data.origin.y, r.data.origin.z, 0};
+                int u = (m.axis + 1) % 3, v = (m.axis + 2) % 3;
+                float x = coordinate(origin, u), y = coordinate(origin, v);
+                coordinate(origin, u) = x * std::cos(angle) - y * std::sin(angle);
+                coordinate(origin, v) = x * std::sin(angle) + y * std::cos(angle);
+                r.data.origin = {origin.x, origin.y, origin.z};
+            }
         }
     r.data.bounds();
     return r;

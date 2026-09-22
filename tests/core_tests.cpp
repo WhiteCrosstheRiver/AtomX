@@ -110,6 +110,18 @@ int main() {
         require(structures.counts["FCC"] == fcc.atoms.size() &&
                     fcc.scalarProperties["Structure Type"].size() == fcc.atoms.size(),
                 "structure property publication");
+        Dataset wave;
+        wave.species = {"X"};
+        wave.atoms = {{0,0,0,0},{1,0,0,0},{0,1,0,0},{0,0,1,0}};
+        wave.sourceCount = wave.atoms.size(); wave.bounds();
+        std::vector<Modifier> waveMods{{Op::CreateBonds,true,1.01f},
+                                       {Op::CommonNeighborAnalysis,true,1.01f},
+                                       {Op::ColorCoding,true,0,2,0,1,"Coordination"}};
+        auto waveResult = evaluate(wave, waveMods);
+        require(waveResult.data.bonds.size() == 3 &&
+                    waveResult.data.scalarProperties["Structure Type"].size() == 4 &&
+                    waveResult.data.scalarProperties["Color coding"].size() == 4,
+                "Wave1 bond, CNA, and property color modifiers");
         PipelineGraph graph;
         graph.insert({"source", "Source", "Data", true});
         graph.insert({"color", "Color coding", "Coloring", true});
