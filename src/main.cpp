@@ -530,6 +530,7 @@ struct App {
             op == Op::ExpandSelection || op == Op::SelectOverlapping) m.value = cutoff;
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
         if (op == Op::ReduceProperty) m.property = "Position.X";
+        if (op == Op::SelectOverlapping) m.property = "Radius";
         if (op == Op::ExpandSelection) m.type = 1;
         if (op == Op::ExpressionSelect) m.property = "Position.X > 0";
         if (op == Op::ComputeProperty) m.property = "x*x + y*y + z*z";
@@ -1559,13 +1560,44 @@ struct App {
                     }
                     if (m.op == Op::CreateBonds || m.op == Op::CommonNeighborAnalysis ||
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
-                        m.op == Op::RadialDistribution || m.op == Op::ExpandSelection ||
-                        m.op == Op::SelectOverlapping) {
+                        m.op == Op::RadialDistribution || m.op == Op::ExpandSelection) {
                         if (!(m.op==Op::CreateBonds && m.bondTypeCutoffsEnabled)) {
                             float value = m.value;
                             if (ImGui::DragFloat("Cutoff distance", &value, .01f, .0001f, 100000.f, "%.5g")) {
                                 checkpoint(); m.value = value; update();
                             }
+                        }
+                    }
+                    if (m.op == Op::SelectOverlapping) {
+                        bool useRadii = m.overlapUseRadii;
+                        if (ImGui::Checkbox("Use per-particle radii", &useRadii)) {
+                            checkpoint(); m.overlapUseRadii = useRadii; update();
+                        }
+                        if (m.overlapUseRadii) {
+                            std::vector<std::string> radiusProperties;
+                            for (const auto &[name, values] : result.data.scalarProperties)
+                                if (values.size() == result.data.atoms.size())
+                                    radiusProperties.push_back(name);
+                            std::sort(radiusProperties.begin(), radiusProperties.end());
+                            if (radiusProperties.empty()) {
+                                ImGui::TextWrapped("No scalar particle-radius property is available. Compute or import a Radius property first.");
+                            } else if (ImGui::BeginCombo("Radius property", m.property.c_str())) {
+                                for (const auto &name : radiusProperties) {
+                                    const bool selected = m.property == name;
+                                    if (ImGui::Selectable(name.c_str(), selected)) {
+                                        checkpoint(); m.property = name; update();
+                                    }
+                                    if (selected) ImGui::SetItemDefaultFocus();
+                                }
+                                ImGui::EndCombo();
+                            }
+                            ImGui::TextWrapped("Two particles overlap when their minimum-image distance is less than the sum of their radii.");
+                        } else {
+                            float value = m.value;
+                            if (ImGui::DragFloat("Pair cutoff", &value, .01f, .0001f, 100000.f, "%.5g")) {
+                                checkpoint(); m.value = value; update();
+                            }
+                            ImGui::TextWrapped("Selects both endpoints of every pair closer than this distance. Enable per-particle radii for sphere-overlap testing.");
                         }
                     }
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
@@ -1758,15 +1790,17 @@ struct App {
                                                 counts[1], counts[2], counts[3], counts[4], counts[0]);
                         }
                     }
-                    if (m.op == Op::ExpandSelection || m.op == Op::SelectOverlapping) {
+                    if (m.op == Op::ExpandSelection) {
                         float c = m.value;
                         if (ImGui::DragFloat("Cutoff", &c, .01f, .001f, 100.f)) { checkpoint(); m.value = c; update(); }
                         size_t selectedParticles = std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
-                        if (m.op == Op::ExpandSelection) {
-                            int steps = m.type;
-                            if (ImGui::InputInt("Expansion steps", &steps)) { checkpoint(); m.type = std::clamp(steps, 1, 64); update(); }
-                            ImGui::TextDisabled("Selected: %zu / %zu", selectedParticles, result.data.atoms.size());
-                        } else ImGui::TextDisabled("Overlapping particles: %zu", selectedParticles);
+                        int steps = m.type;
+                        if (ImGui::InputInt("Expansion steps", &steps)) { checkpoint(); m.type = std::clamp(steps, 1, 64); update(); }
+                        ImGui::TextDisabled("Selected: %zu / %zu", selectedParticles, result.data.atoms.size());
+                    }
+                    if (m.op == Op::SelectOverlapping) {
+                        const size_t selectedParticles = std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
+                        ImGui::TextDisabled("Overlapping particles: %zu", selectedParticles);
                     }
                     if (m.op == Op::ExpressionSelect) {
                         char expression[512]{};
@@ -2380,7 +2414,7 @@ struct App {
                 operation(Op::Replicate,"Repeat the system along a cell vector.");
                 operation(Op::Slice,"Keep particles below the chosen coordinate plane.");
                 for (auto name : {"Smooth trajectory", "Unwrap trajectories"}) planned(name);
-                operation(Op::Wrap,"Wrap positions into an orthogonal periodic cell.");
+                operation(Op::Wrap,"Wrap positions into orthogonal or triclinic periodic cells, including partially periodic cells.");
                 operation(Op::Translate,"Translate particle positions along an axis.");
                 operation(Op::Scale,"Scale positions and simulation cell uniformly.");
                 operation(Op::Rotate,"Rotate positions and cell vectors around an axis (degrees).");
@@ -2404,7 +2438,7 @@ struct App {
                 operation(Op::Clear,"Clear the current selection.");
                 operation(Op::ExpandSelection,"Expand the current selection through cutoff-neighbor shells.");
                 operation(Op::ExpressionSelect,"Select particles using the safe native scalar expression language.");
-                operation(Op::SelectOverlapping,"Select every particle that belongs to at least one pair closer than the cutoff.");
+                operation(Op::SelectOverlapping,"Select overlapping pairs using either a distance cutoff or the sum of a scalar radius property, with periodic minimum-image distances.");
                 operation(Op::Invert,"Invert selected and unselected particles.");
                 operation(Op::ManualSelection,"Select particles in the Particles table; Ctrl-click toggles rows.");
                 operation(Op::SelectType,"Select particles of a specified type.");

@@ -582,6 +582,7 @@ struct Modifier {
     Vec3 editedOrigin{};
     std::array<bool, 3> editedPbc{};
     bool transformCoordinatesWithCell = false;
+    bool overlapUseRadii = false;
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
 };
 struct DataObject {
@@ -1387,9 +1388,21 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                         if (m.bondTypeCutoffs[a*typeCount+b]!=m.bondTypeCutoffs[b*typeCount+a])
                             throw std::runtime_error("Type-pair bond cutoff matrix must be symmetric");
             }
-            if ((m.op == Op::ExpandSelection || m.op == Op::SelectOverlapping) &&
-                (!(m.value > 0) || !std::isfinite(m.value)))
+            if (m.op == Op::ExpandSelection && (!(m.value > 0) || !std::isfinite(m.value)))
                 throw std::runtime_error("Cutoff must be finite and positive");
+            if (m.op == Op::SelectOverlapping) {
+                if (!m.overlapUseRadii && (!(m.value > 0) || !std::isfinite(m.value)))
+                    throw std::runtime_error("Pair cutoff must be finite and positive");
+                if (m.overlapUseRadii) {
+                    auto radius = r.data.scalarProperties.find(m.property);
+                    if (m.property.empty() || radius == r.data.scalarProperties.end() ||
+                        radius->second.size() != r.data.atoms.size())
+                        throw std::runtime_error("Choose a scalar particle-radius property with one value per particle");
+                    for (double value : radius->second)
+                        if (!std::isfinite(value) || value < 0 || value > 100000)
+                            throw std::runtime_error("Particle radii must be finite and between 0 and 100000");
+                }
+            }
             if (m.op == Op::ExpandSelection && (m.type < 1 || m.type > 64))
                 throw std::runtime_error("Expansion steps must be between 1 and 64");
             if (m.op == Op::ColorCoding && m.property.empty())
@@ -1557,9 +1570,25 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
             }
             if (m.op == Op::SelectOverlapping) {
                 r.selected.assign(r.data.atoms.size(), 0);
-                forEachNeighborPair(r.data, m.value, [&](uint32_t i, uint32_t j, double) {
-                    r.selected[i] = r.selected[j] = 1;
-                }, cancel);
+                if (m.overlapUseRadii) {
+                    const auto &radii = r.data.scalarProperties.at(m.property);
+                    const double maxRadius = radii.empty() ? 0 : *std::max_element(radii.begin(), radii.end());
+                    if (maxRadius > 0) {
+                        const double searchCutoff = 2 * maxRadius;
+                        if (!std::isfinite(searchCutoff))
+                            throw std::runtime_error("Particle-radius search cutoff is not finite");
+                        forEachNeighborPair(r.data, searchCutoff,
+                            [&](uint32_t i, uint32_t j, double distanceSquared) {
+                                const double pairRadius = radii[i] + radii[j];
+                                if (distanceSquared < pairRadius * pairRadius)
+                                    r.selected[i] = r.selected[j] = 1;
+                            }, cancel);
+                    }
+                } else {
+                    forEachNeighborPair(r.data, m.value, [&](uint32_t i, uint32_t j, double) {
+                        r.selected[i] = r.selected[j] = 1;
+                    }, cancel);
+                }
                 continue;
             }
             if (m.op == Op::ExpressionSelect) {

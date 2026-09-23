@@ -41,6 +41,7 @@
 - Fixed-cutoff common-neighbor analysis publishes `Structure Type`, global structure counts, and a result table. Numerical fixtures verify FCC 1421, HCP 1421/1422 in a triclinic periodic cell, BCC 443/665, an isolated icosahedral-center 554 signature, and a deterministic disordered sample classified as Other. Adaptive CNA and production-scale acceleration remain incomplete. The coordination-based DXA helper remains an explicitly approximate prepass.
 - A composed Create bonds → CNA → Select index → Delete pipeline is regression-tested with a pre-existing bond and a generated periodic-image bond; particle properties and selection remain aligned, retained bond endpoints are remapped, and no dangling bond survives.
 - Cluster analysis has an independent disconnected-component fixture (two dimers and one isolated particle) that checks deterministic per-particle labels and exact cluster-size table rows.
+- Radius-aware overlap selection is covered for unequal radii, a triclinic periodic boundary crossing, a missing property, and a negative radius; the legacy fixed-pair-cutoff mode remains separately available.
 - Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts, and renders GPU lines in viewports and image exports. It supports one global cutoff or a symmetric per-type-pair cutoff matrix (up to 32 types); visibility, color, and pixel width are configurable. Cylinder rendering remains future work.
 - Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV. Particle-table manual selection is one persistent pipeline node: click replaces the set, Ctrl-click toggles one particle, and invalid indices are reported rather than silently applied.
 - While a source frame or modifier stack is being re-evaluated, the previous result remains visible with a `STALE RESULT` footer marker. Failed evaluations retain that marker until a successful publish.
@@ -113,7 +114,7 @@
 | Invert selection | 已实现 | 当前管线中的粒子选择取反 |
 | Manual selection | 部分 | 粒子表选择存入一个持久 Manual selection 管线节点；单击替换选区、Ctrl 单击切换单个粒子；视口 picking、框选与套索待实现 |
 | Select type | 已实现 | species/type 映射后的类型索引 |
-| Find overlapping particles | 部分 | cutoff 邻居对中的所有端点均被选中；粒子半径感知的 overlap、非正交 PBC 待做 |
+| Find overlapping particles | 部分 | 既支持固定距离对筛选，也支持指定有限非负标量 Radius 属性并按半径和判断重叠；复用正交/三斜/部分周期最小镜像邻居搜索。当前需显式计算或导入半径属性，尚未自动读取 Particle appearance 的类型显示半径，椭球/网格的几何相交也未实现 |
 | Ackland-Jones analysis | 待实现 | 邻居键角结构分类 |
 | Centrosymmetry parameter | 待实现 | 最近邻最优配对 |
 | Chill+ | 待实现 | 冰相局域键序参数 |

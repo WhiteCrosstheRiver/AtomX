@@ -276,6 +276,39 @@ int main() {
         require(keptColorResult.colorSelected == std::vector<uint8_t>({0,0,1,0}) &&
                     keptColorResult.selected == std::vector<uint8_t>({0,0,1,0}),
                 "keep selection preserves selection after selected-only coloring");
+        Dataset overlapFixture;
+        overlapFixture.species = {"X"};
+        overlapFixture.atoms = {{0,0,0,0},{.5f,0,0,0},{4,0,0,0},{4.5f,0,0,0},{9,0,0,0}};
+        overlapFixture.scalarProperties["Radius"] = {.3,.3,.1,.1,0};
+        overlapFixture.bounds();
+        Modifier overlapByRadius{Op::SelectOverlapping};
+        overlapByRadius.overlapUseRadii = true;
+        overlapByRadius.property = "Radius";
+        const auto overlaps = evaluate(overlapFixture, {overlapByRadius});
+        require(overlaps.selected == std::vector<uint8_t>({1,1,0,0,0}),
+                "radius-based overlap selection uses each pair's radius sum rather than a global cutoff");
+        Dataset periodicOverlap;
+        periodicOverlap.species = {"X"};
+        periodicOverlap.cell = {2,0,0,1,2,0,0,0,2};
+        periodicOverlap.pbc = {true,true,true};
+        periodicOverlap.atoms = {{.1f,.1f,.1f,0},{1.95f,.1f,.1f,0}};
+        periodicOverlap.scalarProperties["Radius"] = {.1,.1};
+        periodicOverlap.bounds();
+        require(evaluate(periodicOverlap, {overlapByRadius}).selected ==
+                    std::vector<uint8_t>({1,1}),
+                "radius-based overlap selection detects contact across a triclinic periodic boundary");
+        overlapByRadius.property = "Missing radius";
+        bool missingOverlapRadiiRejected = false;
+        try { (void)evaluate(overlapFixture, {overlapByRadius}); }
+        catch (const ModifierExecutionError &e) { missingOverlapRadiiRejected = e.nodeIndex == 0; }
+        require(missingOverlapRadiiRejected,
+                "radius-based overlap selection reports a missing radius property at its pipeline node");
+        overlapByRadius.property = "Radius";
+        overlapFixture.scalarProperties["Radius"][2] = -1;
+        bool invalidOverlapRadiusRejected = false;
+        try { (void)evaluate(overlapFixture, {overlapByRadius}); }
+        catch (const ModifierExecutionError &e) { invalidOverlapRadiusRejected = e.nodeIndex == 0; }
+        require(invalidOverlapRadiusRejected, "negative particle radii are rejected at the overlap node");
         Modifier assignRed{Op::AssignColor}; assignRed.assignColor={1,0,0};
         auto assignedSelection=evaluate(wave,{{Op::SelectIndex,true,0,0,1},assignRed});
         require(assignedSelection.data.particleColors.size()==wave.atoms.size() &&
@@ -600,7 +633,8 @@ int main() {
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice, wrap, "
                      "scale, scientific modifier tables, assign color, roundtrip, malformed input, "
                      "FCC/HCP/BCC/ICO CNA signatures and disordered reference, periodic topology, "
-                     "disconnected cluster labels, bonds/CNA/select/delete pipeline composition, "
+                     "disconnected cluster labels, radius-aware periodic overlap selection, "
+                     "bonds/CNA/select/delete pipeline composition, "
                      "sampled analysis rejection\n";
         return 0;
     } catch (const std::exception &e) {
