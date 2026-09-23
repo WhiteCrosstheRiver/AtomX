@@ -518,6 +518,11 @@ struct App {
         if (op == Op::SelectRange) {
             m.value = result.data.lo.z; m.upper = result.data.hi.z;
         }
+        if (op == Op::EditCell) {
+            m.editedCell = result.data.cell;
+            m.editedOrigin = result.data.origin;
+            m.editedPbc = result.data.pbc;
+        }
         if (op == Op::ColorType) { colorCoding = true; colorAxis = 0; colorAutoRange = true; }
         if (op == Op::ColorCoding) { colorCoding = true; colorAutoRange = true; }
         if (op == Op::CommonNeighborAnalysis || op == Op::CreateBonds ||
@@ -1469,6 +1474,58 @@ struct App {
                             checkpoint(); m.upper = upper; update();
                         }
                     }
+                    if (m.op == Op::EditCell) {
+                        auto editedCell = m.editedCell;
+                        auto origin = m.editedOrigin;
+                        auto pbc = m.editedPbc;
+                        bool transform = m.transformCoordinatesWithCell;
+                        bool changed = false;
+                        heading("Cell vectors");
+                        if (ImGui::BeginTable("Edited cell vectors", 4,
+                                              ImGuiTableFlags_SizingStretchSame)) {
+                            ImGui::TableSetupColumn("Vector");
+                            ImGui::TableSetupColumn("X"); ImGui::TableSetupColumn("Y");
+                            ImGui::TableSetupColumn("Z"); ImGui::TableHeadersRow();
+                            for (int row = 0; row < 3; ++row) {
+                                ImGui::TableNextRow();
+                                ImGui::TableSetColumnIndex(0); ImGui::Text("%c", 'a' + row);
+                                for (int column = 0; column < 3; ++column) {
+                                    ImGui::TableSetColumnIndex(column + 1);
+                                    ImGui::PushID(row * 3 + column);
+                                    ImGui::SetNextItemWidth(-1);
+                                    changed |= ImGui::InputDouble("##cell", &editedCell[row * 3 + column],
+                                                                  0, 0, "%.8g");
+                                    ImGui::PopID();
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                        ImGui::Text("Origin");
+                        float originValues[3]{origin.x, origin.y, origin.z};
+                        for (int axis = 0; axis < 3; ++axis) {
+                            if (axis) ImGui::SameLine();
+                            ImGui::PushID(100 + axis);
+                            ImGui::SetNextItemWidth(U(88));
+                            changed |= ImGui::InputFloat(axis == 0 ? "X" : axis == 1 ? "Y" : "Z",
+                                                        &originValues[axis], 0, 0, "%.6g");
+                            ImGui::PopID();
+                        }
+                        origin = {originValues[0], originValues[1], originValues[2]};
+                        ImGui::Text("Periodic boundaries");
+                        for (int axis = 0; axis < 3; ++axis) {
+                            if (axis) ImGui::SameLine();
+                            ImGui::PushID(200 + axis);
+                            changed |= ImGui::Checkbox(axis == 0 ? "X" : axis == 1 ? "Y" : "Z",
+                                                       &pbc[axis]);
+                            ImGui::PopID();
+                        }
+                        changed |= ImGui::Checkbox("Transform particle coordinates with cell", &transform);
+                        ImGui::TextWrapped("Off: particle positions stay fixed while the cell changes. On: preserve fractional coordinates in the edited cell.");
+                        if (changed) {
+                            checkpoint(); m.editedCell = editedCell; m.editedOrigin = origin;
+                            m.editedPbc = pbc; m.transformCoordinatesWithCell = transform; update();
+                        }
+                    }
                     if (m.op == Op::CreateBonds || m.op == Op::CommonNeighborAnalysis ||
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
                         m.op == Op::RadialDistribution || m.op == Op::ExpandSelection ||
@@ -2286,7 +2343,7 @@ struct App {
                 for (auto name : {"Affine transformation", "Combine datasets"}) planned(name);
                 operation(Op::ComputeProperty,"Evaluate a scalar expression for every particle and publish the named property.");
                 operation(Op::Delete,"Remove selected particles.");
-                planned("Edit simulation cell"); operation(Op::EditType,"Edit particle type assignments.");
+                operation(Op::EditCell,"Edit cell origin, vectors and periodic boundaries. Particle coordinates stay fixed unless fractional-coordinate remapping is explicitly enabled."); operation(Op::EditType,"Edit particle type assignments.");
                 for (auto name : {"Freeze property", "Load trajectory", "Python script (deferred)"}) planned(name);
                 operation(Op::RemoveProperty,"Remove a scalar or vector particle property by name.");
                 operation(Op::Replicate,"Repeat the system along a cell vector.");

@@ -147,6 +147,28 @@ int main() {
                     trajectoryPropertyRange.first==-5 && trajectoryPropertyRange.second==12 &&
                     trajectoryVectorRange.first==-4 && trajectoryVectorRange.second==6,
                 "all-frame color range evaluates the upstream pipeline and aggregates every frame");
+        Dataset cellEditData; cellEditData.species={"X"};
+        cellEditData.cell={10,0,0,0,10,0,0,0,10}; cellEditData.pbc={true,true,true};
+        cellEditData.atoms={{1,2,3,0}}; cellEditData.bounds();
+        Modifier editCell{Op::EditCell};
+        editCell.editedCell={20,0,0,0,20,0,0,0,20}; editCell.editedOrigin={1,1,1};
+        editCell.editedPbc={true,false,true};
+        auto fixedCoordinates=evaluate(cellEditData,{editCell});
+        require(fixedCoordinates.data.atoms[0].x==1 && fixedCoordinates.data.atoms[0].y==2 &&
+                    fixedCoordinates.data.cell[0]==20 && fixedCoordinates.data.origin.x==1 &&
+                    fixedCoordinates.data.pbc==editCell.editedPbc,
+                "simulation-cell edits change cell metadata without moving particle coordinates by default");
+        editCell.transformCoordinatesWithCell=true;
+        auto transformedCoordinates=evaluate(cellEditData,{editCell});
+        require(std::abs(transformedCoordinates.data.atoms[0].x-3)<1e-6 &&
+                    std::abs(transformedCoordinates.data.atoms[0].y-5)<1e-6 &&
+                    std::abs(transformedCoordinates.data.atoms[0].z-7)<1e-6,
+                "optional simulation-cell remapping preserves fractional particle coordinates");
+        editCell.editedCell[8]=0;
+        bool singularCellRejected=false;
+        try { evaluate(cellEditData,{editCell}); }
+        catch (const ModifierExecutionError &e) { singularCellRejected=e.nodeIndex==0; }
+        require(singularCellRejected,"simulation-cell editor rejects degenerate vectors at its pipeline node");
         std::atomic<float> rangeProgress{0};
         auto progressedRange=colorRangeAcrossFrames(rangeFrames.size(),
             [&](size_t i){return rangeFrames.at(i);}, {},"Q",nullptr,&rangeProgress);

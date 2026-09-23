@@ -25,7 +25,7 @@
 | Detect reduced coordinates | 待实现 | 当前位置按文件中的笛卡尔坐标读取 |
 | Generate bounding box | 部分 | 没有 Lattice 时显示粒子包围盒，不生成周期晶胞 |
 | Sort particles by ID | 待实现 | 当前保留加载顺序，未解析 ID 属性 |
-| Particles / Simulation cell / Global attributes | 部分 | 虚拟化坐标表、3x3 晶胞和 PBC、原始注释 |
+| Particles / Simulation cell / Global attributes | 部分 | 虚拟化坐标表、3x3 晶胞和 PBC、原始注释；Edit simulation cell 修改晶胞向量、原点和 PBC，默认粒子坐标固定 |
 | 单帧 GPU 图片导出 | 已实现 | 活动相机 PNG，64–8192 像素，粒子与背景；晶胞 UI 叠层不进入 PNG |
 | 完整动画 / 范围 / Every Nth frame | 待实现 | 播放可用，动画文件导出不可用 |
 | 背景颜色 | 已实现 | RGB |
@@ -85,6 +85,7 @@
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
 | Compute property | 部分 | 安全原生数值表达式逐粒子计算并发布标量属性，可供下游节点读取；不支持向量表达式、单位系统、任意脚本及优化缓存 |
 | Delete selected | 已实现 | 非破坏性管线过滤 |
+| Edit simulation cell | 部分 | 原生管线节点编辑原点、3 条向量和 PBC；校验有限值与非退化体积；可选保持分数坐标并变换粒子位置；一般各向异性晶胞与表格编辑已实现，晶胞尺寸快捷字段尚未补齐 |
 | Freeze property | 待实现 | 按稳定 ID 保存参考属性 |
 | Load trajectory | 部分 | 单个 XYZ 多帧文件；未支持拓扑和轨迹文件合并 |
 | Python script | 待实现 | 尚无嵌入式 Python 或插件 API |

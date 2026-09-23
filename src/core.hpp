@@ -550,6 +550,7 @@ enum class Op {
     ,ReduceProperty
     ,AssignColor
     ,ManualSelection
+    ,EditCell
 };
 struct Modifier {
     Op op;
@@ -576,6 +577,10 @@ struct Modifier {
     std::array<float,4> bondColor{.72f,.78f,.86f,1.f};
     std::array<float,3> assignColor{1.f,.15f,.12f};
     std::vector<uint32_t> manualSelection;
+    std::array<double, 9> editedCell{};
+    Vec3 editedOrigin{};
+    std::array<bool, 3> editedPbc{};
+    bool transformCoordinatesWithCell = false;
 };
 struct DataObject {
     enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels };
@@ -1227,6 +1232,7 @@ inline const char *opName(Op op) {
     case Op::Histogram: return "Histogram";
     case Op::ReduceProperty: return "Reduce property";
     case Op::AssignColor: return "Assign color";
+    case Op::EditCell: return "Edit simulation cell";
     default:
         return "Color by type";
     }
@@ -1257,6 +1263,26 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 throw std::runtime_error("Invalid modifier parameters");
             if (m.op == Op::Scale && m.value <= 0)
                 throw std::runtime_error("Scale must be positive");
+            if (m.op == Op::EditCell) {
+                double scale = 0;
+                for (int axis = 0; axis < 3; ++axis) {
+                    double lengthSquared = 0;
+                    for (int component = 0; component < 3; ++component) {
+                        const double value = m.editedCell[axis * 3 + component];
+                        if (!std::isfinite(value))
+                            throw std::runtime_error("Cell vectors must contain finite values");
+                        lengthSquared += value * value;
+                    }
+                    scale = std::max(scale, std::sqrt(lengthSquared));
+                }
+                if (!std::isfinite(m.editedOrigin.x) || !std::isfinite(m.editedOrigin.y) ||
+                    !std::isfinite(m.editedOrigin.z))
+                    throw std::runtime_error("Cell origin must contain finite values");
+                const double determinant = cellDeterminant(m.editedCell);
+                if (!(scale > 0) || !std::isfinite(determinant) ||
+                    std::abs(determinant) <= scale * scale * scale * 1e-12)
+                    throw std::runtime_error("Simulation cell vectors must form a non-degenerate cell");
+            }
             if (m.op == Op::EditType && (m.type < 0 || size_t(m.type) >= r.data.species.size()))
                 throw std::runtime_error("Particle type is out of range");
             if (m.op == Op::SelectRange && m.upper < m.value)
@@ -1439,6 +1465,24 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     values[i] = ParticleExpression(r.data, i, m.property).evaluateNumber();
                 }
                 r.data.scalarProperties[m.outputProperty] = std::move(values);
+                continue;
+            }
+            if (m.op == Op::EditCell) {
+                if (m.transformCoordinatesWithCell) {
+                    const auto oldInverse = cellInverse(r.data.cell);
+                    for (auto &atom : r.data.atoms) {
+                        const auto fractional = fractionalPosition(r.data, atom, oldInverse);
+                        atom.x = float(m.editedOrigin.x + fractional[0] * m.editedCell[0] +
+                                       fractional[1] * m.editedCell[3] + fractional[2] * m.editedCell[6]);
+                        atom.y = float(m.editedOrigin.y + fractional[0] * m.editedCell[1] +
+                                       fractional[1] * m.editedCell[4] + fractional[2] * m.editedCell[7]);
+                        atom.z = float(m.editedOrigin.z + fractional[0] * m.editedCell[2] +
+                                       fractional[1] * m.editedCell[5] + fractional[2] * m.editedCell[8]);
+                    }
+                }
+                r.data.cell = m.editedCell;
+                r.data.origin = m.editedOrigin;
+                r.data.pbc = m.editedPbc;
                 continue;
             }
             if (m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
