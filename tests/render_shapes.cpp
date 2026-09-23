@@ -175,7 +175,23 @@ int main(int argc, char **argv) {
         renderer.styles[0].visual[2] = 0;
         renderer.draw(t, d, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
         renderer.png(t, "build/shape-validation/hidden.png");
-        std::cout << "PASS: seven GPU shapes, property/assigned colors, bond lines, color, width and visibility rendered\n";
+        renderer.styles[0].visual[2] = 1;
+        renderer.draw(t,d,cam,.3f,0,0,0,8,-1,1,true,false,false,bg);
+        ColorLegendOptions legend{true,"Position.X",8,-1,1,false,false};
+        auto legendPath=std::filesystem::path("build/shape-validation/color-legend.png");
+        renderer.png(t,legendPath,legend);
+        if (!std::filesystem::exists(legendPath) || std::filesystem::file_size(legendPath)<1000)
+            throw std::runtime_error("Color legend export must produce a visible PNG artifact");
+        legend.reverse=true; legend.discrete=true;
+        auto reversedLegendPath=std::filesystem::path("build/shape-validation/color-legend-reversed-discrete.png");
+        renderer.png(t,reversedLegendPath,legend);
+        auto readFile=[](const std::filesystem::path &file) {
+            std::ifstream in(file,std::ios::binary);
+            return std::vector<char>((std::istreambuf_iterator<char>(in)),{});
+        };
+        if (readFile(legendPath)==readFile(reversedLegendPath))
+            throw std::runtime_error("PNG color legend must reflect reversed/discrete gradient settings");
+        std::cout << "PASS: seven GPU shapes, property/assigned colors, bond lines, legends, color, width and visibility rendered\n";
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         DestroyWindow(w);

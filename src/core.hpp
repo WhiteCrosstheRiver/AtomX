@@ -531,6 +531,7 @@ struct Modifier {
     bool colorAutoRange = true, colorSymmetricRange = false, colorReverse = false;
     bool colorAllFramesRange = false;
     bool colorDiscrete = false, colorSelectedOnly = false, colorKeepSelection = false;
+    bool colorLegend = true;
     float colorMin = 0, colorMax = 1;
     int reduceOperation = 2; // min, max, mean, sum
     bool bondsVisible = true;

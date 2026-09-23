@@ -53,12 +53,13 @@
 - 新增管线节点的数值回归覆盖 Coordination 属性与均值、Cluster 标签与簇大小表、FCC RDF 表、可配置直方图、Reduce mean、选区/全体赋色与复制/删除颜色映射、CSV 转义，以及采样数据拒绝和节点错误归属。
 - 全帧颜色范围测试覆盖两个帧的 XYZ 属性聚合，以及对上游 Translate 节点执行后再汇总范围；界面计算在后台运行、支持取消，并且每帧超过 200 万原子时明确拒绝，不使用预览采样冒充完整范围。
 - 当前全帧范围仅支持 XYZ 和 LAMMPS dump。手动改颜色属性或上游修改器后会将下游全帧范围标为需重算；更改轨迹帧时保留已算出的跨帧范围。
+- D3D11 渲染测试导出并检查 `build/shape-validation/color-legend.png`；Windows workspace smoke 测试截图 `build/ui-color-legend.png` 目视验证四视口图例与属性范围。活动视口 PNG 使用同一颜色渐变及反向/离散设置绘制图例。
 - CNA 输出统一为 `Structure Type`，提供全局结构计数和结果表；本地固定样本包含 FCC、BCC、三斜周期 HCP 与孤立 ICO 中心。
 - GPU 渲染回归检查键线像素、隐藏行为、颜色及线宽变化、逐粒子赋色和七种粒子形状。键按 image shift 跨周期展开。
 - `tests/export_workflow.cpp` 验证帧范围、步长、序列导出、应用管线、拒绝覆盖输入和失败清理；Data Tables 增加 CSV 导出。
 - `--smoke 3 --catalog --screenshot build/phase-catalog.png` 与普通工作区截图运行成功，目视检查四视口和菜单。时间轴标签与单帧计数已改为 1-based 用户显示；未执行自动鼠标逐项点击回归。
 - CMakeLists 已注册与 PowerShell 入口相同的五组测试，但当前环境找不到 `cmake` 命令，因此本次只实跑 `build.ps1`，没有声称 CTest 通过。
-- 仍未完成：缓存复用/节点级按需拷贝、稳定大数据异步索引和可复现交互测试；键圆柱、全帧颜色范围和图例；高级结构算法、DXA、Voronoi、完整透明/AO及 Intel Arc 实机验证。
+- 仍未完成：缓存复用/节点级按需拷贝、稳定大数据异步索引和可复现交互测试；键圆柱；渐变色与 OVITO 标准色表的数值级比对；高级结构算法、DXA、Voronoi、完整透明/AO及 Intel Arc 实机验证。
 
 
 ## 2026-09-21 界面改版验证

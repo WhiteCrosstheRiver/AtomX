@@ -1,5 +1,6 @@
 #pragma once
 #define NOMINMAX
+#pragma comment(lib, "gdi32.lib")
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi1_6.h>
@@ -41,6 +42,34 @@ struct ParticleStyle {
     bool operator==(const ParticleStyle &) const = default;
 };
 static_assert(sizeof(ParticleStyle) == 48);
+inline std::array<float, 3> sampleColorGradient(int gradient, float u) {
+    u = std::clamp(u, 0.f, 1.f);
+    auto mix = [](std::array<float,3> a, std::array<float,3> b, float t) {
+        t = std::clamp(t, 0.f, 1.f);
+        return std::array<float,3>{a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t};
+    };
+    if (gradient == 0) {
+        const std::array<float,3> a{.10f,.15f,.85f}, b{.12f,.85f,.75f}, c{.98f,.88f,.08f}, d{.9f,.08f,.04f};
+        return u < .5f ? mix(a,b,u*2) : u < .8f ? mix(b,c,(u-.5f)*3.3333333f) : mix(c,d,(u-.8f)*5);
+    }
+    if (gradient == 1)
+        return u < .5f ? mix({.1f,.15f,.9f},{1,1,1},u*2) : mix({1,1,1},{.9f,.05f,.05f},(u-.5f)*2);
+    if (gradient == 2)
+        return {.5f+.5f*std::cos(6.2831853f*u), .5f+.5f*std::cos(6.2831853f*(u+.33f)), .5f+.5f*std::cos(6.2831853f*(u+.67f))};
+    if (gradient == 3) return mix({.02f,.02f,.02f},{1,.95f,.1f},u);
+    if (gradient == 4) return {u,u,u};
+    if (gradient == 5) return mix({.02f,.02f,.15f},{1,.02f,0},u);
+    if (gradient == 6) return {std::clamp(1.5f-std::abs(4*u-3),0.f,1.f), std::clamp(1.5f-std::abs(4*u-2),0.f,1.f), std::clamp(1.5f-std::abs(4*u-1),0.f,1.f)};
+    if (gradient == 7) return mix({.05f,.01f,.2f},{1,.3f,.02f},u);
+    return mix({.27f,.01f,.33f},{.99f,.9f,.14f},u);
+}
+struct ColorLegendOptions {
+    bool visible = false;
+    std::string property;
+    int gradient = 0;
+    float minimum = 0, maximum = 1;
+    bool reverse = false, discrete = false;
+};
 class Renderer {
     struct BondVertex { DirectX::XMFLOAT3 position; };
     struct Chunk {
@@ -609,7 +638,7 @@ float4 bondPixel():SV_TARGET { return color; }
         context->PSSetShaderResources(2, 1, &empty);
         context->OMSetRenderTargets(0, nullptr, nullptr);
     }
-    void png(Target &t, const std::filesystem::path &path) {
+    void png(Target &t, const std::filesystem::path &path, const ColorLegendOptions &legend = {}) {
         D3D11_TEXTURE2D_DESC td{};
         t.texture->GetDesc(&td);
         td.Usage = D3D11_USAGE_STAGING;
@@ -643,8 +672,91 @@ float4 bondPixel():SV_TARGET { return color; }
         check(frame->SetPixelFormat(&fmt), "PNG format");
         if (fmt != GUID_WICPixelFormat32bppBGRA)
             throw std::runtime_error("Unsupported PNG pixel format");
-        for (size_t i = 0; i < pixels.size(); i += 4)
-            std::swap(pixels[i], pixels[i + 2]);
+        if (legend.visible && t.w >= 240 && t.h >= 120) {
+            for (size_t i = 0; i < pixels.size(); i += 4)
+                std::swap(pixels[i], pixels[i + 2]); // RGBA readback to top-down BGRA DIB.
+            BITMAPINFO info{};
+            info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth = t.w;
+            info.bmiHeader.biHeight = -t.h;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB;
+            void *bits = nullptr;
+            HBITMAP dib = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+            HDC dc = CreateCompatibleDC(nullptr);
+            if (!dib || !dc || !bits) {
+                if (dib) DeleteObject(dib);
+                if (dc) DeleteDC(dc);
+                throw std::runtime_error("Could not create PNG legend surface");
+            }
+            HGDIOBJ oldBitmap = SelectObject(dc, dib);
+            memcpy(bits, pixels.data(), pixels.size());
+            const float scale = std::clamp(std::min(t.w / 1280.f, t.h / 720.f), .65f, 2.5f);
+            const int margin = int(std::round(14 * scale));
+            const int boxW = int(std::round(258 * scale));
+            const int boxH = int(std::round(88 * scale));
+            const int left = t.w - boxW - margin;
+            const int top = margin;
+            auto *bgra = static_cast<BYTE *>(bits);
+            for (int y = top; y < top + boxH; ++y)
+                for (int x = left; x < left + boxW; ++x) {
+                    size_t at = (size_t(y) * t.w + x) * 4;
+                    bgra[at] = 22; bgra[at+1] = 18; bgra[at+2] = 14; bgra[at+3] = 245;
+                }
+            RECT frameRect{left, top, left+boxW, top+boxH};
+            HBRUSH border = CreateSolidBrush(RGB(100, 117, 139));
+            FrameRect(dc, &frameRect, border);
+            DeleteObject(border);
+            int fontHeight = std::max(10, int(std::round(13 * scale)));
+            HFONT font = CreateFontW(fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(238, 243, 250));
+            std::wstring propertyName;
+            if (!legend.property.empty()) {
+                int length = MultiByteToWideChar(CP_UTF8, 0, legend.property.c_str(), -1, nullptr, 0);
+                if (length > 1) {
+                    propertyName.resize(size_t(length));
+                    MultiByteToWideChar(CP_UTF8, 0, legend.property.c_str(), -1, propertyName.data(), length);
+                    propertyName.resize(size_t(length - 1));
+                }
+            }
+            if (propertyName.empty()) propertyName = L"Color coding";
+            RECT title{left+int(10*scale), top+int(5*scale), left+boxW-int(8*scale), top+int(25*scale)};
+            DrawTextW(dc, propertyName.c_str(), -1, &title, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            const int barX = left + int(10*scale), barY = top + int(30*scale);
+            const int barW = boxW - int(20*scale), barH = std::max(6, int(15*scale));
+            for (int x = 0; x < barW; ++x) {
+                float u = barW > 1 ? float(x) / float(barW-1) : 0;
+                if (legend.reverse) u = 1-u;
+                if (legend.discrete) u = std::min(std::floor(u*12),11.f)/11.f;
+                auto color = sampleColorGradient(legend.gradient, u);
+                BYTE red = BYTE(std::clamp(color[0],0.f,1.f)*255), green = BYTE(std::clamp(color[1],0.f,1.f)*255), blue = BYTE(std::clamp(color[2],0.f,1.f)*255);
+                for (int y = 0; y < barH; ++y) {
+                    size_t at = (size_t(barY+y)*t.w + barX+x)*4;
+                    bgra[at]=blue; bgra[at+1]=green; bgra[at+2]=red; bgra[at+3]=255;
+                }
+            }
+            std::wostringstream lowText, highText;
+            lowText << std::setprecision(5) << legend.minimum;
+            highText << std::setprecision(5) << legend.maximum;
+            RECT lowLabel{barX, barY+barH+int(3*scale), left+boxW/2, top+boxH-int(4*scale)};
+            RECT highLabel{left+boxW/2, barY+barH+int(3*scale), left+boxW-int(7*scale), top+boxH-int(4*scale)};
+            DrawTextW(dc, lowText.str().c_str(), -1, &lowLabel, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            DrawTextW(dc, highText.str().c_str(), -1, &highLabel, DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (oldFont) SelectObject(dc, oldFont);
+            if (font) DeleteObject(font);
+            memcpy(pixels.data(), bits, pixels.size());
+            SelectObject(dc, oldBitmap);
+            DeleteObject(dib);
+            DeleteDC(dc);
+        } else {
+            for (size_t i = 0; i < pixels.size(); i += 4)
+                std::swap(pixels[i], pixels[i + 2]);
+        }
         check(frame->WritePixels(t.h, t.w * 4, UINT(pixels.size()), pixels.data()), "PNG pixels");
         check(frame->Commit(), "PNG commit");
         check(enc->Commit(), "PNG complete");

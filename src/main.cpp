@@ -250,8 +250,10 @@ struct App {
     int cellDimension = 1;
     bool colorCoding = false, colorDiscrete = false, colorSelectedOnly = false, colorAutoRange = false,
          colorSymmetricRange = false, colorReverse = false;
+    bool colorLegend = true;
     int colorAxis = 0, colorGradient = 0;
     float colorMin = 0, colorMax = 1;
+    std::string colorRangeProperty = "Position.X";
     int active = 3, propertyAxis = 2, tab = 0;
     int viewportTool = 2; // 0 zoom, 1 pan, 2 orbit, 3 perspective
     bool animationSettings = false, autoKey = false;
@@ -337,8 +339,10 @@ struct App {
                 colorAutoRange = activeColor->colorAutoRange;
                 colorSymmetricRange = activeColor->colorSymmetricRange;
                 colorReverse = activeColor->colorReverse;
+                colorLegend = activeColor->colorLegend;
                 colorDiscrete = activeColor->colorDiscrete;
                 colorSelectedOnly = activeColor->colorSelectedOnly;
+                colorRangeProperty = activeColor->property;
                 colorMin = activeColor->colorMin;
                 colorMax = activeColor->colorMax;
             }
@@ -731,7 +735,9 @@ struct App {
         Target t;
         gpu.target(t, exportW, exportH);
             gpu.draw(t, result.data, cameras[active], radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles, cell);
-        gpu.png(t, p);
+        ColorLegendOptions legend{colorCoding && colorLegend, colorRangeProperty, colorGradient,
+                                  colorMin, colorMax, colorReverse, colorDiscrete};
+        gpu.png(t, p, legend);
         status = "Rendered " + utf8(p.filename().wstring());
     }
     void fixed(const char *name, float x, float y, float w, float h) {
@@ -969,6 +975,34 @@ struct App {
                     }
             if (cellLabels) { draw->AddText(corners[0], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "O"); draw->AddText(corners[1], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "A"); draw->AddText(corners[2], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "B"); draw->AddText(corners[4], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "C"); }
             draw->PopClipRect();
+        }
+        if (colorCoding && colorLegend && avail.x >= U(220) && avail.y >= U(110)) {
+            const float sx = U(174), sy = U(64), pad = U(8);
+            ImVec2 a{p.x + avail.x - sx - U(12), p.y + U(12)};
+            ImVec2 b{a.x + sx, a.y + sy};
+            draw->AddRectFilled(a,b,IM_COL32(15,19,25,238),U(4));
+            draw->AddRect(a,b,IM_COL32(104,119,138,255),U(4));
+            std::string title = colorRangeProperty;
+            if (title.size() > 24) title = title.substr(0,21) + "...";
+            draw->AddText({a.x+pad,a.y+U(5)},IM_COL32(238,243,250,255),title.c_str());
+            const float barX=a.x+pad, barY=a.y+U(25), barW=sx-pad*2, barH=U(12);
+            const int segments=colorDiscrete?12:96;
+            for (int segment=0; segment<segments; ++segment) {
+                float u=segments>1?float(segment)/float(segments-1):0;
+                if (colorReverse) u=1-u;
+                if (colorDiscrete) u=std::min(std::floor(u*12),11.f)/11.f;
+                auto c=sampleColorGradient(colorGradient,u);
+                auto packed=ImGui::ColorConvertFloat4ToU32({c[0],c[1],c[2],1});
+                const float x0=barX+barW*segment/segments;
+                const float x1=barX+barW*(segment+1)/segments+.5f;
+                draw->AddRectFilled({x0,barY},{x1,barY+barH},packed);
+            }
+            char low[48]{}, high[48]{};
+            snprintf(low,sizeof(low),"%.5g",colorMin);
+            snprintf(high,sizeof(high),"%.5g",colorMax);
+            draw->AddText({barX,a.y+U(42)},IM_COL32(218,226,237,255),low);
+            auto highSize=ImGui::CalcTextSize(high);
+            draw->AddText({barX+barW-highSize.x,a.y+U(42)},IM_COL32(218,226,237,255),high);
         }
         if (ImGui::IsItemHovered()) {
             const char* toolHint = viewportTool == 0 ? "Zoom" : viewportTool == 1 ? "Pan" : viewportTool == 2 ? "Orbit" : "FOV";
@@ -1451,6 +1485,10 @@ struct App {
                         if (ImGui::Checkbox("Reverse range", &reverse)) { edited.colorReverse = reverse; changed = true; }
                         bool keepSelection = edited.colorKeepSelection;
                         if (ImGui::Checkbox("Keep selection", &keepSelection)) { edited.colorKeepSelection = keepSelection; changed = true; }
+                        bool showLegend = edited.colorLegend;
+                        if (ImGui::Checkbox("Show color legend", &showLegend)) {
+                            checkpoint(); m.colorLegend = showLegend; colorLegend = showLegend;
+                        }
                         ImGui::BeginDisabled(colorRangeRunning || busy || indexing || pipelineBusy || frames.empty());
                         if (ImGui::Button("Compute range across all frames"))
                             computeColorRangeAllFrames(modifierGraph.selected);
@@ -2247,7 +2285,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         int argc;
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         int adapter = -1, smoke = 0;
-        bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false;
+        bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
+             smokeColorLegend = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
@@ -2255,6 +2294,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (a == L"--settings") smokeSettings = true;
             else if (a == L"--export-settings")
                 smokeExport = true;
+            else if (a == L"--smoke-color-legend") smokeColorLegend = true;
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -2303,6 +2343,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             app.showCatalog = smokeCatalog;
             app.showSettings = smokeSettings;
             app.showDataExport = smokeExport;
+            if (smokeColorLegend) app.add(Op::ColorCoding);
             if (desktopTest) {
                 auto requireWindow = [](bool ok, const char *message) {
                     if (!ok) throw std::runtime_error(message);
