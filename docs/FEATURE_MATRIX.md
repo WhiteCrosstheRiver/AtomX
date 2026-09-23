@@ -93,7 +93,7 @@
 | Slice | 部分 | 轴向半空间切片，保留坐标小于阈值的原子；任意平面与厚度待做 |
 | Smooth trajectory | 待实现 | 时间窗口及周期展开 |
 | Unwrap trajectories | 待实现 | 稳定 ID、跨帧周期跳跃处理 |
-| Wrap at periodic boundaries | 部分 | 正交晶胞、按文件 PBC 标记操作，原点固定为零 |
+| Wrap at periodic boundaries | 部分 | 正交/三斜晶胞、任意独立周期向量组合、部分周期 slab/wire 和非零原点；周期向量线性相关时明确报错 |
 | Assign shared visual element | 待实现 | 多管线共享外观 |
 | Calculate local entropy | 待实现 | 局部 RDF、积分与参数控制 |
 | Identify FCC planar faults | 待实现 | 局部结构、层错分类 |

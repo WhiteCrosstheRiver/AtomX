@@ -684,6 +684,66 @@ inline std::array<double, 3> fractionalPosition(const Dataset &d, const Atom &at
             inverse[1][0]*x + inverse[1][1]*y + inverse[1][2]*z,
             inverse[2][0]*x + inverse[2][1]*y + inverse[2][2]*z};
 }
+inline Atom wrapAtomInCell(const Dataset &data, Atom atom) {
+    std::array<int, 3> periodicAxes{};
+    int periodicCount = 0;
+    for (int axis = 0; axis < 3; ++axis)
+        if (data.pbc[axis]) periodicAxes[periodicCount++] = axis;
+    if (periodicCount == 0) return atom;
+
+    const std::array<double, 3> position{atom.x - data.origin.x,
+                                         atom.y - data.origin.y,
+                                         atom.z - data.origin.z};
+    double augmented[3][4]{};
+    double matrixScale = 0;
+    for (int row = 0; row < periodicCount; ++row) {
+        const int a = periodicAxes[row];
+        for (int col = 0; col < periodicCount; ++col) {
+            const int b = periodicAxes[col];
+            for (int xyz = 0; xyz < 3; ++xyz)
+                augmented[row][col] += data.cell[a * 3 + xyz] * data.cell[b * 3 + xyz];
+        }
+        for (int xyz = 0; xyz < 3; ++xyz)
+            augmented[row][periodicCount] += data.cell[a * 3 + xyz] * position[xyz];
+        matrixScale = std::max(matrixScale, augmented[row][row]);
+    }
+    if (!(matrixScale > 0) || !std::isfinite(matrixScale))
+        throw std::runtime_error("Periodic cell vectors must be nonzero and finite");
+    for (int column = 0; column < periodicCount; ++column) {
+        int pivot = column;
+        for (int row = column + 1; row < periodicCount; ++row)
+            if (std::abs(augmented[row][column]) > std::abs(augmented[pivot][column])) pivot = row;
+        if (std::abs(augmented[pivot][column]) <= matrixScale * 1e-12)
+            throw std::runtime_error("Periodic cell vectors are linearly dependent");
+        if (pivot != column)
+            for (int col = column; col <= periodicCount; ++col)
+                std::swap(augmented[pivot][col], augmented[column][col]);
+        for (int row = column + 1; row < periodicCount; ++row) {
+            const double factor = augmented[row][column] / augmented[column][column];
+            for (int col = column; col <= periodicCount; ++col)
+                augmented[row][col] -= factor * augmented[column][col];
+        }
+    }
+    std::array<double, 3> fractional{};
+    for (int row = periodicCount - 1; row >= 0; --row) {
+        double rhs = augmented[row][periodicCount];
+        for (int col = row + 1; col < periodicCount; ++col)
+            rhs -= augmented[row][col] * fractional[col];
+        fractional[row] = rhs / augmented[row][row];
+        if (!std::isfinite(fractional[row]))
+            throw std::runtime_error("Particle position cannot be wrapped in this periodic cell");
+    }
+    std::array<double, 3> wrapped{atom.x, atom.y, atom.z};
+    for (int component = 0; component < 3; ++component)
+        for (int i = 0; i < periodicCount; ++i) {
+            const int axis = periodicAxes[i];
+            wrapped[component] -= std::floor(fractional[i]) * data.cell[axis * 3 + component];
+        }
+    atom.x = float(wrapped[0]); atom.y = float(wrapped[1]); atom.z = float(wrapped[2]);
+    if (!std::isfinite(atom.x) || !std::isfinite(atom.y) || !std::isfinite(atom.z))
+        throw std::runtime_error("Wrapped particle position is non-finite");
+    return atom;
+}
 inline std::array<double,9> neighborSearchCell(const Dataset &d) {
     auto basis=d.cell;
     std::vector<std::array<double,3>> orthonormal;
@@ -1387,10 +1447,14 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 }
                 continue;
             }
-            if (m.op == Op::Wrap &&
-                (r.data.cell[1] != 0 || r.data.cell[2] != 0 || r.data.cell[3] != 0 ||
-                 r.data.cell[5] != 0 || r.data.cell[6] != 0 || r.data.cell[7] != 0))
-                throw std::runtime_error("Wrap currently requires an orthogonal cell");
+            if (m.op == Op::Wrap) {
+                for (size_t i = 0; i < r.data.atoms.size(); ++i) {
+                    if (cancel && (i & 65535) == 0 && *cancel)
+                        throw std::runtime_error("Cancelled");
+                    r.data.atoms[i] = wrapAtomInCell(r.data, r.data.atoms[i]);
+                }
+                continue;
+            }
             if (m.op == Op::ColorCoding) {
                 r.data.particleColors.clear();
                 r.data.scalarProperties["Color coding"] = particlePropertyValues(r.data, m.property);
@@ -1677,16 +1741,6 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     a.x *= m.value;
                     a.y *= m.value;
                     a.z *= m.value;
-                    break;
-                case Op::Wrap:
-                    for (int k = 0; k < 3; k++)
-                        if (r.data.pbc[k] && r.data.cell[k * 4] > 0)
-                            coordinate(a, k) -=
-                                float(std::floor((coordinate(a, k) - (k == 0   ? r.data.origin.x
-                                                                      : k == 1 ? r.data.origin.y
-                                                                               : r.data.origin.z)) /
-                                                 r.data.cell[k * 4]) *
-                                      r.data.cell[k * 4]);
                     break;
                 default:
                     break;

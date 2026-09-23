@@ -43,6 +43,14 @@ int main() {
         require(r.data.atoms.size() == 2, "slice");
         r = evaluate(d, {{Op::Wrap}});
         require(r.data.atoms.back().x == 1 && r.data.atoms.back().z == 9, "periodic wrapping");
+        Dataset triclinicWrap; triclinicWrap.species={"X"};
+        triclinicWrap.cell={2,0,0, 1,2,0, 0,0,2}; triclinicWrap.origin={1,2,3};
+        triclinicWrap.pbc={true,true,false}; triclinicWrap.atoms={{3.1f,1.4f,4,0}};
+        auto wrappedTriclinic=evaluate(triclinicWrap,{{Op::Wrap}});
+        require(std::abs(wrappedTriclinic.data.atoms[0].x-2.1f)<1e-5f &&
+                    std::abs(wrappedTriclinic.data.atoms[0].y-3.4f)<1e-5f &&
+                    wrappedTriclinic.data.atoms[0].z==4,
+                "triclinic partial-periodic wrapping preserves the non-periodic component and cell origin");
         r = evaluate(d, {{Op::Scale, true, 2}});
         require(r.data.cell[0] == 20 && r.data.atoms[1].x == 6, "scale");
         r = evaluate(d, {{Op::SelectRange, true, 2, 0, 0, 7}, {Op::EditType,true,0,2,0}});
