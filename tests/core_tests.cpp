@@ -489,6 +489,13 @@ int main() {
         require(evaluate(duplicateBondData,{pairCutoffBonds}).data.bonds==
                     std::vector<Bond>{{0,1,{0,0,0}}},
                 "Create bonds deduplicates reverse-oriented existing topology without changing its endpoints");
+        auto periodicSelfBondData=pairCutoffData;
+        periodicSelfBondData.cell={2,0,0,0,2,0,0,0,2};
+        periodicSelfBondData.pbc={true,false,false};
+        periodicSelfBondData.bonds={{0,0,{1,0,0}},{0,0,{-1,0,0}}};
+        require(evaluate(periodicSelfBondData,{pairCutoffBonds}).data.bonds==
+                    std::vector<Bond>{{0,0,{1,0,0}}},
+                "Create bonds keeps valid periodic self-image bonds and deduplicates their reverse orientation");
         auto invalidExistingBond=duplicateBondData;
         invalidExistingBond.bonds={{0,3,{0,0,0}}};
         bool invalidBondEndpointRejected=false;

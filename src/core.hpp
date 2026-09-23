@@ -1933,6 +1933,13 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                         if (bond.a > bond.b) {
                             std::swap(bond.a, bond.b);
                             for (auto &v : bond.image) v = -v;
+                        } else if (bond.a == bond.b) {
+                            for (const auto v : bond.image) {
+                                if (v == 0) continue;
+                                if (v < 0)
+                                    for (auto &component : bond.image) component = -component;
+                                break;
+                            }
                         }
                         return std::tuple{bond.a, bond.b, bond.image[0], bond.image[1], bond.image[2]};
                     };
