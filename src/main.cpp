@@ -262,6 +262,7 @@ struct App {
     std::future<Loaded> job;
     std::future<PipelineResult> pipelineJob;
     std::atomic<bool> pipelineCancel{false};
+    std::atomic<size_t> pipelineActiveNode{0};
     bool pipelineBusy = false;
     uint64_t pipelineGeneration = 0, pipelineJobGeneration = 0;
     std::vector<std::string> pipelineJobNodeIds;
@@ -452,13 +453,14 @@ struct App {
         Dataset input = source;
         pipelineJobGeneration = pipelineGeneration;
         pipelineCancel = false;
+        pipelineActiveNode = 0;
         pipelineBusy = true;
         error.clear();
         status = "Updating pipeline; previous evaluated result remains visible...";
         for (auto &node : mods) node.running = node.enabled;
         pipelineJob = std::async(std::launch::async,
             [this, input = std::move(input), executable = std::move(executable)]() mutable {
-                return evaluate(input, executable, &pipelineCancel);
+                return evaluate(std::move(input), executable, &pipelineCancel, &pipelineActiveNode);
             });
     }
     void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
@@ -2305,6 +2307,10 @@ struct App {
         ImGui::TextDisabled("%s  |  %.1f FPS  |  %s drawn", utf8(gpu.adapterName).c_str(),
                             io.Framerate, number(result.data.atoms.size()).c_str());
         ImGui::SameLine();
+        if (pipelineBusy) {
+            ImGui::TextDisabled("Pipeline stage %zu / %zu", pipelineActiveNode.load(), pipelineJobNodeIds.size());
+            ImGui::SameLine();
+        }
         if (staleResult) {
             ImGui::TextColored({1.f,.62f,.18f,1.f}, "STALE RESULT");
             ImGui::SameLine();

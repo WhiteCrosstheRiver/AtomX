@@ -20,6 +20,7 @@
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <iomanip>
 #include <cwctype>
@@ -1135,11 +1136,14 @@ struct ModifierExecutionError : std::runtime_error {
     ModifierExecutionError(size_t node, const std::string &message)
         : std::runtime_error(message), nodeIndex(node) {}
 };
-inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier> &mods,
-                               std::atomic<bool> *cancel = nullptr) {
-    PipelineResult r{source, std::vector<uint8_t>(source.atoms.size()),
-                     std::vector<uint8_t>(source.atoms.size(), 1)};
+inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods,
+                               std::atomic<bool> *cancel = nullptr,
+                               std::atomic<size_t> *activeNode = nullptr) {
+    const size_t particleCount=source.atoms.size();
+    PipelineResult r{std::move(source), std::vector<uint8_t>(particleCount),
+                     std::vector<uint8_t>(particleCount, 1)};
     for (size_t modifierIndex = 0; modifierIndex < mods.size(); ++modifierIndex) {
+        if (activeNode) *activeNode = modifierIndex + 1;
         const auto m = mods[modifierIndex];
         if (m.enabled) {
           try {
@@ -1596,6 +1600,7 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
         }
     }
     r.data.bounds();
+    if (activeNode) *activeNode = mods.size();
     return r;
 }
 inline std::pair<double, double> colorRangeAcrossFrames(

@@ -340,6 +340,17 @@ int main() {
         chain.species = {"X"};
         chain.atoms = {{0,0,0,0},{0.8f,0,0,0},{1.6f,0,0,0},{5,0,0,0}};
         chain.bounds();
+        Dataset pipelineWorkingSet=chain;
+        auto movedEvaluation=evaluate(std::move(pipelineWorkingSet),{{Op::Translate,true,2,0}});
+        require(movedEvaluation.data.atoms[0].x==2 && movedEvaluation.data.atoms[3].x==7 &&
+                    chain.atoms[0].x==0,
+                "owned pipeline working set moves into its result while preserving the source dataset");
+        std::atomic<size_t> activePipelineNode{0};
+        auto stagedEvaluation=evaluate(chain,{{Op::Translate,true,1,0},{Op::Scale,true,2}},
+                                       nullptr,&activePipelineNode);
+        require(activePipelineNode==2 && stagedEvaluation.data.atoms[0].x==2 &&
+                    stagedEvaluation.data.atoms[1].x==3.6f,
+                "pipeline reports the active node while preserving modifier order");
         auto expanded = evaluate(chain, {{Op::SelectIndex,true,0,0,0},
                                          {Op::ExpandSelection,true,0.9f,2,2}});
         require(expanded.selected[0] && expanded.selected[1] && expanded.selected[2] &&
