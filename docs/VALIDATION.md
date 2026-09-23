@@ -54,6 +54,7 @@
 - 全帧颜色范围测试覆盖两个帧的 XYZ 属性聚合，以及对上游 Translate 节点执行后再汇总范围；界面计算在后台运行、支持取消，并且每帧超过 200 万原子时明确拒绝，不使用预览采样冒充完整范围。
 - 当前全帧范围仅支持 XYZ 和 LAMMPS dump。手动改颜色属性或上游修改器后会将下游全帧范围标为需重算；更改轨迹帧时保留已算出的跨帧范围。
 - D3D11 渲染测试导出并检查 `build/shape-validation/color-legend.png`；Windows workspace smoke 测试截图 `build/ui-color-legend.png` 目视验证四视口图例与属性范围。活动视口 PNG 使用同一颜色渐变及反向/离散设置绘制图例。
+- D3D11 渲染回归使用一个远端离群原子对比全体取景与选区取景，验证 Fit selected 不会被全数据包围盒拉远。工作区 smoke 截图 `build/fit-selected-workspace.png` 检查四视口控件和禁用状态；没有执行鼠标框选粒子的完整端到端 GUI 测试。
 - CNA 输出统一为 `Structure Type`，提供全局结构计数和结果表；本地固定样本包含 FCC、BCC、三斜周期 HCP 与孤立 ICO 中心。
 - GPU 渲染回归检查键线像素、隐藏行为、颜色及线宽变化、逐粒子赋色和七种粒子形状。键按 image shift 跨周期展开。
 - `tests/export_workflow.cpp` 验证帧范围、步长、序列导出、应用管线、拒绝覆盖输入和失败清理；Data Tables 增加 CSV 导出。

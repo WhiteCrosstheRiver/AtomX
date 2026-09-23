@@ -375,6 +375,8 @@ struct App {
             gpu.upload(next.data, next.selected, next.colorSelected);
             syncAppearance(next.data.species);
             result = std::move(next);
+            for (auto &camera : cameras)
+                if (camera.fitSelected) refreshSelectionFit(camera,result.data,result.selected);
             for (size_t i = 0; i < modifierGraph.nodes.size(); ++i) {
                 auto &node = modifierGraph.nodes[i];
                 node.dirty = false;
@@ -403,6 +405,37 @@ struct App {
         } catch (const std::exception &e) {
             error = e.what();
         }
+    }
+    void refreshSelectionFit(Camera &camera, const Dataset &data,
+                             const std::vector<uint8_t> &selection, bool force = false) {
+        if (!force && !camera.fitSelected) return;
+        Vec3 lo{std::numeric_limits<float>::max(),std::numeric_limits<float>::max(),std::numeric_limits<float>::max()};
+        Vec3 hi{-lo.x,-lo.y,-lo.z};
+        bool found=false;
+        for (size_t i=0;i<data.atoms.size() && i<selection.size();++i) {
+            if (!selection[i]) continue;
+            found=true;
+            const auto &atom=data.atoms[i];
+            lo.x=std::min(lo.x,atom.x); lo.y=std::min(lo.y,atom.y); lo.z=std::min(lo.z,atom.z);
+            hi.x=std::max(hi.x,atom.x); hi.y=std::max(hi.y,atom.y); hi.z=std::max(hi.z,atom.z);
+        }
+        if (!found) { camera.fitSelected=false; return; }
+        const float pad=std::max(radius*1.4f,.18f);
+        camera.fitLo={lo.x-pad,lo.y-pad,lo.z-pad};
+        camera.fitHi={hi.x+pad,hi.y+pad,hi.z+pad};
+        camera.fitSelected=true;
+    }
+    void fitCamera(int index, bool selectionOnly) {
+        auto &camera=cameras[std::clamp(index,0,3)];
+        camera.zoom=1;
+        camera.panX=camera.panY=0;
+        if (selectionOnly) {
+            refreshSelectionFit(camera,result.data,result.selected,true);
+            if (!camera.fitSelected) {
+                status="Select one or more particles before Fit selected";
+                return;
+            }
+        } else camera.fitSelected=false;
     }
     void launchPipeline() {
         if (pipelineBusy) return;
@@ -816,8 +849,8 @@ struct App {
         if (ImGui::Button(quad ? "Single view##toolbar" : "Four views##toolbar"))
             quad = !quad;
         ImGui::SameLine();
-        if (ImGui::Button("Fit##toolbar"))
-            cameras[active] = Camera{.65f, .48f, 1, 0, 0, cameras[active].mode};
+        if (ImGui::Button("Fit all##toolbar"))
+            for (int i=0;i<4;++i) fitCamera(i,false);
         ImGui::SameLine();
         if (ImGui::Button("Modifiers##toolbar"))
             showCatalog = true;
@@ -907,9 +940,14 @@ struct App {
         ImGui::TextDisabled(i == active ? "ACTIVE" : "");
         ImGui::SameLine();
         if (ImGui::SmallButton("Fit")) {
-            cam.zoom = 1;
-            cam.panX = cam.panY = 0;
+            fitCamera(i,false);
         }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(selectedCount==0);
+        if (ImGui::SmallButton("Fit selected")) fitCamera(i,true);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered() && selectedCount==0)
+            ImGui::SetTooltip("Select particles in the data table first");
         ImGui::PopStyleColor(7);
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();

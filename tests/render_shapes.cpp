@@ -110,6 +110,17 @@ int main(int argc, char **argv) {
             renderer.context->Unmap(readback.Get(), 0);
             return hash;
         };
+        atomx::Dataset fitData;
+        fitData.species={"X"}; fitData.atoms={{0,0,0,0},{100,0,0,0}}; fitData.bounds();
+        renderer.upload(fitData,{});
+        Camera fitAll=cam; fitAll.mode=2;
+        renderer.draw(t,fitData,fitAll,.3f,0,0,0,0,0,1,false,false,false,bg);
+        const auto allParticleFit=imageHash(t);
+        Camera fitSelected=fitAll; fitSelected.fitSelected=true;
+        fitSelected.fitLo={-.6f,-.6f,-.6f}; fitSelected.fitHi={.6f,.6f,.6f};
+        renderer.draw(t,fitData,fitSelected,.3f,0,0,0,0,0,1,false,false,false,bg);
+        if (imageHash(t)==allParticleFit)
+            throw std::runtime_error("Fit selected camera bounds must frame the selected region independently of outliers");
         atomx::Dataset coded;
         coded.species = {"X"};
         coded.atoms = {{-.5f, 0, 0, 0}, {.5f, 0, 0, 0}};

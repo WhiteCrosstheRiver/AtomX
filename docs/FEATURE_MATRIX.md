@@ -11,7 +11,7 @@
 | Top / Bottom / Front / Back / Left / Right | 已实现 | 六个固定相机方向 |
 | Ortho / Perspective | 已实现 | 正交与透视，左键旋转、右键平移、滚轮缩放 |
 | 多视口与 Window layout | 部分 | 单视口 / 四视口，活动视口切换；没有任意拆分 |
-| Preview mode / Adjust view | 部分 | Fit、PNG 尺寸设置；没有输出安全框 |
+| Preview mode / Adjust view | 部分 | Fit all、Fit selected、PNG 尺寸设置；没有输出安全框 |
 | Constrain rotation | 待实现 | 当前俯仰角有限制，没有独立约束开关 |
 | Create camera | 待实现 | 尚无可保存的场景相机对象 |
 | Pipeline visibility | 部分 | 单数据源，粒子 / 晶胞可见性开关 |

@@ -19,6 +19,8 @@ inline void check(HRESULT hr, const char *message) {
 struct Camera {
     float yaw = .65f, pitch = .48f, zoom = 1.0f, panX = 0, panY = 0;
     int mode = 7;
+    bool fitSelected = false;
+    atomx::Vec3 fitLo{}, fitHi{};
 };
 struct Target {
     ComPtr<ID3D11Texture2D> texture, depth;
@@ -494,8 +496,9 @@ float4 bondPixel():SV_TARGET { return color; }
                              DirectX::XMMATRIX *viewOut = nullptr,
                              DirectX::XMMATRIX *projOut = nullptr) {
         using namespace DirectX;
-        auto lo = d.lo, hi = d.hi;
-        if (includeCell && (d.cell[0] != 0 || d.cell[4] != 0 || d.cell[8] != 0)) {
+        auto lo = cam.fitSelected ? cam.fitLo : d.lo;
+        auto hi = cam.fitSelected ? cam.fitHi : d.hi;
+        if (includeCell && !cam.fitSelected && (d.cell[0] != 0 || d.cell[4] != 0 || d.cell[8] != 0)) {
             for (int j = 0; j < 8; j++) {
                 float x = float((j & 1 ? d.cell[0] : 0) + (j & 2 ? d.cell[3] : 0) +
                                 (j & 4 ? d.cell[6] : 0));
