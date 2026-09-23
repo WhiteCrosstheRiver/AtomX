@@ -86,10 +86,21 @@ int main() {
                 "scaled reordered dump columns");
         p = dir / "sample.gro";
         d.origin = {};
+        d.atoms[0].x = 1;
         io::write(p, io::Format::GRO, d);
         r = io::read(p, io::index(p)[0]);
         require(std::abs(r.atoms[0].z - 3) < 1e-5 && r.cell == d.cell,
                 "GRO nm conversion and nine-value cell");
+        auto staticFrames = io::index(p);
+        require(staticFrames.size() == 1 && staticFrames[0].count == 0,
+                "static structure formats expose one frame with unknown indexed atom count");
+        auto staticRange = colorRangeAcrossFrames(staticFrames.size(), [&](size_t index) {
+            return io::read(p, staticFrames.at(index), 2000001);
+        }, {}, "Position.X");
+        auto minX = std::min(r.atoms[0].x, r.atoms[1].x);
+        auto maxX = std::max(r.atoms[0].x, r.atoms[1].x);
+        require(!r.sampled() && staticRange.first == minX && staticRange.second == maxX,
+                "all-frame range scans a complete static GRO structure");
         p = dir / "sample.cif";
         io::write(p, io::Format::CIF, d);
         r = io::read(p, io::index(p)[0]);

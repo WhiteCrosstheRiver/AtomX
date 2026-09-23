@@ -52,7 +52,7 @@
 - `build.ps1` 当前统一执行核心算法、POSCAR、结构格式、D3D11 形状/着色/键外观、数据导出工作流五组测试，全部通过。实测渲染适配器为 NVIDIA GeForce RTX 5090 D v2；Intel Arc 未验证。
 - 新增管线节点的数值回归覆盖 Coordination 属性与均值、Cluster 标签与簇大小表、FCC RDF 表、可配置直方图、Reduce mean、选区/全体赋色与复制/删除颜色映射、CSV 转义，以及采样数据拒绝和节点错误归属。
 - 全帧颜色范围测试覆盖两个帧的 XYZ 属性聚合，以及对上游 Translate 节点执行后再汇总范围；界面计算在后台运行、支持取消，并且每帧超过 200 万原子时明确拒绝，不使用预览采样冒充完整范围。
-- 当前全帧范围仅支持 XYZ 和 LAMMPS dump。手动改颜色属性或上游修改器后会将下游全帧范围标为需重算；更改轨迹帧时保留已算出的跨帧范围。
+- 全帧范围扫描所有已支持输入格式：XYZ / LAMMPS dump 遍历轨迹帧，静态结构格式作为单帧处理；每帧严格限制 200 万原子，未知粒子数的静态输入若触发采样或超限会报错，不以预览数据计算。手动改颜色属性或上游修改器后会将下游全帧范围标为需重算；更改轨迹帧时保留已算出的跨帧范围。
 - D3D11 渲染测试导出并检查 `build/shape-validation/color-legend.png`；Windows workspace smoke 测试截图 `build/ui-color-legend.png` 目视验证四视口图例与属性范围。活动视口 PNG 使用同一颜色渐变及反向/离散设置绘制图例。
 - D3D11 渲染回归使用一个远端离群原子对比全体取景与选区取景，验证 Fit selected 不会被全数据包围盒拉远。工作区 smoke 截图 `build/fit-selected-workspace.png` 检查四视口控件和禁用状态；没有执行鼠标框选粒子的完整端到端 GUI 测试。
 - 手动选区节点测试覆盖多粒子集合、与 Delete selected 的管线顺序组合及越界索引错误；`build/manual-selection-workspace.png` 检查工作区布局。普通鼠标单击 / Ctrl 单击的桌面自动交互尚未验证。

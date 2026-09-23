@@ -609,14 +609,11 @@ struct App {
             error = "Load a trajectory before computing an all-frame color range";
             return;
         }
-        if (io::detect(path) != io::Format::XYZ && io::detect(path) != io::Format::LammpsDump) {
-            error = "All-frame color ranges currently require an XYZ or LAMMPS dump trajectory";
-            return;
-        }
         const auto &target = mods[nodeIndex];
         if (target.op != Op::ColorCoding) return;
+        constexpr uint64_t maxExactAtomsPerFrame = 2000000;
         for (const auto &frame : frames) {
-            if (frame.count > 2000000) {
+            if (frame.count > maxExactAtomsPerFrame) {
                 error = "Exact all-frame color range is limited to 2 million atoms per frame";
                 return;
             }
@@ -637,12 +634,22 @@ struct App {
         error.clear();
         status = "Computing exact color range across trajectory frames...";
         colorRangeJob = std::async(std::launch::async,
-            [this, inputPath, frameSnapshot = std::move(frameSnapshot), upstream = std::move(upstream), property]() mutable {
+            [this, inputPath, frameSnapshot = std::move(frameSnapshot), upstream = std::move(upstream), property,
+             maxExactAtomsPerFrame]() mutable {
                 auto readFrame = [&](size_t index) {
                     if (colorRangeCancel) throw std::runtime_error("Cancelled");
                     const auto &frame = frameSnapshot.at(index);
-                    return io::read(inputPath, frame, std::max<uint64_t>(frame.count, 1),
-                                    nullptr, &colorRangeCancel);
+                    // Static formats have one indexed frame whose particle count is unknown.
+                    // Read just over the exact-work limit so the importer can report sampling
+                    // or an over-limit source without silently calculating from a preview.
+                    auto data = io::read(inputPath, frame, maxExactAtomsPerFrame + 1,
+                                         nullptr, &colorRangeCancel);
+                    if (data.sampled() || data.sourceCount > maxExactAtomsPerFrame ||
+                        data.atoms.size() > maxExactAtomsPerFrame)
+                        throw std::runtime_error(
+                            "Exact all-frame color range is limited to 2 million atoms per frame; "
+                            "the input was sampled or exceeds the limit");
+                    return data;
                 };
                 return colorRangeAcrossFrames(frameSnapshot.size(), readFrame, upstream, property,
                                               &colorRangeCancel, &colorRangeProgress);
