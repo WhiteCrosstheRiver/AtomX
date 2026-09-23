@@ -267,7 +267,7 @@ struct App {
     std::vector<std::string> pipelineJobNodeIds;
     std::atomic<float> progress{0};
     std::atomic<bool> cancel{false};
-    bool busy = false;
+    bool busy = false, staleResult = false, staleBeforeLoad = false;
     std::string status = "Ready", error;
     std::string readerName = "Generated crystal";
     double lastFrame = 0;
@@ -403,6 +403,7 @@ struct App {
                 cachedStats[k] = statistics(result.data, k);
             selectedCount = std::count(result.selected.begin(), result.selected.end(), 1);
             analysis.reset();
+            staleResult = false;
             revision++;
         } catch (const std::exception &e) {
             error = e.what();
@@ -471,6 +472,7 @@ struct App {
         }
         modifierGraph.markDirtyFrom(first);
         ++pipelineGeneration;
+        staleResult = true;
         if (pipelineBusy) {
             pipelineCancel = true;
             status = "Cancelling outdated pipeline evaluation...";
@@ -563,6 +565,8 @@ struct App {
     void load(const std::filesystem::path &p, int frame = 0) {
         if (busy || p.empty())
             return;
+        staleBeforeLoad = staleResult;
+        staleResult = true;
         indexing = p != path || frames.empty();
         if (indexing) pendingFrame = -1;
         busy = true;
@@ -745,6 +749,7 @@ struct App {
             } catch (const std::exception &e) {
                 error = e.what();
                 playing = false;
+                staleResult = staleBeforeLoad;
                 status = "Load stopped";
             }
         }
@@ -2300,6 +2305,10 @@ struct App {
         ImGui::TextDisabled("%s  |  %.1f FPS  |  %s drawn", utf8(gpu.adapterName).c_str(),
                             io.Framerate, number(result.data.atoms.size()).c_str());
         ImGui::SameLine();
+        if (staleResult) {
+            ImGui::TextColored({1.f,.62f,.18f,1.f}, "STALE RESULT");
+            ImGui::SameLine();
+        }
         ImGui::TextDisabled("  %s", status.c_str());
         ImGui::End();
         catalog();
