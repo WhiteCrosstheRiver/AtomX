@@ -2066,10 +2066,12 @@ struct App {
                 heading("AVAILABLE ADAPTERS");
                 for (auto a : gpu.adapters) {
                     if (a.duplicate) continue;
-                    ImGui::TextWrapped("[%u] %s", a.index, utf8(a.name).c_str());
-                    ImGui::TextDisabled("Dedicated memory: %.2f GiB", a.memory / 1073741824.);
+                    ImGui::TextWrapped("[%u] %s%s", a.index, utf8(a.name).c_str(),
+                                       a.active ? "  • IN USE" : "");
+                    ImGui::TextDisabled("Dedicated memory: %.2f GiB%s", a.memory / 1073741824.,
+                                        a.active ? "  |  Active renderer" : "");
                 }
-                ImGui::TextDisabled("Repeated DXGI aliases are hidden.");
+                ImGui::TextDisabled("DXGI aliases are grouped by adapter LUID; distinct devices keep their own index.");
                 ImGui::TextWrapped("Select at launch: AtomX.exe --adapter N");
                 heading("MEMORY BUDGET");
                 ImGui::InputInt("Preview atoms", &budget, 100000, 1000000);

@@ -36,7 +36,11 @@ struct Adapter {
     UINT index;
     LUID luid{};
     bool duplicate = false;
+    bool active = false;
 };
+inline bool sameAdapterIdentity(LUID a, LUID b) {
+    return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
+}
 struct ParticleStyle {
     std::array<float, 4> color{.76f, .57f, .38f, 1};
     // radius=0 and shape=-1 inherit the particle visual defaults.
@@ -229,10 +233,9 @@ class Renderer {
             if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
                 continue;
             bool duplicate = std::any_of(adapters.begin(), adapters.end(), [&](const Adapter &known) {
-                return known.luid.LowPart == d.AdapterLuid.LowPart &&
-                       known.luid.HighPart == d.AdapterLuid.HighPart;
+                return sameAdapterIdentity(known.luid, d.AdapterLuid);
             });
-            adapters.push_back({d.Description, d.DedicatedVideoMemory, i, d.AdapterLuid, duplicate});
+            adapters.push_back({d.Description, d.DedicatedVideoMemory, i, d.AdapterLuid, duplicate, false});
             if ((requested < 0 && (!chosen || d.DedicatedVideoMemory > best)) ||
                 requested == int(i)) {
                 chosen = a;
@@ -257,6 +260,14 @@ class Renderer {
                   chosen.Get(), chosen ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
                   nullptr, 0, levels, 1, D3D11_SDK_VERSION, &sd, &swap, &device, &level, &context),
               "Create GPU device (feature level 11.0 required)");
+        ComPtr<IDXGIDevice> dxgiDevice;
+        check(device.As(&dxgiDevice), "Query active DXGI device");
+        ComPtr<IDXGIAdapter> activeAdapter;
+        check(dxgiDevice->GetAdapter(&activeAdapter), "Get active DXGI adapter");
+        DXGI_ADAPTER_DESC activeDescription{};
+        check(activeAdapter->GetDesc(&activeDescription), "Get active adapter identity");
+        for (auto &adapter : adapters)
+            adapter.active = sameAdapterIdentity(adapter.luid, activeDescription.AdapterLuid);
         factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
         resize();
         std::array<float, colorGradientCount * atomx::color_maps::sampleCount * 3> gradientSamples{};

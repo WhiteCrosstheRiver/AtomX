@@ -9,6 +9,12 @@
 #pragma comment(lib, "user32.lib")
 int main(int argc, char **argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const LUID adapter = {0x1234, 7};
+    const LUID alias = {0x1234, 7};
+    const LUID sameModelDifferentDevice = {0x5678, 7};
+    if (!sameAdapterIdentity(adapter, alias) ||
+        sameAdapterIdentity(adapter, sameModelDifferentDevice))
+        throw std::runtime_error("DXGI aliases must deduplicate by LUID while distinct same-model GPUs remain separate");
     auto expectColor = [](std::array<float, 3> color, std::array<float, 3> expected,
                           const char *name) {
         for (int channel = 0; channel < 3; ++channel)
