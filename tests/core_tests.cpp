@@ -116,6 +116,16 @@ int main() {
                     clusterPipeline.data.scalarProperties.at("Cluster").size() == fcc.atoms.size() &&
                     clusterPipeline.data.tables.back().rows.size() == 1,
                 "cluster modifier publishes labels and a cluster-size table");
+        Dataset clusterFixture;
+        clusterFixture.species = {"X"};
+        clusterFixture.atoms = {{0,0,0,0},{.5f,0,0,0},{5,0,0,0},{5.5f,0,0,0},{10,0,0,0}};
+        const auto disconnectedClusters = evaluate(clusterFixture, {{Op::ClusterAnalysis,true,.75f}});
+        require(disconnectedClusters.data.globalAttributes.at("ClusterAnalysis.count") == 3 &&
+                    disconnectedClusters.data.scalarProperties.at("Cluster") ==
+                        std::vector<double>({1,1,2,2,3}) &&
+                    disconnectedClusters.data.tables.back().rows ==
+                        std::vector<std::vector<std::string>>({{"1","2"},{"2","2"},{"3","1"}}),
+                "cluster pipeline assigns deterministic connected-component labels and exact table sizes");
         auto rdfPipeline = evaluate(fcc, {{Op::RadialDistribution,true,.8f}});
         require(rdfPipeline.data.tables.back().rows.size() == 128 &&
                     rdfPipeline.data.tables.back().columns[2] == "g(r)",
@@ -590,7 +600,8 @@ int main() {
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice, wrap, "
                      "scale, scientific modifier tables, assign color, roundtrip, malformed input, "
                      "FCC/HCP/BCC/ICO CNA signatures and disordered reference, periodic topology, "
-                     "bonds/CNA/select/delete pipeline composition, sampled analysis rejection\n";
+                     "disconnected cluster labels, bonds/CNA/select/delete pipeline composition, "
+                     "sampled analysis rejection\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
