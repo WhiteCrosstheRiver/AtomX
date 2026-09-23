@@ -1482,7 +1482,7 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                      std::vector<uint8_t>(particleCount, 1)};
     for (size_t modifierIndex = 0; modifierIndex < mods.size(); ++modifierIndex) {
         if (activeNode) *activeNode = modifierIndex + 1;
-        const auto m = mods[modifierIndex];
+        const auto &m = mods[modifierIndex];
         if (m.enabled) {
           try {
             if (cancel && *cancel) throw std::runtime_error("Cancelled");
