@@ -58,7 +58,7 @@
 | Atomic strain | 待实现 | 参考构型、邻居映射、局部变形梯度与应变 |
 | Bond analysis | 部分 | Bond length / angle distribution 通过显式键拓扑生成可导出的直方图，正确解析周期镜像并检查空拓扑、非法端点；键级分析待实现 |
 | Cluster analysis | 部分 | 可组合管线节点：周期最小镜像 cutoff 连通分量、Cluster 粒子属性、簇尺寸表；不超过 200 万原子 |
-| Coordination analysis | 部分 | 可组合管线节点：Coordination 粒子属性和全局均值；正交与三斜周期最小镜像；不超过 200 万原子 |
+| Coordination analysis | 部分 | 可组合管线节点：Coordination 粒子属性和全局均值；正交与三斜周期最小镜像；不超过 200 万原子；超出精确空间索引比值范围的周期盒明确报错 |
 | Difference between frames | 待实现 | 持久 ID 匹配与属性差值 |
 | Dislocation analysis (DXA) | 待实现 | 晶格识别、Burgers 回路和位错网络 |
 | Displacement vectors | 待实现 | 参考帧匹配、周期展开与矢量显示 |

@@ -137,6 +137,19 @@ int main() {
                     disconnectedClusters.data.tables.back().rows ==
                         std::vector<std::vector<std::string>>({{"1","2"},{"2","2"},{"3","1"}}),
                 "cluster pipeline assigns deterministic connected-component labels and exact table sizes");
+        Dataset extremePeriodicIndex;
+        extremePeriodicIndex.species={"X"};
+        extremePeriodicIndex.atoms={{0,0,0,0},{.25f,0,0,0}};
+        extremePeriodicIndex.cell={1e300,0,0,0,1,0,0,0,1};
+        extremePeriodicIndex.pbc={true,false,false};
+        bool extremePeriodicIndexRejected=false;
+        try { (void)evaluate(extremePeriodicIndex,{{Op::CoordinationAnalysis,true,.5f}}); }
+        catch (const ModifierExecutionError &e) {
+            extremePeriodicIndexRejected=e.nodeIndex==0 &&
+                std::string(e.what()).find("spatial-index range")!=std::string::npos;
+        }
+        require(extremePeriodicIndexRejected,
+                "neighbor analysis rejects periodic cell ratios outside the exact spatial-index range");
         auto rdfPipeline = evaluate(fcc, {{Op::RadialDistribution,true,.8f}});
         require(rdfPipeline.data.tables.back().rows.size() == 128 &&
                     rdfPipeline.data.tables.back().columns[2] == "g(r)",

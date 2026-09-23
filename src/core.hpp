@@ -1028,9 +1028,14 @@ inline void forEachNeighborPair(const Dataset &d, double cutoff, Callback &&call
     for (int axis = 0; axis < 3; ++axis)
         if (d.pbc[axis]) {
             double length = d.cell[axis * 4];
+            if (!(length > 0) || !std::isfinite(length))
+                throw std::runtime_error("Periodic cell length must be finite and positive");
             if (!(length >= 2 * cutoff))
                 throw std::runtime_error("Periodic cell must be at least twice the cutoff");
-            periodicBins[axis] = std::max<int64_t>(1, int64_t(length / cutoff));
+            const double binCount = length / cutoff;
+            if (!std::isfinite(binCount) || binCount >= 1e15)
+                throw std::runtime_error("Periodic cell-to-cutoff ratio exceeds the exact spatial-index range");
+            periodicBins[axis] = std::max<int64_t>(1, int64_t(binCount));
             widths[axis] = length / periodicBins[axis];
         }
     auto binOf = [&](const Atom &atom) {
