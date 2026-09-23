@@ -17,6 +17,20 @@ int main() {
         require(ix.size() == 2, "frame index");
         auto d = readXYZ(p, ix[0]);
         require(d.atoms.size() == 4 && d.species.size() == 2, "reader");
+        {
+            auto input = d;
+            input.scalarProperties["Energy"] = {1, 2, 3, 4};
+            input.vectorProperties["Velocity"] = std::vector<Vec3>(4);
+            Modifier remove{Op::RemoveProperty}; remove.property = "Energy";
+            auto output = evaluate(input, {remove});
+            require(!output.data.scalarProperties.contains("Energy") &&
+                    output.data.vectorProperties.contains("Velocity") &&
+                    input.scalarProperties.contains("Energy"), "non-destructive property removal");
+            remove.property = "Velocity";
+            require(evaluate(input, {remove}).data.vectorProperties.empty(), "vector property removal");
+            remove.enabled = false;
+            require(evaluate(input, {remove}).data.vectorProperties.contains("Velocity"), "disabled removal");
+        }
         require(d.cell[8] == 10 && d.pbc[0] && !d.pbc[1], "metadata");
         auto sample = readXYZ(p, ix[0], 2);
         require(sample.atoms.size() == 2 && sample.stride == 2 && sample.sourceCount == 4,
@@ -114,21 +128,94 @@ int main() {
         wave.species = {"X"};
         wave.atoms = {{0,0,0,0},{1,0,0,0},{0,1,0,0},{0,0,1,0}};
         wave.sourceCount = wave.atoms.size(); wave.bounds();
+        wave.scalarProperties["Coordination"] = {1,2,3,4};
         std::vector<Modifier> waveMods{{Op::CreateBonds,true,1.01f},
-                                       {Op::CommonNeighborAnalysis,true,1.01f},
                                        {Op::ColorCoding,true,0,2,0,1,"Coordination"}};
         auto waveResult = evaluate(wave, waveMods);
         require(waveResult.data.bonds.size() == 3 &&
-                    waveResult.data.scalarProperties["Structure Type"].size() == 4 &&
                     waveResult.data.scalarProperties["Color coding"].size() == 4,
-                "Wave1 bond, CNA, and property color modifiers");
+                "bond and property color modifiers");
+        require(waveResult.data.scalarProperties["Color coding"] ==
+                    waveResult.data.scalarProperties["Coordination"],
+                "color coding publishes selected property values, not position coordinates");
+        auto fixedCna = evaluate(fcc, {{Op::CommonNeighborAnalysis,true,.8f}});
+        require(fixedCna.data.scalarProperties["CNA Structure"].size() == fcc.atoms.size() &&
+                    std::all_of(fixedCna.data.scalarProperties["CNA Structure"].begin(),
+                                fixedCna.data.scalarProperties["CNA Structure"].end(),
+                                [](double code) { return code == 1; }),
+                "fixed-cutoff common-neighbor analysis identifies periodic FCC from pair topology");
+        Dataset bcc;
+        bcc.species = {"X"}; bcc.cell = {4,0,0,0,4,0,0,0,4}; bcc.pbc = {true,true,true};
+        for (int z=0;z<4;++z) for (int y=0;y<4;++y) for (int x=0;x<4;++x) {
+            bcc.atoms.push_back({float(x),float(y),float(z),0});
+            bcc.atoms.push_back({x+.5f,y+.5f,z+.5f,0});
+        }
+        bcc.bounds();
+        auto bccCna = evaluate(bcc, {{Op::CommonNeighborAnalysis,true,1.01f}});
+        size_t bccCount = std::count(bccCna.data.scalarProperties["CNA Structure"].begin(),
+                                     bccCna.data.scalarProperties["CNA Structure"].end(),3.0);
+        require(bccCount == bcc.atoms.size(), "fixed-cutoff common-neighbor analysis identifies periodic BCC");
+        Dataset chain;
+        chain.species = {"X"};
+        chain.atoms = {{0,0,0,0},{0.8f,0,0,0},{1.6f,0,0,0},{5,0,0,0}};
+        chain.bounds();
+        auto expanded = evaluate(chain, {{Op::SelectIndex,true,0,0,0},
+                                         {Op::ExpandSelection,true,0.9f,2,2}});
+        require(expanded.selected[0] && expanded.selected[1] && expanded.selected[2] &&
+                    !expanded.selected[3], "selection expands through multiple neighbor shells");
+        auto overlapping = evaluate(chain, {{Op::SelectOverlapping,true,0.9f}});
+        require(overlapping.selected[0] && overlapping.selected[1] && overlapping.selected[2] &&
+                    !overlapping.selected[3], "overlap selection includes every atom in close pairs");
+        chain.scalarProperties["Energy"] = {-2, 0, 3, 8};
+        Modifier expression{Op::ExpressionSelect};
+        expression.property = "Energy >= 0 && (x < 2 || abs(Energy) > 7)";
+        auto expressionResult = evaluate(chain, {expression});
+        require(!expressionResult.selected[0] && expressionResult.selected[1] &&
+                    expressionResult.selected[2] && expressionResult.selected[3],
+                "safe expression selection reads scalar properties and boolean expressions");
+        Modifier compute{Op::ComputeProperty};
+        compute.property = "x*x + Energy";
+        compute.outputProperty = "Derived";
+        auto computed = evaluate(chain, {compute});
+        require(computed.data.scalarProperties["Derived"].size() == chain.atoms.size() &&
+                    std::abs(computed.data.scalarProperties["Derived"][2] - 5.56) < 1e-5,
+                "compute property publishes expression values for all particles");
+        expression.property = "Derived > 5";
+        auto derivedSelection = evaluate(computed.data, {expression});
+        require(derivedSelection.selected[2] && derivedSelection.selected[3] &&
+                    !derivedSelection.selected[0], "computed properties feed later pipeline expressions");
+        expression.property = "sqrt(Energy) > 0";
+        bool expressionDomainRejected = false;
+        try { evaluate(chain, {expression}); } catch (const std::runtime_error &) { expressionDomainRejected = true; }
+        require(expressionDomainRejected, "expression domain errors are reported");
+        expression.property = "system(1)";
+        bool unsafeExpressionRejected = false;
+        try { evaluate(chain, {expression}); } catch (const std::runtime_error &) { unsafeExpressionRejected = true; }
+        require(unsafeExpressionRejected, "expression rejects unapproved function calls");
+        chain.stride = 2;
+        bool sampledSelectionRejected = false;
+        try { evaluate(chain, {{Op::ExpandSelection,true,0.9f,2,1}}); }
+        catch (const std::runtime_error &) { sampledSelectionRejected = true; }
+        require(sampledSelectionRejected, "neighbor selection refuses sampled previews");
         PipelineGraph graph;
-        graph.insert({"source", "Source", "Data", true});
-        graph.insert({"color", "Color coding", "Coloring", true});
+        ModifierNode selectType{Op::SelectType, true, 0, 2, 1};
+        selectType.id = "select-type";
+        selectType.displayName = "Select type";
+        graph.insert(std::move(selectType));
+        ModifierNode deleteSelected{Op::Delete};
+        deleteSelected.id = "delete-selected";
+        graph.insert(std::move(deleteSelected));
+        graph.nodes[1].dirty = false;
         graph.move(1, 0);
-        require(graph.nodes[0].id == "color" && graph.nodes[1].dirty, "pipeline ordering and dirty state");
+        require(graph.nodes[0].id == "delete-selected" && graph.nodes[1].dirty,
+                "pipeline ordering and dependent dirty state");
+        graph.move(0, 1);
+        auto graphResult = evaluate(d, graph);
+        require(graphResult.data.atoms.size() == 2 && graphResult.selected.size() == 2,
+                "pipeline graph executes its owned modifier nodes in order");
         graph.erase(0);
-        require(graph.nodes.size() == 1 && graph.nodes[0].id == "source", "pipeline erase");
+        require(graph.nodes.size() == 1 && graph.nodes[0].id == "delete-selected",
+                "pipeline erase");
         auto poscar = p.parent_path() / "atomx-test.POSCAR";
         writePOSCAR(poscar, fcc);
         auto pos = readPOSCAR(poscar);

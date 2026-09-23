@@ -200,14 +200,16 @@ struct App {
     Renderer &gpu;
     Dataset source = crystal(24);
     PipelineResult result;
-    std::vector<Modifier> mods;
-    std::vector<std::vector<Modifier>> undo, redo;
+    PipelineGraph modifierGraph;
+    std::vector<ModifierNode> &mods = modifierGraph.nodes;
+    std::vector<std::vector<ModifierNode>> undo, redo;
+    uint64_t nextModifierId = 1;
     std::filesystem::path path;
     std::vector<Frame> frames;
     int current = 0, budget = 2000000;
     bool playing = false, quad = true, particles = true, cell = true, showTable = false,
          showCatalog = false;
-    float radius = .23f, bg[4] = {0, 0, 0, 1}, fps = 12;
+    float radius = .32f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
     int appearanceType = 0;
     std::vector<std::string> appearanceNames;
@@ -246,7 +248,8 @@ struct App {
     float cellWidth = 1.25f, cellGlow = 0.35f;
     bool cellDashed = false, cellLabels = false;
     int cellDimension = 1;
-    bool colorCoding = false, colorDiscrete = false, colorSelectedOnly = false, colorSymmetric = false, colorReverse = false;
+    bool colorCoding = false, colorDiscrete = false, colorSelectedOnly = false, colorAutoRange = false,
+         colorSymmetricRange = false, colorReverse = false;
     int colorAxis = 0, colorGradient = 0;
     float colorMin = 0, colorMax = 1;
     int active = 3, propertyAxis = 2, tab = 0;
@@ -309,10 +312,50 @@ struct App {
     }
     void update() {
         try {
-            auto next = evaluate(source, mods);
+            modifierGraph.markDirtyFrom(0);
+            auto next = evaluate(source, modifierGraph);
+            colorCoding = std::any_of(mods.begin(), mods.end(), [](const Modifier &m) {
+                return m.enabled && (m.op == Op::ColorCoding || m.op == Op::ColorType);
+            });
+            if (colorCoding && colorAutoRange) {
+                double lo = std::numeric_limits<double>::infinity();
+                double hi = -std::numeric_limits<double>::infinity();
+                if (auto it = next.data.scalarProperties.find("Color coding");
+                    it != next.data.scalarProperties.end() && it->second.size() == next.data.atoms.size()) {
+                    for (double value : it->second)
+                        if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
+                } else {
+                    for (const auto &a : next.data.atoms) {
+                        double value = coordinate(a, colorAxis);
+                        lo = std::min(lo, value); hi = std::max(hi, value);
+                    }
+                }
+                if (std::isfinite(lo) && std::isfinite(hi)) {
+                    if (lo == hi) { lo -= .5; hi += .5; }
+                    if (colorSymmetricRange) {
+                        double extent = std::max(std::abs(lo), std::abs(hi));
+                        lo = -extent; hi = extent;
+                    }
+                    colorMin = float(lo); colorMax = float(hi);
+                }
+            }
             gpu.upload(next.data, next.selected);
             syncAppearance(next.data.species);
             result = std::move(next);
+            for (size_t i = 0; i < modifierGraph.nodes.size(); ++i) {
+                auto &node = modifierGraph.nodes[i];
+                node.dirty = false;
+                node.running = false;
+                node.error.clear();
+                node.outputs.clear();
+                if (!node.enabled) continue;
+                if (node.op == Op::CreateBonds)
+                    node.outputs.push_back({DataObject::Kind::Bonds, "Bonds", true, i});
+                else if (node.op == Op::ColorCoding || node.op == Op::ColorType)
+                    node.outputs.push_back({DataObject::Kind::Particles, "Particle colors", true, i});
+                else if (node.op == Op::CommonNeighborAnalysis)
+                    node.outputs.push_back({DataObject::Kind::Particles, "CNA structure types", true, i});
+            }
             for (int k = 0; k < 3; k++)
                 cachedStats[k] = statistics(result.data, k);
             selectedCount = std::count(result.selected.begin(), result.selected.end(), 1);
@@ -320,7 +363,23 @@ struct App {
             revision++;
         } catch (const std::exception &e) {
             error = e.what();
+            if (modifierGraph.selected < modifierGraph.nodes.size())
+                modifierGraph.nodes[modifierGraph.selected].error = error;
         }
+    }
+    ModifierNode makeNode(const Modifier &modifier) {
+        ModifierNode node(modifier);
+        node.id = std::to_string(nextModifierId++);
+        node.displayName = opName(modifier.op);
+        node.category = modifier.op == Op::ColorCoding || modifier.op == Op::ColorType
+                            ? "Coloring"
+                            : modifier.op == Op::SelectType || modifier.op == Op::SelectIndex ||
+                                      modifier.op == Op::SelectRange || modifier.op == Op::Invert ||
+                                      modifier.op == Op::Clear || modifier.op == Op::ExpandSelection ||
+                                      modifier.op == Op::SelectOverlapping || modifier.op == Op::ExpressionSelect
+                                  ? "Selection"
+                                  : "Modification";
+        return node;
     }
     void checkpoint() {
         if (undo.size() >= 128)
@@ -339,12 +398,35 @@ struct App {
         if (op == Op::SelectRange) {
             m.value = result.data.lo.z; m.upper = result.data.hi.z;
         }
-        if (op == Op::ColorType) { colorCoding = true; colorAxis = 0; colorMin = result.data.lo.x; colorMax = result.data.hi.x; }
-        if (op == Op::ColorCoding) { colorCoding = true; colorMin = result.data.lo.x; colorMax = result.data.hi.x; }
-        if (op == Op::CommonNeighborAnalysis || op == Op::CreateBonds) m.value = cutoff;
-        mods.push_back(m);
+        if (op == Op::ColorType) { colorCoding = true; colorAxis = 0; colorAutoRange = true; }
+        if (op == Op::ColorCoding) { colorCoding = true; colorAutoRange = true; }
+        if (op == Op::CommonNeighborAnalysis || op == Op::CreateBonds ||
+            op == Op::ExpandSelection || op == Op::SelectOverlapping) m.value = cutoff;
+        if (op == Op::ExpandSelection) m.type = 1;
+        if (op == Op::ExpressionSelect) m.property = "Position.X > 0";
+        if (op == Op::ComputeProperty) m.property = "x*x + y*y + z*z";
+        modifierGraph.insert(makeNode(m));
         update();
         status = std::string("Added ") + opName(op);
+    }
+    bool colorPropertyCombo(const char *label, std::string &property) {
+        std::vector<std::string> choices{"Position.X", "Position.Y", "Position.Z"};
+        for (const auto &[name, values] : result.data.scalarProperties)
+            if (name != "Color coding" && values.size() == result.data.atoms.size())
+                choices.push_back(name);
+        bool changed = false;
+        if (ImGui::BeginCombo(label, property.c_str())) {
+            for (const auto &name : choices) {
+                bool selected = property == name;
+                if (ImGui::Selectable(name.c_str(), selected)) {
+                    property = name;
+                    changed = true;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        return changed;
     }
     void history(bool forward) {
         auto &from = forward ? redo : undo;
@@ -354,6 +436,7 @@ struct App {
         to.push_back(mods);
         mods = std::move(from.back());
         from.pop_back();
+        modifierGraph.selected = mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1);
         update();
     }
     void load(const std::filesystem::path &p, int frame = 0) {
@@ -427,6 +510,7 @@ struct App {
                     exportOptions.scalarProperties.clear();
                     exportOptions.vectorProperties.clear();
                     mods.clear();
+                    modifierGraph.selected = 0;
                     undo.clear();
                     redo.clear();
                     for (auto &c : cameras)
@@ -596,6 +680,7 @@ struct App {
         if (ImGui::Button("Reset pipeline", {-1, U(30)})) {
             checkpoint();
             mods.clear();
+            modifierGraph.selected = 0;
             update();
         }
         if (ImGui::Button("Load demo crystal", {-1, U(30)}) && !busy) {
@@ -604,6 +689,7 @@ struct App {
             frames.clear();
             current = 0;
             mods.clear();
+            modifierGraph.selected = 0;
             undo.clear();
             redo.clear();
             update();
@@ -752,7 +838,7 @@ struct App {
         int edit = selected;
         if (ImGui::InputInt("##frame number", &edit, 0, 0)) seekFrame(edit);
         ImGui::EndDisabled();
-        ImGui::SameLine(); ImGui::Text("/ %d", last);
+        ImGui::SameLine(); ImGui::Text("/ %zu", std::max<size_t>(frames.size(), 1));
         ImGui::SameLine(); ImGui::TextDisabled("  %s", playing ? "Playing" : "Paused");
         ImGui::SameLine();
         auto toolButton = [&](const char* label, int tool, const char* tip) {
@@ -873,7 +959,7 @@ struct App {
                                                       result.selected[j] != 0,
                                                       ImGuiSelectableFlags_SpanAllColumns)) {
                                     checkpoint();
-                                    mods.push_back({Op::SelectIndex, true, 0, 2, j});
+                                    modifierGraph.insert(makeNode(Modifier{Op::SelectIndex, true, 0, 2, j}));
                                     update();
                                 }
                                 ImGui::TableNextColumn();
@@ -934,10 +1020,14 @@ struct App {
                         update();
                     }
                     ImGui::SameLine();
-                    ImGui::TextUnformatted(opName(m.op));
+                    ImGui::TextUnformatted(m.displayName.empty() ? opName(m.op) : m.displayName.c_str());
+                    for (const auto &output : m.outputs)
+                        ImGui::TextDisabled("  -> %s", output.name.c_str());
+                    if (!m.error.empty())
+                        ImGui::TextColored({1, .32f, .28f, 1}, "%s", m.error.c_str());
                     if (ImGui::SmallButton("Remove")) {
                         checkpoint();
-                        mods.erase(mods.begin() + i);
+                        modifierGraph.erase(size_t(i));
                         update();
                         ImGui::PopID();
                         break;
@@ -945,7 +1035,7 @@ struct App {
                     ImGui::SameLine();
                     if (ImGui::SmallButton("Earlier") && i > 0) {
                         checkpoint();
-                        std::swap(mods[i], mods[i - 1]);
+                        modifierGraph.move(size_t(i), size_t(i - 1));
                         update();
                     }
                     if (m.op == Op::Slice || m.op == Op::Translate || m.op == Op::Scale || m.op == Op::Rotate || m.op == Op::SelectRange) {
@@ -998,25 +1088,74 @@ struct App {
                     if (m.op == Op::ColorType) {
                         ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
                         ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0");
-                        if (ImGui::Checkbox("Automatic range", &colorSymmetric)) {
-                            colorMin = colorAxis==0?result.data.lo.x:colorAxis==1?result.data.lo.y:result.data.lo.z;
-                            colorMax = colorAxis==0?result.data.hi.x:colorAxis==1?result.data.hi.y:result.data.hi.z;
-                        }
-                        if (!colorSymmetric) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
+                        if (ImGui::Checkbox("Automatic range", &colorAutoRange) && colorAutoRange) update();
+                        if (ImGui::Checkbox("Symmetric range", &colorSymmetricRange) && colorAutoRange) update();
+                        if (!colorAutoRange) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
                         ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse); ImGui::Checkbox("Color only selected", &colorSelectedOnly);
                     }
+                    if (m.op == Op::RemoveProperty) {
+                        char property[256]{};
+                        snprintf(property, sizeof(property), "%s", m.property.c_str());
+                        if (ImGui::InputText("Property name", property, sizeof(property), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                            checkpoint(); m.property = property; update();
+                        }
+                        ImGui::TextWrapped("Enter the exact scalar or vector property name and press Enter. Position and particle types are retained.");
+                    }
                     if (m.op == Op::ColorCoding) {
-                        int p = m.property == "Position.Y" ? 1 : m.property == "Position.Z" ? 2 : m.property == "Coordination" ? 3 : m.property == "Structure Type" ? 4 : 0;
-                        if (ImGui::Combo("Input property", &p, "Position.X\0Position.Y\0Position.Z\0Coordination\0Structure Type\0")) { checkpoint(); m.property = p==1?"Position.Y":p==2?"Position.Z":p==3?"Coordination":p==4?"Structure Type":"Position.X"; update(); }
+                        if (colorPropertyCombo("Input property", m.property)) { checkpoint(); colorAutoRange = true; update(); }
                         ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0");
-                        ImGui::Checkbox("Automatic range", &colorSymmetric);
-                        if (!colorSymmetric) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
+                        if (ImGui::Checkbox("Automatic range", &colorAutoRange) && colorAutoRange) update();
+                        if (ImGui::Checkbox("Symmetric range", &colorSymmetricRange) && colorAutoRange) update();
+                        if (!colorAutoRange) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
+                        ImGui::Checkbox("Color only selected elements", &colorSelectedOnly);
                         ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse);
                     }
                     if (m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) {
                         float c = m.value;
                         if (ImGui::DragFloat("Cutoff", &c, .01f, .001f, 100.f)) { checkpoint(); m.value = c; update(); }
-                        ImGui::TextDisabled(m.op == Op::CreateBonds ? "%zu bonds" : "FCC/HCP/BCC/ICO/Other", result.data.bonds.size());
+                        if (m.op == Op::CreateBonds) ImGui::TextDisabled("%zu bonds", result.data.bonds.size());
+                        else {
+                            const auto &codes = result.data.scalarProperties["CNA Structure"];
+                            size_t counts[5]{};
+                            for (double value : codes) if (value >= 0 && value < 5) ++counts[size_t(value)];
+                            ImGui::TextDisabled("FCC %zu | HCP %zu | BCC %zu | ICO %zu | Other %zu",
+                                                counts[1], counts[2], counts[3], counts[4], counts[0]);
+                        }
+                    }
+                    if (m.op == Op::ExpandSelection || m.op == Op::SelectOverlapping) {
+                        float c = m.value;
+                        if (ImGui::DragFloat("Cutoff", &c, .01f, .001f, 100.f)) { checkpoint(); m.value = c; update(); }
+                        size_t selectedParticles = std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
+                        if (m.op == Op::ExpandSelection) {
+                            int steps = m.type;
+                            if (ImGui::InputInt("Expansion steps", &steps)) { checkpoint(); m.type = std::clamp(steps, 1, 64); update(); }
+                            ImGui::TextDisabled("Selected: %zu / %zu", selectedParticles, result.data.atoms.size());
+                        } else ImGui::TextDisabled("Overlapping particles: %zu", selectedParticles);
+                    }
+                    if (m.op == Op::ExpressionSelect) {
+                        char expression[512]{};
+                        snprintf(expression, sizeof(expression), "%s", m.property.c_str());
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::InputText("Expression", expression, sizeof(expression), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                            checkpoint(); m.property = expression; update();
+                        }
+                        ImGui::TextWrapped("Use x/y/z, Position.X/Y/Z, type, scalar properties, arithmetic, comparisons, &&, ||, !, abs(), sqrt(), isfinite(). Press Enter to evaluate.");
+                        size_t selectedParticles = std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
+                        ImGui::TextDisabled("Selected: %zu / %zu", selectedParticles, result.data.atoms.size());
+                    }
+                    if (m.op == Op::ComputeProperty) {
+                        char expression[512]{}, outputName[128]{};
+                        snprintf(expression, sizeof(expression), "%s", m.property.c_str());
+                        snprintf(outputName, sizeof(outputName), "%s", m.outputProperty.c_str());
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::InputText("Output property", outputName, sizeof(outputName), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                            checkpoint(); m.outputProperty = outputName; update();
+                        }
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::InputText("Expression", expression, sizeof(expression), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                            checkpoint(); m.property = expression; update();
+                        }
+                        ImGui::TextWrapped("Publishes one scalar value per particle. Use the safe expression language; press Enter to evaluate.");
                     }
                     ImGui::Separator();
                     ImGui::PopID();
@@ -1111,10 +1250,20 @@ struct App {
                 }
                 if (colorCoding) {
                     heading("COLOR CODING");
-                    ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
+                    auto activeColor = std::find_if(mods.rbegin(), mods.rend(), [](const Modifier &m) {
+                        return m.enabled && (m.op == Op::ColorCoding || m.op == Op::ColorType);
+                    });
+                    if (activeColor != mods.rend() && activeColor->op == Op::ColorCoding) {
+                        if (colorPropertyCombo("Input property", activeColor->property)) {
+                            checkpoint(); colorAutoRange = true; update();
+                        }
+                    } else {
+                        ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
+                    }
                     ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0");
-                    if (ImGui::Checkbox("Automatic range", &colorSymmetric)) { colorMin = colorAxis==0?result.data.lo.x:colorAxis==1?result.data.lo.y:result.data.lo.z; colorMax = colorAxis==0?result.data.hi.x:colorAxis==1?result.data.hi.y:result.data.hi.z; }
-                    if (!colorSymmetric) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
+                    if (ImGui::Checkbox("Automatic range", &colorAutoRange) && colorAutoRange) update();
+                    if (ImGui::Checkbox("Symmetric range", &colorSymmetricRange) && colorAutoRange) update();
+                    if (!colorAutoRange) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
                     ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse);
                     ImGui::Checkbox("Color only selected elements", &colorSelectedOnly);
                 }
@@ -1242,9 +1391,11 @@ struct App {
             if (ImGui::BeginTabItem("System")) {
                 heading("AVAILABLE ADAPTERS");
                 for (auto a : gpu.adapters) {
+                    if (a.duplicate) continue;
                     ImGui::TextWrapped("[%u] %s", a.index, utf8(a.name).c_str());
                     ImGui::TextDisabled("Dedicated memory: %.2f GiB", a.memory / 1073741824.);
                 }
+                ImGui::TextDisabled("Repeated DXGI aliases are hidden.");
                 ImGui::TextWrapped("Select at launch: AtomX.exe --adapter N");
                 heading("MEMORY BUDGET");
                 ImGui::InputInt("Preview atoms", &budget, 100000, 1000000);
@@ -1309,7 +1460,7 @@ struct App {
         exportJob = std::async(std::launch::async, [this, destination, fmt, range, sequence, first,
                                                     last, step, snapshot = result.data,
                                                     sourcePath = path, frameIndex = frames,
-                                                    pipeline = mods, options = exportOptions,
+                                                    pipeline = modifierGraph, options = exportOptions,
                                                     atomBudget = budget,
                                                     allowPreview = exportPreview]() {
             std::vector<std::pair<std::filesystem::path, std::filesystem::path>> staged;
@@ -1535,7 +1686,7 @@ struct App {
             showCatalog = false;
         }
         auto display = ImGui::GetIO().DisplaySize;
-        float width = std::min(U(1080), display.x - U(24));
+        float width = std::min(U(1360), display.x - U(24));
         ImGui::SetNextWindowPos({std::max(U(12),catalogAnchor.x-width),catalogAnchor.y}, ImGuiCond_Appearing);
         ImGui::SetNextWindowSize({width,std::min(U(790),display.y-catalogAnchor.y-U(36))}, ImGuiCond_Appearing);
         if (ImGui::BeginPopup("Add modification", ImGuiWindowFlags_NoSavedSettings)) {
@@ -1559,17 +1710,11 @@ struct App {
             };
             auto planned = [&](const char *name) {
                 if (!matches(name)) return;
-                if (ImGui::Selectable(name)) {
-                    // Keep every documented OVITO entry actionable while its
-                    // algorithm is being filled in: selecting it takes the
-                    // user to the pipeline editor and records the exact
-                    // requested feature instead of silently doing nothing.
-                    status = std::string(name) + " selected — parameter editor is being prepared";
-                    selectPipeline = true;
-                    ImGui::CloseCurrentPopup();
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Select to open the AtomX pipeline editor. No Pro restriction.");
+                ImGui::BeginDisabled();
+                ImGui::Selectable(name);
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Not implemented. This entry does not execute an algorithm.");
             };
             auto beginCard = [&](const char *title) {
                 ImGui::BeginChild(title,{0,0},ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
@@ -1577,51 +1722,67 @@ struct App {
                 heading(title);
             };
             auto endCard = [&] { ImGui::EndChild(); };
-            if (ImGui::BeginTable("Modifier categories",3,ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
+            if (ImGui::BeginTable("Modifier categories",4,ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
                 ImGui::TableNextColumn();
                 beginCard("Analysis");
-                analysisItem("Cluster analysis"); analysisItem("Coordination analysis"); analysisItem("Radial distribution function (RDF)"); analysisItem("Neighbor distance distribution");
-                if (matches("Histogram") && ImGui::Selectable("Histogram")) { selectPipeline=true; status="Position histogram is shown below the pipeline"; ImGui::CloseCurrentPopup(); }
-                for (auto name : {"Atomic strain", "Bond angle distribution", "Bond length distribution", "Bond order", "Difference between frames", "Displacement vectors", "Elastic strain calculation", "Find rings", "Grain segmentation", "Reduce property", "Scatter plot", "Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
+                for (auto name : {"Atomic strain", "Bader charge integration", "Bond angle distribution", "Bond length distribution", "Bond order"}) planned(name);
+                analysisItem("Cluster analysis"); planned("Difference between frames");
                 analysisItem("Dislocation analysis (DXA)");
+                for (auto name : {"Displacement vectors", "Elastic strain calculation", "Find rings", "Grain segmentation"}) planned(name);
+                if (matches("Histogram") && ImGui::Selectable("Histogram")) { selectPipeline=true; status="Position histogram is shown below the pipeline"; ImGui::CloseCurrentPopup(); }
+                analysisItem("Radial distribution function (RDF)");
+                for (auto name : {"Reduce property", "Scatter plot", "Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
+                analysisItem("Coordination analysis"); analysisItem("Neighbor distance distribution");
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Modification");
+                for (auto name : {"Affine transformation", "Combine datasets"}) planned(name);
+                operation(Op::ComputeProperty,"Evaluate a scalar expression for every particle and publish the named property.");
+                operation(Op::Delete,"Remove selected particles.");
+                planned("Edit simulation cell"); operation(Op::EditType,"Edit particle type assignments.");
+                for (auto name : {"Freeze property", "Load trajectory", "Python script (deferred)"}) planned(name);
+                operation(Op::RemoveProperty,"Remove a scalar or vector particle property by name.");
+                operation(Op::Replicate,"Repeat the system along a cell vector.");
+                operation(Op::Slice,"Keep particles below the chosen coordinate plane.");
+                for (auto name : {"Smooth trajectory", "Unwrap trajectories"}) planned(name);
+                operation(Op::Wrap,"Wrap positions into an orthogonal periodic cell.");
                 operation(Op::Translate,"Translate particle positions along an axis.");
                 operation(Op::Scale,"Scale positions and simulation cell uniformly.");
                 operation(Op::Rotate,"Rotate positions and cell vectors around an axis (degrees).");
-                operation(Op::Replicate,"Repeat the system along a cell vector.");
-                operation(Op::EditType,"Assign a particle type to selected atoms.");
-                operation(Op::Delete,"Remove selected particles.");
-                operation(Op::Slice,"Keep particles below the chosen coordinate plane.");
-                operation(Op::Wrap,"Wrap positions into an orthogonal periodic cell.");
-                for (auto name : {"Affine transformation", "Combine datasets", "Compute property", "Edit simulation cell", "Freeze property", "Load trajectory", "Python script", "Smooth trajectory", "Unwrap trajectories"}) planned(name);
-                endCard();
-                beginCard("Visualization");
-                operation(Op::CreateBonds,"Create neighbor bonds using the cutoff.");
-                for (auto name : {"Construct surface mesh", "Coordination polyhedra", "Create isosurface", "Generate trajectory lines"}) planned(name);
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Structure identification");
-                operation(Op::CommonNeighborAnalysis,"Classify local structures by neighbor coordination.");
-                for (auto name : {"Ackland-Jones analysis", "Centrosymmetry parameter", "Chill+", "Identify diamond structure", "Polyhedral template matching", "VoroTop analysis"}) planned(name);
+                for (auto name : {"Ackland-Jones analysis", "Centrosymmetry parameter", "Chill+"}) planned(name);
+                operation(Op::CommonNeighborAnalysis,"Fixed-cutoff Honeycutt–Andersen pair signatures; FCC and BCC are verified against periodic reference crystals. Unsupported or ambiguous motifs remain Other.");
+                for (auto name : {"Identify diamond structure", "Polyhedral template matching", "VoroTop analysis"}) planned(name);
                 endCard();
+                beginCard("Visualization");
+                for (auto name : {"Add text labels", "Construct surface mesh", "Coordination polyhedra"}) planned(name);
+                operation(Op::CreateBonds,"Create neighbor bond pairs. Bond rendering is still in development.");
+                for (auto name : {"Create isosurface", "Generate trajectory lines"}) planned(name);
+                endCard();
+                beginCard("Modifier templates");
+                planned("Manage templates...");
+                endCard();
+                ImGui::TableNextColumn();
                 beginCard("Selection");
                 operation(Op::Clear,"Clear the current selection.");
+                operation(Op::ExpandSelection,"Expand the current selection through cutoff-neighbor shells.");
+                operation(Op::ExpressionSelect,"Select particles using the safe native scalar expression language.");
+                operation(Op::SelectOverlapping,"Select every particle that belongs to at least one pair closer than the cutoff.");
                 operation(Op::Invert,"Invert selected and unselected particles.");
                 operation(Op::SelectIndex,"Select one atom by its current pipeline index.");
                 operation(Op::SelectType,"Select particles of a specified type.");
                 operation(Op::SelectRange,"Select particles in a coordinate interval.");
-                for (auto name : {"Expand selection", "Expression selection", "Select overlapping particles"}) planned(name);
                 endCard();
-                beginCard("Coloring");
-                operation(Op::ColorType,"Use the particle-type color palette.");
-                operation(Op::ColorCoding,"Map a particle property to a color gradient.");
-                for (auto name : {"Ambient occlusion", "Assign color"}) planned(name);
-                endCard();
-                ImGui::TableNextColumn();
                 beginCard("Python modifiers");
                 for (auto name : {"Assign shared visual element", "Calculate local entropy", "Identify fcc planar faults", "Render LAMMPS regions", "Shrink-wrap simulation box"}) planned(name);
+                endCard();
+                beginCard("Coloring");
+                planned("Ambient occlusion");
+                planned("Assign color");
+                operation(Op::ColorType,"Use the particle-type color palette.");
+                operation(Op::ColorCoding,"Map a particle property to a color gradient.");
                 endCard();
                 ImGui::EndTable();
             }

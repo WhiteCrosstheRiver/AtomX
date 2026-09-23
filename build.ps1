@@ -16,6 +16,19 @@ if errorlevel 1 exit /b 1
 cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\core_tests.cpp /Fo:build\ /Fe:build\core_tests.exe
 if errorlevel 1 exit /b 1
 build\core_tests.exe
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\poscar_tests.cpp /Fo:build\ /Fe:build\poscar_tests.exe
+if errorlevel 1 exit /b 1
+build\poscar_tests.exe
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\structure_io_tests.cpp /Fo:build\ /Fe:build\structure_io_tests.exe
+if errorlevel 1 exit /b 1
+build\structure_io_tests.exe
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\render_shapes.cpp /Fo:build\ /Fe:build\render_shapes.exe
+if errorlevel 1 exit /b 1
+build\render_shapes.exe
+if errorlevel 1 exit /b 1
 "@
 Set-Content -LiteralPath build/compile.cmd -Value $batch -Encoding utf8
 & cmd.exe /d /c build\compile.cmd

@@ -37,10 +37,10 @@
 
 ## Wave1 functional OVITO parity
 
-- Color coding is a pipeline modifier for Position.X/Y/Z and scalar particle properties.
-- Common neighbor analysis publishes Coordination and conservative structure codes.
-- Create bonds publishes explicit cutoff neighbor pairs in the evaluated Dataset.
-- Wave2 leftovers: bond line/cylinder rendering, exact adaptive CNA HCP/ICO signatures, Assign color, and remaining OVITO menu algorithms.
+- Color coding writes the selected Position/scalar values into the evaluated dataset and the D3D11 renderer consumes that property buffer; color-map fidelity, per-node settings, legend and all-frame range remain incomplete.
+- Common neighbor analysis now computes fixed-cutoff Honeycutt–Andersen common-neighbor signatures and publishes a `CNA Structure` particle property; FCC and BCC fixtures pass. Adaptive cutoff, validated HCP/icosahedral fixtures, non-orthogonal periodic cells, and production-scale acceleration remain incomplete. The coordination-based helper is still only an approximate DXA prepass.
+- Create bonds publishes explicit cutoff neighbor pairs in the evaluated Dataset; bond rendering is not implemented yet.
+- Wave2 leftovers: bond line/cylinder rendering, adaptive CNA and broader crystal reference fixtures, Assign color, and remaining OVITO menu algorithms.
 
 ## Analysis
 
@@ -67,7 +67,7 @@
 | Voronoi analysis | 待实现 | 周期 / 非正交晶胞下的多面体构造 |
 | Wigner-Seitz defect analysis | 待实现 | 参考晶格位点占据、空位与间隙原子 |
 
-邻域分析在采样数据上明确拒绝运行。截断邻居会损坏配位数与聚类结果，不能以可视化采样代替全数据科学分析。正交周期晶胞要求各周期长度至少为 cutoff 的两倍，非正交周期分析尚未实现。300,000,000 次候选比较的上限用于防止极大 cutoff 导致无界运行。
+邻域分析与选择共享 linked-cell 邻居搜索内核；在采样数据上明确拒绝运行。截断邻居会损坏配位数与聚类结果，不能以可视化采样代替全数据科学分析。正交周期晶胞要求各周期长度至少为 cutoff 的两倍，非正交周期分析尚未实现。300,000,000 次候选比较的上限用于防止极大 cutoff 导致无界运行。
 
 ## Coloring / Modification / Python
 
@@ -77,10 +77,10 @@
 | Assign color | 待实现 | 尚无用户自定义逐粒子颜色 |
 | Color by type | 已实现 | 默认 8 色循环，选中粒子高亮 |
 | 粒子形状 | 部分 | 全局选择 Sphere、Circle、Cube、Cylinder、Spherocylinder；按类型的独立半径/颜色/形状编辑待做 |
-| Color coding | 待实现 | 属性色带、范围、图例 |
+| Color coding | 部分 | GPU 已按所选 Position 或数值粒子属性着色，支持自动/对称范围、离散、反转和仅选中；渐变当前为近似色表，设置仍有全局共享状态，图例与全帧范围待实现 |
 | Affine transformation | 部分 | 按轴平移、统一比例缩放、旋转坐标与晶胞；不是完整 3x4 仿射矩阵 |
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
-| Compute property | 待实现 | 表达式求值与属性存储 |
+| Compute property | 部分 | 安全原生数值表达式逐粒子计算并发布标量属性，可供下游节点读取；不支持向量表达式、单位系统、任意脚本及优化缓存 |
 | Delete selected | 已实现 | 非破坏性管线过滤 |
 | Freeze property | 待实现 | 按稳定 ID 保存参考属性 |
 | Load trajectory | 部分 | 单个 XYZ 多帧文件；未支持拓扑和轨迹文件合并 |
@@ -102,15 +102,16 @@
 | 修改器 | 状态 | 范围 |
 |---|---|---|
 | Clear selection | 已实现 | 清空选择掩码 |
-| Expand selection | 待实现 | 邻接扩展、层数/距离 |
-| Expression selection | 待实现 | 表达式解析及属性类型系统 |
+| Expand selection | 部分 | 通过 cutoff 邻接扩展当前选区，支持 1–64 层及正交周期最小镜像；非正交 PBC 和大规模邻域任务待做 |
+| Expression selection | 部分 | 安全原生表达式支持坐标/类型/标量属性、算术、比较、逻辑和 abs/sqrt/isfinite；不执行脚本，无向量分量语法、单位和帧变量 |
 | Invert selection | 已实现 | 当前管线中的粒子选择取反 |
 | Manual selection | 部分 | 点击粒子表行选择；视口 picking、框选与套索待实现 |
 | Select type | 已实现 | species/type 映射后的类型索引 |
+| Find overlapping particles | 部分 | cutoff 邻居对中的所有端点均被选中；粒子半径感知的 overlap、非正交 PBC 待做 |
 | Ackland-Jones analysis | 待实现 | 邻居键角结构分类 |
 | Centrosymmetry parameter | 待实现 | 最近邻最优配对 |
 | Chill+ | 待实现 | 冰相局域键序参数 |
-| Common neighbor analysis | 待实现 | 固定 / 自适应 CNA |
+| Common neighbor analysis | 部分 | 固定 cutoff 公共近邻签名；周期 FCC 与 BCC fixtures 验证通过。自适应 cutoff、HCP/ICO 专门 fixtures、非正交 PBC 和性能加速仍待完成 |
 | Identify diamond structure | 待实现 | 多壳层邻域识别 |
 | Polyhedral template matching | 待实现 | 模板匹配、取向和 RMSD |
 | VoroTop analysis | 待实现 | Voronoi 拓扑签名及分类器 |
@@ -133,7 +134,7 @@
 ## 2026-09-21 界面与基础修改器更新
 
 - 原始用户 Logo 嵌入可执行文件、标题栏、任务栏和托盘，无外部图片路径依赖。
-- 三列分类、可搜索、非模态 Add modification 下拉；点击外部或 Esc 可收起。无 Pro 门槛；尚未实现的算法灰显。
+- 四列分类、可搜索、非模态 Add modification 下拉；点击外部或 Esc 可收起。无 Pro 门槛；尚未实现的算法灰显并标注不执行。
 - 无系统标题栏；保留原生拖动、双击最大化、边缘缩放和任务栏最小化。X / Alt+F4 收到托盘，电源键彻底退出。
 - Slate dark / Classic light / Midnight、Segoe UI / Arial / Consolas、14–20 px 字体设置立即应用并持久化。
 - Rotate、Replicate、Coordinate range selection、Edit particle types 已实现，并支持现有撤销/重做及启停。

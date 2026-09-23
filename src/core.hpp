@@ -2,8 +2,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -12,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <iomanip>
@@ -76,55 +79,6 @@ struct Dataset {
     }
 };
 
-struct DataObject {
-    enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels };
-    Kind kind = Kind::Particles;
-    std::string name;
-    bool visible = true;
-    size_t sourceNode = 0;
-};
-
-struct ModifierNode {
-    std::string id;
-    std::string displayName;
-    std::string category;
-    bool enabled = true;
-    bool dirty = true;
-    bool running = false;
-    std::string error;
-    std::vector<DataObject> outputs;
-};
-
-// Lightweight pipeline contract used by the UI and by asynchronous workers.
-// Concrete algorithms can remain in headers while sharing ordering, enabled
-// state, diagnostics and output-object publication.
-struct PipelineGraph {
-    std::vector<ModifierNode> nodes;
-    size_t selected = 0;
-    void markDirtyFrom(size_t index) {
-        for (size_t i = index; i < nodes.size(); ++i) nodes[i].dirty = true;
-    }
-    void insert(ModifierNode node, size_t at = SIZE_MAX) {
-        at = std::min(at, nodes.size());
-        nodes.insert(nodes.begin() + at, std::move(node));
-        markDirtyFrom(at);
-        selected = at;
-    }
-    void erase(size_t at) {
-        if (at >= nodes.size()) return;
-        nodes.erase(nodes.begin() + at);
-        selected = nodes.empty() ? 0 : std::min(selected, nodes.size() - 1);
-        markDirtyFrom(selected);
-    }
-    void move(size_t from, size_t to) {
-        if (from >= nodes.size() || to >= nodes.size() || from == to) return;
-        auto node = std::move(nodes[from]);
-        nodes.erase(nodes.begin() + from);
-        nodes.insert(nodes.begin() + to, std::move(node));
-        selected = to;
-        markDirtyFrom(std::min(from, to));
-    }
-};
 inline std::string attribute(const std::string &s, const std::string &key) {
     auto p = s.find(key + "=");
     if (p == std::string::npos)
@@ -502,6 +456,11 @@ enum class Op {
     ,ColorCoding
     ,CommonNeighborAnalysis
     ,CreateBonds
+    ,RemoveProperty
+    ,ExpandSelection
+    ,SelectOverlapping
+    ,ExpressionSelect
+    ,ComputeProperty
 };
 struct Modifier {
     Op op;
@@ -512,7 +471,297 @@ struct Modifier {
     float upper = 1;
     std::string property = "Position.X";
     bool adaptive = false;
+    std::string outputProperty = "Computed property";
 };
+struct DataObject {
+    enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels };
+    Kind kind = Kind::Particles;
+    std::string name;
+    bool visible = true;
+    size_t sourceNode = 0;
+};
+
+// A pipeline node owns the executable modifier parameters as well as the UI,
+// diagnostic and output-object state associated with that stage.
+struct ModifierNode : Modifier {
+    std::string id;
+    std::string displayName;
+    std::string category;
+    bool dirty = true;
+    bool running = false;
+    std::string error;
+    std::vector<DataObject> outputs;
+    ModifierNode() = default;
+    ModifierNode(const Modifier &modifier) : Modifier(modifier) {}
+    ModifierNode(Op operation, bool active = true, float parameter = 0, int direction = 2,
+                 int typeIndex = 0, float upperBound = 1,
+                 std::string propertyName = "Position.X", bool useAdaptive = false)
+        : Modifier{operation, active, parameter, direction, typeIndex, upperBound,
+                   std::move(propertyName), useAdaptive} {}
+};
+
+// OVITO's pipeline is a linear dataflow graph. Nodes store real executable
+// Modifier values; changing their order or state marks dependent stages dirty.
+struct PipelineGraph {
+    std::vector<ModifierNode> nodes;
+    size_t selected = 0;
+    PipelineGraph() {}
+    void markDirtyFrom(size_t index) {
+        for (size_t i = index; i < nodes.size(); ++i) nodes[i].dirty = true;
+    }
+    void insert(ModifierNode node, size_t at = SIZE_MAX) {
+        at = std::min(at, nodes.size());
+        nodes.insert(nodes.begin() + at, std::move(node));
+        markDirtyFrom(at);
+        selected = at;
+    }
+    void erase(size_t at) {
+        if (at >= nodes.size()) return;
+        nodes.erase(nodes.begin() + at);
+        selected = nodes.empty() ? 0 : std::min(selected, nodes.size() - 1);
+        markDirtyFrom(selected);
+    }
+    void move(size_t from, size_t to) {
+        if (from >= nodes.size() || to >= nodes.size() || from == to) return;
+        auto node = std::move(nodes[from]);
+        nodes.erase(nodes.begin() + from);
+        nodes.insert(nodes.begin() + to, std::move(node));
+        selected = to;
+        markDirtyFrom(std::min(from, to));
+    }
+};
+struct NeighborBin {
+    int64_t x = 0, y = 0, z = 0;
+    bool operator==(const NeighborBin &) const = default;
+};
+inline int64_t &binComponent(NeighborBin &b, int axis) {
+    return axis == 0 ? b.x : axis == 1 ? b.y : b.z;
+}
+struct NeighborBinHash {
+    size_t operator()(NeighborBin b) const {
+        return std::hash<int64_t>{}(b.x) ^ (std::hash<int64_t>{}(b.y) * 19349663u) ^
+               (std::hash<int64_t>{}(b.z) * 83492791u);
+    }
+};
+
+// Visits each cutoff pair once using linked spatial bins. Scientific neighbor
+// operations reject sampled previews and currently require orthogonal PBC.
+template <typename Callback>
+inline void forEachNeighborPair(const Dataset &d, double cutoff, Callback &&callback,
+                                std::atomic<bool> *cancel = nullptr) {
+    if (d.sampled())
+        throw std::runtime_error("Neighbor analysis requires full data; increase the import budget.");
+    if (!(cutoff > 0) || !std::isfinite(cutoff))
+        throw std::runtime_error("Cutoff must be finite and positive");
+    if (d.atoms.size() > 2000000)
+        throw std::runtime_error("Neighbor analysis currently limited to 2 million atoms");
+    if (std::any_of(d.pbc.begin(), d.pbc.end(), [](bool b) { return b; }) &&
+        (d.cell[1] || d.cell[2] || d.cell[3] || d.cell[5] || d.cell[6] || d.cell[7]))
+        throw std::runtime_error("Periodic analysis currently requires an orthogonal cell");
+
+    std::array<int64_t, 3> periodicBins{};
+    std::array<double, 3> widths{cutoff, cutoff, cutoff};
+    for (int axis = 0; axis < 3; ++axis)
+        if (d.pbc[axis]) {
+            double length = d.cell[axis * 4];
+            if (!(length >= 2 * cutoff))
+                throw std::runtime_error("Periodic cell must be at least twice the cutoff");
+            periodicBins[axis] = std::max<int64_t>(1, int64_t(length / cutoff));
+            widths[axis] = length / periodicBins[axis];
+        }
+    auto binOf = [&](const Atom &atom) {
+        NeighborBin bin;
+        for (int axis = 0; axis < 3; ++axis) {
+            double origin = axis == 0 ? d.origin.x : axis == 1 ? d.origin.y : d.origin.z;
+            double value = coordinate(atom, axis) - origin;
+            if (d.pbc[axis])
+                value -= std::floor(value / d.cell[axis * 4]) * d.cell[axis * 4];
+            double q = std::floor(value / widths[axis]);
+            if (!std::isfinite(q) || std::abs(q) > 1e15)
+                throw std::runtime_error("Coordinates exceed spatial index range");
+            binComponent(bin, axis) = int64_t(q);
+        }
+        return bin;
+    };
+    std::unordered_map<NeighborBin, std::vector<uint32_t>, NeighborBinHash> grid;
+    grid.reserve(d.atoms.size());
+    for (size_t i = 0; i < d.atoms.size(); ++i) {
+        if (cancel && *cancel) throw std::runtime_error("Cancelled");
+        grid[binOf(d.atoms[i])].push_back(uint32_t(i));
+    }
+    uint64_t comparisons = 0;
+    const double cutoff2 = cutoff * cutoff;
+    for (uint32_t i = 0; i < d.atoms.size(); ++i) {
+        if (cancel && *cancel) throw std::runtime_error("Cancelled");
+        auto center = binOf(d.atoms[i]);
+        std::array<NeighborBin, 27> visited{};
+        size_t visitedCount = 0;
+        for (int z = -1; z <= 1; ++z)
+            for (int y = -1; y <= 1; ++y)
+                for (int x = -1; x <= 1; ++x) {
+                    NeighborBin neighbor{center.x + x, center.y + y, center.z + z};
+                    for (int axis = 0; axis < 3; ++axis)
+                        if (periodicBins[axis]) {
+                            auto &v = binComponent(neighbor, axis);
+                            v = (v % periodicBins[axis] + periodicBins[axis]) % periodicBins[axis];
+                        }
+                    if (std::find(visited.begin(), visited.begin() + visitedCount, neighbor) !=
+                        visited.begin() + visitedCount)
+                        continue;
+                    visited[visitedCount++] = neighbor;
+                    auto found = grid.find(neighbor);
+                    if (found == grid.end()) continue;
+                    for (uint32_t j : found->second) {
+                        if (j <= i) continue;
+                        if (++comparisons > 300000000)
+                            throw std::runtime_error("Neighbor comparison budget exceeded; reduce cutoff");
+                        double distance2 = 0;
+                        for (int axis = 0; axis < 3; ++axis) {
+                            double delta = double(coordinate(d.atoms[i], axis)) - coordinate(d.atoms[j], axis);
+                            if (d.pbc[axis])
+                                delta -= std::round(delta / d.cell[axis * 4]) * d.cell[axis * 4];
+                            distance2 += delta * delta;
+                        }
+                        if (distance2 <= cutoff2)
+                            callback(i, j, distance2);
+                    }
+                }
+    }
+}
+class ParticleExpression {
+    const Dataset &d; size_t atom; std::string_view text; size_t p = 0;
+    void ws() { while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p; }
+    [[noreturn]] void error(const std::string &s) const {
+        throw std::runtime_error("Expression column " + std::to_string(p + 1) + ": " + s);
+    }
+    bool take(std::string_view token) { ws(); if (text.substr(p, token.size()) != token) return false; p += token.size(); return true; }
+    bool word(std::string_view token) {
+        ws(); if (text.substr(p, token.size()) != token) return false;
+        size_t e = p + token.size();
+        auto ident = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+        if ((p && ident(text[p-1])) || (e < text.size() && ident(text[e]))) return false;
+        p = e; return true;
+    }
+    std::string name() {
+        ws(); size_t b = p;
+        while (p < text.size()) { char c = text[p]; if (std::isalnum(static_cast<unsigned char>(c)) || c=='_' || c=='.') ++p; else break; }
+        if (p == b) error("Expected a property or function name");
+        return std::string(text.substr(b,p-b));
+    }
+    double property(const std::string &n) {
+        const Atom &a = d.atoms.at(atom);
+        if (n == "x" || n == "Position.X") return a.x;
+        if (n == "y" || n == "Position.Y") return a.y;
+        if (n == "z" || n == "Position.Z") return a.z;
+        if (n == "type" || n == "Particle Type") return a.type;
+        auto it = d.scalarProperties.find(n);
+        if (it == d.scalarProperties.end()) error("Unknown scalar property '" + n + "'");
+        if (it->second.size() != d.atoms.size()) error("Property length does not match particle count");
+        if (!std::isfinite(it->second[atom])) error("Property is non-finite");
+        return it->second[atom];
+    }
+    double primary() {
+        ws();
+        if (take("(")) { double v=exprOr(); if(!take(")")) error("Expected ')'"); return v; }
+        if (p < text.size() && (std::isdigit(static_cast<unsigned char>(text[p])) || text[p]=='.')) {
+            const char *b=text.data()+p; char *e=nullptr; double v=std::strtod(b,&e);
+            if(e==b || !std::isfinite(v)) error("Invalid number"); p += size_t(e-b); return v;
+        }
+        auto n=name();
+        if (take("(")) {
+            double v=exprOr(); if(!take(")")) error("Expected ')' after function argument");
+            if(n=="abs") return std::abs(v);
+            if(n=="sqrt") { if(v<0) error("sqrt requires a nonnegative input"); return std::sqrt(v); }
+            if(n=="isfinite") return std::isfinite(v) ? 1.0 : 0.0;
+            error("Function is not allowed: '"+n+"'");
+        }
+        return property(n);
+    }
+    double unary() { if(take("!")) return unary()==0; if(take("-")) return -unary(); if(take("+")) return unary(); return primary(); }
+    double mul() { double v=unary(); for(;;){if(take("*"))v*=unary();else if(take("/")){double q=unary();if(q==0)error("Division by zero");v/=q;}else break;}return v; }
+    double add() { double v=mul(); for(;;){if(take("+"))v+=mul();else if(take("-"))v-=mul();else break;}return v; }
+    double compare() {
+        double a=add();
+        if(take("=="))return a==add(); if(take("!="))return a!=add();
+        if(take("<="))return a<=add(); if(take(">="))return a>=add();
+        if(take("<"))return a<add(); if(take(">"))return a>add(); return a;
+    }
+    double exprAnd() { double v=compare(); for(;;){if(take("&&")||word("and")){double q=compare();v=(v!=0&&q!=0);}else break;}return v; }
+    double exprOr() { double v=exprAnd(); for(;;){if(take("||")||word("or")){double q=exprAnd();v=(v!=0||q!=0);}else break;}return v; }
+public:
+    ParticleExpression(const Dataset &data, size_t i, std::string_view expression) : d(data), atom(i), text(expression) {}
+    double evaluateNumber() { if(text.empty())error("Expression is empty");double v=exprOr();ws();if(p!=text.size())error("Unexpected token");if(!std::isfinite(v))error("Result is non-finite");return v; }
+    bool evaluate() { return evaluateNumber()!=0; }
+};
+
+struct CNAResult {
+    std::vector<uint8_t> structure;
+    std::unordered_map<std::string, uint64_t> counts;
+    std::map<std::tuple<int,int,int>, uint64_t> bondSignatureCounts;
+};
+
+inline CNAResult analyzeCommonNeighbors(const Dataset &d, double cutoff,
+                                        std::atomic<bool> *cancel = nullptr) {
+    if (d.sampled()) throw std::runtime_error("CNA requires full data, not a sampled preview");
+    std::vector<std::vector<uint32_t>> adjacency(d.atoms.size());
+    forEachNeighborPair(d, cutoff, [&](uint32_t a, uint32_t b, double) {
+        adjacency[a].push_back(b); adjacency[b].push_back(a);
+    }, cancel);
+    for (auto &neighbors : adjacency) {
+        std::sort(neighbors.begin(), neighbors.end());
+        neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+        if (neighbors.size() > 128)
+            throw std::runtime_error("CNA cutoff produced more than 128 neighbors per atom");
+    }
+    CNAResult result; result.structure.resize(d.atoms.size());
+    result.counts = {{"Other",0},{"FCC",0},{"HCP",0},{"BCC",0},{"Icosahedral",0}};
+    for (uint32_t center=0; center<d.atoms.size(); ++center) {
+        if (cancel && *cancel) throw std::runtime_error("Cancelled");
+        std::map<std::tuple<int,int,int>,uint32_t> signatures;
+        const auto &neighbors = adjacency[center];
+        for (uint32_t other : neighbors) {
+            const auto &otherNeighbors = adjacency[other];
+            std::vector<uint32_t> common;
+            std::set_intersection(neighbors.begin(), neighbors.end(), otherNeighbors.begin(), otherNeighbors.end(),
+                                  std::back_inserter(common));
+            if (common.empty()) continue;
+            int edges = 0;
+            std::vector<std::vector<uint8_t>> graph(common.size(), std::vector<uint8_t>(common.size()));
+            for (size_t i=0;i<common.size();++i)
+                for (size_t j=i+1;j<common.size();++j)
+                    if (std::binary_search(adjacency[common[i]].begin(), adjacency[common[i]].end(), common[j])) {
+                        graph[i][j]=graph[j][i]=1; ++edges;
+                    }
+            int chain = 0;
+            if (common.size() <= 12) {
+                size_t searchStates = 0;
+                bool capped = false;
+                auto visit = [&](auto &&self, size_t node, uint16_t visited, int length) -> void {
+                    if (capped || ++searchStates > 2000) { capped = true; return; }
+                    chain = std::max(chain, length);
+                    for (size_t next=0; next<common.size(); ++next)
+                        if (graph[node][next] && !(visited & (uint16_t(1) << next)))
+                            self(self,next,uint16_t(visited | (uint16_t(1)<<next)),length+1);
+                };
+                for (size_t start=0; start<common.size(); ++start)
+                    visit(visit,start,uint16_t(1)<<start,0);
+                if (capped) chain = -1; // fail closed: never classify an incomplete signature
+            }
+            ++signatures[{int(common.size()),edges,chain}];
+            ++result.bondSignatureCounts[{int(common.size()),edges,chain}];
+        }
+        int coordination = int(neighbors.size());
+        uint8_t id = 0;
+        if (coordination == 12 && signatures[{4,2,1}] == 12) id = 1; // FCC
+        else if (coordination == 12 && signatures[{4,2,1}] == 6 && signatures[{4,2,2}] == 6) id = 2; // HCP
+        else if (coordination == 14 && signatures[{4,4,3}] == 6 && signatures[{6,6,5}] == 8) id = 3; // BCC
+        else if (coordination == 12 && signatures[{5,5,4}] == 12) id = 4; // Icosahedral
+        result.structure[center] = id;
+        ++result.counts[id==1?"FCC":id==2?"HCP":id==3?"BCC":id==4?"Icosahedral":"Other"];
+    }
+    return result;
+}
+
 inline const char *opName(Op op) {
     switch (op) {
     case Op::Rotate: return "Rotate";
@@ -539,7 +788,12 @@ inline const char *opName(Op op) {
         return "Wrap at periodic boundaries";
     case Op::ColorCoding: return "Color coding";
     case Op::CommonNeighborAnalysis: return "Common neighbor analysis";
+    case Op::RemoveProperty: return "Remove property";
     case Op::CreateBonds: return "Create bonds";
+    case Op::ExpandSelection: return "Expand selection";
+    case Op::SelectOverlapping: return "Find overlapping particles";
+    case Op::ExpressionSelect: return "Expression selection";
+    case Op::ComputeProperty: return "Compute property";
     default:
         return "Color by type";
     }
@@ -563,8 +817,26 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
             if ((m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) &&
                 (!(m.value > 0) || !std::isfinite(m.value)))
                 throw std::runtime_error("Cutoff must be finite and positive");
+            if ((m.op == Op::ExpandSelection || m.op == Op::SelectOverlapping) &&
+                (!(m.value > 0) || !std::isfinite(m.value)))
+                throw std::runtime_error("Cutoff must be finite and positive");
+            if (m.op == Op::ExpandSelection && (m.type < 1 || m.type > 64))
+                throw std::runtime_error("Expansion steps must be between 1 and 64");
             if (m.op == Op::ColorCoding && m.property.empty())
                 throw std::runtime_error("Color coding requires a particle property");
+            if (m.op == Op::ExpressionSelect && m.property.empty())
+                throw std::runtime_error("Expression selection requires an expression");
+            if (m.op == Op::ComputeProperty && (m.property.empty() || m.outputProperty.empty()))
+                throw std::runtime_error("Computed property requires an expression and output name");
+            if (m.op == Op::RemoveProperty) {
+                if (m.property.empty() || m.property == "Position" || m.property == "Particle Type")
+                    throw std::runtime_error("Choose an auxiliary particle property to remove");
+                auto removed = r.data.scalarProperties.erase(m.property);
+                removed += r.data.vectorProperties.erase(m.property);
+                if (!removed) throw std::runtime_error("Unknown particle property: " + m.property);
+                r.data.propertyComponents.erase(m.property);
+                continue;
+            }
             if (m.op == Op::Replicate) {
                 if (m.type < 1 || m.type > 32 || r.data.atoms.size() > 20000000 / size_t(m.type))
                     throw std::runtime_error("Replication exceeds the 20 million atom budget");
@@ -615,25 +887,46 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
                 r.data.scalarProperties["Color coding"] = std::move(values);
                 continue;
             }
+            if (m.op == Op::ExpandSelection) {
+                for (int step = 0; step < m.type; ++step) {
+                    auto expanded = r.selected;
+                    forEachNeighborPair(r.data, m.value, [&](uint32_t i, uint32_t j, double) {
+                        if (r.selected[i]) expanded[j] = 1;
+                        if (r.selected[j]) expanded[i] = 1;
+                    });
+                    r.selected = std::move(expanded);
+                }
+                continue;
+            }
+            if (m.op == Op::SelectOverlapping) {
+                r.selected.assign(r.data.atoms.size(), 0);
+                forEachNeighborPair(r.data, m.value, [&](uint32_t i, uint32_t j, double) {
+                    r.selected[i] = r.selected[j] = 1;
+                });
+                continue;
+            }
+            if (m.op == Op::ExpressionSelect) {
+                r.selected.resize(r.data.atoms.size());
+                for (size_t i=0; i<r.data.atoms.size(); ++i)
+                    r.selected[i] = ParticleExpression(r.data, i, m.property).evaluate() ? 1 : 0;
+                continue;
+            }
+            if (m.op == Op::ComputeProperty) {
+                std::vector<double> values(r.data.atoms.size());
+                for (size_t i=0; i<r.data.atoms.size(); ++i)
+                    values[i] = ParticleExpression(r.data, i, m.property).evaluateNumber();
+                r.data.scalarProperties[m.outputProperty] = std::move(values);
+                continue;
+            }
             if (m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) {
-                if (r.data.atoms.size() > 2000000)
-                    throw std::runtime_error("Neighbor modifier limited to 2 million atoms");
                 r.data.bonds.clear();
-                std::vector<uint32_t> coordination(r.data.atoms.size());
-                const double cutoff2 = double(m.value) * m.value;
-                for (size_t i = 0; i < r.data.atoms.size(); ++i)
-                    for (size_t j = i + 1; j < r.data.atoms.size(); ++j) {
-                        double dx = r.data.atoms[i].x-r.data.atoms[j].x, dy = r.data.atoms[i].y-r.data.atoms[j].y, dz = r.data.atoms[i].z-r.data.atoms[j].z;
-                        for (int k=0;k<3;++k) if (r.data.pbc[k] && r.data.cell[k*4]>0) {
-                            double &v = k==0?dx:k==1?dy:dz, L=r.data.cell[k*4]; v -= std::round(v/L)*L;
-                        }
-                        if (dx*dx+dy*dy+dz*dz <= cutoff2) { r.data.bonds.push_back({uint32_t(i),uint32_t(j)}); coordination[i]++; coordination[j]++; }
-                    }
-                if (m.op == Op::CommonNeighborAnalysis) {
-                    std::vector<double> structure(r.data.atoms.size());
-                    for (size_t i=0;i<structure.size();++i) structure[i] = coordination[i]==12?1:coordination[i]==8?2:coordination[i]==4?3:coordination[i]==10?4:0;
-                    r.data.scalarProperties["Structure Type"] = std::move(structure);
-                    r.data.scalarProperties["Coordination"] = std::vector<double>(coordination.begin(), coordination.end());
+                if (m.op == Op::CreateBonds)
+                    forEachNeighborPair(r.data, m.value, [&](uint32_t i, uint32_t j, double) { r.data.bonds.push_back({i,j}); });
+                else {
+                    auto cna = analyzeCommonNeighbors(r.data, m.value);
+                    std::vector<double> structure(cna.structure.begin(), cna.structure.end());
+                    r.data.scalarProperties["CNA Structure"] = std::move(structure);
+                    r.data.bonds.clear();
                 }
                 continue;
             }
@@ -745,6 +1038,13 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
         }
     r.data.bounds();
     return r;
+}
+inline PipelineResult evaluate(const Dataset &source, const PipelineGraph &graph) {
+    std::vector<Modifier> executable;
+    executable.reserve(graph.nodes.size());
+    for (const auto &node : graph.nodes)
+        executable.push_back(static_cast<const Modifier &>(node));
+    return evaluate(source, executable);
 }
 struct Statistics {
     double min = 0, max = 0, mean = 0;

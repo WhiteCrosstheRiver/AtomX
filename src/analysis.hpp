@@ -54,60 +54,10 @@ inline void publishStructure(Dataset &d, const StructureAnalysis &analysis) {
     std::vector<double> values(analysis.structure.begin(), analysis.structure.end());
     d.scalarProperties[analysis.propertyName] = std::move(values);
 }
-struct Bin {
-    int64_t x, y, z;
-    bool operator==(const Bin &) const = default;
-};
-inline int64_t &component(Bin &b, int k) {
-    return k == 0 ? b.x : k == 1 ? b.y : b.z;
-}
-struct BinHash {
-    size_t operator()(Bin b) const {
-        return std::hash<int64_t>{}(b.x) ^ (std::hash<int64_t>{}(b.y) * 19349663u) ^
-               (std::hash<int64_t>{}(b.z) * 83492791u);
-    }
-};
 // Linked spatial bins; orthogonal minimum-image convention. Refuse sampled data:
 // missing neighbors would make coordination and connected components misleading.
 inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
                                   std::atomic<bool> *cancel = nullptr) {
-    if (d.sampled())
-        throw std::runtime_error(
-            "Neighbor analysis requires full data; increase the import budget.");
-    if (!(cutoff > 0) || !std::isfinite(cutoff))
-        throw std::runtime_error("Cutoff must be finite and positive");
-    if (d.atoms.size() > 2000000)
-        throw std::runtime_error("Neighbor analysis currently limited to 2 million atoms");
-    if (std::any_of(d.pbc.begin(), d.pbc.end(), [](bool b) { return b; }) &&
-        (d.cell[1] || d.cell[2] || d.cell[3] || d.cell[5] || d.cell[6] || d.cell[7]))
-        throw std::runtime_error("Periodic analysis currently requires an orthogonal cell");
-    std::array<int64_t, 3> periodicBins{};
-    std::array<double, 3> widths{cutoff, cutoff, cutoff};
-    for (int k = 0; k < 3; k++)
-        if (d.pbc[k]) {
-            double length = d.cell[k * 4];
-            if (!(length >= 2 * cutoff))
-                throw std::runtime_error("Periodic cell must be at least twice the cutoff");
-            periodicBins[k] = std::max<int64_t>(1, int64_t(length / cutoff));
-            widths[k] = length / periodicBins[k];
-        }
-    auto bin = [&](const Atom &a) {
-        Bin b;
-        for (int k = 0; k < 3; k++) {
-            double v = coordinate(a, k);
-            if (d.pbc[k])
-                v -= std::floor(v / d.cell[k * 4]) * d.cell[k * 4];
-            double q = std::floor(v / widths[k]);
-            if (std::abs(q) > 1e15)
-                throw std::runtime_error("Coordinates exceed spatial index range");
-            component(b, k) = int64_t(q);
-        }
-        return b;
-    };
-    std::unordered_map<Bin, std::vector<uint32_t>, BinHash> grid;
-    grid.reserve(d.atoms.size());
-    for (uint32_t i = 0; i < d.atoms.size(); i++)
-        grid[bin(d.atoms[i])].push_back(i);
     NeighborAnalysis r;
     r.cutoff = cutoff;
     r.coordination.resize(d.atoms.size());
@@ -120,55 +70,15 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
         }
         return i;
     };
-    uint64_t comparisons = 0;
-    for (uint32_t i = 0; i < d.atoms.size(); i++) {
-        if (cancel && *cancel)
-            throw std::runtime_error("Cancelled");
-        auto b = bin(d.atoms[i]);
-        std::array<Bin, 27> visited;
-        size_t count = 0;
-        for (int z = -1; z <= 1; z++)
-            for (int y = -1; y <= 1; y++)
-                for (int x = -1; x <= 1; x++) {
-                    Bin n{b.x + x, b.y + y, b.z + z};
-                    for (int k = 0; k < 3; k++)
-                        if (periodicBins[k]) {
-                            auto &v = component(n, k);
-                            v = (v % periodicBins[k] + periodicBins[k]) % periodicBins[k];
-                        }
-                    if (std::find(visited.begin(), visited.begin() + count, n) !=
-                        visited.begin() + count)
-                        continue;
-                    visited[count++] = n;
-                    auto it = grid.find(n);
-                    if (it == grid.end())
-                        continue;
-                    for (auto j : it->second)
-                        if (j > i) {
-                            if (++comparisons > 300000000)
-                                throw std::runtime_error(
-                                    "Neighbor comparison budget exceeded; reduce cutoff");
-                            double r2 = 0;
-                            for (int k = 0; k < 3; k++) {
-                                double v =
-                                    double(coordinate(d.atoms[i], k)) - coordinate(d.atoms[j], k);
-                                if (d.pbc[k])
-                                    v -= std::round(v / d.cell[k * 4]) * d.cell[k * 4];
-                                r2 += v * v;
-                            }
-                            if (r2 <= double(cutoff) * cutoff) {
-                                r.coordination[i]++;
-                                r.coordination[j]++;
-                                r.bonds++;
-                                auto binIndex = std::min(127, int(std::sqrt(r2) / cutoff * 128));
-                                r.pairHistogram[binIndex]++;
-                                auto ri = root(i), rj = root(j);
-                                if (ri != rj)
-                                    r.cluster[std::max(ri, rj)] = std::min(ri, rj);
-                            }
-                        }
-                }
-    }
+    forEachNeighborPair(d, cutoff, [&](uint32_t i, uint32_t j, double r2) {
+        r.coordination[i]++;
+        r.coordination[j]++;
+        r.bonds++;
+        auto binIndex = std::min(127, int(std::sqrt(r2) / cutoff * 128));
+        r.pairHistogram[binIndex]++;
+        auto ri = root(i), rj = root(j);
+        if (ri != rj) r.cluster[std::max(ri, rj)] = std::min(ri, rj);
+    }, cancel);
     std::unordered_map<uint32_t, uint32_t> ids;
     for (uint32_t i = 0; i < r.cluster.size(); i++) {
         auto rt = root(i);
