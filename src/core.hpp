@@ -1469,8 +1469,16 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
             }
             if (m.op == Op::ExpandSelection && (m.type < 1 || m.type > 64))
                 throw std::runtime_error("Expansion steps must be between 1 and 64");
-            if (m.op == Op::ColorCoding && m.property.empty())
-                throw std::runtime_error("Color coding requires a particle property");
+            if (m.op == Op::ColorCoding) {
+                if (m.property.empty())
+                    throw std::runtime_error("Color coding requires a particle property");
+                if (m.colorGradient < 0 || m.colorGradient > 9)
+                    throw std::runtime_error("Choose a supported color gradient");
+                if (!m.colorAutoRange &&
+                    (!std::isfinite(m.colorMin) || !std::isfinite(m.colorMax) ||
+                     !(m.colorMax > m.colorMin)))
+                    throw std::runtime_error("Manual color range must have finite, increasing endpoints");
+            }
             if (m.op == Op::AssignColor && !std::all_of(m.assignColor.begin(),m.assignColor.end(),
                     [](float value){return std::isfinite(value)&&value>=0&&value<=1;}))
                 throw std::runtime_error("Assigned color channels must be finite values between 0 and 1");
@@ -1613,7 +1621,17 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
             }
             if (m.op == Op::ColorCoding) {
                 r.data.particleColors.clear();
-                r.data.scalarProperties["Color coding"] = particlePropertyValues(r.data, m.property, cancel);
+                auto values = particlePropertyValues(r.data, m.property, cancel);
+                bool hasFiniteValue = false;
+                for (double value : values) {
+                    if (!std::isfinite(value)) continue;
+                    hasFiniteValue = true;
+                    if (std::abs(value) > std::numeric_limits<float>::max())
+                        throw std::runtime_error("Color coding values must fit the renderer's finite single-precision range");
+                }
+                if (!hasFiniteValue)
+                    throw std::runtime_error("Color coding property has no finite values");
+                r.data.scalarProperties["Color coding"] = std::move(values);
                 if (m.colorSelectedOnly) {
                     r.colorSelected = r.selected;
                     if (!m.colorKeepSelection)

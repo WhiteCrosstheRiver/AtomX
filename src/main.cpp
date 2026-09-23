@@ -378,7 +378,21 @@ struct App {
                     }
                 }
                 if (std::isfinite(lo) && std::isfinite(hi)) {
-                    if (lo == hi) { lo -= .5; hi += .5; }
+                    if (lo == hi) {
+                        const float center = float(lo);
+                        const double delta = std::max(std::abs(double(center)) * .01, .5);
+                        const double lowValue = double(center) - delta;
+                        const double highValue = double(center) + delta;
+                        const double floatLimit = std::numeric_limits<float>::max();
+                        float expandedLow = lowValue < -floatLimit
+                            ? std::nextafter(center, -std::numeric_limits<float>::infinity())
+                            : float(lowValue);
+                        float expandedHigh = highValue > floatLimit
+                            ? std::nextafter(center, std::numeric_limits<float>::infinity())
+                            : float(highValue);
+                        if (std::isfinite(expandedLow)) lo = expandedLow;
+                        if (std::isfinite(expandedHigh)) hi = expandedHigh;
+                    }
                     if (colorSymmetricRange) {
                         double extent = std::max(std::abs(lo), std::abs(hi));
                         lo = -extent; hi = extent;

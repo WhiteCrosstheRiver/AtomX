@@ -405,6 +405,39 @@ int main() {
                     std::count(colorThenReselectThenDelete.selected.begin(),
                                colorThenReselectThenDelete.selected.end(),uint8_t(1))==0,
                 "selected-only color masks stay aligned after downstream selection and deletion");
+        Modifier invalidColorRange{Op::ColorCoding};
+        invalidColorRange.property="Coordination";
+        invalidColorRange.colorAutoRange=false;
+        invalidColorRange.colorMin=2;
+        invalidColorRange.colorMax=2;
+        bool invalidColorRangeRejected=false;
+        try { (void)evaluate(wave,{invalidColorRange}); }
+        catch (const ModifierExecutionError &e) { invalidColorRangeRejected=e.nodeIndex==0; }
+        require(invalidColorRangeRejected,"color coding rejects a non-increasing manual range at its node");
+        Modifier unsupportedGradient{Op::ColorCoding};
+        unsupportedGradient.property="Coordination";
+        unsupportedGradient.colorGradient=10;
+        bool unsupportedGradientRejected=false;
+        try { (void)evaluate(wave,{unsupportedGradient}); }
+        catch (const ModifierExecutionError &e) { unsupportedGradientRejected=e.nodeIndex==0; }
+        require(unsupportedGradientRejected,"color coding rejects an unknown gradient at its node");
+        Dataset invalidColorValues=wave;
+        invalidColorValues.scalarProperties["Bad values"]={
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::quiet_NaN()};
+        Modifier noFiniteColorValues{Op::ColorCoding}; noFiniteColorValues.property="Bad values";
+        bool noFiniteColorValuesRejected=false;
+        try { (void)evaluate(invalidColorValues,{noFiniteColorValues}); }
+        catch (const ModifierExecutionError &e) { noFiniteColorValuesRejected=e.nodeIndex==0; }
+        require(noFiniteColorValuesRejected,"color coding rejects properties without any finite values");
+        invalidColorValues.scalarProperties["Bad values"]={1,2,3,1e100};
+        bool unrepresentableColorValuesRejected=false;
+        try { (void)evaluate(invalidColorValues,{noFiniteColorValues}); }
+        catch (const ModifierExecutionError &e) { unrepresentableColorValuesRejected=e.nodeIndex==0; }
+        require(unrepresentableColorValuesRejected,
+                "color coding rejects finite doubles that cannot be represented by the GPU float buffer");
         Dataset overlapFixture;
         overlapFixture.species = {"X"};
         overlapFixture.atoms = {{0,0,0,0},{.5f,0,0,0},{4,0,0,0},{4.5f,0,0,0},{9,0,0,0}};
