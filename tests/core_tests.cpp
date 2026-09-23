@@ -252,6 +252,31 @@ int main() {
         double expectedX=0; for (const auto &atom:fcc.atoms) expectedX+=atom.x; expectedX/=fcc.atoms.size();
         require(std::abs(reduced.data.globalAttributes.at("ReduceProperty.Position.X.mean")-expectedX)<1e-10,
                 "reduce property publishes numeric global mean");
+        Modifier computedRadius{Op::ComputeProperty};
+        computedRadius.property="x*x + y*y + z*z";
+        computedRadius.outputProperty="Squared distance";
+        Modifier computedHistogram{Op::Histogram}; computedHistogram.type=4;
+        computedHistogram.property="Squared distance";
+        Modifier computedMean{Op::ReduceProperty}; computedMean.property="Squared distance";
+        computedMean.reduceOperation=2;
+        const auto computedPipeline=evaluate(fcc,{computedRadius,computedHistogram,computedMean});
+        double expectedSquaredMean=0;
+        for (const auto &atom:fcc.atoms)
+            expectedSquaredMean+=double(atom.x)*atom.x+double(atom.y)*atom.y+double(atom.z)*atom.z;
+        expectedSquaredMean/=fcc.atoms.size();
+        uint64_t computedHistogramPopulation=0;
+        for (const auto &row:computedPipeline.data.tables.back().rows)
+            computedHistogramPopulation+=std::stoull(row[1]);
+        require(computedHistogramPopulation==fcc.atoms.size() &&
+                    std::abs(computedPipeline.data.globalAttributes.at("ReduceProperty.Squared distance.mean")-
+                             expectedSquaredMean)<1e-9 &&
+                    computedPipeline.data.scalarProperties.at("Squared distance").size()==fcc.atoms.size(),
+                "computed particle properties flow through histogram and reduction nodes with results preserved");
+        const auto computedHistogramPrefix=evaluatePrefix(fcc,{computedRadius,computedHistogram,computedMean},2);
+        require(computedHistogramPrefix.data.tables.size()==1 &&
+                    computedHistogramPrefix.data.globalAttributes.empty() &&
+                    computedHistogramPrefix.data.scalarProperties.contains("Squared distance"),
+                "node inspection prefix exposes the histogram output before downstream reductions");
         Modifier extremeMean{Op::ReduceProperty}; extremeMean.property="Extreme"; extremeMean.reduceOperation=2;
         const auto extremeMeanResult=evaluate(extremeValues,{extremeMean});
         require(extremeMeanResult.data.globalAttributes.at("ReduceProperty.Extreme.mean")==0,
