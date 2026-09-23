@@ -9,6 +9,7 @@
 #include <shellapi.h>
 #include <future>
 #include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <optional>
 #pragma comment(lib, "d3d11.lib")
@@ -210,6 +211,7 @@ struct App {
     int current = 0, budget = 2000000;
     bool playing = false, quad = true, particles = true, cell = true, showTable = false,
          showCatalog = false;
+    bool histogramPreviewTab = false;
     float radius = .32f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
     int appearanceType = 0;
@@ -1285,7 +1287,7 @@ struct App {
                                                          : utf8(path.filename().wstring()).c_str());
         ImGui::Separator();
         auto avail = ImGui::GetContentRegionAvail();
-        float dataH = showTable ? U(170) : 0;
+        float dataH = showTable ? U(240) : 0;
         float gap = ImGui::GetStyle().ItemSpacing.y;
         float sceneH = std::max(U(150), avail.y - dataH - U(128) - ImGui::GetFrameHeight() - gap*(showTable ? 4 : 3));
         if (quad) {
@@ -1495,7 +1497,9 @@ struct App {
                     }
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Data Tables")) {
+                if (ImGui::BeginTabItem("Data Tables", nullptr,
+                                        histogramPreviewTab ? ImGuiTabItemFlags_SetSelected : 0)) {
+                    histogramPreviewTab = false;
                     if (inspected->data.tables.empty()) ImGui::TextDisabled("No analysis tables have been produced at this output.");
                     for (size_t tableIndex = 0; tableIndex < inspected->data.tables.size(); ++tableIndex) {
                         const auto &table = inspected->data.tables[tableIndex];
@@ -1507,6 +1511,26 @@ struct App {
                                     try { writeDataTableCsv(outputPath, table); status = "Exported " + table.name; }
                                     catch (const std::exception &exception) { error = exception.what(); }
                                 }
+                            }
+                            if (table.name.rfind("Histogram: ", 0) == 0 &&
+                                table.columns.size() >= 2 && !table.rows.empty()) {
+                                std::vector<float> bins;
+                                bins.reserve(table.rows.size());
+                                float maximum = 0;
+                                for (const auto &row : table.rows) {
+                                    char *end = nullptr;
+                                    const float value = row.size() > 1
+                                        ? std::strtof(row[1].c_str(), &end) : 0.f;
+                                    const float finiteValue = end && *end == '\0' && std::isfinite(value)
+                                        ? std::max(0.f, value) : 0.f;
+                                    bins.push_back(finiteValue);
+                                    maximum = std::max(maximum, finiteValue);
+                                }
+                                ImGui::TextDisabled("%s across %zu bins", table.columns[1].c_str(), bins.size());
+                                ImGui::PlotHistogram("##histogram-result", bins.data(), int(bins.size()),
+                                    0, nullptr, 0, maximum > 0 ? maximum : 1.f, {-1, U(72)});
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Bin centers are listed in the table below.");
                             }
                             if (ImGui::BeginTable("table", int(table.columns.size()), ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, {-1, U(240)})) {
                                 for (const auto &column : table.columns) ImGui::TableSetupColumn(column.c_str());
@@ -2737,7 +2761,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         int adapter = -1, smoke = 0;
         bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
-             smokeColorLegend = false, smokeBondPairs = false, smokeInspectorNode = false;
+             smokeColorLegend = false, smokeBondPairs = false, smokeInspectorNode = false,
+             smokeHistogram = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
@@ -2748,6 +2773,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (a == L"--smoke-color-legend") smokeColorLegend = true;
             else if (a == L"--smoke-bond-pairs") smokeBondPairs = true;
             else if (a == L"--smoke-inspector-node") smokeInspectorNode = true;
+            else if (a == L"--smoke-histogram") smokeHistogram = true;
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -2799,6 +2825,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (smokeInspectorNode) {
                 app.showTable = true;
                 app.add(Op::Translate);
+            }
+            if (smokeHistogram) {
+                app.showTable = true;
+                app.histogramPreviewTab = true;
+                app.add(Op::Histogram);
             }
             if (smokeColorLegend) app.add(Op::ColorCoding);
             if (smokeBondPairs) {
