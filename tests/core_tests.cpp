@@ -92,6 +92,20 @@ int main() {
         r = evaluate(d, {{Op::SelectType,true,0,2,1}, {Op::Replicate,true,0,0,3}});
         require(r.data.atoms.size() == 12 && r.data.cell[0] == 30 &&
                 r.data.atoms[8].x == 20 && r.selected[9], "replication cell positions selection");
+        Dataset periodicBondReplication; periodicBondReplication.species={"X"};
+        periodicBondReplication.atoms={{0,0,0,0},{1,0,0,0}};
+        periodicBondReplication.cell={2,0,0,0,2,0,0,0,2};
+        periodicBondReplication.pbc={true,false,false};
+        periodicBondReplication.bonds={{0,1,{1,0,0}}};
+        Modifier replicatePeriodicBond{Op::Replicate}; replicatePeriodicBond.type=2; replicatePeriodicBond.axis=0;
+        const auto replicatedPeriodicBond=evaluate(periodicBondReplication,{replicatePeriodicBond});
+        require(replicatedPeriodicBond.data.bonds==std::vector<Bond>{{0,3,{0,0,0}},{2,1,{1,0,0}}} &&
+                    std::all_of(replicatedPeriodicBond.data.bonds.begin(),replicatedPeriodicBond.data.bonds.end(),
+                                [&](const Bond &bond) {
+                                    const auto vector=bondVector(replicatedPeriodicBond.data,bond);
+                                    return std::abs(vector[0]-3)<1e-6 && vector[1]==0 && vector[2]==0;
+                                }),
+                "replication remaps periodic bond endpoints and image shifts while preserving bond vectors");
         r = evaluate(d, {{Op::Rotate,true,90,2}});
         require(std::abs(r.data.atoms[1].x + 4) < 1e-5 &&
                 std::abs(r.data.atoms[1].y - 3) < 1e-5 &&
