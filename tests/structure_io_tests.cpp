@@ -29,6 +29,23 @@ int main() {
         require(r.scalarProperties.at("Energy")[0] == -2.5 &&
                     r.vectorProperties.at("Force")[1].z == 6,
                 "XYZ property roundtrip");
+        auto trajectoryPath = dir / "color-range.xyz";
+        Dataset trajectory; trajectory.species={"X"}; trajectory.atoms={{1,0,0,0},{3,0,0,0}};
+        trajectory.scalarProperties["Q"]={-5,8}; trajectory.bounds();
+        io::ExportOptions trajectoryOptions; trajectoryOptions.scalarProperties={"Q"};
+        {
+            std::ofstream trajectoryFile(trajectoryPath);
+            io::writeFrame(trajectoryFile, io::Format::XYZ, trajectory, trajectoryOptions, 0);
+            trajectory.atoms={{-4,0,0,0},{7,0,0,0}}; trajectory.scalarProperties["Q"]={2,12};
+            io::writeFrame(trajectoryFile, io::Format::XYZ, trajectory, trajectoryOptions, 1);
+        }
+        auto trajectoryFrames=io::index(trajectoryPath);
+        auto fileRange=colorRangeAcrossFrames(trajectoryFrames.size(),[&](size_t index) {
+            const auto &frame=trajectoryFrames.at(index);
+            return io::read(trajectoryPath,frame,frame.count);
+        },{},"Q");
+        require(fileRange.first==-5 && fileRange.second==12,
+                "all-frame range scans full Extended XYZ trajectory frames");
         auto filtered = evaluate(r, {{Op::SelectType, true, 0, 2, 0}, {Op::Delete}});
         require(filtered.data.atoms.size() == 1 &&
                     filtered.data.scalarProperties.at("Energy")[0] == 3.25,
@@ -142,7 +159,7 @@ int main() {
         for (const auto &e : std::filesystem::directory_iterator(dir))
             std::filesystem::remove(e.path());
         std::filesystem::remove(dir);
-        std::cout << "PASS: native format reads, property alignment, multi-frame seek, triclinic "
+        std::cout << "PASS: native format reads, property alignment, multi-frame seek/color range, triclinic "
                      "roundtrips, export validation\n";
         return 0;
     } catch (const std::exception &e) {

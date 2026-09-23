@@ -131,6 +131,30 @@ int main() {
         double expectedX=0; for (const auto &atom:fcc.atoms) expectedX+=atom.x; expectedX/=fcc.atoms.size();
         require(std::abs(reduced.data.globalAttributes.at("ReduceProperty.Position.X.mean")-expectedX)<1e-10,
                 "reduce property publishes numeric global mean");
+        Dataset rangeFrameA; rangeFrameA.species={"X"}; rangeFrameA.atoms={{1,0,0,0},{3,0,0,0}};
+        rangeFrameA.scalarProperties["Q"]={-5,8}; rangeFrameA.bounds();
+        Dataset rangeFrameB=rangeFrameA; rangeFrameB.atoms={{-4,0,0,0},{7,0,0,0}};
+        rangeFrameB.scalarProperties["Q"]={2,12}; rangeFrameB.bounds();
+        std::vector<Dataset> rangeFrames{rangeFrameA,rangeFrameB};
+        Modifier upstreamTranslate{Op::Translate}; upstreamTranslate.axis=0; upstreamTranslate.value=5;
+        auto trajectoryPositionRange=colorRangeAcrossFrames(rangeFrames.size(),
+            [&](size_t i){return rangeFrames.at(i);},{upstreamTranslate},"Position.X");
+        auto trajectoryPropertyRange=colorRangeAcrossFrames(rangeFrames.size(),
+            [&](size_t i){return rangeFrames.at(i);},{},"Q");
+        require(trajectoryPositionRange.first==1 && trajectoryPositionRange.second==12 &&
+                    trajectoryPropertyRange.first==-5 && trajectoryPropertyRange.second==12,
+                "all-frame color range evaluates the upstream pipeline and aggregates every frame");
+        std::atomic<float> rangeProgress{0};
+        auto progressedRange=colorRangeAcrossFrames(rangeFrames.size(),
+            [&](size_t i){return rangeFrames.at(i);}, {},"Q",nullptr,&rangeProgress);
+        std::atomic<bool> cancelColorRange{true};
+        bool colorRangeCancelled=false;
+        try {
+            colorRangeAcrossFrames(rangeFrames.size(),[&](size_t i){return rangeFrames.at(i);}, {},"Q",
+                                   &cancelColorRange);
+        } catch (const std::runtime_error &e) { colorRangeCancelled=std::string(e.what())=="Cancelled"; }
+        require(progressedRange.first==-5 && rangeProgress==1 && colorRangeCancelled,
+                "all-frame color range reports progress and observes cancellation");
         auto partial=fcc; partial.stride=2;
         bool sampledModifierRejected=false;
         try { evaluate(partial,{{Op::CoordinationAnalysis,true,.8f}}); }

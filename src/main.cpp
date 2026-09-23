@@ -289,6 +289,13 @@ struct App {
     std::future<DXAResult> dxaJob;
     bool dxaRunning = false;
     float dxaCutoff = .8f;
+    std::future<std::pair<double, double>> colorRangeJob;
+    std::atomic<bool> colorRangeCancel{false};
+    std::atomic<float> colorRangeProgress{0};
+    bool colorRangeRunning = false;
+    uint64_t colorRangePipelineGeneration = 0;
+    std::string colorRangeNodeId;
+    std::filesystem::path colorRangePath;
     App(HWND w, Renderer &r) : window(w), gpu(r) {
         preferences.load();
         theme(preferences.theme);
@@ -313,6 +320,8 @@ struct App {
         if (analysisJob.valid())
             analysisJob.wait();
         if (dxaJob.valid()) dxaJob.wait();
+        colorRangeCancel = true;
+        if (colorRangeJob.valid()) colorRangeJob.wait();
         exportCancel = true;
         if (exportJob.valid())
             exportJob.wait();
@@ -334,16 +343,20 @@ struct App {
                 colorMax = activeColor->colorMax;
             }
             if (colorCoding && activeColor->colorAutoRange) {
-                double lo = std::numeric_limits<double>::infinity();
-                double hi = -std::numeric_limits<double>::infinity();
-                if (auto it = next.data.scalarProperties.find("Color coding");
-                    it != next.data.scalarProperties.end() && it->second.size() == next.data.atoms.size()) {
-                    for (double value : it->second)
-                        if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
-                } else {
-                    for (const auto &a : next.data.atoms) {
-                        double value = coordinate(a, colorAxis);
-                        lo = std::min(lo, value); hi = std::max(hi, value);
+                double lo = activeColor->colorAllFramesRange ? activeColor->colorMin
+                    : std::numeric_limits<double>::infinity();
+                double hi = activeColor->colorAllFramesRange ? activeColor->colorMax
+                    : -std::numeric_limits<double>::infinity();
+                if (!activeColor->colorAllFramesRange) {
+                    if (auto it = next.data.scalarProperties.find("Color coding");
+                        it != next.data.scalarProperties.end() && it->second.size() == next.data.atoms.size()) {
+                        for (double value : it->second)
+                            if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
+                    } else {
+                        for (const auto &a : next.data.atoms) {
+                            double value = coordinate(a, colorAxis);
+                            lo = std::min(lo, value); hi = std::max(hi, value);
+                        }
                     }
                 }
                 if (std::isfinite(lo) && std::isfinite(hi)) {
@@ -408,10 +421,15 @@ struct App {
                 return evaluate(input, executable, &pipelineCancel);
             });
     }
-    void update(size_t dirtyFrom = SIZE_MAX) {
+    void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
         const size_t first = dirtyFrom == SIZE_MAX
             ? (mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1))
             : dirtyFrom;
+        if (!preserveColorRanges) {
+            for (size_t i = first; i < mods.size(); ++i)
+                if (mods[i].op == Op::ColorCoding && mods[i].colorAllFramesRange && i > first)
+                    mods[i].colorAllFramesRange = false;
+        }
         modifierGraph.markDirtyFrom(first);
         ++pipelineGeneration;
         if (pipelineBusy) {
@@ -497,6 +515,8 @@ struct App {
         to.push_back(mods);
         mods = std::move(from.back());
         from.pop_back();
+        for (auto &node : mods)
+            if (node.op == Op::ColorCoding) node.colorAllFramesRange = false;
         modifierGraph.selected = mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1);
         update();
     }
@@ -521,6 +541,52 @@ struct App {
                 auto d = io::read(p, known[frame], b, &progress, &cancel);
                 known[frame].count = d.sourceCount;
                 return Loaded{std::move(d), std::move(known), p, frame};
+            });
+    }
+    void computeColorRangeAllFrames(size_t nodeIndex) {
+        if (colorRangeRunning || busy || indexing || pipelineBusy || nodeIndex >= mods.size())
+            return;
+        if (frames.empty() || path.empty()) {
+            error = "Load a trajectory before computing an all-frame color range";
+            return;
+        }
+        if (io::detect(path) != io::Format::XYZ && io::detect(path) != io::Format::LammpsDump) {
+            error = "All-frame color ranges currently require an XYZ or LAMMPS dump trajectory";
+            return;
+        }
+        const auto &target = mods[nodeIndex];
+        if (target.op != Op::ColorCoding) return;
+        for (const auto &frame : frames) {
+            if (frame.count > 2000000) {
+                error = "Exact all-frame color range is limited to 2 million atoms per frame";
+                return;
+            }
+        }
+        std::vector<Frame> frameSnapshot = frames;
+        std::vector<Modifier> upstream;
+        upstream.reserve(nodeIndex);
+        for (size_t i = 0; i < nodeIndex; ++i)
+            upstream.push_back(static_cast<const Modifier &>(mods[i]));
+        const auto inputPath = path;
+        const auto property = target.property;
+        colorRangeNodeId = target.id;
+        colorRangePath = inputPath;
+        colorRangePipelineGeneration = pipelineGeneration;
+        colorRangeCancel = false;
+        colorRangeProgress = 0;
+        colorRangeRunning = true;
+        error.clear();
+        status = "Computing exact color range across trajectory frames...";
+        colorRangeJob = std::async(std::launch::async,
+            [this, inputPath, frameSnapshot = std::move(frameSnapshot), upstream = std::move(upstream), property]() mutable {
+                auto readFrame = [&](size_t index) {
+                    if (colorRangeCancel) throw std::runtime_error("Cancelled");
+                    const auto &frame = frameSnapshot.at(index);
+                    return io::read(inputPath, frame, std::max<uint64_t>(frame.count, 1),
+                                    nullptr, &colorRangeCancel);
+                };
+                return colorRangeAcrossFrames(frameSnapshot.size(), readFrame, upstream, property,
+                                              &colorRangeCancel, &colorRangeProgress);
             });
     }
     void poll() {
@@ -581,6 +647,32 @@ struct App {
                 error = e.what();
             }
         }
+        if (colorRangeRunning && colorRangeJob.valid() &&
+            colorRangeJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            colorRangeRunning = false;
+            try {
+                auto range = colorRangeJob.get();
+                auto node = std::find_if(mods.begin(), mods.end(), [&](const ModifierNode &item) {
+                    return item.id == colorRangeNodeId;
+                });
+                if (node == mods.end() || path != colorRangePath ||
+                    pipelineGeneration != colorRangePipelineGeneration) {
+                    status = "Dataset or pipeline changed; all-frame color range discarded";
+                } else {
+                    checkpoint();
+                    node->colorMin = float(range.first);
+                    node->colorMax = float(range.second);
+                    node->colorAutoRange = true;
+                    node->colorAllFramesRange = true;
+                    const size_t index = size_t(node - mods.begin());
+                    update(index, true);
+                    status = "Color range computed across all frames";
+                }
+            } catch (const std::exception &e) {
+                if (std::string(e.what()) == "Cancelled") status = "All-frame color range cancelled";
+                else { error = e.what(); status = "All-frame color range failed"; }
+            }
+        }
         if (busy && job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             busy = false;
             try {
@@ -608,7 +700,7 @@ struct App {
                     for (auto &c : cameras)
                         c.zoom = 1;
                 }
-                update();
+                update(SIZE_MAX, true);
                 status = "Loaded " + number(source.sourceCount) + " atoms";
             } catch (const std::exception &e) {
                 error = e.what();
@@ -1338,7 +1430,8 @@ struct App {
                         auto edited = m;
                         auto property = edited.property;
                         if (colorPropertyCombo("Input property", property)) {
-                            edited.property = std::move(property); edited.colorAutoRange = true; changed = true;
+                            edited.property = std::move(property); edited.colorAutoRange = true;
+                            edited.colorAllFramesRange = false; changed = true;
                         }
                         int gradient = edited.colorGradient;
                         if (ImGui::Combo("Color gradient", &gradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0")) { edited.colorGradient = gradient; changed = true; }
@@ -1358,6 +1451,19 @@ struct App {
                         if (ImGui::Checkbox("Reverse range", &reverse)) { edited.colorReverse = reverse; changed = true; }
                         bool keepSelection = edited.colorKeepSelection;
                         if (ImGui::Checkbox("Keep selection", &keepSelection)) { edited.colorKeepSelection = keepSelection; changed = true; }
+                        ImGui::BeginDisabled(colorRangeRunning || busy || indexing || pipelineBusy || frames.empty());
+                        if (ImGui::Button("Compute range across all frames"))
+                            computeColorRangeAllFrames(modifierGraph.selected);
+                        ImGui::EndDisabled();
+                        if (colorRangeRunning) {
+                            ImGui::ProgressBar(colorRangeProgress.load(), ImVec2(-1, 0), "Scanning trajectory");
+                            if (ImGui::Button("Cancel range calculation")) colorRangeCancel = true;
+                        } else if (m.colorAllFramesRange) {
+                            ImGui::TextDisabled("Range: %.6g to %.6g across %zu frames", m.colorMin, m.colorMax, frames.size());
+                            if (ImGui::SmallButton("Use current-frame automatic range")) {
+                                checkpoint(); m.colorAllFramesRange = false; m.colorAutoRange = true; update();
+                            }
+                        }
                         if (changed) {
                             checkpoint();
                             m.property = std::move(edited.property);
@@ -1369,6 +1475,7 @@ struct App {
                             m.colorSelectedOnly = edited.colorSelectedOnly;
                             m.colorKeepSelection = edited.colorKeepSelection;
                             m.colorMin = edited.colorMin; m.colorMax = edited.colorMax;
+                            m.colorAllFramesRange = edited.colorAllFramesRange;
                             update();
                         }
                     }

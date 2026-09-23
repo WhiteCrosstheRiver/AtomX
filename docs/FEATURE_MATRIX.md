@@ -37,7 +37,7 @@
 
 ## Pipeline / analysis status, 2026-09-23
 
-- Color coding is stored per pipeline node and writes the selected Position/scalar values into the evaluated dataset. Automatic/symmetric/manual range, discrete mapping, inversion, selected-only coloring, and keep-selection are implemented. Gradient fidelity, legend, and all-frame range remain incomplete.
+- Color coding is stored per pipeline node and writes the selected Position/scalar values into the evaluated dataset. Automatic/symmetric/manual range, exact cancellable range scanning across XYZ/LAMMPS dump frames (up to 2 million atoms per frame), discrete mapping, inversion, selected-only coloring, and keep-selection are implemented. Gradient fidelity and an in-view/exported legend remain incomplete.
 - Fixed-cutoff common-neighbor analysis publishes `Structure Type`, global structure counts, and a result table; periodic FCC, BCC, HCP (triclinic), and an isolated icosahedral-center fixture are covered. Adaptive CNA and production-scale acceleration remain incomplete. The coordination-based DXA helper remains an explicitly approximate prepass.
 - Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts, and renders GPU lines in viewports and image exports. Visibility, color, and pixel width are configurable. Cylinder rendering and type-pair cutoffs remain future work.
 - Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV.
@@ -67,7 +67,7 @@
 | Voronoi analysis | 待实现 | 周期 / 非正交晶胞下的多面体构造 |
 | Wigner-Seitz defect analysis | 待实现 | 参考晶格位点占据、空位与间隙原子 |
 
-邻域分析与选择共享 linked-cell 邻居搜索内核；在采样数据上明确拒绝运行。截断邻居会损坏配位数与聚类结果，不能以可视化采样代替全数据科学分析。正交周期晶胞要求各周期长度至少为 cutoff 的两倍，非正交周期分析尚未实现。300,000,000 次候选比较的上限用于防止极大 cutoff 导致无界运行。
+邻域分析与选择共享 linked-cell 邻居搜索内核；在采样数据上明确拒绝运行。截断邻居会损坏配位数与聚类结果，不能以可视化采样代替全数据科学分析。正交和三斜周期晶胞均走周期最小镜像；非正交最小镜像使用有界精确搜索。200 万原子与候选比较上限用于防止超大任务无界运行。
 
 ## Coloring / Modification / Python
 
@@ -77,7 +77,7 @@
 | Assign color | 部分 | 管线节点对选中粒子赋色；无选区时作用于全部粒子；粒子色可检查且进入 GPU 渲染，并随筛选/复制映射；颜色不写入当前结构文件格式 |
 | Color by type | 已实现 | 默认 8 色循环，选中粒子高亮 |
 | 粒子形状 | 部分 | 全局选择 Sphere、Circle、Cube、Cylinder、Spherocylinder；按类型的独立半径/颜色/形状编辑待做 |
-| Color coding | 部分 | GPU 按节点配置的 Position 或数值粒子属性着色，支持自动/对称/手动范围、离散、反转、仅选中和 Keep selection；渐变仍为近似色表，图例与全帧范围待实现 |
+| Color coding | 部分 | GPU 按节点配置的 Position 或数值粒子属性着色，支持当前帧自动/对称/手动范围和跨 XYZ/LAMMPS dump 帧的精确异步范围、取消、离散、反转、仅选中和 Keep selection；全帧计算限每帧 200 万原子；渐变仍为近似色表，图例待实现 |
 | Affine transformation | 部分 | 按轴平移、统一比例缩放、旋转坐标与晶胞；不是完整 3x4 仿射矩阵 |
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
 | Compute property | 部分 | 安全原生数值表达式逐粒子计算并发布标量属性，可供下游节点读取；不支持向量表达式、单位系统、任意脚本及优化缓存 |
@@ -138,5 +138,5 @@
 - 无系统标题栏；保留原生拖动、双击最大化、边缘缩放和任务栏最小化。X / Alt+F4 收到托盘，电源键彻底退出。
 - Slate dark / Classic light / Midnight、Segoe UI / Arial / Consolas、14–20 px 字体设置立即应用并持久化。
 - Rotate、Replicate、Coordinate range selection、Edit particle types 已实现，并支持现有撤销/重做及启停。
-- 邻域距离直方图与全周期正交晶胞 RDF 已实现，CSV 可导出。Cluster/RDF 等菜单项打开 Analysis 面板，设置 cutoff 后计算；目前不是可排序的管线节点。
+- 邻域距离直方图与全周期正交/三斜晶胞 RDF 已实现为可排序管线节点；Coordination、Cluster、Histogram、Reduce property 也提供节点参数和可检查属性/数据表，数据表可导出 CSV。各节点仍有数据规模和物理模型限制，详见上表。
 - 高级晶格识别、DXA、Voronoi、显式键拓扑、Python 等仍待实现，不能将这次改动视为 OVITO 全功能完成。

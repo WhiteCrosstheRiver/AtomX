@@ -529,6 +529,7 @@ struct Modifier {
     bool discardExistingBonds = false;
     int colorGradient = 0;
     bool colorAutoRange = true, colorSymmetricRange = false, colorReverse = false;
+    bool colorAllFramesRange = false;
     bool colorDiscrete = false, colorSelectedOnly = false, colorKeepSelection = false;
     float colorMin = 0, colorMax = 1;
     int reduceOperation = 2; // min, max, mean, sum
@@ -1582,6 +1583,41 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
     }
     r.data.bounds();
     return r;
+}
+inline std::pair<double, double> colorRangeAcrossFrames(
+    size_t frameCount, const std::function<Dataset(size_t)> &readFrame,
+    const std::vector<Modifier> &upstream, const std::string &property,
+    std::atomic<bool> *cancel = nullptr, std::atomic<float> *progress = nullptr) {
+    if (frameCount == 0 || !readFrame)
+        throw std::runtime_error("No trajectory frames are available for color range calculation");
+    double lo = std::numeric_limits<double>::infinity();
+    double hi = -std::numeric_limits<double>::infinity();
+    for (size_t frame = 0; frame < frameCount; ++frame) {
+        if (cancel && *cancel) throw std::runtime_error("Cancelled");
+        auto evaluated = evaluate(readFrame(frame), upstream, cancel);
+        const auto &data = evaluated.data;
+        if (property == "Position.X" || property == "Position.Y" || property == "Position.Z") {
+            const int axis = property == "Position.X" ? 0 : property == "Position.Y" ? 1 : 2;
+            for (const auto &atom : data.atoms) {
+                if (cancel && *cancel) throw std::runtime_error("Cancelled");
+                double value = coordinate(atom, axis);
+                if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
+            }
+        } else {
+            auto values = data.scalarProperties.find(property);
+            if (values == data.scalarProperties.end() || values->second.size() != data.atoms.size())
+                throw std::runtime_error("Color range property is missing or is not scalar: " + property);
+            for (double value : values->second) {
+                if (cancel && *cancel) throw std::runtime_error("Cancelled");
+                if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
+            }
+        }
+        if (progress) *progress = float(frame + 1) / float(frameCount);
+    }
+    if (!std::isfinite(lo) || !std::isfinite(hi))
+        throw std::runtime_error("No finite values were found across trajectory frames");
+    if (lo == hi) { lo -= .5; hi += .5; }
+    return {lo, hi};
 }
 inline PipelineResult evaluate(const Dataset &source, const PipelineGraph &graph,
                                std::atomic<bool> *cancel = nullptr) {
