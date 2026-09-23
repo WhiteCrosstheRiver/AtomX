@@ -400,6 +400,10 @@ int main() {
         require(slabBonds.data.bonds.size()==1 && slabBonds.data.bonds[0].a==0 &&
                     slabBonds.data.bonds[0].b==1 && slabBonds.data.bonds[0].image==std::array<int32_t,3>{1,0,0},
                 "partially periodic triclinic slab works with a degenerate non-periodic cell vector");
+        auto slabExpanded=evaluate(slab,{{Op::SelectIndex,true,0,0,0},
+                                         {Op::ExpandSelection,true,.3f,2,1}});
+        require(slabExpanded.selected[0] && slabExpanded.selected[1] && !slabExpanded.selected[2],
+                "selection expansion uses the same triclinic partial-periodic minimum-image neighbors");
         Dataset chain;
         chain.species = {"X"};
         chain.atoms = {{0,0,0,0},{0.8f,0,0,0},{1.6f,0,0,0},{5,0,0,0}};

@@ -106,7 +106,7 @@
 | 修改器 | 状态 | 范围 |
 |---|---|---|
 | Clear selection | 已实现 | 清空选择掩码 |
-| Expand selection | 部分 | 通过 cutoff 邻接扩展当前选区，支持 1–64 层及正交周期最小镜像；非正交 PBC 和大规模邻域任务待做 |
+| Expand selection | 部分 | 通过 cutoff 邻接扩展当前选区，支持 1–64 层和正交/三斜/部分周期 PBC 最小镜像；单核完整粒子运算受 200 万原子与候选对上限保护 |
 | Expression selection | 部分 | 安全原生表达式支持坐标/类型/标量属性、反引号属性引用、算术、比较、逻辑和 abs/sqrt/isfinite；空数据时也解析并检查属性，表达式长度限制 511 字符；不执行脚本，无向量分量语法、单位和帧变量 |
 | Invert selection | 已实现 | 当前管线中的粒子选择取反 |
 | Manual selection | 部分 | 粒子表选择存入一个持久 Manual selection 管线节点；单击替换选区、Ctrl 单击切换单个粒子；视口 picking、框选与套索待实现 |
