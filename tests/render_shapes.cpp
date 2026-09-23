@@ -1,5 +1,6 @@
 #include "../src/renderer.hpp"
 #include <iostream>
+#include <limits>
 #include <set>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -236,6 +237,31 @@ int main(int argc, char **argv) {
         renderer.draw(t, coded, cam, .3f, 0, 0, 0, 0, 0, 1, true, false, false, bg);
         if (imageHash(t) == firstPropertyImage)
             throw std::runtime_error("GPU color coding must follow the selected particle property");
+        coded.atoms={{0,0,0,0}};
+        coded.scalarProperties["Color coding"] = {-std::numeric_limits<float>::max()};
+        renderer.upload(coded, {});
+        renderer.draw(t,coded,cam,.3f,0,0,0,8,-std::numeric_limits<float>::max(),
+                      std::numeric_limits<float>::max(),true,false,false,bg);
+        const auto wideNegative=imageHash(t);
+        coded.scalarProperties["Color coding"] = {-1};
+        renderer.upload(coded, {});
+        renderer.draw(t,coded,cam,.3f,0,0,0,8,-1,1,true,false,false,bg);
+        const auto narrowNegative=imageHash(t);
+        coded.scalarProperties["Color coding"] = {1};
+        renderer.upload(coded, {});
+        renderer.draw(t,coded,cam,.3f,0,0,0,8,-1,1,true,false,false,bg);
+        const auto narrowPositive=imageHash(t);
+        if (narrowPositive==narrowNegative)
+            throw std::runtime_error("Single-particle color coding fixture must visibly distinguish low and high property values");
+        coded.scalarProperties["Color coding"] = {std::numeric_limits<float>::max()};
+        renderer.upload(coded, {});
+        renderer.draw(t,coded,cam,.3f,0,0,0,8,-std::numeric_limits<float>::max(),
+                      std::numeric_limits<float>::max(),true,false,false,bg);
+        const auto widePositive=imageHash(t);
+        if (widePositive==wideNegative)
+            throw std::runtime_error("GPU color coding must distinguish both ends of the widest finite float range");
+        coded.atoms={{-.5f,0,0,0},{.5f,0,0,0}};
+        coded.bounds();
         coded.scalarProperties.clear();
         coded.particleColors={{1,0,0},{0,1,0}};
         renderer.upload(coded,{});
