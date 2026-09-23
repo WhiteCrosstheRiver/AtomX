@@ -631,6 +631,59 @@ struct Modifier {
     bool transformVectorProperties = false;
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
 };
+// Returns properties visible at a node's input without evaluating particle
+// operations. This is the schema counterpart to evaluatePrefix(): particle
+// filters preserve property names, while property-producing/removing nodes
+// update the schema in pipeline order.
+template<class ModifierRange>
+inline std::vector<std::string> pipelineInputPropertyChoices(
+    const Dataset &source, const ModifierRange &modifiers,
+    size_t nodeIndex, bool includeVectorComponents = false) {
+    std::set<std::string> scalar, vector;
+    for (const auto &[name, values] : source.scalarProperties)
+        if (values.size() == source.atoms.size()) scalar.insert(name);
+    for (const auto &[name, values] : source.vectorProperties)
+        if (values.size() == source.atoms.size()) vector.insert(name);
+    nodeIndex = std::min(nodeIndex, modifiers.size());
+    for (size_t i = 0; i < nodeIndex; ++i) {
+        const auto &modifier = modifiers[i];
+        if (!modifier.enabled) continue;
+        switch (modifier.op) {
+        case Op::RemoveProperty:
+            scalar.erase(modifier.property);
+            vector.erase(modifier.property);
+            break;
+        case Op::ComputeProperty:
+            scalar.insert(modifier.outputProperty);
+            break;
+        case Op::ColorCoding:
+            scalar.insert("Color coding");
+            break;
+        case Op::ColorType:
+            scalar.erase("Color coding");
+            break;
+        case Op::CoordinationAnalysis:
+            scalar.insert("Coordination");
+            break;
+        case Op::ClusterAnalysis:
+            scalar.insert("Cluster");
+            break;
+        case Op::CommonNeighborAnalysis:
+            scalar.insert("Structure Type");
+            break;
+        default:
+            break;
+        }
+    }
+    std::vector<std::string> choices{"Position.X", "Position.Y", "Position.Z"};
+    choices.insert(choices.end(), scalar.begin(), scalar.end());
+    if (includeVectorComponents)
+        for (const auto &name : vector)
+            for (const char *axis : {"X", "Y", "Z"})
+                choices.push_back(name + "." + axis);
+    std::sort(choices.begin() + 3, choices.end());
+    return choices;
+}
 struct DataObject {
     enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels, GlobalAttributes };
     Kind kind = Kind::Particles;

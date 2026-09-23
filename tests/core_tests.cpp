@@ -471,6 +471,24 @@ int main() {
         wave.sourceCount = wave.atoms.size(); wave.bounds();
         wave.scalarProperties["Coordination"] = {1,2,3,4};
         wave.vectorProperties["Velocity"]={{0,1,2},{3,4,5},{6,7,8},{9,10,11}};
+        Modifier schemaCompute{Op::ComputeProperty};
+        schemaCompute.outputProperty="Derived upstream";
+        Modifier schemaDisabled{Op::ComputeProperty};
+        schemaDisabled.enabled=false; schemaDisabled.outputProperty="Disabled output";
+        Modifier schemaRemove{Op::RemoveProperty}; schemaRemove.property="Coordination";
+        Modifier schemaDownstream{Op::ComputeProperty}; schemaDownstream.outputProperty="Downstream only";
+        const std::vector<Modifier> schemaModifiers{
+            schemaCompute,schemaDisabled,schemaRemove,schemaDownstream};
+        const auto schemaChoices=pipelineInputPropertyChoices(
+            wave,schemaModifiers,3,true);
+        const auto hasSchemaChoice=[&](const std::string &name) {
+            return std::find(schemaChoices.begin(),schemaChoices.end(),name)!=schemaChoices.end();
+        };
+        require(hasSchemaChoice("Derived upstream") && !hasSchemaChoice("Disabled output") &&
+                    !hasSchemaChoice("Coordination") && !hasSchemaChoice("Downstream only") &&
+                    hasSchemaChoice("Velocity.X") && hasSchemaChoice("Velocity.Y") &&
+                    hasSchemaChoice("Velocity.Z") && hasSchemaChoice("Position.X"),
+                "modifier property choices reflect only aligned source and enabled upstream schemas");
         std::atomic<bool> cancelPropertyCopy{true};
         bool positionCopyCancelled=false, scalarCopyCancelled=false, vectorCopyCancelled=false;
         try { (void)particlePropertyValues(wave,"Position.X",&cancelPropertyCopy); }

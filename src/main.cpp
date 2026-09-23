@@ -591,16 +591,8 @@ struct App {
     }
     bool colorPropertyCombo(const char *label, std::string &property,
                             bool includeVectorComponents = false) {
-        std::vector<std::string> choices{"Position.X", "Position.Y", "Position.Z"};
-        for (const auto &[name, values] : result.data.scalarProperties)
-            if (name != "Color coding" && values.size() == result.data.atoms.size())
-                choices.push_back(name);
-        if (includeVectorComponents)
-            for (const auto &[name, values] : result.data.vectorProperties)
-                if (values.size() == result.data.atoms.size())
-                    for (const char *axis : {"X", "Y", "Z"})
-                        choices.push_back(name + "." + axis);
-        std::sort(choices.begin() + 3, choices.end());
+        const auto choices = pipelineInputPropertyChoices(
+            source, mods, std::min(modifierGraph.selected, mods.size()), includeVectorComponents);
         bool changed = false;
         if (ImGui::BeginCombo(label, property.c_str())) {
             for (const auto &name : choices) {
