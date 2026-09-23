@@ -1762,13 +1762,30 @@ struct App {
                         if (m.op == Op::Histogram) {
                             int bins = edited.type;
                             if (ImGui::InputInt("Bins", &bins)) { edited.type = std::clamp(bins, 1, 4096); changed = true; }
+                            if (ImGui::Checkbox("Use only selected elements", &edited.histogramSelectedOnly))
+                                changed = true;
+                            int normalization = edited.histogramNormalization;
+                            if (ImGui::Combo("Normalization", &normalization,
+                                             "Absolute counts\0Relative frequency\0Probability density\0")) {
+                                edited.histogramNormalization = normalization;
+                                changed = true;
+                            }
+                            ImGui::TextDisabled("Builds the table from the current frame; selected-only uses the incoming pipeline selection.");
                         } else {
                             int reduction = edited.reduceOperation;
                             if (ImGui::Combo("Reduction", &reduction, "Minimum\0Maximum\0Mean\0Sum\0")) {
                                 edited.reduceOperation = reduction; changed = true;
                             }
                         }
-                        if (changed) { checkpoint(); m.property = edited.property; m.type = edited.type; m.reduceOperation = edited.reduceOperation; update(); }
+                        if (changed) {
+                            checkpoint();
+                            m.property = edited.property;
+                            m.type = edited.type;
+                            m.reduceOperation = edited.reduceOperation;
+                            m.histogramSelectedOnly = edited.histogramSelectedOnly;
+                            m.histogramNormalization = edited.histogramNormalization;
+                            update();
+                        }
                     }
                     if (m.op == Op::Replicate) {
                         int count = m.type, axis = m.axis;

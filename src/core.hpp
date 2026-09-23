@@ -630,6 +630,8 @@ struct Modifier {
     bool overlapUseRadii = false;
     bool transformVectorProperties = false;
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
+    int histogramNormalization = 0; // counts, relative frequency, probability density
+    bool histogramSelectedOnly = false;
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -719,7 +721,8 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
     if (modifier.op==Op::RadialDistribution || modifier.op==Op::Histogram ||
         modifier.op==Op::BondLengthDistribution || modifier.op==Op::BondAngleDistribution)
         add(Kind::Table,opName(modifier.op));
-    if (modifier.op==Op::RadialDistribution || modifier.op==Op::ReduceProperty ||
+    if (modifier.op==Op::RadialDistribution || modifier.op==Op::Histogram ||
+        modifier.op==Op::ReduceProperty ||
         modifier.op==Op::BondLengthDistribution || modifier.op==Op::BondAngleDistribution)
         add(Kind::GlobalAttributes,opName(modifier.op)+std::string(" statistics"));
     return outputs;
@@ -1587,6 +1590,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 throw std::runtime_error("Computed property requires an expression and output name");
             if (m.op == Op::Histogram && (m.type < 1 || m.type > 4096))
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
+            if (m.op == Op::Histogram && (m.histogramNormalization < 0 || m.histogramNormalization > 2))
+                throw std::runtime_error("Choose a supported histogram normalization mode");
             if (m.op == Op::BondLengthDistribution && (m.type < 1 || m.type > 4096))
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
             if (m.op == Op::BondAngleDistribution && (m.type < 1 || m.type > 4096))
@@ -1934,17 +1939,25 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                         (m.reduceOperation == 0 ? "min" : m.reduceOperation == 1 ? "max" : m.reduceOperation == 2 ? "mean" : "sum")] = reduced;
                 } else {
                     DataTable table; table.name = "Histogram: " + m.property;
-                    table.columns = {"Bin center", "Count"};
+                    table.columns = {"Bin center", m.histogramNormalization == 0 ? "Count" :
+                        m.histogramNormalization == 1 ? "Relative frequency" : "Probability density"};
+                    if (m.histogramSelectedOnly && r.selected.size() != valueCount)
+                        throw std::runtime_error("Selection length does not match the particle count");
                     double lo = 0, hi = 0;
                     bool first = true;
+                    uint64_t sampleCount = 0;
                     for (size_t i = 0; i < valueCount; ++i) {
                         checkCancelled(i);
+                        if (m.histogramSelectedOnly && !r.selected[i]) continue;
                         const double value = valueAt(i);
                         if (!std::isfinite(value)) continue;
+                        ++sampleCount;
                         if (first) { lo = hi = value; first = false; }
                         else { lo = std::min(lo, value); hi = std::max(hi, value); }
                     }
-                    if (first) throw std::runtime_error("Property has no finite values to histogram");
+                    if (first) throw std::runtime_error(m.histogramSelectedOnly
+                        ? "The selected elements contain no finite property values"
+                        : "Property has no finite values to histogram");
                     const bool constantRange = lo == hi;
                     if (constantRange) {
                         const double expandedLo = lo - .5, expandedHi = hi + .5;
@@ -1959,9 +1972,14 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     const double scaledLo = std::scalbn(lo, -scaleExponent);
                     const double scaledHi = std::scalbn(hi, -scaleExponent);
                     const double scaledSpan = scaledHi - scaledLo;
+                    const double densityScale = m.histogramNormalization == 2
+                        ? std::scalbn(double(m.type) / scaledSpan, -scaleExponent) : 1.0;
+                    if (m.histogramNormalization == 2 && (!std::isfinite(densityScale) || densityScale <= 0))
+                        throw std::runtime_error("Histogram probability-density scale is outside the finite numeric range");
                     std::vector<uint64_t> counts(size_t(m.type));
                     for (size_t i = 0; i < valueCount; ++i) {
                         checkCancelled(i);
+                        if (m.histogramSelectedOnly && !r.selected[i]) continue;
                         const double value = valueAt(i);
                         if (!std::isfinite(value)) continue;
                         const double fraction = constantRange ? .5 :
@@ -1973,8 +1991,17 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     for (int bin = 0; bin < m.type; ++bin) {
                         const double center = constantRange && lo == hi ? lo :
                             std::scalbn(scaledLo + (bin + .5) * scaledSpan / m.type, scaleExponent);
-                        table.rows.push_back({std::to_string(center), std::to_string(counts[bin])});
+                        double output = double(counts[bin]);
+                        if (m.histogramNormalization == 1)
+                            output = double(counts[bin]) / double(sampleCount);
+                        else if (m.histogramNormalization == 2)
+                            output = (double(counts[bin]) / double(sampleCount)) * densityScale;
+                        if (!std::isfinite(output))
+                            throw std::runtime_error("Histogram normalized value is outside the finite numeric range");
+                        table.rows.push_back({std::to_string(center), m.histogramNormalization == 0
+                            ? std::to_string(counts[bin]) : std::to_string(output)});
                     }
+                    r.data.globalAttributes["Histogram.samples"] = double(sampleCount);
                     r.data.tables.push_back(std::move(table));
                 }
                 continue;

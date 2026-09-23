@@ -274,7 +274,8 @@ int main() {
                 "computed particle properties flow through histogram and reduction nodes with results preserved");
         const auto computedHistogramPrefix=evaluatePrefix(fcc,{computedRadius,computedHistogram,computedMean},2);
         require(computedHistogramPrefix.data.tables.size()==1 &&
-                    computedHistogramPrefix.data.globalAttributes.empty() &&
+                    computedHistogramPrefix.data.globalAttributes.contains("Histogram.samples") &&
+                    !computedHistogramPrefix.data.globalAttributes.contains("ReduceProperty.Squared distance.mean") &&
                     computedHistogramPrefix.data.scalarProperties.contains("Squared distance"),
                 "node inspection prefix exposes the histogram output before downstream reductions");
         Modifier extremeMean{Op::ReduceProperty}; extremeMean.property="Extreme"; extremeMean.reduceOperation=2;
@@ -489,6 +490,52 @@ int main() {
                     hasSchemaChoice("Velocity.X") && hasSchemaChoice("Velocity.Y") &&
                     hasSchemaChoice("Velocity.Z") && hasSchemaChoice("Position.X"),
                 "modifier property choices reflect only aligned source and enabled upstream schemas");
+        Modifier selectedHistogram{Op::Histogram};
+        selectedHistogram.property="Coordination";
+        selectedHistogram.type=4;
+        selectedHistogram.histogramSelectedOnly=true;
+        selectedHistogram.histogramNormalization=1;
+        Modifier chosenParticles{Op::ManualSelection};
+        chosenParticles.manualSelection={1,3};
+        const auto selectedHistogramResult=evaluate(wave,{chosenParticles,selectedHistogram});
+        const auto &selectedHistogramTable=selectedHistogramResult.data.tables.back();
+        double relativeFrequencySum=0;
+        int occupiedSelectedBins=0;
+        for (const auto &row:selectedHistogramTable.rows) {
+            const double frequency=std::stod(row[1]);
+            relativeFrequencySum+=frequency;
+            occupiedSelectedBins+=frequency>0;
+        }
+        require(selectedHistogramTable.columns[1]=="Relative frequency" &&
+                    selectedHistogramResult.data.globalAttributes.at("Histogram.samples")==2 &&
+                    std::abs(relativeFrequencySum-1)<1e-6 && occupiedSelectedBins==2 &&
+                    selectedHistogramResult.selected==std::vector<uint8_t>({0,1,0,1}),
+                "selected-only relative-frequency histogram uses the incoming selection without changing it");
+        const auto histogramOutputs=modifierOutputs(selectedHistogram,1);
+        require(std::any_of(histogramOutputs.begin(),histogramOutputs.end(),[](const DataObject &output) {
+                    return output.kind==DataObject::Kind::Table;
+                }) && std::any_of(histogramOutputs.begin(),histogramOutputs.end(),[](const DataObject &output) {
+                    return output.kind==DataObject::Kind::GlobalAttributes;
+                }),
+                "histogram node metadata declares both its table and sample-statistics output");
+        selectedHistogram.histogramNormalization=2;
+        const auto densityHistogram=evaluate(wave,{chosenParticles,selectedHistogram});
+        double probabilityArea=0;
+        const auto &densityRows=densityHistogram.data.tables.back().rows;
+        const double binWidth=std::stod(densityRows[1][0])-std::stod(densityRows[0][0]);
+        for (const auto &row:densityRows) probabilityArea+=std::stod(row[1])*binWidth;
+        require(densityHistogram.data.tables.back().columns[1]=="Probability density" &&
+                    std::abs(probabilityArea-1)<1e-5,
+                "selected-only probability-density histogram integrates to one over its bin range");
+        Modifier emptySelection{Op::ManualSelection};
+        bool emptySelectedHistogramRejected=false;
+        try { (void)evaluate(wave,{emptySelection,selectedHistogram}); }
+        catch (const ModifierExecutionError &e) {
+            emptySelectedHistogramRejected=e.nodeIndex==1 &&
+                std::string(e.what()).find("selected elements")!=std::string::npos;
+        }
+        require(emptySelectedHistogramRejected,
+                "selected-only histogram reports an empty selected population at its own node");
         std::atomic<bool> cancelPropertyCopy{true};
         bool positionCopyCancelled=false, scalarCopyCancelled=false, vectorCopyCancelled=false;
         try { (void)particlePropertyValues(wave,"Position.X",&cancelPropertyCopy); }
