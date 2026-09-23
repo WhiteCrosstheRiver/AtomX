@@ -168,6 +168,7 @@ int main() {
         Dataset cellEditData; cellEditData.species={"X"};
         cellEditData.cell={10,0,0,0,10,0,0,0,10}; cellEditData.pbc={true,true,true};
         cellEditData.atoms={{1,2,3,0}}; cellEditData.bounds();
+        cellEditData.vectorProperties["Velocity"]={{1,2,3}};
         Modifier editCell{Op::EditCell};
         editCell.editedCell={20,0,0,0,20,0,0,0,20}; editCell.editedOrigin={1,1,1};
         editCell.editedPbc={true,false,true};
@@ -194,8 +195,23 @@ int main() {
                     affineResult.data.atoms[0].z==5.5f && affineResult.data.cell[0]==20 &&
                     affineResult.data.cell[3]==10 && affineResult.data.cell[4]==30 &&
                     affineResult.data.cell[8]==5 && affineResult.data.origin.x==-1 &&
-                    affineResult.data.origin.y==2 && affineResult.data.origin.z==4,
+                    affineResult.data.origin.y==2 && affineResult.data.origin.z==4 &&
+                    affineResult.data.vectorProperties.at("Velocity")[0].x==1,
                 "general affine matrix transforms positions, cell vectors and origin");
+        affine.transformVectorProperties = true;
+        auto affineVectors = evaluate(cellEditData,{affine});
+        const auto transformedVelocity = affineVectors.data.vectorProperties.at("Velocity")[0];
+        require(transformedVelocity.x==4 && transformedVelocity.y==6 && transformedVelocity.z==1.5f,
+                "optional affine vector-property transform uses the linear matrix without translation");
+        Modifier overflowingAffine = affine;
+        overflowingAffine.affineTransform={1e20,0,0,0, 0,1e20,0,0, 0,0,1e20,0};
+        Dataset overflowingVectors = cellEditData;
+        overflowingVectors.vectorProperties["Velocity"][0].x = 1e20f;
+        bool affineVectorOverflowRejected=false;
+        try { evaluate(overflowingVectors,{overflowingAffine}); }
+        catch (const ModifierExecutionError &e) { affineVectorOverflowRejected=e.nodeIndex==0; }
+        require(affineVectorOverflowRejected,
+                "affine vector-property overflow reports an error at its pipeline node");
         affine.affineTransform[8]=0; affine.affineTransform[9]=0; affine.affineTransform[10]=0;
         bool singularAffineRejected=false;
         try { evaluate(cellEditData,{affine}); }

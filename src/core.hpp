@@ -583,6 +583,7 @@ struct Modifier {
     std::array<bool, 3> editedPbc{};
     bool transformCoordinatesWithCell = false;
     bool overlapUseRadii = false;
+    bool transformVectorProperties = false;
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
 };
 struct DataObject {
@@ -1452,6 +1453,22 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     atom.z = float(transformed[2]);
                     if (!std::isfinite(atom.x) || !std::isfinite(atom.y) || !std::isfinite(atom.z))
                         throw std::runtime_error("Affine transformation exceeds particle coordinate range");
+                }
+                if (m.transformVectorProperties) {
+                    for (auto &[name, values] : r.data.vectorProperties) {
+                        if (values.size() != r.data.atoms.size())
+                            throw std::runtime_error(
+                                "Vector property length does not match particle count: " + name);
+                        for (auto &value : values) {
+                            const auto transformed = transformPoint(value.x, value.y, value.z, false);
+                            for (double component : transformed)
+                                if (std::abs(component) > std::numeric_limits<float>::max())
+                                    throw std::runtime_error(
+                                        "Affine transformation exceeds vector property range: " + name);
+                            value = {float(transformed[0]), float(transformed[1]),
+                                     float(transformed[2])};
+                        }
+                    }
                 }
                 for (int vector = 0; vector < 3; ++vector) {
                     const int offset = vector * 3;

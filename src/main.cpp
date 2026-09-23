@@ -1541,8 +1541,9 @@ struct App {
                     }
                     if (m.op == Op::AffineTransform) {
                         auto matrix = m.affineTransform;
+                        bool transformVectors = m.transformVectorProperties;
                         bool changed = false;
-                        ImGui::TextWrapped("Maps particle positions, cell vectors, and origin with a 3 x 4 matrix. Particle vector properties are left unchanged.");
+                        ImGui::TextWrapped("Maps particle positions, cell vectors, and origin with a 3 x 4 matrix. Translation is not applied to vectors.");
                         if (ImGui::BeginTable("Affine matrix", 4,
                                               ImGuiTableFlags_SizingStretchSame)) {
                             for (const char *column : {"X", "Y", "Z", "Translation"})
@@ -1561,8 +1562,11 @@ struct App {
                             }
                             ImGui::EndTable();
                         }
+                        changed |= ImGui::Checkbox("Transform vector properties", &transformVectors);
+                        ImGui::TextDisabled("Applies the 3 x 3 linear part. Normal vectors are not inverse-transpose transformed.");
                         if (changed) {
-                            checkpoint(); m.affineTransform = matrix; update();
+                            checkpoint(); m.affineTransform = matrix;
+                            m.transformVectorProperties = transformVectors; update();
                         }
                     }
                     if (m.op == Op::CreateBonds || m.op == Op::CommonNeighborAnalysis ||
