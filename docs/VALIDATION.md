@@ -167,6 +167,7 @@
 ### Histogram 选区与归一化验证
 
 - `core_tests` 用固定两粒子选区验证直方图只统计输入选区且不改变选区；相对频率总和为 1，概率密度对 bin 宽积分为 1，空选区在 Histogram 节点明确报错。
+- 同组测试验证闭区间选择包含起止端点、选择结果独立于仅选中统计选项、反向范围定位至 Histogram 节点报错，并与下游 Delete selected 组合得到预期粒子。
 - 参数面板提供 1–4096 bins、仅选中元素、绝对计数/相对频率/概率密度；全套 `build.ps1` 五组核心、格式、GPU 形状和导出工作流测试通过。
 - `--smoke 40 --smoke-histogram --screenshot build/histogram-smoke.png` 实机 D3D11 工作区运行成功；截图覆盖节点参数、Data Tables 标签、柱形预览和单帧时间轴。数据检查器高度增至 240 px，柱形预览为 72 px；较窄窗口下可在检查器内部滚动。
 - 当前 Histogram 仍只作用于粒子标量属性，不含 OVITO 的 bond/其他数据对象分类、数值区间选择和绘图缩放选项。

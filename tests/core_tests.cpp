@@ -527,6 +527,31 @@ int main() {
         require(densityHistogram.data.tables.back().columns[1]=="Probability density" &&
                     std::abs(probabilityArea-1)<1e-5,
                 "selected-only probability-density histogram integrates to one over its bin range");
+        selectedHistogram.histogramNormalization=0;
+        selectedHistogram.histogramSelectRange=true;
+        selectedHistogram.histogramRangeStart=2;
+        selectedHistogram.histogramRangeEnd=3;
+        const auto rangeSelectedHistogram=evaluate(wave,{chosenParticles,selectedHistogram});
+        require(rangeSelectedHistogram.selected==std::vector<uint8_t>({0,1,1,0}) &&
+                    rangeSelectedHistogram.data.globalAttributes.at("Histogram.samples")==2,
+                "histogram value-range selection includes endpoints across all particles while selected-only filters only the table");
+        const auto rangeHistogramOutputs=modifierOutputs(selectedHistogram,1);
+        require(std::any_of(rangeHistogramOutputs.begin(),rangeHistogramOutputs.end(),[](const DataObject &output) {
+                    return output.kind==DataObject::Kind::Particles && output.name=="Value-range selection";
+                }),
+                "histogram output metadata exposes its optional selection result");
+        const auto histogramThenDelete=evaluate(wave,{chosenParticles,selectedHistogram,Modifier{Op::Delete}});
+        require(histogramThenDelete.data.atoms.size()==2 &&
+                    histogramThenDelete.data.atoms[0].x==0 && histogramThenDelete.data.atoms[0].y==0 &&
+                    histogramThenDelete.data.atoms[0].z==0 && histogramThenDelete.data.atoms[1].z==1,
+                "histogram range output selection composes with downstream delete-selected");
+        selectedHistogram.histogramRangeStart=4;
+        selectedHistogram.histogramRangeEnd=2;
+        bool invalidHistogramRangeRejected=false;
+        try { (void)evaluate(wave,{selectedHistogram}); }
+        catch (const ModifierExecutionError &e) { invalidHistogramRangeRejected=e.nodeIndex==0; }
+        require(invalidHistogramRangeRejected,"histogram rejects a reversed range at its node");
+        selectedHistogram.histogramSelectRange=false;
         Modifier emptySelection{Op::ManualSelection};
         bool emptySelectedHistogramRejected=false;
         try { (void)evaluate(wave,{emptySelection,selectedHistogram}); }

@@ -632,6 +632,8 @@ struct Modifier {
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
     int histogramNormalization = 0; // counts, relative frequency, probability density
     bool histogramSelectedOnly = false;
+    bool histogramSelectRange = false;
+    double histogramRangeStart = 0, histogramRangeEnd = 1;
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -701,6 +703,8 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
     if (modifier.op==Op::CreateBonds) add(Kind::Bonds,"Bonds");
     if (modifier.op==Op::EditCell) add(Kind::Cell,"Simulation cell");
     if (modifier.op==Op::ManualSelection) add(Kind::Particles,"Manual selection");
+    if (modifier.op==Op::Histogram && modifier.histogramSelectRange)
+        add(Kind::Particles,"Value-range selection");
     if (modifier.op==Op::ColorCoding || modifier.op==Op::ColorType || modifier.op==Op::AssignColor)
         add(Kind::Particles,"Particle colors");
     if (modifier.op==Op::ComputeProperty) add(Kind::Particles,modifier.outputProperty);
@@ -1592,6 +1596,10 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
             if (m.op == Op::Histogram && (m.histogramNormalization < 0 || m.histogramNormalization > 2))
                 throw std::runtime_error("Choose a supported histogram normalization mode");
+            if (m.op == Op::Histogram && m.histogramSelectRange &&
+                (!std::isfinite(m.histogramRangeStart) || !std::isfinite(m.histogramRangeEnd) ||
+                 m.histogramRangeEnd < m.histogramRangeStart))
+                throw std::runtime_error("Histogram selection range must be finite and non-decreasing");
             if (m.op == Op::BondLengthDistribution && (m.type < 1 || m.type > 4096))
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
             if (m.op == Op::BondAngleDistribution && (m.type < 1 || m.type > 4096))
@@ -2003,6 +2011,15 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     }
                     r.data.globalAttributes["Histogram.samples"] = double(sampleCount);
                     r.data.tables.push_back(std::move(table));
+                    if (m.histogramSelectRange) {
+                        r.selected.resize(valueCount);
+                        for (size_t i = 0; i < valueCount; ++i) {
+                            checkCancelled(i);
+                            const double value = valueAt(i);
+                            r.selected[i] = std::isfinite(value) &&
+                                value >= m.histogramRangeStart && value <= m.histogramRangeEnd;
+                        }
+                    }
                 }
                 continue;
             }

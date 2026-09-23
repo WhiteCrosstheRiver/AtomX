@@ -1794,7 +1794,16 @@ struct App {
                                 edited.histogramNormalization = normalization;
                                 changed = true;
                             }
-                            ImGui::TextDisabled("Builds the table from the current frame; selected-only uses the incoming pipeline selection.");
+                            if (ImGui::Checkbox("Select value range", &edited.histogramSelectRange))
+                                changed = true;
+                            if (edited.histogramSelectRange) {
+                                changed |= ImGui::InputDouble("Range start", &edited.histogramRangeStart,
+                                                              0, 0, "%.8g");
+                                changed |= ImGui::InputDouble("Range end", &edited.histogramRangeEnd,
+                                                              0, 0, "%.8g");
+                                ImGui::TextDisabled("Replaces the output selection with particles in the inclusive range.");
+                            }
+                            ImGui::TextDisabled("The table uses this frame; selected-only filters its input samples.");
                         } else {
                             int reduction = edited.reduceOperation;
                             if (ImGui::Combo("Reduction", &reduction, "Minimum\0Maximum\0Mean\0Sum\0")) {
@@ -1808,6 +1817,9 @@ struct App {
                             m.reduceOperation = edited.reduceOperation;
                             m.histogramSelectedOnly = edited.histogramSelectedOnly;
                             m.histogramNormalization = edited.histogramNormalization;
+                            m.histogramSelectRange = edited.histogramSelectRange;
+                            m.histogramRangeStart = edited.histogramRangeStart;
+                            m.histogramRangeEnd = edited.histogramRangeEnd;
                             update();
                         }
                     }
