@@ -646,10 +646,59 @@ inline std::array<double, 3> fractionalPosition(const Dataset &d, const Atom &at
             inverse[1][0]*x + inverse[1][1]*y + inverse[1][2]*z,
             inverse[2][0]*x + inverse[2][1]*y + inverse[2][2]*z};
 }
+inline std::array<double,9> neighborSearchCell(const Dataset &d) {
+    auto basis=d.cell;
+    std::vector<std::array<double,3>> orthonormal;
+    double scale=0;
+    for (int axis=0;axis<3;++axis) if (d.pbc[axis]) {
+        std::array<double,3> vector{d.cell[axis*3],d.cell[axis*3+1],d.cell[axis*3+2]};
+        const double length=std::sqrt(vector[0]*vector[0]+vector[1]*vector[1]+vector[2]*vector[2]);
+        if (!(length>0) || !std::isfinite(length))
+            throw std::runtime_error("Periodic simulation cell vector is zero or non-finite");
+        scale=std::max(scale,length);
+        for (const auto &q:orthonormal) {
+            const double projection=vector[0]*q[0]+vector[1]*q[1]+vector[2]*q[2];
+            for (int xyz=0;xyz<3;++xyz) vector[xyz]-=projection*q[xyz];
+        }
+        const double residual=std::sqrt(vector[0]*vector[0]+vector[1]*vector[1]+vector[2]*vector[2]);
+        if (!(residual>length*1e-12))
+            throw std::runtime_error("Periodic cell vectors are linearly dependent");
+        for (double &component:vector) component/=residual;
+        orthonormal.push_back(vector);
+    }
+    if (scale==0) scale=1;
+    for (int axis=0;axis<3;++axis) if (!d.pbc[axis]) {
+        std::array<double,3> best{};
+        double bestLength=0;
+        for (int candidate=0;candidate<3;++candidate) {
+            std::array<double,3> residual{};
+            residual[candidate]=1;
+            for (const auto &q:orthonormal) {
+                const double projection=residual[0]*q[0]+residual[1]*q[1]+residual[2]*q[2];
+                for (int xyz=0;xyz<3;++xyz) residual[xyz]-=projection*q[xyz];
+            }
+            const double length=std::sqrt(residual[0]*residual[0]+residual[1]*residual[1]+residual[2]*residual[2]);
+            if (length>bestLength) { bestLength=length; best=residual; }
+        }
+        if (!(bestLength>1e-10))
+            throw std::runtime_error("Could not construct a nonsingular neighbor-search basis");
+        for (int xyz=0;xyz<3;++xyz) {
+            best[xyz]*=scale/bestLength;
+            basis[axis*3+xyz]=best[xyz];
+            best[xyz]/=scale;
+        }
+        orthonormal.push_back(best);
+    }
+    return basis;
+}
 template <typename Callback>
 inline void forEachTriclinicNeighborPair(const Dataset &d, double cutoff, Callback &&callback,
                                          std::atomic<bool> *cancel) {
-    const auto inverse = cellInverse(d.cell);
+    // Non-periodic cell vectors are irrelevant to minimum-image distances.
+    // Complete missing/degenerate non-periodic axes so slab and wire cells can
+    // still use exact fractional-space bins without requiring a 3D cell volume.
+    const auto searchCell=neighborSearchCell(d);
+    const auto inverse = cellInverse(searchCell);
     std::array<double,3> reach{}, width{};
     std::array<int64_t,3> periodicBins{};
     for (int axis=0; axis<3; ++axis) {
@@ -753,7 +802,7 @@ inline void forEachTriclinicNeighborPair(const Dataset &d, double cutoff, Callba
                     std::array<double,3> cart{};
                     for (int xyz=0;xyz<3;++xyz)
                         for (int axis=0;axis<3;++axis)
-                            cart[xyz]+=(delta[axis]-translation[axis])*d.cell[axis*3+xyz];
+                            cart[xyz]+=(delta[axis]-translation[axis])*searchCell[axis*3+xyz];
                     return cart[0]*cart[0]+cart[1]*cart[1]+cart[2]*cart[2];
                 };
                 double best=distanceSquared(shift);

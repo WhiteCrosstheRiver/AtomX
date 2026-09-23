@@ -354,6 +354,13 @@ int main() {
         auto tiltedBond=evaluate(tilted,{{Op::CreateBonds,true,.3f}});
         require(tiltedBond.data.bonds.size()==1 && tiltedBond.data.bonds[0].image==std::array<int32_t,3>{1,0,0},
                 "triclinic periodic neighbor search keeps the correct image shift");
+        Dataset slab;
+        slab.species={"X"}; slab.cell={2,0,0, 1,2,0, 0,0,0}; slab.pbc={true,true,false};
+        slab.atoms={{.15f,.1f,0,0},{1.95f,.1f,0,0},{.15f,.1f,1,0}}; slab.bounds();
+        auto slabBonds=evaluate(slab,{{Op::CreateBonds,true,.3f}});
+        require(slabBonds.data.bonds.size()==1 && slabBonds.data.bonds[0].a==0 &&
+                    slabBonds.data.bonds[0].b==1 && slabBonds.data.bonds[0].image==std::array<int32_t,3>{1,0,0},
+                "partially periodic triclinic slab works with a degenerate non-periodic cell vector");
         Dataset chain;
         chain.species = {"X"};
         chain.atoms = {{0,0,0,0},{0.8f,0,0,0},{1.6f,0,0,0},{5,0,0,0}};
