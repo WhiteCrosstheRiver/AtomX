@@ -20,6 +20,23 @@ int main() {
         d.sourceCount = 2;
         d.scalarProperties["Energy"] = {-2.5, 3.25};
         d.vectorProperties["Force"] = {{1, 2, 3}, {4, 5, 6}};
+        auto verifyStaticColorRange = [&](const std::filesystem::path &staticPath) {
+            auto indexed = io::index(staticPath);
+            require(indexed.size() == 1 && indexed[0].count == 0,
+                    "static input formats expose one frame with unknown indexed atom count");
+            auto full = io::read(staticPath, indexed[0], 2000001);
+            require(!full.sampled() && full.atoms.size() == full.sourceCount,
+                    "static all-frame color range reads the full structure");
+            auto values = particlePropertyValues(full, "Position.X");
+            auto expected = std::minmax_element(values.begin(), values.end());
+            auto actual = colorRangeAcrossFrames(indexed.size(), [&](size_t frame) {
+                return io::read(staticPath, indexed.at(frame), 2000001);
+            }, {}, "Position.X");
+            double lo = *expected.first, hi = *expected.second;
+            if (lo == hi) { lo -= .5; hi += .5; }
+            require(actual.first == lo && actual.second == hi,
+                    "all-frame color range scans a complete static structure");
+        };
         io::ExportOptions opt;
         opt.scalarProperties = {"Energy"};
         opt.vectorProperties = {"Force"};
@@ -91,25 +108,18 @@ int main() {
         r = io::read(p, io::index(p)[0]);
         require(std::abs(r.atoms[0].z - 3) < 1e-5 && r.cell == d.cell,
                 "GRO nm conversion and nine-value cell");
-        auto staticFrames = io::index(p);
-        require(staticFrames.size() == 1 && staticFrames[0].count == 0,
-                "static structure formats expose one frame with unknown indexed atom count");
-        auto staticRange = colorRangeAcrossFrames(staticFrames.size(), [&](size_t index) {
-            return io::read(p, staticFrames.at(index), 2000001);
-        }, {}, "Position.X");
-        auto minX = std::min(r.atoms[0].x, r.atoms[1].x);
-        auto maxX = std::max(r.atoms[0].x, r.atoms[1].x);
-        require(!r.sampled() && staticRange.first == minX && staticRange.second == maxX,
-                "all-frame range scans a complete static GRO structure");
+        verifyStaticColorRange(p);
         p = dir / "sample.cif";
         io::write(p, io::Format::CIF, d);
         r = io::read(p, io::index(p)[0]);
         require(std::abs(r.atoms[1].x - 2) < 1e-5 && std::abs(r.atoms[0].z - 3) < 1e-5,
                 "CIF triclinic roundtrip");
+        verifyStaticColorRange(p);
         p = dir / "sample.data";
         io::write(p, io::Format::LammpsData, d);
         r = io::read(p, io::index(p)[0]);
         require(r.cell == d.cell && r.atoms.size() == 2, "atomic data roundtrip");
+        verifyStaticColorRange(p);
         p = dir / "sample.vasp";
         opt = {};
         opt.fractionalPOSCAR = true;
@@ -118,6 +128,7 @@ int main() {
         require(std::abs(r.atoms[0].x - 2) < 1e-5 && std::abs(r.atoms[0].z - 4) < 1e-5 &&
                     r.species[r.atoms[0].type] == "Cu",
                 "fractional POSCAR row-vector inverse and grouping");
+        verifyStaticColorRange(p);
         p = dir / "sample.pdb";
         {
             std::ofstream f(p);
@@ -127,6 +138,7 @@ int main() {
         r = io::read(p, io::index(p)[0]);
         require(r.atoms.size() == 1 && r.species[0] == "C" && r.atoms[0].y == 2,
                 "PDB fixed columns");
+        verifyStaticColorRange(p);
         p = dir / "selective.vasp";
         d.vectorProperties["MoveMask"] = {{1, 0, 1}, {0, 1, 0}};
         opt = {};
