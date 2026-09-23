@@ -1326,7 +1326,7 @@ struct App {
                         ImGui::Unindent();
                     } else {
                         ImGui::Indent();
-                        if (mods[i].dirty || staleResult) ImGui::TextDisabled("Last result (stale):");
+                        if (mods[i].dirty) ImGui::TextDisabled("Last result (stale):");
                         for (const auto &output : mods[i].outputs) {
                             const char *kind=output.kind==DataObject::Kind::Particles ? "Particles" :
                                 output.kind==DataObject::Kind::Bonds ? "Bonds" :
