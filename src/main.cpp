@@ -1320,6 +1320,23 @@ struct App {
                     const bool selected = inspectorNode == int(i);
                     if (ImGui::Selectable(label.c_str(), selected)) inspectPipelineNode(int(i));
                     ImGui::EndDisabled();
+                    if (mods[i].outputs.empty()) {
+                        ImGui::Indent();
+                        ImGui::TextDisabled("%s", mods[i].enabled ? "Output not evaluated" : "Disabled");
+                        ImGui::Unindent();
+                    } else {
+                        ImGui::Indent();
+                        if (mods[i].dirty || staleResult) ImGui::TextDisabled("Last result (stale):");
+                        for (const auto &output : mods[i].outputs) {
+                            const char *kind=output.kind==DataObject::Kind::Particles ? "Particles" :
+                                output.kind==DataObject::Kind::Bonds ? "Bonds" :
+                                output.kind==DataObject::Kind::Cell ? "Simulation cell" :
+                                output.kind==DataObject::Kind::Table ? "Data table" :
+                                output.kind==DataObject::Kind::GlobalAttributes ? "Global attributes" : "Data object";
+                            ImGui::TextDisabled("↳ %s (%s)",output.name.c_str(),kind);
+                        }
+                        ImGui::Unindent();
+                    }
                     ImGui::PopID();
                 }
                 ImGui::EndCombo();
