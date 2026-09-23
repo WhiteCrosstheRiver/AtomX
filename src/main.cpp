@@ -998,7 +998,7 @@ struct App {
         auto *draw = ImGui::GetWindowDrawList();
         if (cell) {
             using namespace DirectX;
-            auto m = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true);
+            auto m = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
             ImVec2 corners[8];
             bool valid[8];
             bool lattice = source.cell[0] != 0 || source.cell[4] != 0 || source.cell[8] != 0;

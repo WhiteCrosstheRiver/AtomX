@@ -564,12 +564,26 @@ float4 bondPixel():SV_TARGET { return color; }
         check(device->CreateTexture2D(&td, nullptr, &t.depth), "Depth texture");
         check(device->CreateDepthStencilView(t.depth.Get(), nullptr, &t.dsv), "Depth view");
     }
-    DirectX::XMMATRIX matrix(const atomx::Dataset &d, const Camera &cam, float aspect, bool includeCell,
+    DirectX::XMMATRIX matrix(const atomx::Dataset &d, const Camera &cam, float aspect,
+                             bool includeCell, float defaultRadius,
                              DirectX::XMMATRIX *viewOut = nullptr,
                              DirectX::XMMATRIX *projOut = nullptr) {
         using namespace DirectX;
         auto lo = cam.fitSelected ? cam.fitLo : d.lo;
         auto hi = cam.fitSelected ? cam.fitHi : d.hi;
+        float particleExtent = 0;
+        for (const auto &style : styles) {
+            if (style.visual[2] <= .5f) continue;
+            const float particleRadius = style.visual[0] > 0 ? style.visual[0] : defaultRadius;
+            const float ax = std::max(style.axes[0], .05f);
+            const float ay = std::max(style.axes[1], .05f);
+            const float az = std::max(style.axes[2], .05f);
+            particleExtent = std::max(particleExtent,
+                                      particleRadius * std::sqrt(ax * ax + ay * ay + az * az));
+        }
+        if (particleExtent == 0 && styles.empty()) particleExtent = defaultRadius;
+        lo.x -= particleExtent; lo.y -= particleExtent; lo.z -= particleExtent;
+        hi.x += particleExtent; hi.y += particleExtent; hi.z += particleExtent;
         if (includeCell && !cam.fitSelected && (d.cell[0] != 0 || d.cell[4] != 0 || d.cell[8] != 0)) {
             for (int j = 0; j < 8; j++) {
                 float x = float((j & 1 ? d.cell[0] : 0) + (j & 2 ? d.cell[3] : 0) +
@@ -601,8 +615,29 @@ float4 bondPixel():SV_TARGET { return color; }
             if (cam.mode < 2)
                 up = XMVectorSet(0, 1, 0, 0);
         }
+        aspect = std::isfinite(aspect) ? std::clamp(aspect, 1e-4f, 1e4f) : 1.f;
         float dist = span * 2.8f * cam.zoom;
         auto baseView = XMMatrixLookAtRH(center + dir * dist, center, up);
+        if (cam.mode == 7) {
+            const float tanHalfY = std::tan(.65f * .5f);
+            const float tanHalfX = tanHalfY * aspect;
+            const float minDepth = std::max({particleExtent * 2.5f, span * .01f, .5f});
+            float fittedDistance = 0;
+            for (int corner = 0; corner < 8; ++corner) {
+                const XMVECTOR point = XMVectorSet(corner & 1 ? hi.x : lo.x,
+                                                   corner & 2 ? hi.y : lo.y,
+                                                   corner & 4 ? hi.z : lo.z, 1);
+                XMFLOAT3 projected;
+                XMStoreFloat3(&projected, XMVector3TransformCoord(point, baseView));
+                const float depth = std::max(-projected.z, 1e-4f);
+                const float requiredDepth = std::max(
+                    minDepth, 1.12f * std::max(std::abs(projected.x) / tanHalfX,
+                                              std::abs(projected.y) / tanHalfY));
+                fittedDistance = std::max(fittedDistance, dist + requiredDepth - depth);
+            }
+            dist = std::max(fittedDistance, minDepth);
+            baseView = XMMatrixLookAtRH(center + dir * dist, center, up);
+        }
         auto v = baseView * XMMatrixTranslation(cam.panX * span, cam.panY * span, 0);
         XMMATRIX p;
         if (cam.mode == 7) {
@@ -624,7 +659,7 @@ float4 bondPixel():SV_TARGET { return color; }
             float width = std::max((maxX-minX)*1.12f, span*.02f);
             float height = std::max((maxY-minY)*1.12f, span*.02f);
             width = std::max(width, height * aspect);
-            height = std::max(height, width / std::max(aspect, .1f));
+            height = std::max(height, width / aspect);
             p = XMMatrixOrthographicRH(width * cam.zoom, height * cam.zoom,
                                        span * .001f, span * 1000);
         }
@@ -655,7 +690,7 @@ float4 bondPixel():SV_TARGET { return color; }
         context->GSSetShader(nullptr, nullptr, 0);
         Constants c{};
         XMMATRIX view, proj;
-        matrix(d, cam, float(t.w) / t.h, includeCellInFit, &view, &proj);
+        matrix(d, cam, float(t.w) / t.h, includeCellInFit, radius, &view, &proj);
         XMStoreFloat4x4(&c.view, view);
         XMStoreFloat4x4(&c.projection, proj);
         c.radius = radius;

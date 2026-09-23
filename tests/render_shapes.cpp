@@ -133,6 +133,42 @@ int main(int argc, char **argv) {
             renderer.context->Unmap(readback.Get(), 0);
             return hash;
         };
+        auto litInXRange = [&](const Target &target, int minX, int maxX) {
+            D3D11_TEXTURE2D_DESC td{};
+            target.texture->GetDesc(&td);
+            td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            ComPtr<ID3D11Texture2D> readback;
+            check(renderer.device->CreateTexture2D(&td, nullptr, &readback), "Fit color readback");
+            renderer.context->CopyResource(readback.Get(), target.texture.Get());
+            D3D11_MAPPED_SUBRESOURCE map{};
+            check(renderer.context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &map), "Fit color map");
+            uint64_t lit = 0;
+            for (int y = 0; y < target.h; ++y)
+                for (int x = std::clamp(minX, 0, target.w); x < std::clamp(maxX, 0, target.w); ++x) {
+                    const auto *pixel = (const unsigned char *)map.pData + y * map.RowPitch + x * 4;
+                    if (pixel[0] || pixel[1] || pixel[2]) ++lit;
+                }
+            renderer.context->Unmap(readback.Get(), 0);
+            return lit;
+        };
+        auto litXBounds = [&](const Target &target) {
+            D3D11_TEXTURE2D_DESC td{};
+            target.texture->GetDesc(&td);
+            td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            ComPtr<ID3D11Texture2D> readback;
+            check(renderer.device->CreateTexture2D(&td, nullptr, &readback), "Fit bounds readback");
+            renderer.context->CopyResource(readback.Get(), target.texture.Get());
+            D3D11_MAPPED_SUBRESOURCE map{};
+            check(renderer.context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &map), "Fit bounds map");
+            int lo = target.w, hi = -1;
+            for (int y = 0; y < target.h; ++y)
+                for (int x = 0; x < target.w; ++x) {
+                    const auto *pixel = (const unsigned char *)map.pData + y * map.RowPitch + x * 4;
+                    if (pixel[0] || pixel[1] || pixel[2]) { lo = std::min(lo, x); hi = std::max(hi, x); }
+                }
+            renderer.context->Unmap(readback.Get(), 0);
+            return std::pair{lo, hi};
+        };
         atomx::Dataset fitData;
         fitData.species={"X"}; fitData.atoms={{0,0,0,0},{100,0,0,0}}; fitData.bounds();
         renderer.upload(fitData,{});
@@ -144,6 +180,41 @@ int main(int argc, char **argv) {
         renderer.draw(t,fitData,fitSelected,.3f,0,0,0,0,0,1,false,false,false,bg);
         if (imageHash(t)==allParticleFit)
             throw std::runtime_error("Fit selected camera bounds must frame the selected region independently of outliers");
+        Target portrait;
+        renderer.target(portrait, 256, 512);
+        renderer.resetStyles(1);
+        Camera perspectiveFit;
+        perspectiveFit.mode = 7;
+        perspectiveFit.yaw = 0;
+        perspectiveFit.pitch = 0;
+        renderer.draw(portrait, fitData, perspectiveFit, .3f, 0, 0, 0, 0, 0, 1,
+                      false, false, false, bg);
+        renderer.png(portrait, "build/shape-validation/fit-portrait.png");
+        const auto portraitLeft = litInXRange(portrait, 0, portrait.w / 2);
+        const auto portraitRight = litInXRange(portrait, portrait.w / 2, portrait.w);
+        std::cout << "portrait fit lit halves=" << portraitLeft << "," << portraitRight << '\n';
+        if (portraitLeft == 0 || portraitRight == 0)
+            throw std::runtime_error("Perspective Fit must keep both ends of an elongated structure visible in a portrait viewport");
+        Target landscape;
+        renderer.target(landscape, 512, 256);
+        renderer.draw(landscape, fitData, perspectiveFit, .3f, 0, 0, 0, 0, 0, 1,
+                      false, false, false, bg);
+        renderer.png(landscape, "build/shape-validation/fit-landscape.png");
+        const auto landscapeLeft = litInXRange(landscape, 0, landscape.w / 2);
+        const auto landscapeRight = litInXRange(landscape, landscape.w / 2, landscape.w);
+        std::cout << "landscape fit lit halves=" << landscapeLeft << "," << landscapeRight << '\n';
+        if (landscapeLeft == 0 || landscapeRight == 0)
+            throw std::runtime_error("Perspective Fit must keep both ends of an elongated structure visible in a landscape viewport");
+        const auto [landscapeLo, landscapeHi] = litXBounds(landscape);
+        if (landscapeHi - landscapeLo < int(landscape.w * .75f))
+            throw std::runtime_error("Perspective Fit should use the landscape viewport while preserving the structure's aspect ratio");
+        Camera orthographicFit = perspectiveFit;
+        orthographicFit.mode = 2;
+        renderer.draw(portrait, fitData, orthographicFit, .3f, 0, 0, 0, 0, 0, 1,
+                      false, false, false, bg);
+        if (litInXRange(portrait, 0, portrait.w / 2) == 0 ||
+            litInXRange(portrait, portrait.w / 2, portrait.w) == 0)
+            throw std::runtime_error("Orthographic Fit must include particle extents at portrait aspect ratios");
         atomx::Dataset coded;
         coded.species = {"X"};
         coded.atoms = {{-.5f, 0, 0, 0}, {.5f, 0, 0, 0}};
