@@ -94,3 +94,9 @@
 - 合成的 37 帧 / 每帧 4000 粒子 XYZ 验证轨迹加载。扩展的 `--desktop-test` 验证后台读帧时后一个定位请求生效，以及首尾越界请求限制；测试结束位于第 36 帧。
 - 检查 `build/ui-v2.png`、`build/ui-v2-catalog.png`、`build/ui-v2-settings-large.png` 和 `build/ui-v2-dark.png`，覆盖轨迹尺、菜单卡片、20 px 设置和深色菜单。
 - 保留已存外观配置；验证过程中临时配置已恢复。尚未执行跨显示器 DPI 切换回归，当前缩放取自启动显示器。
+
+### 共享渐变表验证
+
+- D3D11 粒子、视口图例和 PNG 导出共用相同的 256 项渐变表。Magma、Viridis、Plasma 色值取 Matplotlib 公布的 256-entry CC0 表并量化为 RGB8；其余渐变沿用 AtomX 配方后采样进同一张表。
+- `render_shapes` 检查已知端点、所有渐变 257 个输入位置的有限/归一化范围，并对十种渐变实际渲染图像做区分测试。
+- 此项验证的是 AtomX 内部的 GPU/图例一致性与色表取值，不代表所有渐变与 OVITO 私有/专有实现数值一致。

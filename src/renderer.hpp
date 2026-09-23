@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 #include <wincodec.h>
 #include "core.hpp"
+#include "color_maps.hpp"
 #include "particle_mesh.hpp"
 using Microsoft::WRL::ComPtr;
 inline void check(HRESULT hr, const char *message) {
@@ -44,7 +45,7 @@ struct ParticleStyle {
     bool operator==(const ParticleStyle &) const = default;
 };
 static_assert(sizeof(ParticleStyle) == 48);
-inline std::array<float, 3> sampleColorGradient(int gradient, float u) {
+inline std::array<float, 3> sampleColorGradientFormula(int gradient, float u) {
     u = std::clamp(u, 0.f, 1.f);
     auto mix = [](std::array<float,3> a, std::array<float,3> b, float t) {
         t = std::clamp(t, 0.f, 1.f);
@@ -62,8 +63,48 @@ inline std::array<float, 3> sampleColorGradient(int gradient, float u) {
     if (gradient == 4) return {u,u,u};
     if (gradient == 5) return mix({.02f,.02f,.15f},{1,.02f,0},u);
     if (gradient == 6) return {std::clamp(1.5f-std::abs(4*u-3),0.f,1.f), std::clamp(1.5f-std::abs(4*u-2),0.f,1.f), std::clamp(1.5f-std::abs(4*u-1),0.f,1.f)};
-    if (gradient == 7) return mix({.05f,.01f,.2f},{1,.3f,.02f},u);
-    return mix({.27f,.01f,.33f},{.99f,.9f,.14f},u);
+    if (gradient == 7 || gradient == 8 || gradient == 9) {
+        const auto &lut = gradient == 7 ? atomx::color_maps::magma
+                         : gradient == 8 ? atomx::color_maps::viridis
+                                         : atomx::color_maps::plasma;
+        const float position = u * float(atomx::color_maps::sampleCount - 1);
+        const auto lower = size_t(position);
+        const auto upper = std::min(lower + 1, size_t(atomx::color_maps::sampleCount - 1));
+        const float blend = position - float(lower);
+        std::array<float, 3> result{};
+        for (int channel = 0; channel < 3; ++channel) {
+            const float a = float(lut[lower][channel]) / 255.f;
+            const float b = float(lut[upper][channel]) / 255.f;
+            result[channel] = a + (b - a) * blend;
+        }
+        return result;
+    }
+    return mix({.02f,.02f,.02f},{1,.95f,.1f},u);
+}
+inline constexpr int colorGradientCount = 10;
+inline const auto &colorGradientLut() {
+    static const auto lut = [] {
+        std::array<std::array<std::array<float, 3>, atomx::color_maps::sampleCount>, colorGradientCount> result{};
+        for (int gradient = 0; gradient < colorGradientCount; ++gradient)
+            for (int sample = 0; sample < atomx::color_maps::sampleCount; ++sample)
+                result[gradient][sample] = sampleColorGradientFormula(
+                    gradient, float(sample) / float(atomx::color_maps::sampleCount - 1));
+        return result;
+    }();
+    return lut;
+}
+inline std::array<float, 3> sampleColorGradient(int gradient, float u) {
+    gradient = std::clamp(gradient, 0, colorGradientCount - 1);
+    u = std::clamp(u, 0.f, 1.f);
+    const auto &lut = colorGradientLut()[gradient];
+    const float position = u * float(atomx::color_maps::sampleCount - 1);
+    const size_t lower = size_t(position);
+    const size_t upper = std::min(lower + 1, size_t(atomx::color_maps::sampleCount - 1));
+    const float blend = position - float(lower);
+    std::array<float, 3> result{};
+    for (int channel = 0; channel < 3; ++channel)
+        result[channel] = lut[lower][channel] + (lut[upper][channel] - lut[lower][channel]) * blend;
+    return result;
 }
 struct ColorLegendOptions {
     bool visible = false;
@@ -108,6 +149,8 @@ class Renderer {
     ComPtr<ID3D11Buffer> meshBuffer;
     ComPtr<ID3D11ShaderResourceView> meshView;
     ComPtr<ID3D11Buffer> bondBuffer, bondConstants;
+    ComPtr<ID3D11Buffer> gradientBuffer;
+    ComPtr<ID3D11ShaderResourceView> gradientView;
     ComPtr<ID3D11VertexShader> bondVS;
     ComPtr<ID3D11PixelShader> bondPS;
     ComPtr<ID3D11GeometryShader> bondGS;
@@ -216,6 +259,23 @@ class Renderer {
               "Create GPU device (feature level 11.0 required)");
         factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
         resize();
+        std::array<float, colorGradientCount * atomx::color_maps::sampleCount * 3> gradientSamples{};
+        const auto &gradientLut = colorGradientLut();
+        for (int gradient = 0; gradient < colorGradientCount; ++gradient)
+            for (int sample = 0; sample < atomx::color_maps::sampleCount; ++sample) {
+                const auto &color = gradientLut[gradient][sample];
+                const size_t index = (size_t(gradient) * atomx::color_maps::sampleCount + sample) * 3;
+                std::copy(color.begin(), color.end(), gradientSamples.begin() + index);
+            }
+        D3D11_BUFFER_DESC gradientDesc{};
+        gradientDesc.ByteWidth = UINT(sizeof(gradientSamples));
+        gradientDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        gradientDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        gradientDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        gradientDesc.StructureByteStride = sizeof(float) * 3;
+        D3D11_SUBRESOURCE_DATA gradientData{gradientSamples.data(), 0, 0};
+        check(device->CreateBuffer(&gradientDesc, &gradientData, &gradientBuffer), "Color gradient buffer");
+        check(device->CreateShaderResourceView(gradientBuffer.Get(), nullptr, &gradientView), "Color gradient view");
         const char *shader = R"(
 cbuffer C : register(b0) {row_major float4x4 view;row_major float4x4 proj;float radius;float shape;float colorAxis;float colorMin;float colorMax;float colorMode;float colorDiscrete;float colorGradient;float4 colors[8];};
 struct Atom {float3 pos;uint type;};StructuredBuffer<Atom> atoms : register(t0);
@@ -223,6 +283,7 @@ struct Style {float4 color;float4 visual;float4 axes;};StructuredBuffer<Style> s
 struct Triangle {float4 a;float4 b;float4 c;};StructuredBuffer<Triangle> mesh:register(t2);
 StructuredBuffer<float> propertyValues:register(t3);
 StructuredBuffer<float3> particleColors:register(t4);
+StructuredBuffer<float3> gradientColors:register(t5);
 struct V {
  float4 pos:SV_POSITION;float2 uv:TEXCOORD0;float3 center:TEXCOORD1;
  nointerpolation uint type:TEXCOORD2;nointerpolation float3 world:TEXCOORD3;
@@ -304,7 +365,7 @@ P pixel(V i) {
  float3 base=i.overrideColor.x>=0?i.overrideColor:i.color.rgb;
  if(i.type&0x80000000)base=float3(1,.83,.32);
  bool selectedOnlyMode=(colorMode>1.5&&colorMode<2.5)||colorMode>3.5;
- if(colorMode>0.5 && (!selectedOnlyMode || (i.type&0x40000000))) { float value = colorMode>2.5 ? i.mappedValue : colorAxis<0.5 ? i.world.x : colorAxis<1.5 ? i.world.y : i.world.z; float u=saturate((value-colorMin)/(abs(colorMax-colorMin)<1e-12?1e-12:colorMax-colorMin)); if(colorDiscrete>0.5) u=min(floor(u*12),11)/11; float3 c0=float3(0.10,.15,.85), c1=float3(.12,.85,.75), c2=float3(.98,.88,.08), c3=float3(.9,.08,.04); if(colorGradient<.5) base=u<.5?lerp(c0,c1,u*2):u<.8?lerp(c1,c2,(u-.5)*3.333):lerp(c2,c3,(u-.8)*5); else if(colorGradient<1.5) base=u<.5?lerp(float3(0.1,.15,.9),float3(1,1,1),u*2):lerp(float3(1,1,1),float3(.9,.05,.05),(u-.5)*2); else if(colorGradient<2.5) base=float3(.5+.5*cos(6.283*(u+float3(0,.33,.67)))); else if(colorGradient<3.5) base=lerp(float3(.02,.02,.02),float3(1,.95,.1),u); else if(colorGradient<4.5) base=float3(u,u,u); else if(colorGradient<5.5) base=lerp(float3(.02,.02,.15),float3(1,.02,.0),u); else if(colorGradient<6.5) base=float3(saturate(1.5-abs(4*u-3)),saturate(1.5-abs(4*u-2)),saturate(1.5-abs(4*u-1))); else if(colorGradient<7.5) base=lerp(float3(.05,.01,.2),float3(1,.3,.02),u); else base=lerp(float3(.27,.01,.33),float3(.99,.9,.14),u); }
+ if(colorMode>0.5 && (!selectedOnlyMode || (i.type&0x40000000))) { float value = colorMode>2.5 ? i.mappedValue : colorAxis<0.5 ? i.world.x : colorAxis<1.5 ? i.world.y : i.world.z; float u=saturate((value-colorMin)/(abs(colorMax-colorMin)<1e-12?1e-12:colorMax-colorMin)); if(colorDiscrete>0.5) u=min(floor(u*12),11)/11; float p=u*(256-1); uint lo=(uint)floor(p); uint hi=min(lo+1,255); uint gradient=(uint)clamp(colorGradient,0,9); base=lerp(gradientColors[gradient*256+lo],gradientColors[gradient*256+hi],frac(p)); }
  float diffuse=max(0,dot(n,normalize(float3(-.45,.65,1))));float rim=pow(1-sqrt(max(0,1-r)),3);
  float spec=pow(max(0,dot(n,normalize(float3(-.22,.32,1)))),36);
  o.color=float4(base*(.28+.72*diffuse)+spec*.3+rim*.045,1);return o;}
@@ -604,6 +665,7 @@ float4 bondPixel():SV_TARGET { return color; }
         context->UpdateSubresource(constants.Get(), 0, nullptr, &c, 0, 0);
         context->VSSetConstantBuffers(0, 1, constants.GetAddressOf());
         context->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
+        context->PSSetShaderResources(5, 1, gradientView.GetAddressOf());
         if (visible)
             for (auto &ch : chunks) {
                 context->VSSetShaderResources(0, 1, ch.srv.GetAddressOf());

@@ -1540,7 +1540,7 @@ struct App {
                             edited.colorAllFramesRange = false; changed = true;
                         }
                         int gradient = edited.colorGradient;
-                        if (ImGui::Combo("Color gradient", &gradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0")) { edited.colorGradient = gradient; changed = true; }
+                        if (ImGui::Combo("Color gradient", &gradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0Plasma\0")) { edited.colorGradient = gradient; changed = true; }
                         bool automatic = edited.colorAutoRange;
                         if (ImGui::Checkbox("Automatic range", &automatic)) { edited.colorAutoRange = automatic; changed = true; }
                         bool symmetric = edited.colorSymmetricRange;
@@ -1799,7 +1799,7 @@ struct App {
                     } else {
                         ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
                     }
-                    ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0");
+                    ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0Plasma\0");
                     if (ImGui::Checkbox("Automatic range", &colorAutoRange) && colorAutoRange) update();
                     if (ImGui::Checkbox("Symmetric range", &colorSymmetricRange) && colorAutoRange) update();
                     if (!colorAutoRange) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }

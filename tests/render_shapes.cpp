@@ -9,6 +9,23 @@
 #pragma comment(lib, "user32.lib")
 int main(int argc, char **argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    auto expectColor = [](std::array<float, 3> color, std::array<float, 3> expected,
+                          const char *name) {
+        for (int channel = 0; channel < 3; ++channel)
+            if (std::abs(color[channel] - expected[channel]) > 1.f / 255.f + 1e-6f)
+                throw std::runtime_error(std::string(name) + " color table endpoint mismatch");
+    };
+    expectColor(sampleColorGradient(7, 0), {0, 0, 4 / 255.f}, "Magma");
+    expectColor(sampleColorGradient(8, 0), {68 / 255.f, 1 / 255.f, 84 / 255.f}, "Viridis");
+    expectColor(sampleColorGradient(9, 0), {13 / 255.f, 8 / 255.f, 135 / 255.f}, "Plasma");
+    expectColor(sampleColorGradient(8, 1), {253 / 255.f, 231 / 255.f, 37 / 255.f}, "Viridis");
+    for (int gradient = 0; gradient < colorGradientCount; ++gradient)
+        for (int sample = 0; sample <= 256; ++sample) {
+            auto color = sampleColorGradient(gradient, float(sample) / 256.f);
+            for (float channel : color)
+                if (!std::isfinite(channel) || channel < 0 || channel > 1)
+                    throw std::runtime_error("Color gradient sample must be finite and normalized");
+        }
     HWND w = CreateWindowExW(0, L"STATIC", L"AtomX shape validation", WS_OVERLAPPEDWINDOW, 0, 0,
                              256, 256, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     try {
@@ -127,8 +144,16 @@ int main(int argc, char **argv) {
         coded.scalarProperties["Color coding"] = {0, 1};
         coded.bounds();
         renderer.upload(coded, {});
-        renderer.draw(t, coded, cam, .3f, 0, 0, 0, 0, 0, 1, true, false, false, bg);
-        auto firstPropertyImage = imageHash(t);
+        std::set<uint64_t> paletteImages;
+        uint64_t firstPropertyImage = 0;
+        for (int gradient = 0; gradient < colorGradientCount; ++gradient) {
+            renderer.draw(t, coded, cam, .3f, 0, 0, 0, gradient, 0, 1, true, false, false, bg);
+            const auto hash = imageHash(t);
+            if (gradient == 0) firstPropertyImage = hash;
+            paletteImages.insert(hash);
+        }
+        if (paletteImages.size() < 8)
+            throw std::runtime_error("GPU color gradients must render distinct palettes from the shared color tables");
         coded.scalarProperties["Color coding"] = {1, 0};
         renderer.upload(coded, {});
         renderer.draw(t, coded, cam, .3f, 0, 0, 0, 0, 0, 1, true, false, false, bg);
