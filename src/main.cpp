@@ -1308,11 +1308,16 @@ struct App {
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Simulation cell")) {
+                    ImGui::TextDisabled("Cell vectors (a, b, c)");
                     for (int row = 0; row < 3; row++)
-                        ImGui::Text("%12.4f   %12.4f   %12.4f", result.data.cell[row * 3],
+                        ImGui::Text("%c  %12.4f   %12.4f   %12.4f", 'a' + row,
+                                    result.data.cell[row * 3],
                                     result.data.cell[row * 3 + 1], result.data.cell[row * 3 + 2]);
-                    ImGui::Text("PBC: %s / %s / %s", source.pbc[0] ? "X" : "-",
-                                source.pbc[1] ? "Y" : "-", source.pbc[2] ? "Z" : "-");
+                    ImGui::Separator();
+                    ImGui::Text("Origin: %.6g   %.6g   %.6g", result.data.origin.x,
+                                result.data.origin.y, result.data.origin.z);
+                    ImGui::Text("PBC: %s / %s / %s", result.data.pbc[0] ? "X" : "-",
+                                result.data.pbc[1] ? "Y" : "-", result.data.pbc[2] ? "Z" : "-");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Global attributes")) {

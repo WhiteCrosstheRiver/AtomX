@@ -25,7 +25,7 @@
 | Detect reduced coordinates | 待实现 | 当前位置按文件中的笛卡尔坐标读取 |
 | Generate bounding box | 部分 | 没有 Lattice 时显示粒子包围盒，不生成周期晶胞 |
 | Sort particles by ID | 待实现 | 当前保留加载顺序，未解析 ID 属性 |
-| Particles / Simulation cell / Global attributes | 部分 | 虚拟化坐标表、3x3 晶胞和 PBC、原始注释；Edit simulation cell 修改晶胞向量、原点和 PBC，默认粒子坐标固定 |
+| Particles / Simulation cell / Global attributes | 部分 | 虚拟化粒子/属性表、晶胞三向量/原点/PBC 和全局属性；单元格检查器读取最终 Pipeline 结果；Edit simulation cell 默认只改晶胞 |
 | 单帧 GPU 图片导出 | 已实现 | 活动相机 PNG，64–8192 像素，粒子与背景；晶胞 UI 叠层不进入 PNG |
 | 完整动画 / 范围 / Every Nth frame | 待实现 | 播放可用，动画文件导出不可用 |
 | 背景颜色 | 已实现 | RGB |
