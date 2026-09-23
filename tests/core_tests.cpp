@@ -329,6 +329,7 @@ int main() {
         try { (void)evaluate(noBondTopology,{bondLengths}); }
         catch (const ModifierExecutionError &e) { missingBondTopologyRejected=e.nodeIndex==0; }
         require(missingBondTopologyRejected,"bond-length distribution reports missing topology at its node");
+        Dataset sampledBonded=bondedMeasurements; sampledBonded.sourceCount=8; sampledBonded.stride=2;
         Dataset largeBondGeometry;
         largeBondGeometry.species={"X"};
         largeBondGeometry.atoms={{0,0,0,0},{0,0,0,0},{0,0,0,0}};
@@ -341,6 +342,14 @@ int main() {
                     largeBondLengths.data.globalAttributes.at("BondLengthDistribution.maximum")==1e150,
                 "bond-length distribution preserves representable lengths whose naive square overflows");
         Modifier bondAngles{Op::BondAngleDistribution}; bondAngles.type=18;
+        for (const auto &analysis : {bondLengths,bondAngles}) {
+            bool sampleRejected=false;
+            try { (void)evaluate(sampledBonded,{analysis}); }
+            catch (const ModifierExecutionError &e) {
+                sampleRejected=e.nodeIndex==0 && std::string(e.what()).find("sampled preview")!=std::string::npos;
+            }
+            require(sampleRejected,"bond distributions reject sampled topology rather than report partial statistics");
+        }
         auto bondAngleResult=evaluate(bondedMeasurements,{bondAngles});
         const auto &bondAngleTable=bondAngleResult.data.tables.back();
         require(bondAngleTable.name=="Bond angle distribution" && bondAngleTable.rows.size()==18 &&
@@ -371,6 +380,13 @@ int main() {
         try { (void)evaluate(noBondTopology,{bondAngles}); }
         catch (const ModifierExecutionError &e) { missingBondAnglesRejected=e.nodeIndex==0; }
         require(missingBondAnglesRejected,"bond-angle distribution reports missing topology at its node");
+        std::atomic<bool> cancelBondMeasurements{true};
+        bool bondMeasurementCancelled=false;
+        try { (void)evaluate(bondedMeasurements,{bondAngles},&cancelBondMeasurements); }
+        catch (const ModifierExecutionError &e) {
+            bondMeasurementCancelled=e.nodeIndex==0 && std::string(e.what()).find("Cancelled")!=std::string::npos;
+        }
+        require(bondMeasurementCancelled,"bond-angle enumeration observes cancellation at its node");
         Dataset zeroLengthTopology=bondedMeasurements;
         zeroLengthTopology.bonds={{0,0,{0,0,0}}};
         for (const auto &analysis : {bondLengths,bondAngles}) {

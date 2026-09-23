@@ -2032,6 +2032,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 continue;
             }
             if (m.op == Op::BondLengthDistribution) {
+                if (r.data.sampled())
+                    throw std::runtime_error("Bond length distribution requires full data, not a sampled preview");
                 if (r.data.bonds.empty())
                     throw std::runtime_error("Bond length distribution requires explicit bonds; add Create bonds first");
                 if (r.data.bonds.size() > 20'000'000)
@@ -2068,7 +2070,10 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 if (m.histogramNormalization==2 && (!std::isfinite(densityScale) || densityScale<=0))
                     throw std::runtime_error("Bond-length probability-density scale is outside the finite numeric range");
                 std::vector<uint64_t> counts(size_t(m.type));
+                size_t sampleIndex=0;
                 for (double length:lengths) {
+                    if ((sampleIndex++ & 4095)==0 && cancel && *cancel)
+                        throw std::runtime_error("Cancelled");
                     const double fraction=lo==hi ? .5 :
                         (std::scalbn(length,-scaleExponent)-scaledLo)/scaledSpan;
                     const auto bin=std::min(size_t(m.type-1),
@@ -2095,6 +2100,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 continue;
             }
             if (m.op == Op::BondAngleDistribution) {
+                if (r.data.sampled())
+                    throw std::runtime_error("Bond angle distribution requires full data, not a sampled preview");
                 if (r.data.bonds.empty())
                     throw std::runtime_error("Bond angle distribution requires explicit bonds; add Create bonds first");
                 if (r.data.bonds.size() > 20'000'000)
@@ -2119,6 +2126,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     if (incident.size()>1 && angles.size()+incident.size()*(incident.size()-1)/2>20'000'000)
                         throw std::runtime_error("Bond angle distribution exceeds 20 million angles");
                     for (size_t i=0;i<incident.size();++i) for (size_t j=i+1;j<incident.size();++j) {
+                        if ((angles.size() & 4095)==0 && cancel && *cancel)
+                            throw std::runtime_error("Cancelled");
                         const auto &a=incident[i], &b=incident[j];
                         const double la=std::hypot(a[0],a[1],a[2]);
                         const double lb=std::hypot(b[0],b[1],b[2]);
@@ -2133,7 +2142,12 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 if (angles.empty())
                     throw std::runtime_error("Bond angle distribution requires at least one particle with two bonds");
                 std::vector<uint64_t> counts(size_t(m.type));
-                for (double angle:angles) ++counts[std::min(size_t(m.type-1),size_t(angle/180*m.type))];
+                size_t angleIndex=0;
+                for (double angle:angles) {
+                    if ((angleIndex++ & 4095)==0 && cancel && *cancel)
+                        throw std::runtime_error("Cancelled");
+                    ++counts[std::min(size_t(m.type-1),size_t(angle/180*m.type))];
+                }
                 DataTable table; table.name="Bond angle distribution";
                 table.columns={"Bond angle (degrees)",m.histogramNormalization==0 ? "Angle count" :
                     m.histogramNormalization==1 ? "Relative frequency" : "Probability density (1/degree)"};
