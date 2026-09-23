@@ -44,7 +44,7 @@
 - Cluster analysis has an independent disconnected-component fixture (two dimers and one isolated particle) that checks deterministic per-particle labels and exact cluster-size table rows.
 - Radius-aware overlap selection is covered for unequal radii, a triclinic periodic boundary crossing, a missing property, and a negative radius; the legacy fixed-pair-cutoff mode remains separately available.
 - Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts (including valid periodic self-image bonds), and renders GPU lines or shaded 3D cylinders in viewports and image exports. It supports one global cutoff or a symmetric per-type-pair cutoff matrix (up to 32 types); visibility, color, pixel width, and cylinder radius are configurable. Malformed endpoints, zero-length geometry, degenerate periodic image vectors, non-periodic image shifts, and invalid color channels are reported at the node instead of silently dropped.
-- Bond length and bond angle distributions are pipeline nodes with configurable histogram bins. They measure explicit bonds including periodic image translations, publish count and range globals, and emit data tables. Bond order analysis remains unavailable.
+- Bond length and bond angle distributions are pipeline nodes with configurable histogram bins. They measure explicit bonds including periodic image translations through one shared geometry validator, publish count and range globals, and emit data tables. Invalid endpoints, zero-length bonds, non-finite geometry, and image shifts on non-periodic axes fail at the owning node. Bond order analysis remains unavailable.
 - Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV. Particle-table manual selection is one persistent pipeline node: click replaces the set, Ctrl-click toggles one particle, and invalid indices are reported rather than silently applied.
 - While a source frame or modifier stack is being re-evaluated, the previous result remains visible with a `STALE RESULT` footer marker. Failed evaluations retain that marker until a successful publish.
 - Pipeline evaluation now takes ownership of its working `Dataset` snapshot, removing the extra full-dataset copy between the asynchronous worker input and its result. The application still makes one working copy from the retained source; node-level caching and shared immutable storage remain incomplete.
@@ -56,7 +56,7 @@
 | 修改器 | 状态 | 实现范围 / 所需后续工作 |
 |---|---|---|
 | Atomic strain | 待实现 | 参考构型、邻居映射、局部变形梯度与应变 |
-| Bond analysis | 部分 | Bond length / angle distribution 通过显式键拓扑生成可导出的直方图，正确解析周期镜像，采用尺度稳定的范数处理超大有限向量并检查空拓扑、非法端点；键级分析待实现 |
+| Bond analysis | 部分 | Bond length / angle distribution 通过显式键拓扑生成可导出的直方图，使用共享几何校验解析周期镜像；尺度稳定的范数可处理超大有限向量，并在所属节点拒绝空拓扑、非法端点、零长度键、非有限几何及非周期镜像；键级分析待实现 |
 | Cluster analysis | 部分 | 可组合管线节点：周期最小镜像 cutoff 连通分量、Cluster 粒子属性、簇尺寸表；不超过 200 万原子 |
 | Coordination analysis | 部分 | 可组合管线节点：Coordination 粒子属性和全局均值；正交与三斜周期最小镜像；不超过 200 万原子；超出精确空间索引比值范围的周期盒明确报错 |
 | Difference between frames | 待实现 | 持久 ID 匹配与属性差值 |

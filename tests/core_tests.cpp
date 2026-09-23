@@ -203,6 +203,7 @@ int main() {
         bondedMeasurements.species={"X"};
         bondedMeasurements.atoms={{0,0,0,0},{1,0,0,0},{1,2,0,0},{9.9f,0,0,0}};
         bondedMeasurements.cell={10,0,0,0,10,0,0,0,10};
+        bondedMeasurements.pbc={true,false,false};
         bondedMeasurements.bonds={{0,1,{0,0,0}},{1,2,{0,0,0}},{0,3,{-1,0,0}}};
         Modifier bondLengths{Op::BondLengthDistribution}; bondLengths.type=3;
         auto bondLengthResult=evaluate(bondedMeasurements,{bondLengths});
@@ -221,6 +222,7 @@ int main() {
         largeBondGeometry.species={"X"};
         largeBondGeometry.atoms={{0,0,0,0},{0,0,0,0},{0,0,0,0}};
         largeBondGeometry.cell={1e150,0,0,0,1e150,0,0,0,1e150};
+        largeBondGeometry.pbc={true,true,false};
         largeBondGeometry.bonds={{0,1,{1,0,0}},{0,2,{0,1,0}}};
         const auto largeBondLengths=evaluate(largeBondGeometry,{bondLengths});
         require(largeBondLengths.data.globalAttributes.at("BondLengthDistribution.count")==2 &&
@@ -243,6 +245,22 @@ int main() {
         try { (void)evaluate(noBondTopology,{bondAngles}); }
         catch (const ModifierExecutionError &e) { missingBondAnglesRejected=e.nodeIndex==0; }
         require(missingBondAnglesRejected,"bond-angle distribution reports missing topology at its node");
+        Dataset zeroLengthTopology=bondedMeasurements;
+        zeroLengthTopology.bonds={{0,0,{0,0,0}}};
+        for (const auto &analysis : {bondLengths,bondAngles}) {
+            bool zeroLengthRejected=false;
+            try { (void)evaluate(zeroLengthTopology,{analysis}); }
+            catch (const ModifierExecutionError &e) { zeroLengthRejected=e.nodeIndex==0; }
+            require(zeroLengthRejected,"bond distributions reject zero-length topology consistently");
+        }
+        Dataset nonPeriodicImageTopology=bondedMeasurements;
+        nonPeriodicImageTopology.bonds={{0,1,{0,1,0}}};
+        for (const auto &analysis : {bondLengths,bondAngles}) {
+            bool nonPeriodicImageRejected=false;
+            try { (void)evaluate(nonPeriodicImageTopology,{analysis}); }
+            catch (const ModifierExecutionError &e) { nonPeriodicImageRejected=e.nodeIndex==0; }
+            require(nonPeriodicImageRejected,"bond distributions reject image shifts on non-periodic axes");
+        }
         Dataset rangeFrameA; rangeFrameA.species={"X"}; rangeFrameA.atoms={{1,0,0,0},{3,0,0,0}};
         rangeFrameA.scalarProperties["Q"]={-5,8}; rangeFrameA.vectorProperties["Velocity"]={{0,2,1},{0,-4,3}}; rangeFrameA.bounds();
         Dataset rangeFrameB=rangeFrameA; rangeFrameB.atoms={{-4,0,0,0},{7,0,0,0}};

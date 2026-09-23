@@ -130,6 +130,28 @@ struct Dataset {
     }
 };
 
+inline std::array<double,3> bondVector(const Dataset &data, const Bond &bond) {
+    if (bond.a >= data.atoms.size() || bond.b >= data.atoms.size())
+        throw std::runtime_error("Bond endpoint is outside the particle array");
+    for (int axis=0;axis<3;++axis) if (bond.image[axis]!=0) {
+        if (!data.pbc[axis])
+            throw std::runtime_error("Bond image shift uses a non-periodic axis");
+        const double length=std::hypot(data.cell[axis*3],data.cell[axis*3+1],data.cell[axis*3+2]);
+        if (!(length>0) || !std::isfinite(length))
+            throw std::runtime_error("Bond image shift uses an invalid periodic cell vector");
+    }
+    const auto &a=data.atoms[bond.a], &b=data.atoms[bond.b];
+    std::array<double,3> vector{double(b.x)-a.x,double(b.y)-a.y,double(b.z)-a.z};
+    for (int axis=0;axis<3;++axis)
+        for (int component=0;component<3;++component)
+            vector[component]+=double(bond.image[axis])*data.cell[axis*3+component];
+    if (!std::all_of(vector.begin(),vector.end(),[](double value){return std::isfinite(value);}))
+        throw std::runtime_error("Bond has non-finite geometry");
+    if (!(std::hypot(vector[0],vector[1],vector[2])>0))
+        throw std::runtime_error("Bond has zero-length geometry");
+    return vector;
+}
+
 inline std::vector<double> particlePropertyValues(const Dataset &data,
                                                   const std::string &property,
                                                   std::atomic<bool> *cancel = nullptr) {
@@ -1865,17 +1887,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 for (const auto &bond : r.data.bonds) {
                     if ((bondIndex++ & 4095)==0 && cancel && *cancel)
                         throw std::runtime_error("Cancelled");
-                    if (bond.a >= r.data.atoms.size() || bond.b >= r.data.atoms.size())
-                        throw std::runtime_error("Bond endpoint is outside the particle array");
-                    const auto &a=r.data.atoms[bond.a], &b=r.data.atoms[bond.b];
-                    double dx=double(b.x)-a.x, dy=double(b.y)-a.y, dz=double(b.z)-a.z;
-                    for (int axis=0;axis<3;++axis) {
-                        const double image=bond.image[axis];
-                        dx+=image*r.data.cell[axis*3];
-                        dy+=image*r.data.cell[axis*3+1];
-                        dz+=image*r.data.cell[axis*3+2];
-                    }
-                    const double length=std::hypot(dx,dy,dz);
+                    const auto vector=bondVector(r.data,bond);
+                    const double length=std::hypot(vector[0],vector[1],vector[2]);
                     if (!std::isfinite(length))
                         throw std::runtime_error("Bond length is not finite");
                     lengths.push_back(length); lo=std::min(lo,length); hi=std::max(hi,length);
@@ -1919,14 +1932,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 for (const auto &bond:r.data.bonds) {
                     if ((bondIndex++ & 4095)==0 && cancel && *cancel)
                         throw std::runtime_error("Cancelled");
-                    if (bond.a>=r.data.atoms.size() || bond.b>=r.data.atoms.size())
-                        throw std::runtime_error("Bond endpoint is outside the particle array");
-                    const auto &a=r.data.atoms[bond.a], &b=r.data.atoms[bond.b];
-                    Vector v{double(b.x)-a.x,double(b.y)-a.y,double(b.z)-a.z};
-                    for (int axis=0;axis<3;++axis)
-                        for (int c=0;c<3;++c) v[c]+=bond.image[axis]*r.data.cell[axis*3+c];
-                    if (!std::all_of(v.begin(),v.end(),[](double x){return std::isfinite(x);}))
-                        throw std::runtime_error("Bond angle uses a non-finite bond vector");
+                    const auto geometry=bondVector(r.data,bond);
+                    Vector v{geometry[0],geometry[1],geometry[2]};
                     neighbors[bond.a].push_back(v);
                     for (double &component:v) component=-component;
                     neighbors[bond.b].push_back(v);
@@ -2018,32 +2025,7 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     std::vector<Bond> unique;
                     unique.reserve(r.data.bonds.size());
                     for (auto bond : r.data.bonds) {
-                        if (bond.a >= r.data.atoms.size() || bond.b >= r.data.atoms.size())
-                            throw std::runtime_error("Existing bond endpoint is outside the particle array");
-                        if (bond.a == bond.b && bond.image == std::array<int32_t, 3>{})
-                            throw std::runtime_error("Existing topology contains a zero-displacement self-bond");
-                        for (int axis=0;axis<3;++axis)
-                            if (bond.image[axis]!=0) {
-                                if (!r.data.pbc[axis])
-                                    throw std::runtime_error("Existing bond has an image shift along a non-periodic axis");
-                                const double vx=r.data.cell[axis*3], vy=r.data.cell[axis*3+1],
-                                             vz=r.data.cell[axis*3+2];
-                                const double vectorLength2=vx*vx+vy*vy+vz*vz;
-                                if (!(vectorLength2>0) || !std::isfinite(vectorLength2))
-                                    throw std::runtime_error("Existing bond image shift uses an invalid periodic cell vector");
-                            }
-                        const auto &a=r.data.atoms[bond.a], &b=r.data.atoms[bond.b];
-                        const double dx=double(b.x)-a.x+
-                            bond.image[0]*r.data.cell[0]+bond.image[1]*r.data.cell[3]+bond.image[2]*r.data.cell[6];
-                        const double dy=double(b.y)-a.y+
-                            bond.image[0]*r.data.cell[1]+bond.image[1]*r.data.cell[4]+bond.image[2]*r.data.cell[7];
-                        const double dz=double(b.z)-a.z+
-                            bond.image[0]*r.data.cell[2]+bond.image[1]*r.data.cell[5]+bond.image[2]*r.data.cell[8];
-                        const double distance2=dx*dx+dy*dy+dz*dz;
-                        if (!std::isfinite(distance2))
-                            throw std::runtime_error("Existing bond has non-finite geometry");
-                        if (!(distance2>0))
-                            throw std::runtime_error("Existing bond has zero-length geometry");
+                        (void)bondVector(r.data,bond);
                         if (seen.insert(key(bond)).second) unique.push_back(bond);
                     }
                     r.data.bonds = std::move(unique);
