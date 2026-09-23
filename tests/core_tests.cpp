@@ -34,6 +34,12 @@ int main() {
                     !historyCurrent[0].colorAllFramesRange && historyCurrent[0].colorMin==0 &&
                     historyCurrent[0].colorMax==1,
                 "redo restores the complete post-edit color range state");
+        InteractiveEditCheckpoint editGate;
+        require(editGate.shouldRecord(true) && !editGate.shouldRecord(true),
+                "interactive drag snapshots coalesce within one held mouse gesture");
+        editGate.beginFrame(false);
+        require(editGate.shouldRecord(true) && editGate.shouldRecord(false),
+                "a later mouse gesture receives its own checkpoint and keyboard edits remain independent");
         auto p = std::filesystem::temp_directory_path() / "atomx-core-fixture.xyz";
         {
             std::ofstream f(p);

@@ -203,6 +203,7 @@ struct App {
     PipelineGraph modifierGraph;
     std::vector<ModifierNode> &mods = modifierGraph.nodes;
     std::vector<std::vector<ModifierNode>> undo, redo;
+    InteractiveEditCheckpoint editCheckpoint;
     uint64_t nextModifierId = 1;
     std::filesystem::path path;
     std::vector<Frame> frames;
@@ -548,6 +549,8 @@ struct App {
         return node;
     }
     void checkpoint() {
+        if (!editCheckpoint.shouldRecord(ImGui::IsMouseDown(ImGuiMouseButton_Left)))
+            return;
         if (undo.size() >= 128)
             undo.erase(undo.begin());
         undo.push_back(mods);
@@ -2644,6 +2647,7 @@ struct App {
     }
     void ui() {
         poll();
+        editCheckpoint.beginFrame(ImGui::IsMouseDown(ImGuiMouseButton_Left));
         auto &io = ImGui::GetIO();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O))
             open();

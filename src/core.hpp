@@ -733,6 +733,18 @@ inline bool applyModifierHistory(std::vector<ModifierNode> &current,
     source.pop_back();
     return true;
 }
+struct InteractiveEditCheckpoint {
+    bool mouseGestureCheckpointed = false;
+    void beginFrame(bool leftMouseDown) {
+        if (!leftMouseDown) mouseGestureCheckpointed = false;
+    }
+    bool shouldRecord(bool leftMouseDown) {
+        if (!leftMouseDown) return true;
+        if (mouseGestureCheckpointed) return false;
+        mouseGestureCheckpointed = true;
+        return true;
+    }
+};
 struct NeighborBin {
     int64_t x = 0, y = 0, z = 0;
     bool operator==(const NeighborBin &) const = default;
