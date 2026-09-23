@@ -188,6 +188,11 @@ struct Loaded {
     std::filesystem::path path;
     int frame;
 };
+struct HistogramPlotView {
+    int firstBin = 0;
+    int lastBin = -1;
+    float yMaximum = 0; // zero means automatic
+};
 struct App {
     HWND window;
     desktop::Preferences preferences;
@@ -212,6 +217,7 @@ struct App {
     bool playing = false, quad = true, particles = true, cell = true, showTable = false,
          showCatalog = false;
     bool histogramPreviewTab = false;
+    std::map<std::string, HistogramPlotView> histogramPlotViews;
     float radius = .32f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
     int appearanceType = 0;
@@ -1287,7 +1293,7 @@ struct App {
                                                          : utf8(path.filename().wstring()).c_str());
         ImGui::Separator();
         auto avail = ImGui::GetContentRegionAvail();
-        float dataH = showTable ? U(240) : 0;
+        float dataH = showTable ? U(280) : 0;
         float gap = ImGui::GetStyle().ItemSpacing.y;
         float sceneH = std::max(U(150), avail.y - dataH - U(128) - ImGui::GetFrameHeight() - gap*(showTable ? 4 : 3));
         if (quad) {
@@ -1516,7 +1522,6 @@ struct App {
                                 table.columns.size() >= 2 && !table.rows.empty()) {
                                 std::vector<float> bins;
                                 bins.reserve(table.rows.size());
-                                float maximum = 0;
                                 for (const auto &row : table.rows) {
                                     char *end = nullptr;
                                     const float value = row.size() > 1
@@ -1524,11 +1529,44 @@ struct App {
                                     const float finiteValue = end && *end == '\0' && std::isfinite(value)
                                         ? std::max(0.f, value) : 0.f;
                                     bins.push_back(finiteValue);
-                                    maximum = std::max(maximum, finiteValue);
                                 }
-                                ImGui::TextDisabled("%s across %zu bins", table.columns[1].c_str(), bins.size());
-                                ImGui::PlotHistogram("##histogram-result", bins.data(), int(bins.size()),
-                                    0, nullptr, 0, maximum > 0 ? maximum : 1.f, {-1, U(72)});
+                                const std::string viewKey =
+                                    (inspectorNode < 0 ? std::string("final") : inspectorNodeId) +
+                                    "|" + table.name + "|" + std::to_string(tableIndex);
+                                auto &view = histogramPlotViews[viewKey];
+                                if (view.lastBin < 0) view.lastBin = int(bins.size()) - 1;
+                                view.firstBin = std::clamp(view.firstBin, 0, int(bins.size()) - 1);
+                                view.lastBin = std::clamp(view.lastBin, view.firstBin, int(bins.size()) - 1);
+                                int firstBin = view.firstBin + 1, lastBin = view.lastBin + 1;
+                                ImGui::SetNextItemWidth(U(100));
+                                if (ImGui::InputInt("First bin", &firstBin, 1, 8))
+                                    view.firstBin = std::clamp(firstBin - 1, 0, int(bins.size()) - 1);
+                                view.lastBin = std::max(view.lastBin, view.firstBin);
+                                ImGui::SameLine();
+                                ImGui::SetNextItemWidth(U(100));
+                                if (ImGui::InputInt("Last bin", &lastBin, 1, 8))
+                                    view.lastBin = std::clamp(lastBin - 1, view.firstBin, int(bins.size()) - 1);
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("Reset plot view")) {
+                                    view.firstBin = 0;
+                                    view.lastBin = int(bins.size()) - 1;
+                                    view.yMaximum = 0;
+                                }
+                                ImGui::SetNextItemWidth(U(170));
+                                ImGui::InputFloat("Y axis maximum (0 = auto)", &view.yMaximum,
+                                                  0, 0, "%.6g");
+                                view.yMaximum = std::max(0.f, std::isfinite(view.yMaximum)
+                                    ? view.yMaximum : 0.f);
+                                std::vector<float> visibleBins(
+                                    bins.begin() + view.firstBin, bins.begin() + view.lastBin + 1);
+                                float visibleMaximum = 0;
+                                for (float value : visibleBins) visibleMaximum = std::max(visibleMaximum, value);
+                                const float scaleMaximum = view.yMaximum > 0
+                                    ? view.yMaximum : visibleMaximum > 0 ? visibleMaximum : 1.f;
+                                ImGui::TextDisabled("%s across bins %d-%d of %zu",
+                                    table.columns[1].c_str(), view.firstBin + 1, view.lastBin + 1, bins.size());
+                                ImGui::PlotHistogram("##histogram-result", visibleBins.data(),
+                                    int(visibleBins.size()), 0, nullptr, 0, scaleMaximum, {-1, U(72)});
                                 if (ImGui::IsItemHovered())
                                     ImGui::SetTooltip("Bin centers are listed in the table below.");
                             }
