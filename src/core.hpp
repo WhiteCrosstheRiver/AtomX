@@ -1388,6 +1388,8 @@ inline CNAResult analyzeCommonNeighbors(const Dataset &d, double cutoff,
             std::set_intersection(neighbors.begin(), neighbors.end(), otherNeighbors.begin(), otherNeighbors.end(),
                                   std::back_inserter(common));
             if (common.empty()) continue;
+            if (common.size() > 12)
+                throw std::runtime_error("CNA common-neighbor graph exceeds the exact-search limit");
             int edges = 0;
             std::vector<std::vector<uint8_t>> graph(common.size(), std::vector<uint8_t>(common.size()));
             for (size_t i=0;i<common.size();++i)
@@ -1395,8 +1397,6 @@ inline CNAResult analyzeCommonNeighbors(const Dataset &d, double cutoff,
                     if (std::binary_search(adjacency[common[i]].begin(), adjacency[common[i]].end(), common[j])) {
                         graph[i][j]=graph[j][i]=1; ++edges;
                     }
-            if (common.size() > 12)
-                throw std::runtime_error("CNA common-neighbor graph exceeds the exact-search limit");
             int chain = 0;
             {
                 size_t searchStates = 0;

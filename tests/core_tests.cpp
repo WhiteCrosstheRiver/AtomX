@@ -749,6 +749,17 @@ int main() {
                     fixedCna.data.globalAttributes.at("CommonNeighborAnalysis.counts.Other") == 0 &&
                     fixedCna.data.tables.size() == 1 && fixedCna.data.tables[0].rows.size() == 5,
                 "CNA publishes OVITO-compatible structure counts");
+        Dataset denseCna; denseCna.species={"X"};
+        for (int i=0;i<15;++i)
+            denseCna.atoms.push_back({float(i%5)*.01f,float(i/5)*.01f,0,0});
+        bool denseCnaRejected=false;
+        try { (void)evaluate(denseCna,{{Op::CommonNeighborAnalysis,true,1.f}}); }
+        catch (const ModifierExecutionError &e) {
+            denseCnaRejected=e.nodeIndex==0 &&
+                std::string(e.what()).find("common-neighbor graph exceeds the exact-search limit")!=std::string::npos;
+        }
+        require(denseCnaRejected,
+                "CNA rejects excessive common-neighbor graphs before allocating quadratic scratch storage");
         const auto fccSignatures = analyzeCommonNeighbors(fcc, .8f);
         require(fccSignatures.bondSignatureCounts.at({4,2,1}) == 12 * fcc.atoms.size() &&
                     fccSignatures.bondSignatureCounts.size() == 1,
