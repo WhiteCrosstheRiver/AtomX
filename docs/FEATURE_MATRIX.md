@@ -39,7 +39,7 @@
 
 - Color coding is stored per pipeline node and writes the selected Position/scalar values into the evaluated dataset. Automatic/symmetric/manual range, exact cancellable range scanning across XYZ/LAMMPS dump frames (up to 2 million atoms per frame), discrete mapping, inversion, selected-only coloring, and keep-selection are implemented. The viewport and active-view PNG show the selected property and numeric range. Palette shapes still use the current approximate GPU gradients; the legend reproduces those same colors.
 - Fixed-cutoff common-neighbor analysis publishes `Structure Type`, global structure counts, and a result table; periodic FCC, BCC, HCP (triclinic), and an isolated icosahedral-center fixture are covered. Adaptive CNA and production-scale acceleration remain incomplete. The coordination-based DXA helper remains an explicitly approximate prepass.
-- Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts, and renders GPU lines in viewports and image exports. Visibility, color, and pixel width are configurable. Cylinder rendering and type-pair cutoffs remain future work.
+- Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts, and renders GPU lines in viewports and image exports. It supports one global cutoff or a symmetric per-type-pair cutoff matrix (up to 32 types); visibility, color, and pixel width are configurable. Cylinder rendering remains future work.
 - Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV. Particle-table manual selection is one persistent pipeline node: click replaces the set, Ctrl-click toggles one particle, and invalid indices are reported rather than silently applied.
 - While a source frame or modifier stack is being re-evaluated, the previous result remains visible with a `STALE RESULT` footer marker. Failed evaluations retain that marker until a successful publish.
 - Pipeline evaluation now takes ownership of its working `Dataset` snapshot, removing the extra full-dataset copy between the asynchronous worker input and its result. The application still makes one working copy from the retained source; node-level caching and shared immutable storage remain incomplete.
@@ -120,7 +120,7 @@
 | VoroTop analysis | 待实现 | Voronoi 拓扑签名及分类器 |
 | Construct surface mesh | 待实现 | 表面重建、周期网格、法向 |
 | Coordination polyhedra | 待实现 | 邻域凸包 |
-| Create bonds | 部分 | 固定 cutoff 周期邻居键、周期镜像位移、默认拓扑保留与去重；D3D11 可见线、颜色/宽度/可见性；无键圆柱和类型对 cutoff |
+| Create bonds | 部分 | 固定 cutoff 或最多 32 种类型的对称类型对 cutoff；周期镜像位移、默认拓扑保留与去重；D3D11 可见线、颜色/宽度/可见性；无键圆柱 |
 | Create isosurface | 待实现 | 体数据、等值面提取 |
 | Generate trajectory lines | 待实现 | 帧间匹配、周期分段和曲线绘制 |
 

@@ -257,6 +257,24 @@ int main() {
         require(preservedBonds.data.bonds.size() == 2 &&
                     preservedBonds.data.bonds[0] == topology.bonds[0],
                 "create bonds preserves existing topology by default");
+        Dataset pairCutoffData;
+        pairCutoffData.species={"A","B"};
+        pairCutoffData.atoms={{0,0,0,0},{.8f,0,0,1},{1.6f,0,0,1}};
+        pairCutoffData.bounds();
+        Modifier pairCutoffBonds{Op::CreateBonds};
+        pairCutoffBonds.bondTypeCutoffsEnabled=true;
+        pairCutoffBonds.bondTypeCutoffs={.2f,.9f,.9f,.2f};
+        auto pairCutoffResult=evaluate(pairCutoffData,{pairCutoffBonds});
+        require(pairCutoffResult.data.bonds==std::vector<Bond>{{0,1,{0,0,0}}},
+                "type-pair bond cutoffs use the symmetric type-pair threshold");
+        pairCutoffBonds.bondTypeCutoffs={0,0,0,0};
+        require(evaluate(pairCutoffData,{pairCutoffBonds}).data.bonds.empty(),
+                "zero type-pair cutoffs disable bond generation without rejecting the node");
+        pairCutoffBonds.bondTypeCutoffs={.2f,.9f,.8f,.2f};
+        bool asymmetricPairCutoffsRejected=false;
+        try { (void)evaluate(pairCutoffData,{pairCutoffBonds}); }
+        catch (const ModifierExecutionError &e) { asymmetricPairCutoffsRejected=e.nodeIndex==0; }
+        require(asymmetricPairCutoffsRejected,"asymmetric type-pair cutoff tables are rejected at their node");
         auto periodicSource = topology;
         periodicSource.bonds.clear();
         auto periodicBonds = evaluate(periodicSource, {{Op::CreateBonds,true,.3f}});

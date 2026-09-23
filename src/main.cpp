@@ -1466,9 +1466,11 @@ struct App {
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
                         m.op == Op::RadialDistribution || m.op == Op::ExpandSelection ||
                         m.op == Op::SelectOverlapping) {
-                        float value = m.value;
-                        if (ImGui::DragFloat("Cutoff distance", &value, .01f, .0001f, 100000.f, "%.5g")) {
-                            checkpoint(); m.value = value; update();
+                        if (!(m.op==Op::CreateBonds && m.bondTypeCutoffsEnabled)) {
+                            float value = m.value;
+                            if (ImGui::DragFloat("Cutoff distance", &value, .01f, .0001f, 100000.f, "%.5g")) {
+                                checkpoint(); m.value = value; update();
+                            }
                         }
                     }
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
@@ -1593,6 +1595,53 @@ struct App {
                             if (ImGui::Checkbox("Discard existing bonds", &discard)) {
                                 checkpoint(); m.discardExistingBonds = discard; update();
                             }
+                            const size_t typeCount=result.data.species.size();
+                            if (typeCount>0 && typeCount<=32) {
+                                bool usePairCutoffs=m.bondTypeCutoffsEnabled;
+                                if (ImGui::Checkbox("Use type-pair cutoffs",&usePairCutoffs)) {
+                                    checkpoint();
+                                    m.bondTypeCutoffsEnabled=usePairCutoffs;
+                                    if (usePairCutoffs)
+                                        m.bondTypeCutoffs.assign(typeCount*typeCount,m.value);
+                                    update();
+                                }
+                                if (m.bondTypeCutoffsEnabled) {
+                                    if (m.bondTypeCutoffs.size()!=typeCount*typeCount) {
+                                        ImGui::TextColored({1.f,.62f,.18f,1.f},"Type table changed; reset pair cutoffs to continue.");
+                                        if (ImGui::Button("Reset type-pair cutoffs")) {
+                                            checkpoint(); m.bondTypeCutoffs.assign(typeCount*typeCount,m.value); update();
+                                        }
+                                    } else if (ImGui::BeginTable("Bond type-pair cutoffs",int(typeCount+1),
+                                               ImGuiTableFlags_Borders|ImGuiTableFlags_RowBg|ImGuiTableFlags_ScrollX,
+                                               {0,U(180)})) {
+                                        ImGui::TableSetupColumn("Type",ImGuiTableColumnFlags_WidthFixed,U(90));
+                                        for (const auto &name:result.data.species)
+                                            ImGui::TableSetupColumn(name.c_str(),ImGuiTableColumnFlags_WidthFixed,U(96));
+                                        ImGui::TableHeadersRow();
+                                        for (size_t a=0;a<typeCount;++a) {
+                                            ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
+                                            ImGui::TextUnformatted(result.data.species[a].c_str());
+                                            for (size_t b=0;b<typeCount;++b) {
+                                                ImGui::TableSetColumnIndex(int(b+1));
+                                                if (b<a) { ImGui::TextDisabled("same"); continue; }
+                                                float pair=m.bondTypeCutoffs[a*typeCount+b];
+                                                ImGui::PushID(int(a*typeCount+b));
+                                                ImGui::SetNextItemWidth(-1);
+                                                if (ImGui::DragFloat("##cutoff",&pair,.01f,0.f,100000.f,"%.4g")) {
+                                                    checkpoint();
+                                                    m.bondTypeCutoffs[a*typeCount+b]=pair;
+                                                    m.bondTypeCutoffs[b*typeCount+a]=pair;
+                                                    update();
+                                                }
+                                                ImGui::PopID();
+                                            }
+                                        }
+                                        ImGui::EndTable();
+                                    }
+                                    ImGui::TextDisabled("Symmetric pair matrix; zero disables that type pair.");
+                                }
+                            } else ImGui::TextDisabled(typeCount==0 ? "Load particle types to configure bonds." :
+                                                       "Type-pair mode supports at most 32 particle types.");
                             bool visible = m.bondsVisible;
                             float width = m.bondWidth;
                             auto color = m.bondColor;
@@ -2364,7 +2413,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         int adapter = -1, smoke = 0;
         bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
-             smokeColorLegend = false;
+             smokeColorLegend = false, smokeBondPairs = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
@@ -2373,6 +2422,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (a == L"--export-settings")
                 smokeExport = true;
             else if (a == L"--smoke-color-legend") smokeColorLegend = true;
+            else if (a == L"--smoke-bond-pairs") smokeBondPairs = true;
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -2422,6 +2472,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             app.showSettings = smokeSettings;
             app.showDataExport = smokeExport;
             if (smokeColorLegend) app.add(Op::ColorCoding);
+            if (smokeBondPairs) {
+                app.add(Op::CreateBonds);
+                auto &bondNode=app.mods.back();
+                const size_t typeCount=app.source.species.size();
+                bondNode.bondTypeCutoffsEnabled=true;
+                bondNode.bondTypeCutoffs.assign(typeCount*typeCount,bondNode.value);
+                app.update(app.mods.size()-1);
+            }
             if (desktopTest) {
                 auto requireWindow = [](bool ok, const char *message) {
                     if (!ok) throw std::runtime_error(message);

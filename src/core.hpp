@@ -529,6 +529,8 @@ struct Modifier {
     bool adaptive = false;
     std::string outputProperty = "Computed property";
     bool discardExistingBonds = false;
+    bool bondTypeCutoffsEnabled = false;
+    std::vector<float> bondTypeCutoffs;
     int colorGradient = 0;
     bool colorAutoRange = true, colorSymmetricRange = false, colorReverse = false;
     bool colorAllFramesRange = false;
@@ -1156,11 +1158,23 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 throw std::runtime_error("Particle type is out of range");
             if (m.op == Op::SelectRange && m.upper < m.value)
                 throw std::runtime_error("Upper bound must be at least the lower bound");
-            if ((m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds ||
+            if ((m.op == Op::CommonNeighborAnalysis || (m.op == Op::CreateBonds && !m.bondTypeCutoffsEnabled) ||
                  m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
                  m.op == Op::RadialDistribution) &&
                 (!(m.value > 0) || !std::isfinite(m.value)))
                 throw std::runtime_error("Cutoff must be finite and positive");
+            if (m.op == Op::CreateBonds && m.bondTypeCutoffsEnabled) {
+                const size_t typeCount=r.data.species.size();
+                if (typeCount==0 || typeCount>32 || m.bondTypeCutoffs.size()!=typeCount*typeCount)
+                    throw std::runtime_error("Type-pair bond cutoffs do not match the particle type table");
+                for (float cutoff : m.bondTypeCutoffs)
+                    if (!std::isfinite(cutoff) || cutoff<0 || cutoff>100000.f)
+                        throw std::runtime_error("Type-pair bond cutoffs must be finite values between 0 and 100000");
+                for (size_t a=0;a<typeCount;++a)
+                    for (size_t b=a+1;b<typeCount;++b)
+                        if (m.bondTypeCutoffs[a*typeCount+b]!=m.bondTypeCutoffs[b*typeCount+a])
+                            throw std::runtime_error("Type-pair bond cutoff matrix must be symmetric");
+            }
             if ((m.op == Op::ExpandSelection || m.op == Op::SelectOverlapping) &&
                 (!(m.value > 0) || !std::isfinite(m.value)))
                 throw std::runtime_error("Cutoff must be finite and positive");
@@ -1422,11 +1436,26 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     r.data.bondStyle.width = m.bondWidth;
                     r.data.bondStyle.color = m.bondColor;
                     if (m.discardExistingBonds) r.data.bonds.clear();
-                    forEachNeighborPair(r.data, m.value,
-                                        [&](uint32_t i, uint32_t j, double,
-                                            std::array<int32_t, 3> image) {
-                                            r.data.bonds.push_back({i, j, image});
-                                        }, cancel);
+                    double searchCutoff=m.value;
+                    if (m.bondTypeCutoffsEnabled)
+                        searchCutoff=*std::max_element(m.bondTypeCutoffs.begin(),m.bondTypeCutoffs.end());
+                    if (searchCutoff>0) {
+                        for (const auto &atom : r.data.atoms)
+                            if (atom.type>=r.data.species.size())
+                                throw std::runtime_error("Particle type is outside the type-pair cutoff table");
+                        forEachNeighborPair(r.data, searchCutoff,
+                                            [&](uint32_t i, uint32_t j, double distanceSquared,
+                                                std::array<int32_t, 3> image) {
+                                                if (m.bondTypeCutoffsEnabled) {
+                                                    const size_t typeCount=r.data.species.size();
+                                                    const size_t a=std::min(r.data.atoms[i].type,r.data.atoms[j].type);
+                                                    const size_t b=std::max(r.data.atoms[i].type,r.data.atoms[j].type);
+                                                    const double pairCutoff=m.bondTypeCutoffs[a*typeCount+b];
+                                                    if (distanceSquared>pairCutoff*pairCutoff) return;
+                                                }
+                                                r.data.bonds.push_back({i, j, image});
+                                            }, cancel);
+                    }
                     auto key = [](Bond &bond) {
                         if (bond.a > bond.b) {
                             std::swap(bond.a, bond.b);
