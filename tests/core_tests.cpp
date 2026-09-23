@@ -132,17 +132,20 @@ int main() {
         require(std::abs(reduced.data.globalAttributes.at("ReduceProperty.Position.X.mean")-expectedX)<1e-10,
                 "reduce property publishes numeric global mean");
         Dataset rangeFrameA; rangeFrameA.species={"X"}; rangeFrameA.atoms={{1,0,0,0},{3,0,0,0}};
-        rangeFrameA.scalarProperties["Q"]={-5,8}; rangeFrameA.bounds();
+        rangeFrameA.scalarProperties["Q"]={-5,8}; rangeFrameA.vectorProperties["Velocity"]={{0,2,1},{0,-4,3}}; rangeFrameA.bounds();
         Dataset rangeFrameB=rangeFrameA; rangeFrameB.atoms={{-4,0,0,0},{7,0,0,0}};
-        rangeFrameB.scalarProperties["Q"]={2,12}; rangeFrameB.bounds();
+        rangeFrameB.scalarProperties["Q"]={2,12}; rangeFrameB.vectorProperties["Velocity"]={{0,6,1},{0,1,3}}; rangeFrameB.bounds();
         std::vector<Dataset> rangeFrames{rangeFrameA,rangeFrameB};
         Modifier upstreamTranslate{Op::Translate}; upstreamTranslate.axis=0; upstreamTranslate.value=5;
         auto trajectoryPositionRange=colorRangeAcrossFrames(rangeFrames.size(),
             [&](size_t i){return rangeFrames.at(i);},{upstreamTranslate},"Position.X");
         auto trajectoryPropertyRange=colorRangeAcrossFrames(rangeFrames.size(),
             [&](size_t i){return rangeFrames.at(i);},{},"Q");
+        auto trajectoryVectorRange=colorRangeAcrossFrames(rangeFrames.size(),
+            [&](size_t i){return rangeFrames.at(i);}, {},"Velocity.Y");
         require(trajectoryPositionRange.first==1 && trajectoryPositionRange.second==12 &&
-                    trajectoryPropertyRange.first==-5 && trajectoryPropertyRange.second==12,
+                    trajectoryPropertyRange.first==-5 && trajectoryPropertyRange.second==12 &&
+                    trajectoryVectorRange.first==-4 && trajectoryVectorRange.second==6,
                 "all-frame color range evaluates the upstream pipeline and aggregates every frame");
         std::atomic<float> rangeProgress{0};
         auto progressedRange=colorRangeAcrossFrames(rangeFrames.size(),
@@ -201,6 +204,12 @@ int main() {
         require(waveResult.data.scalarProperties["Color coding"] ==
                     waveResult.data.scalarProperties["Coordination"],
                 "color coding publishes selected property values, not position coordinates");
+        wave.vectorProperties["Velocity"]={{1,4,7},{2,5,8},{3,6,9},{4,7,10}};
+        Modifier vectorColor{Op::ColorCoding}; vectorColor.property="Velocity.Y";
+        auto vectorColorResult=evaluate(wave,{vectorColor});
+        require(vectorColorResult.data.scalarProperties["Color coding"]==
+                    std::vector<double>({4,5,6,7}),
+                "color coding maps the selected component of a vector particle property");
         Modifier selectedColor{Op::ColorCoding};
         selectedColor.property = "Coordination";
         selectedColor.colorSelectedOnly = true;

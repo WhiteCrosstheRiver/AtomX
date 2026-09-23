@@ -128,6 +128,39 @@ struct Dataset {
     }
 };
 
+inline std::vector<double> particlePropertyValues(const Dataset &data,
+                                                  const std::string &property) {
+    if (property == "Position.X" || property == "Position.Y" || property == "Position.Z") {
+        const int axis = property.back() == 'X' ? 0 : property.back() == 'Y' ? 1 : 2;
+        std::vector<double> values;
+        values.reserve(data.atoms.size());
+        for (const auto &atom : data.atoms) values.push_back(coordinate(atom, axis));
+        return values;
+    }
+    if (auto scalar = data.scalarProperties.find(property); scalar != data.scalarProperties.end()) {
+        if (scalar->second.size() != data.atoms.size())
+            throw std::runtime_error("Particle property length mismatch: " + property);
+        return scalar->second;
+    }
+    if (property.size() > 2 && property[property.size() - 2] == '.') {
+        const char component = property.back();
+        const int axis = component == 'X' ? 0 : component == 'Y' ? 1 : component == 'Z' ? 2 : -1;
+        if (axis >= 0) {
+            const auto name = property.substr(0, property.size() - 2);
+            if (auto vector = data.vectorProperties.find(name); vector != data.vectorProperties.end()) {
+                if (vector->second.size() != data.atoms.size())
+                    throw std::runtime_error("Particle property length mismatch: " + property);
+                std::vector<double> values;
+                values.reserve(vector->second.size());
+                for (const auto &value : vector->second)
+                    values.push_back(axis == 0 ? value.x : axis == 1 ? value.y : value.z);
+                return values;
+            }
+        }
+    }
+    throw std::runtime_error("Unknown particle property: " + property);
+}
+
 inline std::string attribute(const std::string &s, const std::string &key) {
     auto p = s.find(key + "=");
     if (p == std::string::npos)
@@ -1334,20 +1367,7 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 throw std::runtime_error("Wrap currently requires an orthogonal cell");
             if (m.op == Op::ColorCoding) {
                 r.data.particleColors.clear();
-                std::vector<double> values;
-                if (m.property == "Position.X" || m.property == "Position.Y" || m.property == "Position.Z") {
-                    int axis = m.property.back() - 'X';
-                    values.reserve(r.data.atoms.size());
-                    for (const auto &a : r.data.atoms) values.push_back(coordinate(a, axis));
-                } else {
-                    auto it = r.data.scalarProperties.find(m.property);
-                    if (it == r.data.scalarProperties.end())
-                        throw std::runtime_error("Unknown particle property: " + m.property);
-                    values = it->second;
-                }
-                if (values.size() != r.data.atoms.size())
-                    throw std::runtime_error("Particle property length mismatch: " + m.property);
-                r.data.scalarProperties["Color coding"] = std::move(values);
+                r.data.scalarProperties["Color coding"] = particlePropertyValues(r.data, m.property);
                 if (m.colorSelectedOnly) {
                     r.colorSelected = r.selected;
                     if (!m.colorKeepSelection)
@@ -1716,21 +1736,10 @@ inline std::pair<double, double> colorRangeAcrossFrames(
         if (cancel && *cancel) throw std::runtime_error("Cancelled");
         auto evaluated = evaluate(readFrame(frame), upstream, cancel);
         const auto &data = evaluated.data;
-        if (property == "Position.X" || property == "Position.Y" || property == "Position.Z") {
-            const int axis = property == "Position.X" ? 0 : property == "Position.Y" ? 1 : 2;
-            for (const auto &atom : data.atoms) {
-                if (cancel && *cancel) throw std::runtime_error("Cancelled");
-                double value = coordinate(atom, axis);
-                if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
-            }
-        } else {
-            auto values = data.scalarProperties.find(property);
-            if (values == data.scalarProperties.end() || values->second.size() != data.atoms.size())
-                throw std::runtime_error("Color range property is missing or is not scalar: " + property);
-            for (double value : values->second) {
-                if (cancel && *cancel) throw std::runtime_error("Cancelled");
-                if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
-            }
+        auto values = particlePropertyValues(data, property);
+        for (double value : values) {
+            if (cancel && *cancel) throw std::runtime_error("Cancelled");
+            if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
         }
         if (progress) *progress = float(frame + 1) / float(frameCount);
     }

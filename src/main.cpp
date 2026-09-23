@@ -532,11 +532,18 @@ struct App {
         update();
         status = std::string("Added ") + opName(op);
     }
-    bool colorPropertyCombo(const char *label, std::string &property) {
+    bool colorPropertyCombo(const char *label, std::string &property,
+                            bool includeVectorComponents = false) {
         std::vector<std::string> choices{"Position.X", "Position.Y", "Position.Z"};
         for (const auto &[name, values] : result.data.scalarProperties)
             if (name != "Color coding" && values.size() == result.data.atoms.size())
                 choices.push_back(name);
+        if (includeVectorComponents)
+            for (const auto &[name, values] : result.data.vectorProperties)
+                if (values.size() == result.data.atoms.size())
+                    for (const char *axis : {"X", "Y", "Z"})
+                        choices.push_back(name + "." + axis);
+        std::sort(choices.begin() + 3, choices.end());
         bool changed = false;
         if (ImGui::BeginCombo(label, property.c_str())) {
             for (const auto &name : choices) {
@@ -1535,7 +1542,7 @@ struct App {
                         bool changed = false;
                         auto edited = m;
                         auto property = edited.property;
-                        if (colorPropertyCombo("Input property", property)) {
+                        if (colorPropertyCombo("Input property", property, true)) {
                             edited.property = std::move(property); edited.colorAutoRange = true;
                             edited.colorAllFramesRange = false; changed = true;
                         }
@@ -1793,7 +1800,7 @@ struct App {
                         return m.enabled && (m.op == Op::ColorCoding || m.op == Op::ColorType);
                     });
                     if (activeColor != mods.rend() && activeColor->op == Op::ColorCoding) {
-                        if (colorPropertyCombo("Input property", activeColor->property)) {
+                        if (colorPropertyCombo("Input property", activeColor->property, true)) {
                             checkpoint(); colorAutoRange = true; update();
                         }
                     } else {

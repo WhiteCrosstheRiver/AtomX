@@ -37,7 +37,7 @@
 
 ## Pipeline / analysis status, 2026-09-23
 
-- Color coding is stored per pipeline node and writes the selected Position/scalar values into the evaluated dataset. Automatic/symmetric/manual range, exact cancellable range scanning across XYZ/LAMMPS dump frames (up to 2 million atoms per frame), discrete mapping, inversion, selected-only coloring, and keep-selection are implemented. The viewport and active-view PNG show the selected property and numeric range. The D3D11 viewport, legend and PNG now sample one shared 256-step table; Magma, Viridis and Plasma use Matplotlib's published 256-color tables (8-bit RGB), while other gradients retain AtomX's existing formulas sampled into the common table.
+- Color coding is stored per pipeline node and writes the selected Position, scalar, or vector-component values into the evaluated dataset. Automatic/symmetric/manual range, exact cancellable range scanning across XYZ/LAMMPS dump frames (up to 2 million atoms per frame), discrete mapping, inversion, selected-only coloring, and keep-selection are implemented. Current-frame and trajectory-wide range scans support vector components. The viewport and active-view PNG show the selected property and numeric range. The D3D11 viewport, legend and PNG now sample one shared 256-step table; Magma, Viridis and Plasma use Matplotlib's published 256-color tables (8-bit RGB), while other gradients retain AtomX's existing formulas sampled into the common table.
 - Fixed-cutoff common-neighbor analysis publishes `Structure Type`, global structure counts, and a result table; periodic FCC, BCC, HCP (triclinic), and an isolated icosahedral-center fixture are covered. Adaptive CNA and production-scale acceleration remain incomplete. The coordination-based DXA helper remains an explicitly approximate prepass.
 - Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts, and renders GPU lines in viewports and image exports. It supports one global cutoff or a symmetric per-type-pair cutoff matrix (up to 32 types); visibility, color, and pixel width are configurable. Cylinder rendering remains future work.
 - Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV. Particle-table manual selection is one persistent pipeline node: click replaces the set, Ctrl-click toggles one particle, and invalid indices are reported rather than silently applied.
@@ -80,7 +80,7 @@
 | Assign color | 部分 | 管线节点对选中粒子赋色；无选区时作用于全部粒子；粒子色可检查且进入 GPU 渲染，并随筛选/复制映射；颜色不写入当前结构文件格式 |
 | Color by type | 已实现 | 默认 8 色循环，选中粒子高亮 |
 | 粒子形状 | 部分 | 全局选择 Sphere、Circle、Cube、Cylinder、Spherocylinder；按类型的独立半径/颜色/形状编辑待做 |
-| Color coding | 部分 | GPU 按节点配置的 Position 或数值粒子属性着色，支持当前帧自动/对称/手动范围和跨 XYZ/LAMMPS dump 帧的精确异步范围、取消、离散、反转、仅选中和 Keep selection；全帧计算限每帧 200 万原子；视口、图例和 PNG 共用 256 项渐变表；Magma/Viridis/Plasma 使用官方 8-bit 色表，其余现有渐变公式仍保留 |
+| Color coding | 部分 | GPU 按节点配置的 Position、标量属性或向量 X/Y/Z 分量着色，向量分量也支持当前帧/全帧范围统计；另支持自动/对称/手动范围、离散、反转、仅选中和 Keep selection；全帧计算限每帧 200 万原子；视口、图例和 PNG 共用 256 项渐变表；Magma/Viridis/Plasma 使用官方 8-bit 色表，其余现有渐变公式仍保留 |
 | Affine transformation | 部分 | 按轴平移、统一比例缩放、旋转坐标与晶胞；不是完整 3x4 仿射矩阵 |
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
 | Compute property | 部分 | 安全原生数值表达式逐粒子计算并发布标量属性，可供下游节点读取；不支持向量表达式、单位系统、任意脚本及优化缓存 |
