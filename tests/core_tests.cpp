@@ -18,6 +18,22 @@ int main() {
                     cnaOutputs[1].kind==DataObject::Kind::GlobalAttributes &&
                     cnaOutputs[2].kind==DataObject::Kind::Table,
                 "CNA pipeline metadata declares every published result object");
+        ModifierNode colorSnapshot{Op::ColorCoding};
+        colorSnapshot.id="stable-color-node";
+        colorSnapshot.colorAllFramesRange=true;
+        colorSnapshot.colorMin=-7; colorSnapshot.colorMax=13;
+        std::vector<ModifierNode> historyCurrent{colorSnapshot};
+        std::vector<std::vector<ModifierNode>> historyUndo{historyCurrent}, historyRedo;
+        historyCurrent[0].colorAllFramesRange=false;
+        historyCurrent[0].colorMin=0; historyCurrent[0].colorMax=1;
+        require(applyModifierHistory(historyCurrent,historyUndo,historyRedo,false) &&
+                    historyCurrent[0].id=="stable-color-node" && historyCurrent[0].colorAllFramesRange &&
+                    historyCurrent[0].colorMin==-7 && historyCurrent[0].colorMax==13,
+                "undo restores trajectory-wide color range settings without dropping node identity");
+        require(applyModifierHistory(historyCurrent,historyUndo,historyRedo,true) &&
+                    !historyCurrent[0].colorAllFramesRange && historyCurrent[0].colorMin==0 &&
+                    historyCurrent[0].colorMax==1,
+                "redo restores the complete post-edit color range state");
         auto p = std::filesystem::temp_directory_path() / "atomx-core-fixture.xyz";
         {
             std::ofstream f(p);

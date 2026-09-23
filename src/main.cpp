@@ -613,15 +613,7 @@ struct App {
         return changed;
     }
     void history(bool forward) {
-        auto &from = forward ? redo : undo;
-        auto &to = forward ? undo : redo;
-        if (from.empty())
-            return;
-        to.push_back(mods);
-        mods = std::move(from.back());
-        from.pop_back();
-        for (auto &node : mods)
-            if (node.op == Op::ColorCoding) node.colorAllFramesRange = false;
+        if (!applyModifierHistory(mods, undo, redo, forward)) return;
         modifierGraph.selected = mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1);
         update();
     }

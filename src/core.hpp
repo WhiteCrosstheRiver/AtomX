@@ -721,6 +721,18 @@ struct PipelineGraph {
         markDirtyFrom(std::min(from, to));
     }
 };
+inline bool applyModifierHistory(std::vector<ModifierNode> &current,
+                                 std::vector<std::vector<ModifierNode>> &undo,
+                                 std::vector<std::vector<ModifierNode>> &redo,
+                                 bool forward) {
+    auto &source = forward ? redo : undo;
+    auto &destination = forward ? undo : redo;
+    if (source.empty()) return false;
+    destination.push_back(current);
+    current = std::move(source.back());
+    source.pop_back();
+    return true;
+}
 struct NeighborBin {
     int64_t x = 0, y = 0, z = 0;
     bool operator==(const NeighborBin &) const = default;
