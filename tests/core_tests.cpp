@@ -346,6 +346,15 @@ int main() {
         require(keptColorResult.colorSelected == std::vector<uint8_t>({0,0,1,0}) &&
                     keptColorResult.selected == std::vector<uint8_t>({0,0,1,0}),
                 "keep selection preserves selection after selected-only coloring");
+        selectedColor.colorKeepSelection=false;
+        const auto colorThenReselectThenDelete=evaluate(wave,{
+            {Op::SelectIndex,true,0,0,2},selectedColor,{Op::SelectIndex,true,0,0,1},{Op::Delete}});
+        require(colorThenReselectThenDelete.data.atoms.size()==3 &&
+                    colorThenReselectThenDelete.colorSelected==std::vector<uint8_t>({0,1,0}) &&
+                    colorThenReselectThenDelete.data.scalarProperties.at("Color coding").size()==3 &&
+                    std::count(colorThenReselectThenDelete.selected.begin(),
+                               colorThenReselectThenDelete.selected.end(),uint8_t(1))==0,
+                "selected-only color masks stay aligned after downstream selection and deletion");
         Dataset overlapFixture;
         overlapFixture.species = {"X"};
         overlapFixture.atoms = {{0,0,0,0},{.5f,0,0,0},{4,0,0,0},{4.5f,0,0,0},{9,0,0,0}};
