@@ -538,6 +538,27 @@ int main() {
                     hasSchemaChoice("Velocity.X") && hasSchemaChoice("Velocity.Y") &&
                     hasSchemaChoice("Velocity.Z") && hasSchemaChoice("Position.X"),
                 "modifier property choices reflect only aligned source and enabled upstream schemas");
+        Modifier vectorHistogram{Op::Histogram};
+        vectorHistogram.property="Velocity.X"; vectorHistogram.type=4;
+        const auto vectorHistogramResult=evaluate(wave,{vectorHistogram});
+        require(vectorHistogramResult.data.tables.back().rows.size()==4 &&
+                    vectorHistogramResult.data.globalAttributes.at("Histogram.samples")==4 &&
+                    std::all_of(vectorHistogramResult.data.tables.back().rows.begin(),
+                                vectorHistogramResult.data.tables.back().rows.end(),
+                                [](const auto &row){return std::stod(row.at(1))==1;}),
+                "histogram reads vector components directly through its numeric property view");
+        Modifier vectorReduce{Op::ReduceProperty};
+        vectorReduce.property="Velocity.Y"; vectorReduce.reduceOperation=2;
+        const auto vectorReduced=evaluate(wave,{vectorReduce});
+        require(vectorReduced.data.globalAttributes.at("ReduceProperty.Velocity.Y.mean")==5.5,
+                "reduce-property computes a vector-component mean without materializing a scalar copy");
+        Dataset misalignedVelocity=wave;
+        misalignedVelocity.vectorProperties["Velocity"].pop_back();
+        bool misalignedVectorRejected=false;
+        try { (void)evaluate(misalignedVelocity,{vectorHistogram}); }
+        catch (const ModifierExecutionError &e) { misalignedVectorRejected=e.nodeIndex==0; }
+        require(misalignedVectorRejected,
+                "vector-component statistics reject misaligned properties at the owning node");
         Modifier selectedHistogram{Op::Histogram};
         selectedHistogram.property="Coordination";
         selectedHistogram.type=4;

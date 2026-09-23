@@ -1828,7 +1828,7 @@ struct App {
                     }
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
                         auto edited = m;
-                        bool changed = colorPropertyCombo("Input property", edited.property);
+                        bool changed = colorPropertyCombo("Input property", edited.property, true);
                         if (m.op == Op::Histogram) {
                             int bins = edited.type;
                             if (ImGui::InputInt("Bins", &bins)) { edited.type = std::clamp(bins, 1, 4096); changed = true; }

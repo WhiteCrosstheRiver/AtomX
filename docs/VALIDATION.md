@@ -174,4 +174,9 @@
 - 同组测试验证闭区间选择包含起止端点、选择结果独立于仅选中统计选项、反向范围定位至 Histogram 节点报错，并与下游 Delete selected 组合得到预期粒子。
 - 参数面板提供 1–4096 bins、仅选中元素、绝对计数/相对频率/概率密度；全套 `build.ps1` 五组核心、格式、GPU 形状和导出工作流测试通过。
 - `--smoke 40 --smoke-histogram --screenshot build/histogram-zoom-smoke.png` 实机 D3D11 工作区运行成功；截图覆盖 Histogram 参数、Data Tables 标签、首末 bin、Y 轴上限、恢复全范围按钮、柱形预览和单帧时间轴。选择/范围参数在右侧面板，输出表与图表在底部检查器。
-- 图表范围状态按检查器输出和表格保存，仅构造可见 bin 切片并重绘，不调用管线更新。当前 Histogram 仍只作用于粒子标量属性，不含 OVITO 的 bond/其他数据对象分类。
+- 图表范围状态按检查器输出和表格保存，仅构造可见 bin 切片并重绘，不调用管线更新。Histogram 当前作用于粒子属性，不含 OVITO 的 bond/其他数据对象分类。
+
+### 向量分量统计验证
+
+- Histogram 和 Reduce property 的输入属性选择器现包含上游对齐的向量 X/Y/Z 分量；执行器以只读属性视图直接访问分量，不额外复制整列。
+- `core_tests` 验证 Velocity.X 四个 bin 各计一个样本，Velocity.Y 的均值为 5.5；属性 schema 仍只公开当前节点上游已启用的向量属性。

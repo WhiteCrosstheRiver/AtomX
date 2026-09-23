@@ -135,6 +135,44 @@ struct Dataset {
     }
 };
 
+struct NumericParticlePropertyView {
+    const std::vector<double> *scalar = nullptr;
+    const std::vector<Vec3> *vector = nullptr;
+    int component = 0;
+
+    double value(const Dataset &data, size_t index) const {
+        if (scalar) return (*scalar)[index];
+        if (vector) {
+            const auto &v=(*vector)[index];
+            return component==0 ? v.x : component==1 ? v.y : v.z;
+        }
+        return coordinate(data.atoms[index],component);
+    }
+};
+inline NumericParticlePropertyView numericParticlePropertyView(const Dataset &data,
+                                                               const std::string &property) {
+    if (property=="Position.X" || property=="Position.Y" || property=="Position.Z")
+        return {nullptr,nullptr,property.back()=='X'?0:property.back()=='Y'?1:2};
+    if (auto found=data.scalarProperties.find(property);found!=data.scalarProperties.end()) {
+        if (found->second.size()!=data.atoms.size())
+            throw std::runtime_error("Particle property length mismatch: " + property);
+        return {&found->second,nullptr,0};
+    }
+    if (property.size()>2 && property[property.size()-2]=='.') {
+        const char suffix=property.back();
+        const int component=suffix=='X'?0:suffix=='Y'?1:suffix=='Z'?2:-1;
+        if (component>=0) {
+            const auto base=property.substr(0,property.size()-2);
+            if (auto found=data.vectorProperties.find(base);found!=data.vectorProperties.end()) {
+                if (found->second.size()!=data.atoms.size())
+                    throw std::runtime_error("Particle property length mismatch: " + property);
+                return {nullptr,&found->second,component};
+            }
+        }
+    }
+    throw std::runtime_error("Unknown numeric particle property: " + property);
+}
+
 inline std::array<double,3> bondVector(const Dataset &data, const Bond &bond) {
     if (bond.a >= data.atoms.size() || bond.b >= data.atoms.size())
         throw std::runtime_error("Bond endpoint is outside the particle array");
@@ -1614,12 +1652,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 throw std::runtime_error("Choose a supported bond-distribution normalization mode");
             if (m.op == Op::ReduceProperty && (m.property.empty() || m.reduceOperation < 0 || m.reduceOperation > 3))
                 throw std::runtime_error("Choose a property and a valid reduction operation");
-            if ((m.op == Op::Histogram || m.op == Op::ReduceProperty) &&
-                m.property != "Position.X" && m.property != "Position.Y" && m.property != "Position.Z") {
-                auto property = r.data.scalarProperties.find(m.property);
-                if (property == r.data.scalarProperties.end() || property->second.size() != r.data.atoms.size())
-                    throw std::runtime_error("Unknown or invalid scalar particle property: " + m.property);
-            }
+            if (m.op == Op::Histogram || m.op == Op::ReduceProperty)
+                (void)numericParticlePropertyView(r.data,m.property);
             if (m.op == Op::RemoveProperty) {
                 if (m.property.empty() || m.property == "Position" || m.property == "Particle Type")
                     throw std::runtime_error("Choose an auxiliary particle property to remove");
@@ -1896,25 +1930,9 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 continue;
             }
             if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
-                const bool positionProperty = m.property == "Position.X" ||
-                    m.property == "Position.Y" || m.property == "Position.Z";
-                const int axis = positionProperty
-                    ? (m.property.back() == 'X' ? 0 : m.property.back() == 'Y' ? 1 : 2)
-                    : 0;
-                const std::vector<double> *scalarValues = nullptr;
-                if (!positionProperty) {
-                    auto found = r.data.scalarProperties.find(m.property);
-                    if (found == r.data.scalarProperties.end())
-                        throw std::runtime_error("Unknown scalar particle property: " + m.property);
-                    if (found->second.size() != r.data.atoms.size())
-                        throw std::runtime_error("Particle property length mismatch: " + m.property);
-                    scalarValues = &found->second;
-                }
+                const auto propertyView=numericParticlePropertyView(r.data,m.property);
                 const size_t valueCount = r.data.atoms.size();
-                auto valueAt = [&](size_t index) {
-                    return scalarValues ? (*scalarValues)[index] :
-                        double(coordinate(r.data.atoms[index], axis));
-                };
+                auto valueAt = [&](size_t index) { return propertyView.value(r.data,index); };
                 auto checkCancelled = [&](size_t index) {
                     if (cancel && (index & 4095) == 0 && *cancel)
                         throw std::runtime_error("Cancelled");
