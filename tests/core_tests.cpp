@@ -307,6 +307,23 @@ int main() {
                     std::abs(bondLengthResult.data.globalAttributes.at("BondLengthDistribution.minimum")-.1)<1e-5 &&
                     bondLengthResult.data.globalAttributes.at("BondLengthDistribution.maximum")==2,
                 "bond-length distribution analyzes explicit and periodic-image bonds and publishes a table");
+        auto bondLengthsRelative=bondLengths; bondLengthsRelative.histogramNormalization=1;
+        const auto relativeBondLengths=evaluate(bondedMeasurements,{bondLengthsRelative});
+        const auto &relativeBondLengthTable=relativeBondLengths.data.tables.back();
+        double bondLengthFrequencySum=0;
+        for (const auto &row:relativeBondLengthTable.rows) bondLengthFrequencySum+=std::stod(row.at(1));
+        require(relativeBondLengthTable.columns.at(1)=="Relative frequency" &&
+                    std::abs(bondLengthFrequencySum-1)<1e-6,
+                "bond-length relative frequencies sum to one");
+        auto bondLengthsDensity=bondLengths; bondLengthsDensity.histogramNormalization=2;
+        const auto densityBondLengths=evaluate(bondedMeasurements,{bondLengthsDensity});
+        const auto &densityBondLengthTable=densityBondLengths.data.tables.back();
+        double bondLengthDensityIntegral=0;
+        for (const auto &row:densityBondLengthTable.rows) bondLengthDensityIntegral+=std::stod(row.at(1));
+        bondLengthDensityIntegral*=((2.0-.1)/3.0);
+        require(densityBondLengthTable.columns.at(1)=="Probability density (1/length)" &&
+                    std::abs(bondLengthDensityIntegral-1)<2e-6,
+                "bond-length probability density integrates to one over the measured range");
         bool missingBondTopologyRejected=false;
         auto noBondTopology=bondedMeasurements; noBondTopology.bonds.clear();
         try { (void)evaluate(noBondTopology,{bondLengths}); }
@@ -331,6 +348,21 @@ int main() {
                     std::abs(bondAngleResult.data.globalAttributes.at("BondAngleDistribution.minimum")-90)<1e-8 &&
                     std::abs(bondAngleResult.data.globalAttributes.at("BondAngleDistribution.maximum")-180)<1e-8,
                 "bond-angle distribution enumerates central bond pairs and honors periodic image vectors");
+        auto bondAnglesRelative=bondAngles; bondAnglesRelative.histogramNormalization=1;
+        const auto relativeBondAngles=evaluate(bondedMeasurements,{bondAnglesRelative});
+        double bondAngleFrequencySum=0;
+        for (const auto &row:relativeBondAngles.data.tables.back().rows) bondAngleFrequencySum+=std::stod(row.at(1));
+        require(relativeBondAngles.data.tables.back().columns.at(1)=="Relative frequency" &&
+                    std::abs(bondAngleFrequencySum-1)<1e-6,
+                "bond-angle relative frequencies sum to one");
+        auto bondAnglesDensity=bondAngles; bondAnglesDensity.histogramNormalization=2;
+        const auto densityBondAngles=evaluate(bondedMeasurements,{bondAnglesDensity});
+        double bondAngleDensityIntegral=0;
+        for (const auto &row:densityBondAngles.data.tables.back().rows) bondAngleDensityIntegral+=std::stod(row.at(1));
+        bondAngleDensityIntegral*=10.0;
+        require(densityBondAngles.data.tables.back().columns.at(1)=="Probability density (1/degree)" &&
+                    std::abs(bondAngleDensityIntegral-1)<1e-6,
+                "bond-angle probability density integrates to one over 0 to 180 degrees");
         const auto largeBondAngles=evaluate(largeBondGeometry,{bondAngles});
         require(largeBondAngles.data.globalAttributes.at("BondAngleDistribution.count")==1 &&
                     std::abs(largeBondAngles.data.globalAttributes.at("BondAngleDistribution.minimum")-90)<1e-8,

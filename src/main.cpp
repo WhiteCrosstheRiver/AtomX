@@ -1816,6 +1816,14 @@ struct App {
                         if (ImGui::InputInt("Bins", &bins)) {
                             checkpoint(); m.type=std::clamp(bins,1,4096); update();
                         }
+                        int normalization=m.histogramNormalization;
+                        if (ImGui::Combo("Normalization",&normalization,
+                                         "Absolute counts\0Relative frequency\0Probability density\0")) {
+                            checkpoint(); m.histogramNormalization=normalization; update();
+                        }
+                        if (normalization==2)
+                            ImGui::TextDisabled(m.op==Op::BondLengthDistribution ?
+                                "Density is normalized per length unit." : "Density is normalized per degree.");
                         ImGui::TextWrapped("Uses explicit pipeline bonds, including periodic image shifts. Add Create bonds upstream if the dataset has no bond topology.");
                     }
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {

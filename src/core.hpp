@@ -57,6 +57,11 @@ struct DataTable {
     std::vector<std::string> columns;
     std::vector<std::vector<std::string>> rows;
 };
+inline std::string formatDataNumber(double value) {
+    std::ostringstream stream;
+    stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    return stream.str();
+}
 inline void writeDataTableCsv(const std::filesystem::path &path, const DataTable &table) {
     std::ofstream output(path, std::ios::binary);
     if (!output) throw std::runtime_error("Cannot open data table CSV output");
@@ -1604,6 +1609,9 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
             if (m.op == Op::BondAngleDistribution && (m.type < 1 || m.type > 4096))
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
+            if ((m.op == Op::BondLengthDistribution || m.op == Op::BondAngleDistribution) &&
+                (m.histogramNormalization < 0 || m.histogramNormalization > 2))
+                throw std::runtime_error("Choose a supported bond-distribution normalization mode");
             if (m.op == Op::ReduceProperty && (m.property.empty() || m.reduceOperation < 0 || m.reduceOperation > 3))
                 throw std::runtime_error("Choose a property and a valid reduction operation");
             if ((m.op == Op::Histogram || m.op == Op::ReduceProperty) &&
@@ -2047,21 +2055,38 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     if (std::isfinite(expandedLo)) lo=expandedLo;
                     if (std::isfinite(expandedHi)) hi=expandedHi;
                 }
-                const double range=hi-lo;
-                if (!(range>0) || !std::isfinite(range))
+                int scaleExponent=0;
+                const double magnitude=std::max(std::abs(lo),std::abs(hi));
+                if (magnitude>0) std::frexp(magnitude,&scaleExponent);
+                const double scaledLo=std::scalbn(lo,-scaleExponent);
+                const double scaledHi=std::scalbn(hi,-scaleExponent);
+                const double scaledSpan=scaledHi-scaledLo;
+                if (!(scaledSpan>0) || !std::isfinite(scaledSpan))
                     throw std::runtime_error("Bond-length range is outside the finite histogram domain");
+                const double densityScale=m.histogramNormalization==2
+                    ? std::scalbn(double(m.type)/scaledSpan,-scaleExponent) : 1.0;
+                if (m.histogramNormalization==2 && (!std::isfinite(densityScale) || densityScale<=0))
+                    throw std::runtime_error("Bond-length probability-density scale is outside the finite numeric range");
                 std::vector<uint64_t> counts(size_t(m.type));
                 for (double length:lengths) {
+                    const double fraction=lo==hi ? .5 :
+                        (std::scalbn(length,-scaleExponent)-scaledLo)/scaledSpan;
                     const auto bin=std::min(size_t(m.type-1),
-                        size_t(std::clamp((length-lo)/range,0.0,1.0)*m.type));
+                        size_t(std::clamp(fraction,0.0,1.0)*m.type));
                     ++counts[bin];
                 }
                 DataTable table; table.name="Bond length distribution";
-                table.columns={"Bond length", "Bond count"};
+                table.columns={"Bond length",m.histogramNormalization==0 ? "Bond count" :
+                    m.histogramNormalization==1 ? "Relative frequency" : "Probability density (1/length)"};
                 for (int bin=0;bin<m.type;++bin) {
-                    const double center=lo+((bin+.5)/m.type)*range;
-                    table.rows.push_back({std::to_string(center),
-                                          std::to_string(counts[bin])});
+                    const double center=std::scalbn(scaledLo+(bin+.5)*scaledSpan/m.type,scaleExponent);
+                    double output=double(counts[bin]);
+                    if (m.histogramNormalization==1) output/=double(lengths.size());
+                    else if (m.histogramNormalization==2) output=(output/double(lengths.size()))*densityScale;
+                    if (!std::isfinite(output))
+                        throw std::runtime_error("Bond-length normalized value is outside the finite numeric range");
+                    table.rows.push_back({formatDataNumber(center),m.histogramNormalization==0
+                        ? std::to_string(counts[bin]) : formatDataNumber(output)});
                 }
                 r.data.globalAttributes["BondLengthDistribution.count"]=double(lengths.size());
                 r.data.globalAttributes["BondLengthDistribution.minimum"]=*std::min_element(lengths.begin(),lengths.end());
@@ -2110,9 +2135,16 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 std::vector<uint64_t> counts(size_t(m.type));
                 for (double angle:angles) ++counts[std::min(size_t(m.type-1),size_t(angle/180*m.type))];
                 DataTable table; table.name="Bond angle distribution";
-                table.columns={"Bond angle (degrees)","Angle count"};
-                for (int bin=0;bin<m.type;++bin)
-                    table.rows.push_back({std::to_string((bin+.5)*180.0/m.type),std::to_string(counts[bin])});
+                table.columns={"Bond angle (degrees)",m.histogramNormalization==0 ? "Angle count" :
+                    m.histogramNormalization==1 ? "Relative frequency" : "Probability density (1/degree)"};
+                const double densityScale=double(m.type)/180.0;
+                for (int bin=0;bin<m.type;++bin) {
+                    double output=double(counts[bin]);
+                    if (m.histogramNormalization==1) output/=double(angles.size());
+                    else if (m.histogramNormalization==2) output=(output/double(angles.size()))*densityScale;
+                    table.rows.push_back({formatDataNumber((bin+.5)*180.0/m.type),m.histogramNormalization==0
+                        ? std::to_string(counts[bin]) : formatDataNumber(output)});
+                }
                 r.data.globalAttributes["BondAngleDistribution.count"]=double(angles.size());
                 r.data.globalAttributes["BondAngleDistribution.minimum"]=*std::min_element(angles.begin(),angles.end());
                 r.data.globalAttributes["BondAngleDistribution.maximum"]=*std::max_element(angles.begin(),angles.end());
