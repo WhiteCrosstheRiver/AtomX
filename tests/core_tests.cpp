@@ -484,6 +484,43 @@ int main() {
         pairCutoffBonds.bondTypeCutoffs={0,0,0,0};
         require(evaluate(pairCutoffData,{pairCutoffBonds}).data.bonds.empty(),
                 "zero type-pair cutoffs disable bond generation without rejecting the node");
+        auto duplicateBondData=pairCutoffData;
+        duplicateBondData.bonds={{0,1,{0,0,0}},{1,0,{0,0,0}}};
+        require(evaluate(duplicateBondData,{pairCutoffBonds}).data.bonds==
+                    std::vector<Bond>{{0,1,{0,0,0}}},
+                "Create bonds deduplicates reverse-oriented existing topology without changing its endpoints");
+        auto invalidExistingBond=duplicateBondData;
+        invalidExistingBond.bonds={{0,3,{0,0,0}}};
+        bool invalidBondEndpointRejected=false;
+        try { (void)evaluate(invalidExistingBond,{pairCutoffBonds}); }
+        catch (const ModifierExecutionError &e) { invalidBondEndpointRejected=e.nodeIndex==0; }
+        require(invalidBondEndpointRejected,"Create bonds reports malformed existing endpoints at its node");
+        invalidExistingBond=duplicateBondData;
+        invalidExistingBond.bonds={{0,0,{0,0,0}}};
+        bool zeroSelfBondRejected=false;
+        try { (void)evaluate(invalidExistingBond,{pairCutoffBonds}); }
+        catch (const ModifierExecutionError &e) { zeroSelfBondRejected=e.nodeIndex==0; }
+        require(zeroSelfBondRejected,"Create bonds rejects zero-displacement self bonds instead of silently dropping them");
+        invalidExistingBond=duplicateBondData;
+        invalidExistingBond.bonds={{0,1,{1,0,0}}};
+        bool nonPeriodicImageRejected=false;
+        try { (void)evaluate(invalidExistingBond,{pairCutoffBonds}); }
+        catch (const ModifierExecutionError &e) { nonPeriodicImageRejected=e.nodeIndex==0; }
+        require(nonPeriodicImageRejected,"Create bonds rejects image shifts on non-periodic axes");
+        auto invalidPeriodicBond=duplicateBondData;
+        invalidPeriodicBond.cell={0,0,0,0,0,0,0,0,0};
+        invalidPeriodicBond.pbc={true,false,false};
+        invalidPeriodicBond.bonds={{0,1,{1,0,0}}};
+        bool invalidPeriodicVectorRejected=false;
+        try { (void)evaluate(invalidPeriodicBond,{pairCutoffBonds}); }
+        catch (const ModifierExecutionError &e) { invalidPeriodicVectorRejected=e.nodeIndex==0; }
+        require(invalidPeriodicVectorRejected,"Create bonds rejects periodic images with a degenerate cell vector");
+        auto invalidBondColor=pairCutoffBonds;
+        invalidBondColor.bondColor[1]=std::numeric_limits<float>::quiet_NaN();
+        bool invalidBondColorRejected=false;
+        try { (void)evaluate(pairCutoffData,{invalidBondColor}); }
+        catch (const ModifierExecutionError &e) { invalidBondColorRejected=e.nodeIndex==0; }
+        require(invalidBondColorRejected,"Create bonds validates color channels in the core pipeline");
         pairCutoffBonds.bondTypeCutoffs={.2f,.9f,.8f,.2f};
         bool asymmetricPairCutoffsRejected=false;
         try { (void)evaluate(pairCutoffData,{pairCutoffBonds}); }

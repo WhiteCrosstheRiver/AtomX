@@ -65,6 +65,7 @@
 - Pipeline 输出元数据测试检查了键角分布的表/全局统计对象及 CNA 的粒子/全局统计/数据表声明；键分析节点归入 Analysis 分类。
 - Color coding 属性值提取对 Position、标量和向量分量逐块检查取消标记；测试覆盖三个输入类别在已取消任务中的及时退出。
 - Create bonds 数值测试覆盖类型对阈值矩阵、对称表校验、零阈值禁用和不同元素的候选距离过滤。
+- Create bonds 还验证反向重复拓扑会保留一条规范键；非法端点、零位移自键、非周期轴镜像、退化周期向量和非法颜色均定位为该节点错误。
 - `--smoke-bond-pairs --smoke 5 --screenshot build/bond-type-cutoffs.png` 实际渲染了 Cu/Ni 类型对编辑面板；检查了下三角的对称提示和默认阈值。没有自动鼠标点击矩阵单元格验证键盘输入/拖动行为。
 - `tests/export_workflow.cpp` 验证帧范围、步长、序列导出、应用管线、拒绝覆盖输入和失败清理；Data Tables 增加 CSV 导出。
 - `--smoke 3 --catalog --screenshot build/phase-catalog.png` 与普通工作区截图运行成功，目视检查四视口和菜单。时间轴标签与单帧计数已改为 1-based 用户显示；未执行自动鼠标逐项点击回归。

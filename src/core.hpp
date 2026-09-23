@@ -1895,6 +1895,9 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
             }
             if (m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) {
                 if (m.op == Op::CreateBonds) {
+                    if (!std::all_of(m.bondColor.begin(),m.bondColor.end(),
+                            [](float value){return std::isfinite(value)&&value>=0&&value<=1;}))
+                        throw std::runtime_error("Bond color channels must be finite values between 0 and 1");
                     if (!m.bondCylinders &&
                         (!std::isfinite(m.bondWidth) || m.bondWidth < .5f || m.bondWidth > 12.f))
                         throw std::runtime_error("Bond line width must be between 0.5 and 12 pixels");
@@ -1937,9 +1940,32 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     std::vector<Bond> unique;
                     unique.reserve(r.data.bonds.size());
                     for (auto bond : r.data.bonds) {
-                        if (bond.a >= r.data.atoms.size() || bond.b >= r.data.atoms.size() ||
-                            (bond.a == bond.b && bond.image == std::array<int32_t, 3>{}))
-                            continue;
+                        if (bond.a >= r.data.atoms.size() || bond.b >= r.data.atoms.size())
+                            throw std::runtime_error("Existing bond endpoint is outside the particle array");
+                        if (bond.a == bond.b && bond.image == std::array<int32_t, 3>{})
+                            throw std::runtime_error("Existing topology contains a zero-displacement self-bond");
+                        for (int axis=0;axis<3;++axis)
+                            if (bond.image[axis]!=0) {
+                                if (!r.data.pbc[axis])
+                                    throw std::runtime_error("Existing bond has an image shift along a non-periodic axis");
+                                const double vx=r.data.cell[axis*3], vy=r.data.cell[axis*3+1],
+                                             vz=r.data.cell[axis*3+2];
+                                const double vectorLength2=vx*vx+vy*vy+vz*vz;
+                                if (!(vectorLength2>0) || !std::isfinite(vectorLength2))
+                                    throw std::runtime_error("Existing bond image shift uses an invalid periodic cell vector");
+                            }
+                        const auto &a=r.data.atoms[bond.a], &b=r.data.atoms[bond.b];
+                        const double dx=double(b.x)-a.x+
+                            bond.image[0]*r.data.cell[0]+bond.image[1]*r.data.cell[3]+bond.image[2]*r.data.cell[6];
+                        const double dy=double(b.y)-a.y+
+                            bond.image[0]*r.data.cell[1]+bond.image[1]*r.data.cell[4]+bond.image[2]*r.data.cell[7];
+                        const double dz=double(b.z)-a.z+
+                            bond.image[0]*r.data.cell[2]+bond.image[1]*r.data.cell[5]+bond.image[2]*r.data.cell[8];
+                        const double distance2=dx*dx+dy*dy+dz*dz;
+                        if (!std::isfinite(distance2))
+                            throw std::runtime_error("Existing bond has non-finite geometry");
+                        if (!(distance2>0))
+                            throw std::runtime_error("Existing bond has zero-length geometry");
                         if (seen.insert(key(bond)).second) unique.push_back(bond);
                     }
                     r.data.bonds = std::move(unique);
