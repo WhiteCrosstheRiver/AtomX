@@ -148,6 +148,17 @@ int main() {
             histogramPopulation += std::stoull(row[1]);
         require(histogramPipeline.data.tables.back().rows.size()==8 && histogramPopulation==fcc.atoms.size(),
                 "histogram modifier bins every finite property value");
+        Dataset extremeValues;
+        extremeValues.species={"X"};
+        extremeValues.atoms={{0,0,0,0},{1,0,0,0}};
+        extremeValues.scalarProperties["Extreme"]={-std::numeric_limits<double>::max(),
+                                                       std::numeric_limits<double>::max()};
+        Modifier extremeHistogram{Op::Histogram}; extremeHistogram.type=2; extremeHistogram.property="Extreme";
+        const auto extremeHistogramResult=evaluate(extremeValues,{extremeHistogram});
+        require(extremeHistogramResult.data.tables.back().rows.size()==2 &&
+                    std::stoull(extremeHistogramResult.data.tables.back().rows[0][1])==1 &&
+                    std::stoull(extremeHistogramResult.data.tables.back().rows[1][1])==1,
+                "histogram safely bins finite values whose direct range subtraction overflows");
         DataTable csvTable{"CSV quoting",{"Name","Value"},{{"alpha, beta","say \"hi\""}}};
         const auto csvPath=std::filesystem::temp_directory_path()/"atomx-data-table.csv";
         writeDataTableCsv(csvPath,csvTable);
@@ -160,6 +171,21 @@ int main() {
         double expectedX=0; for (const auto &atom:fcc.atoms) expectedX+=atom.x; expectedX/=fcc.atoms.size();
         require(std::abs(reduced.data.globalAttributes.at("ReduceProperty.Position.X.mean")-expectedX)<1e-10,
                 "reduce property publishes numeric global mean");
+        Modifier extremeMean{Op::ReduceProperty}; extremeMean.property="Extreme"; extremeMean.reduceOperation=2;
+        const auto extremeMeanResult=evaluate(extremeValues,{extremeMean});
+        require(extremeMeanResult.data.globalAttributes.at("ReduceProperty.Extreme.mean")==0,
+                "reduce-property mean avoids intermediate overflow for opposite extreme values");
+        extremeValues.scalarProperties["Extreme"]={std::numeric_limits<double>::max(),
+                                                      std::numeric_limits<double>::max()};
+        const auto sameExtremeMean=evaluate(extremeValues,{extremeMean});
+        require(sameExtremeMean.data.globalAttributes.at("ReduceProperty.Extreme.mean")==
+                    std::numeric_limits<double>::max(),
+                "reduce-property mean remains finite when every input is the largest finite value");
+        Modifier overflowingSum{Op::ReduceProperty}; overflowingSum.property="Extreme"; overflowingSum.reduceOperation=3;
+        bool overflowingSumRejected=false;
+        try { (void)evaluate(extremeValues,{overflowingSum}); }
+        catch (const ModifierExecutionError &e) { overflowingSumRejected=e.nodeIndex==0; }
+        require(overflowingSumRejected,"reduce-property rejects sums outside the finite numeric range at their node");
         Dataset bondedMeasurements;
         bondedMeasurements.species={"X"};
         bondedMeasurements.atoms={{0,0,0,0},{1,0,0,0},{1,2,0,0},{9.9f,0,0,0}};

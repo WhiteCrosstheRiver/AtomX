@@ -83,6 +83,12 @@
 - 加入倾斜二维周期 slab 测试：c 向量为零且 z 非周期，a/b 方向跨边界成键正确返回 image shift `{1,0,0}`，z 向分离的原子不会误连。
 - `build.ps1` 五组核心、格式、渲染与导出测试通过；原有三维三斜 HCP/CNA 与键 image shift 回归仍通过。尚无高倾斜大规模 slab 性能基准。
 
+## 2026-09-24 Histogram 与 ReduceProperty 极值安全
+
+- Histogram 对 `-DBL_MAX..+DBL_MAX` 使用二进制指数缩放计算分箱，避免有限输入的直接跨度相减溢出；回归验证两端值分别落入两箱。
+- ReduceProperty mean 先将输入归一化并补偿累加，避免中间和溢出；sum 若真实结果超出 double 有限范围，会在当前节点失败，不发布 Inf。
+- `build.ps1` 五组核心、格式、GPU 形状/着色、导出工作流均通过；渲染组实测 NVIDIA GeForce RTX 5090 D v2。Intel Arc 本轮未测试。
+
 
 ## 2026-09-21 界面改版验证
 

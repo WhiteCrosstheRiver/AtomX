@@ -1763,14 +1763,30 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     if (values.empty()) throw std::runtime_error("Cannot reduce a property of an empty dataset");
                     double reduced = m.reduceOperation == 0 ? std::numeric_limits<double>::infinity() :
                                      m.reduceOperation == 1 ? -std::numeric_limits<double>::infinity() : 0;
+                    double scale = 0;
                     for (double value : values) {
                         if (!std::isfinite(value)) throw std::runtime_error("Property contains a non-finite value");
                         if (m.reduceOperation == 0) reduced = std::min(reduced, value);
                         else if (m.reduceOperation == 1) reduced = std::max(reduced, value);
-                        else reduced += value;
+                        else scale = std::max(scale, std::abs(value));
                     }
-                    if (m.reduceOperation == 2) reduced /= values.size();
-                    if (m.reduceOperation == 3) { /* sum already accumulated */ }
+                    if (m.reduceOperation >= 2 && scale != 0) {
+                        // Sum normalized inputs with compensation so a finite mean
+                        // doesn't overflow merely because the unscaled sum does.
+                        double sum = 0, correction = 0;
+                        for (double value : values) {
+                            const double normalized = value / scale;
+                            const double adjusted = normalized - correction;
+                            const double next = sum + adjusted;
+                            correction = (next - sum) - adjusted;
+                            sum = next;
+                        }
+                        const double normalizedResult = m.reduceOperation == 2 ?
+                            std::clamp(sum / values.size(), -1.0, 1.0) : sum;
+                        reduced = normalizedResult * scale;
+                        if (!std::isfinite(reduced))
+                            throw std::runtime_error("Reduction result is outside the finite numeric range");
+                    }
                     r.data.globalAttributes["ReduceProperty." + m.property + "." +
                         (m.reduceOperation == 0 ? "min" : m.reduceOperation == 1 ? "max" : m.reduceOperation == 2 ? "mean" : "sum")] = reduced;
                 } else {
@@ -1783,14 +1799,33 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                         else { lo = std::min(lo, value); hi = std::max(hi, value); }
                     }
                     if (first) throw std::runtime_error("Property has no finite values to histogram");
-                    if (lo == hi) { lo -= .5; hi += .5; }
+                    const bool constantRange = lo == hi;
+                    if (constantRange) {
+                        const double expandedLo = lo - .5, expandedHi = hi + .5;
+                        if (std::isfinite(expandedLo) && std::isfinite(expandedHi) && expandedLo < expandedHi) {
+                            lo = expandedLo;
+                            hi = expandedHi;
+                        }
+                    }
+                    int scaleExponent = 0;
+                    const double magnitude = std::max(std::abs(lo), std::abs(hi));
+                    if (magnitude > 0) std::frexp(magnitude, &scaleExponent);
+                    const double scaledLo = std::scalbn(lo, -scaleExponent);
+                    const double scaledHi = std::scalbn(hi, -scaleExponent);
+                    const double scaledSpan = scaledHi - scaledLo;
                     std::vector<uint64_t> counts(size_t(m.type));
                     for (double value : values) if (std::isfinite(value)) {
-                        const auto bin = std::min(size_t(m.type - 1), size_t((value - lo) / (hi - lo) * m.type));
+                        const double fraction = constantRange ? .5 :
+                            (std::scalbn(value, -scaleExponent) - scaledLo) / scaledSpan;
+                        const double boundedFraction = std::clamp(fraction, 0.0, 1.0);
+                        const auto bin = std::min(size_t(m.type - 1), size_t(boundedFraction * m.type));
                         ++counts[bin];
                     }
-                    for (int bin = 0; bin < m.type; ++bin)
-                        table.rows.push_back({std::to_string(lo + (bin + .5) * (hi - lo) / m.type), std::to_string(counts[bin])});
+                    for (int bin = 0; bin < m.type; ++bin) {
+                        const double center = constantRange && lo == hi ? lo :
+                            std::scalbn(scaledLo + (bin + .5) * scaledSpan / m.type, scaleExponent);
+                        table.rows.push_back({std::to_string(center), std::to_string(counts[bin])});
+                    }
                     r.data.tables.push_back(std::move(table));
                 }
                 continue;
