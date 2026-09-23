@@ -68,8 +68,8 @@
 | Elastic strain calculation | 待实现 | 晶格局部拟合与弹性变形 |
 | Find rings | 待实现 | 键图最短环分析 |
 | Grain segmentation | 待实现 | 局部晶体取向及晶粒聚类 |
-| Histogram | 部分 | 可选择位置分量或现有标量属性，配置 1–4096 bins，发布 Data Table；极端有限值范围使用缩放分箱避免跨度溢出 |
-| Reduce property | 部分 | 位置分量或现有标量属性的 min/max/mean/sum，发布全局属性；均值缩放累加，超出 double 有限范围的求和报告节点错误 |
+| Histogram | 部分 | 可选择位置分量或现有标量属性，配置 1–4096 bins，发布 Data Table；极端有限值范围使用缩放分箱避免跨度溢出；忽略非有限样本，拒绝缺失/错位属性，扫描和分箱可取消；直接读上游属性而不复制整列 |
+| Reduce property | 部分 | 位置分量或现有标量属性的 min/max/mean/sum，发布全局属性；均值缩放累加，超出 double 有限范围的求和报告节点错误；扫描可取消并直接读上游属性而不复制整列 |
 | Scatter plot | 待实现 | 属性选择、二维图与导出 |
 | Spatial binning | 待实现 | 空间网格统计与场数据 |
 | Spatial correlation function | 待实现 | 相关函数、周期性和误差控制 |

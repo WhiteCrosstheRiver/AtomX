@@ -1822,18 +1822,37 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 continue;
             }
             if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
-                std::vector<double> values;
-                if (m.property == "Position.X" || m.property == "Position.Y" || m.property == "Position.Z") {
-                    const int axis = m.property.back() == 'X' ? 0 : m.property.back() == 'Y' ? 1 : 2;
-                    values.reserve(r.data.atoms.size());
-                    for (const auto &atom : r.data.atoms) values.push_back(coordinate(atom, axis));
-                } else values = r.data.scalarProperties.at(m.property);
+                const bool positionProperty = m.property == "Position.X" ||
+                    m.property == "Position.Y" || m.property == "Position.Z";
+                const int axis = positionProperty
+                    ? (m.property.back() == 'X' ? 0 : m.property.back() == 'Y' ? 1 : 2)
+                    : 0;
+                const std::vector<double> *scalarValues = nullptr;
+                if (!positionProperty) {
+                    auto found = r.data.scalarProperties.find(m.property);
+                    if (found == r.data.scalarProperties.end())
+                        throw std::runtime_error("Unknown scalar particle property: " + m.property);
+                    if (found->second.size() != r.data.atoms.size())
+                        throw std::runtime_error("Particle property length mismatch: " + m.property);
+                    scalarValues = &found->second;
+                }
+                const size_t valueCount = r.data.atoms.size();
+                auto valueAt = [&](size_t index) {
+                    return scalarValues ? (*scalarValues)[index] :
+                        double(coordinate(r.data.atoms[index], axis));
+                };
+                auto checkCancelled = [&](size_t index) {
+                    if (cancel && (index & 4095) == 0 && *cancel)
+                        throw std::runtime_error("Cancelled");
+                };
                 if (m.op == Op::ReduceProperty) {
-                    if (values.empty()) throw std::runtime_error("Cannot reduce a property of an empty dataset");
+                    if (valueCount == 0) throw std::runtime_error("Cannot reduce a property of an empty dataset");
                     double reduced = m.reduceOperation == 0 ? std::numeric_limits<double>::infinity() :
                                      m.reduceOperation == 1 ? -std::numeric_limits<double>::infinity() : 0;
                     double scale = 0;
-                    for (double value : values) {
+                    for (size_t i = 0; i < valueCount; ++i) {
+                        checkCancelled(i);
+                        const double value = valueAt(i);
                         if (!std::isfinite(value)) throw std::runtime_error("Property contains a non-finite value");
                         if (m.reduceOperation == 0) reduced = std::min(reduced, value);
                         else if (m.reduceOperation == 1) reduced = std::max(reduced, value);
@@ -1843,7 +1862,9 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                         // Sum normalized inputs with compensation so a finite mean
                         // doesn't overflow merely because the unscaled sum does.
                         double sum = 0, correction = 0;
-                        for (double value : values) {
+                        for (size_t i = 0; i < valueCount; ++i) {
+                            checkCancelled(i);
+                            const double value = valueAt(i);
                             const double normalized = value / scale;
                             const double adjusted = normalized - correction;
                             const double next = sum + adjusted;
@@ -1851,7 +1872,7 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                             sum = next;
                         }
                         const double normalizedResult = m.reduceOperation == 2 ?
-                            std::clamp(sum / values.size(), -1.0, 1.0) : sum;
+                            std::clamp(sum / valueCount, -1.0, 1.0) : sum;
                         reduced = normalizedResult * scale;
                         if (!std::isfinite(reduced))
                             throw std::runtime_error("Reduction result is outside the finite numeric range");
@@ -1863,7 +1884,10 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     table.columns = {"Bin center", "Count"};
                     double lo = 0, hi = 0;
                     bool first = true;
-                    for (double value : values) if (std::isfinite(value)) {
+                    for (size_t i = 0; i < valueCount; ++i) {
+                        checkCancelled(i);
+                        const double value = valueAt(i);
+                        if (!std::isfinite(value)) continue;
                         if (first) { lo = hi = value; first = false; }
                         else { lo = std::min(lo, value); hi = std::max(hi, value); }
                     }
@@ -1883,7 +1907,10 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                     const double scaledHi = std::scalbn(hi, -scaleExponent);
                     const double scaledSpan = scaledHi - scaledLo;
                     std::vector<uint64_t> counts(size_t(m.type));
-                    for (double value : values) if (std::isfinite(value)) {
+                    for (size_t i = 0; i < valueCount; ++i) {
+                        checkCancelled(i);
+                        const double value = valueAt(i);
+                        if (!std::isfinite(value)) continue;
                         const double fraction = constantRange ? .5 :
                             (std::scalbn(value, -scaleExponent) - scaledLo) / scaledSpan;
                         const double boundedFraction = std::clamp(fraction, 0.0, 1.0);

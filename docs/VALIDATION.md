@@ -87,6 +87,7 @@
 
 - Histogram 对 `-DBL_MAX..+DBL_MAX` 使用二进制指数缩放计算分箱，避免有限输入的直接跨度相减溢出；回归验证两端值分别落入两箱。
 - ReduceProperty mean 先将输入归一化并补偿累加，避免中间和溢出；sum 若真实结果超出 double 有限范围，会在当前节点失败，不发布 Inf。
+- Histogram 与 ReduceProperty 现在直接读取上游标量属性，不再额外复制整列；位置分量按需从粒子读取。长扫描、分箱与归约每 4096 个值检查取消标记；Histogram 对缺失或长度不匹配的属性在节点报错，混合非有限值时只统计有限样本。
 - `build.ps1` 五组核心、格式、GPU 形状/着色、导出工作流均通过；渲染组实测 NVIDIA GeForce RTX 5090 D v2。Intel Arc 本轮未测试。
 
 ## 2026-09-24 邻域分析周期索引范围

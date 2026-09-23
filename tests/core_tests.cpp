@@ -221,6 +221,25 @@ int main() {
                     std::stoull(extremeHistogramResult.data.tables.back().rows[0][1])==1 &&
                     std::stoull(extremeHistogramResult.data.tables.back().rows[1][1])==1,
                 "histogram safely bins finite values whose direct range subtraction overflows");
+        Dataset mixedFiniteValues=extremeValues;
+        mixedFiniteValues.scalarProperties["Mixed"]={1,std::numeric_limits<double>::quiet_NaN()};
+        Modifier mixedHistogram{Op::Histogram}; mixedHistogram.type=2; mixedHistogram.property="Mixed";
+        const auto mixedHistogramResult=evaluate(mixedFiniteValues,{mixedHistogram});
+        require(std::stoull(mixedHistogramResult.data.tables.back().rows[0][1])+
+                    std::stoull(mixedHistogramResult.data.tables.back().rows[1][1])==1,
+                "histogram excludes non-finite values while counting every finite sample");
+        mixedFiniteValues.scalarProperties["Mixed"]={1};
+        bool misalignedHistogramRejected=false;
+        try { (void)evaluate(mixedFiniteValues,{mixedHistogram}); }
+        catch (const ModifierExecutionError &e) { misalignedHistogramRejected=e.nodeIndex==0; }
+        require(misalignedHistogramRejected,
+                "histogram reports misaligned particle properties at the owning pipeline node");
+        mixedFiniteValues.scalarProperties.erase("Mixed");
+        bool missingHistogramPropertyRejected=false;
+        try { (void)evaluate(mixedFiniteValues,{mixedHistogram}); }
+        catch (const ModifierExecutionError &e) { missingHistogramPropertyRejected=e.nodeIndex==0; }
+        require(missingHistogramPropertyRejected,
+                "histogram reports a missing property at the owning pipeline node");
         DataTable csvTable{"CSV quoting",{"Name","Value"},{{"alpha, beta","say \"hi\""}}};
         const auto csvPath=std::filesystem::temp_directory_path()/"atomx-data-table.csv";
         writeDataTableCsv(csvPath,csvTable);
