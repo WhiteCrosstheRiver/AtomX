@@ -29,6 +29,10 @@ cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\render_shapes.cpp /Fo:build
 if errorlevel 1 exit /b 1
 build\render_shapes.exe
 if errorlevel 1 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /I third_party\imgui tests\export_workflow.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\backends\imgui_impl_win32.cpp third_party\imgui\backends\imgui_impl_dx11.cpp /Fo:build\ /Fe:build\export_workflow.exe /link build\atomx.res
+if errorlevel 1 exit /b 1
+build\export_workflow.exe
+if errorlevel 1 exit /b 1
 "@
 Set-Content -LiteralPath build/compile.cmd -Value $batch -Encoding utf8
 & cmd.exe /d /c build\compile.cmd

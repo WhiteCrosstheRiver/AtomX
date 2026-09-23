@@ -98,6 +98,44 @@ int main() {
                 "RDF integral recovers FCC coordination and histogram pair count");
         for (auto c : n.coordination)
             require(c == 12, "FCC nearest neighbors");
+        auto coordinationPipeline = evaluate(fcc, {{Op::CoordinationAnalysis,true,.8f}});
+        require(coordinationPipeline.data.scalarProperties.at("Coordination").size() == fcc.atoms.size() &&
+                    coordinationPipeline.data.scalarProperties.at("Coordination")[0] == 12 &&
+                    coordinationPipeline.data.globalAttributes.at("CoordinationAnalysis.mean") == 12,
+                "coordination modifier publishes per-particle and global results");
+        auto clusterPipeline = evaluate(fcc, {{Op::ClusterAnalysis,true,.8f}});
+        require(clusterPipeline.data.globalAttributes.at("ClusterAnalysis.count") == 1 &&
+                    clusterPipeline.data.scalarProperties.at("Cluster").size() == fcc.atoms.size() &&
+                    clusterPipeline.data.tables.back().rows.size() == 1,
+                "cluster modifier publishes labels and a cluster-size table");
+        auto rdfPipeline = evaluate(fcc, {{Op::RadialDistribution,true,.8f}});
+        require(rdfPipeline.data.tables.back().rows.size() == 128 &&
+                    rdfPipeline.data.tables.back().columns[2] == "g(r)",
+                "RDF modifier publishes tabular radial distribution data");
+        Modifier histogram{Op::Histogram}; histogram.type=8; histogram.property="Position.X";
+        auto histogramPipeline=evaluate(fcc,{histogram});
+        uint64_t histogramPopulation=0;
+        for (const auto &row : histogramPipeline.data.tables.back().rows)
+            histogramPopulation += std::stoull(row[1]);
+        require(histogramPipeline.data.tables.back().rows.size()==8 && histogramPopulation==fcc.atoms.size(),
+                "histogram modifier bins every finite property value");
+        DataTable csvTable{"CSV quoting",{"Name","Value"},{{"alpha, beta","say \"hi\""}}};
+        const auto csvPath=std::filesystem::temp_directory_path()/"atomx-data-table.csv";
+        writeDataTableCsv(csvPath,csvTable);
+        std::ifstream csvInput(csvPath,std::ios::binary);
+        std::string csvText((std::istreambuf_iterator<char>(csvInput)),{});
+        require(csvText=="\"Name\",\"Value\"\r\n\"alpha, beta\",\"say \"\"hi\"\"\"\r\n",
+                "data table CSV export quotes delimiters and embedded quotes");
+        Modifier reduce{Op::ReduceProperty}; reduce.property="Position.X"; reduce.reduceOperation=2;
+        auto reduced=evaluate(fcc,{reduce});
+        double expectedX=0; for (const auto &atom:fcc.atoms) expectedX+=atom.x; expectedX/=fcc.atoms.size();
+        require(std::abs(reduced.data.globalAttributes.at("ReduceProperty.Position.X.mean")-expectedX)<1e-10,
+                "reduce property publishes numeric global mean");
+        auto partial=fcc; partial.stride=2;
+        bool sampledModifierRejected=false;
+        try { evaluate(partial,{{Op::CoordinationAnalysis,true,.8f}}); }
+        catch (const ModifierExecutionError &e) { sampledModifierRejected=e.nodeIndex==0; }
+        require(sampledModifierRejected,"neighbor analysis modifier rejects sampled data at its node");
         Dataset pair;
         pair.species = {"X"};
         pair.atoms = {{.1f, 0, 0, 0}, {1.9f, 0, 0, 0}, {1, 1, 1, 0}};
@@ -126,6 +164,7 @@ int main() {
                 "structure property publication");
         Dataset wave;
         wave.species = {"X"};
+        wave.cell = {4,0,0,0,4,0,0,0,4};
         wave.atoms = {{0,0,0,0},{1,0,0,0},{0,1,0,0},{0,0,1,0}};
         wave.sourceCount = wave.atoms.size(); wave.bounds();
         wave.scalarProperties["Coordination"] = {1,2,3,4};
@@ -138,12 +177,94 @@ int main() {
         require(waveResult.data.scalarProperties["Color coding"] ==
                     waveResult.data.scalarProperties["Coordination"],
                 "color coding publishes selected property values, not position coordinates");
+        Modifier selectedColor{Op::ColorCoding};
+        selectedColor.property = "Coordination";
+        selectedColor.colorSelectedOnly = true;
+        auto selectedColorResult = evaluate(wave, {{Op::SelectIndex,true,0,0,2}, selectedColor});
+        require(selectedColorResult.colorSelected == std::vector<uint8_t>({0,0,1,0}) &&
+                    std::count(selectedColorResult.selected.begin(), selectedColorResult.selected.end(), uint8_t(1)) == 0,
+                "selected-only color snapshots its input selection and clears selection by default");
+        selectedColor.colorKeepSelection = true;
+        auto keptColorResult = evaluate(wave, {{Op::SelectIndex,true,0,0,2}, selectedColor});
+        require(keptColorResult.colorSelected == std::vector<uint8_t>({0,0,1,0}) &&
+                    keptColorResult.selected == std::vector<uint8_t>({0,0,1,0}),
+                "keep selection preserves selection after selected-only coloring");
+        Modifier assignRed{Op::AssignColor}; assignRed.assignColor={1,0,0};
+        auto assignedSelection=evaluate(wave,{{Op::SelectIndex,true,0,0,1},assignRed});
+        require(assignedSelection.data.particleColors.size()==wave.atoms.size() &&
+                    assignedSelection.data.particleColors[0].x<0 &&
+                    assignedSelection.data.particleColors[1].x==1 &&
+                    assignedSelection.data.particleColors[2].x<0,
+                "assign color applies to the current selection and leaves other particles at type color");
+        auto assignedAll=evaluate(wave,{assignRed});
+        require(std::all_of(assignedAll.data.particleColors.begin(),assignedAll.data.particleColors.end(),
+                    [](Vec3 color){return color.x==1&&color.y==0&&color.z==0;}),
+                "assign color with an empty selection colors all particles");
+        auto assignedDeleted=evaluate(wave,{{Op::SelectIndex,true,0,0,2},assignRed,
+                                            {Op::SelectIndex,true,0,0,1},{Op::Delete}});
+        require(assignedDeleted.data.particleColors.size()==3&&assignedDeleted.data.particleColors[1].x==1,
+                "assigned colors stay aligned when selected particles are deleted");
+        auto assignedReplicated=evaluate(wave,{assignRed,{Op::Replicate,true,0,0,2}});
+        require(assignedReplicated.data.particleColors.size()==8&&assignedReplicated.data.particleColors[7].z==0,
+                "assigned colors are duplicated with replicated particles");
+        auto typeColors=evaluate(wave,{assignRed,{Op::ColorType}});
+        require(typeColors.data.particleColors.empty()&&!typeColors.data.scalarProperties.contains("Color coding"),
+                "color-by-type modifier replaces prior per-particle and scalar color operations");
         auto fixedCna = evaluate(fcc, {{Op::CommonNeighborAnalysis,true,.8f}});
-        require(fixedCna.data.scalarProperties["CNA Structure"].size() == fcc.atoms.size() &&
-                    std::all_of(fixedCna.data.scalarProperties["CNA Structure"].begin(),
-                                fixedCna.data.scalarProperties["CNA Structure"].end(),
+        require(fixedCna.data.scalarProperties["Structure Type"].size() == fcc.atoms.size() &&
+                    std::all_of(fixedCna.data.scalarProperties["Structure Type"].begin(),
+                                fixedCna.data.scalarProperties["Structure Type"].end(),
                                 [](double code) { return code == 1; }),
                 "fixed-cutoff common-neighbor analysis identifies periodic FCC from pair topology");
+        require(fixedCna.data.globalAttributes.at("CommonNeighborAnalysis.counts.FCC") == fcc.atoms.size() &&
+                    fixedCna.data.globalAttributes.at("CommonNeighborAnalysis.counts.Other") == 0 &&
+                    fixedCna.data.tables.size() == 1 && fixedCna.data.tables[0].rows.size() == 5,
+                "CNA publishes OVITO-compatible structure counts");
+        Dataset topology;
+        topology.species = {"X"};
+        topology.atoms = {{.1f,0,0,0},{1.9f,0,0,0},{1,1,1,0}};
+        topology.cell = {2,0,0,0,2,0,0,0,2}; topology.pbc = {true,true,true};
+        topology.bounds();
+        topology.bonds = {{0,1,{0,0,0}}};
+        auto withCna = evaluate(topology, {{Op::CommonNeighborAnalysis,true,.3f}});
+        require(withCna.data.bonds == topology.bonds,
+                "CNA leaves pre-existing bond topology unchanged");
+        auto preservedBonds = evaluate(topology, {{Op::CreateBonds,true,.3f}});
+        require(preservedBonds.data.bonds.size() == 2 &&
+                    preservedBonds.data.bonds[0] == topology.bonds[0],
+                "create bonds preserves existing topology by default");
+        auto periodicSource = topology;
+        periodicSource.bonds.clear();
+        auto periodicBonds = evaluate(periodicSource, {{Op::CreateBonds,true,.3f}});
+        require(periodicBonds.data.bonds.size() == 1 &&
+                    periodicBonds.data.bonds[0].a == 0 && periodicBonds.data.bonds[0].b == 1 &&
+                    periodicBonds.data.bonds[0].image == std::array<int32_t,3>{1,0,0},
+                "created bonds preserve periodic image shift");
+        auto periodicReplicate = evaluate(periodicBonds.data,
+                                          {{Op::Replicate,true,0,0,2}});
+        require(periodicReplicate.data.bonds.size() == 2 &&
+                    periodicReplicate.data.bonds[0].a == 0 &&
+                    periodicReplicate.data.bonds[0].b == 4 &&
+                    periodicReplicate.data.bonds[0].image[0] == 0 &&
+                    periodicReplicate.data.bonds[1].a == 3 &&
+                    periodicReplicate.data.bonds[1].b == 1 &&
+                    periodicReplicate.data.bonds[1].image[0] == 1,
+                "replication remaps periodic bonds and retains supercell boundary shift");
+        Dataset deleteTopology;
+        deleteTopology.species = {"X"};
+        deleteTopology.atoms = {{0,0,0,0},{1,0,0,0},{2,0,0,0}};
+        deleteTopology.bounds();
+        deleteTopology.bonds = {{0,2,{0,0,0}},{1,2,{0,0,0}}};
+        auto deletedTopology = evaluate(deleteTopology,
+                                        {{Op::SelectIndex,true,0,0,1}, {Op::Delete}});
+        require(deletedTopology.data.atoms.size() == 2 &&
+                    deletedTopology.data.bonds.size() == 1 &&
+                    deletedTopology.data.bonds[0].a == 0 && deletedTopology.data.bonds[0].b == 1,
+                "delete remaps retained bond endpoints and removes incident bonds");
+        auto slicedTopology = evaluate(deleteTopology,
+                                       {{Op::Slice,true,.5f,0}, {Op::Delete}});
+        require(slicedTopology.data.atoms.size() == 1 && slicedTopology.data.bonds.empty(),
+                "slice plus delete leaves no dangling bond endpoints");
         Dataset bcc;
         bcc.species = {"X"}; bcc.cell = {4,0,0,0,4,0,0,0,4}; bcc.pbc = {true,true,true};
         for (int z=0;z<4;++z) for (int y=0;y<4;++y) for (int x=0;x<4;++x) {
@@ -152,9 +273,45 @@ int main() {
         }
         bcc.bounds();
         auto bccCna = evaluate(bcc, {{Op::CommonNeighborAnalysis,true,1.01f}});
-        size_t bccCount = std::count(bccCna.data.scalarProperties["CNA Structure"].begin(),
-                                     bccCna.data.scalarProperties["CNA Structure"].end(),3.0);
+        size_t bccCount = std::count(bccCna.data.scalarProperties["Structure Type"].begin(),
+                                     bccCna.data.scalarProperties["Structure Type"].end(),3.0);
         require(bccCount == bcc.atoms.size(), "fixed-cutoff common-neighbor analysis identifies periodic BCC");
+        Dataset hcp;
+        const double root3 = std::sqrt(3.0), cOverA = std::sqrt(8.0/3.0);
+        hcp.species = {"X"};
+        hcp.cell = {4,0,0, 2,2*root3,0, 0,0,4*cOverA};
+        hcp.pbc = {true,true,true};
+        for (int k=0;k<4;++k) for (int j=0;j<4;++j) for (int i=0;i<4;++i)
+            for (int basis=0;basis<2;++basis) {
+                const double u=i+(basis ? 1.0/3 : 0), v=j+(basis ? 1.0/3 : 0), w=k+(basis ? .5 : 0);
+                hcp.atoms.push_back({float(u+.5*v),float(.5*root3*v),float(cOverA*w),0});
+            }
+        hcp.bounds();
+        auto hcpCna = evaluate(hcp, {{Op::CommonNeighborAnalysis,true,1.1f}});
+        require(std::all_of(hcpCna.data.scalarProperties["Structure Type"].begin(),
+                            hcpCna.data.scalarProperties["Structure Type"].end(),
+                            [](double code) { return code == 2; }),
+                "fixed-cutoff CNA identifies ideal HCP in a triclinic periodic cell");
+        Dataset icosa;
+        icosa.species = {"X"};
+        const double phi=(1+std::sqrt(5.0))/2, norm=std::sqrt(1+phi*phi);
+        icosa.atoms.push_back({0,0,0,0});
+        for (int sign : {-1,1}) for (int t : {-1,1}) {
+            icosa.atoms.push_back({0,float(sign/norm),float(t*phi/norm),0});
+            icosa.atoms.push_back({float(sign/norm),float(t*phi/norm),0,0});
+            icosa.atoms.push_back({float(t*phi/norm),0,float(sign/norm),0});
+        }
+        icosa.bounds();
+        auto icoCna=evaluate(icosa,{{Op::CommonNeighborAnalysis,true,1.1f}});
+        require(icoCna.data.scalarProperties["Structure Type"][0]==4,
+                "fixed-cutoff CNA identifies an isolated icosahedral center");
+        Dataset tilted;
+        tilted.species={"X"}; tilted.cell={2,0,0, 1,2,0, 0,0,2};
+        tilted.pbc={true,true,true}; tilted.atoms={{.15f,.1f,.1f,0},{1.95f,.1f,.1f,0}};
+        tilted.bounds();
+        auto tiltedBond=evaluate(tilted,{{Op::CreateBonds,true,.3f}});
+        require(tiltedBond.data.bonds.size()==1 && tiltedBond.data.bonds[0].image==std::array<int32_t,3>{1,0,0},
+                "triclinic periodic neighbor search keeps the correct image shift");
         Dataset chain;
         chain.species = {"X"};
         chain.atoms = {{0,0,0,0},{0.8f,0,0,0},{1.6f,0,0,0},{5,0,0,0}};
@@ -188,6 +345,15 @@ int main() {
         bool expressionDomainRejected = false;
         try { evaluate(chain, {expression}); } catch (const std::runtime_error &) { expressionDomainRejected = true; }
         require(expressionDomainRejected, "expression domain errors are reported");
+        bool correctlyAttributed = false;
+        try { evaluate(chain, {{Op::Translate,true,1,0}, {Op::Scale,true,-1}}); }
+        catch (const ModifierExecutionError &e) { correctlyAttributed = e.nodeIndex == 1; }
+        require(correctlyAttributed, "pipeline failures report the modifier that raised them");
+        std::atomic<bool> stopNow{true};
+        bool cancellationReported = false;
+        try { evaluate(chain, {{Op::ExpandSelection,true,.9f,2,1}}, &stopNow); }
+        catch (const ModifierExecutionError &e) { cancellationReported = e.nodeIndex == 0 && std::string(e.what()) == "Cancelled"; }
+        require(cancellationReported, "long-running pipeline operations honor cancellation");
         expression.property = "system(1)";
         bool unsafeExpressionRejected = false;
         try { evaluate(chain, {expression}); } catch (const std::runtime_error &) { unsafeExpressionRejected = true; }
@@ -230,8 +396,8 @@ int main() {
         require(lmpData.atoms.size() == fcc.atoms.size(), "LAMMPS data roundtrip");
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice, wrap, "
-                     "scale, histogram, roundtrip, malformed input, FCC coordination, periodic "
-                     "clusters, sampled analysis rejection\n";
+                     "scale, scientific modifier tables, assign color, roundtrip, malformed input, "
+                     "FCC/BCC/HCP/ICO CNA, periodic topology, sampled analysis rejection\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

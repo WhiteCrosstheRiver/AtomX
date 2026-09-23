@@ -60,7 +60,9 @@ int main() {
             app.frames = io::index(input);
             app.source = io::read(input, app.frames[0]);
             app.mods = {{Op::Translate, true, 2, 0}};
-            app.result = evaluate(app.source, app.mods);
+            std::vector<Modifier> exportModifiers;
+            for (const auto &node : app.mods) exportModifiers.push_back(static_cast<const Modifier &>(node));
+            app.result = evaluate(app.source, exportModifiers);
             auto finish = [&]() {
                 auto message = app.exportJob.get();
                 app.exporting = false;

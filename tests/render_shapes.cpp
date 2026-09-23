@@ -123,17 +123,59 @@ int main(int argc, char **argv) {
         renderer.draw(t, coded, cam, .3f, 0, 0, 0, 0, 0, 1, true, false, false, bg);
         if (imageHash(t) == firstPropertyImage)
             throw std::runtime_error("GPU color coding must follow the selected particle property");
+        coded.scalarProperties.clear();
+        coded.particleColors={{1,0,0},{0,1,0}};
+        renderer.upload(coded,{});
+        renderer.draw(t,coded,cam,.3f,0,0,0,0,0,1,false,false,false,bg);
+        const auto assignedColors=imageHash(t);
+        coded.particleColors={{0,0,1},{1,1,0}};
+        renderer.upload(coded,{});
+        renderer.draw(t,coded,cam,.3f,0,0,0,0,0,1,false,false,false,bg);
+        if (imageHash(t)==assignedColors)
+            throw std::runtime_error("Per-particle assigned colors must reach GPU rendering");
         renderer.upload(coded, {1, 0});
         renderer.draw(t, coded, cam, .3f, 0, 0, 0, 0, 0, 1, true, false, true, bg);
         auto selectedOnlyImage = imageHash(t);
         renderer.draw(t, coded, cam, .3f, 0, 0, 0, 0, 0, 1, true, false, false, bg);
         if (imageHash(t) == selectedOnlyImage)
             throw std::runtime_error("GPU selected-only color coding must preserve unselected type colors");
+        atomx::Dataset bonded;
+        bonded.species = {"X"};
+        bonded.atoms = {{-.7f,0,0,0},{.7f,0,0,0}};
+        bonded.bounds();
+        renderer.upload(bonded,{});
+        renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
+        const auto withoutBonds=imageHash(t);
+        bonded.bonds.push_back({0,1,{0,0,0}});
+        renderer.upload(bonded,{});
+        renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
+        if (imageHash(t)==withoutBonds)
+            throw std::runtime_error("GPU bond lines must be visible in viewport rendering");
+        bonded.bondStyle.visible=false;
+        renderer.upload(bonded,{});
+        renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
+        if (imageHash(t)!=withoutBonds)
+            throw std::runtime_error("Bond visibility setting must hide the bond geometry");
+        bonded.bondStyle.visible=true;
+        bonded.bondStyle.color={1,0,0,1};
+        bonded.bondStyle.width=5;
+        renderer.upload(bonded,{});
+        renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
+        const auto styledBondImage=imageHash(t);
+        bonded.bondStyle.width=.5f;
+        renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
+        if (imageHash(t)==styledBondImage)
+            throw std::runtime_error("Bond width setting must change line coverage");
+        bonded.bondStyle.width=5;
+        bonded.bondStyle.color={0,1,0,1};
+        renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
+        if (imageHash(t)==styledBondImage)
+            throw std::runtime_error("Bond appearance settings must change rendered output");
         renderer.upload(d, {});
         renderer.styles[0].visual[2] = 0;
         renderer.draw(t, d, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
         renderer.png(t, "build/shape-validation/hidden.png");
-        std::cout << "PASS: seven distinct GPU shapes and selected-property color coding rendered\n";
+        std::cout << "PASS: seven GPU shapes, property/assigned colors, bond lines, color, width and visibility rendered\n";
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         DestroyWindow(w);

@@ -21,7 +21,7 @@
 | XYZ / Extended XYZ | 部分 | 多帧、Lattice、pbc、Properties 中的 species/type 和 pos；额外粒子属性尚不保留 |
 | POSCAR / CONTCAR / CIF / LAMMPS data | 部分 | 单结构读取与导出，晶胞、元素和笛卡尔/分数坐标；复杂键拓扑、电荷和约束尚不保留 |
 | 文件序列 / 搜索模式 | 待实现 | 支持单文件多帧；不支持目录通配符序列 |
-| 多时间步 / 轨迹播放 | 已实现 | 64 位偏移索引、后台载入、播放、暂停、首尾帧、帧滑块 |
+| 多时间步 / 轨迹播放 | 已实现 | 64 位偏移索引、后台载入、播放、暂停、首尾帧、帧滑块；用户显示从第 1 帧开始，内部索引从 0 开始 |
 | Detect reduced coordinates | 待实现 | 当前位置按文件中的笛卡尔坐标读取 |
 | Generate bounding box | 部分 | 没有 Lattice 时显示粒子包围盒，不生成周期晶胞 |
 | Sort particles by ID | 待实现 | 当前保留加载顺序，未解析 ID 属性 |
@@ -35,12 +35,12 @@
 | Intel / NVIDIA / AMD | 部分 | 通用 D3D11 feature level 11.0 路径，Intel 与 NVIDIA 在本机实测；AMD 未实测 |
 | 几亿原子 | 未达到完整目标 | 流式扫描 + 有界采样；没有几亿原子全量显存驻留 / 全精度交互的验证 |
 
-## Wave1 functional OVITO parity
+## Pipeline / analysis status, 2026-09-23
 
-- Color coding writes the selected Position/scalar values into the evaluated dataset and the D3D11 renderer consumes that property buffer; color-map fidelity, per-node settings, legend and all-frame range remain incomplete.
-- Common neighbor analysis now computes fixed-cutoff Honeycutt–Andersen common-neighbor signatures and publishes a `CNA Structure` particle property; FCC and BCC fixtures pass. Adaptive cutoff, validated HCP/icosahedral fixtures, non-orthogonal periodic cells, and production-scale acceleration remain incomplete. The coordination-based helper is still only an approximate DXA prepass.
-- Create bonds publishes explicit cutoff neighbor pairs in the evaluated Dataset; bond rendering is not implemented yet.
-- Wave2 leftovers: bond line/cylinder rendering, adaptive CNA and broader crystal reference fixtures, Assign color, and remaining OVITO menu algorithms.
+- Color coding is stored per pipeline node and writes the selected Position/scalar values into the evaluated dataset. Automatic/symmetric/manual range, discrete mapping, inversion, selected-only coloring, and keep-selection are implemented. Gradient fidelity, legend, and all-frame range remain incomplete.
+- Fixed-cutoff common-neighbor analysis publishes `Structure Type`, global structure counts, and a result table; periodic FCC, BCC, HCP (triclinic), and an isolated icosahedral-center fixture are covered. Adaptive CNA and production-scale acceleration remain incomplete. The coordination-based DXA helper remains an explicitly approximate prepass.
+- Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts, and renders GPU lines in viewports and image exports. Visibility, color, and pixel width are configurable. Cylinder rendering and type-pair cutoffs remain future work.
+- Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV.
 
 ## Analysis
 
@@ -48,16 +48,16 @@
 |---|---|---|
 | Atomic strain | 待实现 | 参考构型、邻居映射、局部变形梯度与应变 |
 | Bond analysis | 待实现 | 显式键拓扑与键角/长度分布 |
-| Cluster analysis | 部分 | Analysis 面板：按距离 cutoff 的连通分量、CSV；不超过 200 万原子 |
-| Coordination analysis | 部分 | Analysis 面板：邻域配位数；正交周期最小镜像；新增邻域距离分布及全周期正交晶胞 RDF |
+| Cluster analysis | 部分 | 可组合管线节点：周期最小镜像 cutoff 连通分量、Cluster 粒子属性、簇尺寸表；不超过 200 万原子 |
+| Coordination analysis | 部分 | 可组合管线节点：Coordination 粒子属性和全局均值；正交与三斜周期最小镜像；不超过 200 万原子 |
 | Difference between frames | 待实现 | 持久 ID 匹配与属性差值 |
 | Dislocation analysis (DXA) | 待实现 | 晶格识别、Burgers 回路和位错网络 |
 | Displacement vectors | 待实现 | 参考帧匹配、周期展开与矢量显示 |
 | Elastic strain calculation | 待实现 | 晶格局部拟合与弹性变形 |
 | Find rings | 待实现 | 键图最短环分析 |
 | Grain segmentation | 待实现 | 局部晶体取向及晶粒聚类 |
-| Histogram | 部分 | 坐标 X/Y/Z 的 64 bin 直方图 |
-| Reduce property | 部分 | 坐标 min/max/mean；没有通用粒子属性表达式 |
+| Histogram | 部分 | 可选择位置分量或现有标量属性，配置 1–4096 bins，发布 Data Table |
+| Reduce property | 部分 | 位置分量或现有标量属性的 min/max/mean/sum，发布全局属性 |
 | Scatter plot | 待实现 | 属性选择、二维图与导出 |
 | Spatial binning | 待实现 | 空间网格统计与场数据 |
 | Spatial correlation function | 待实现 | 相关函数、周期性和误差控制 |
@@ -74,10 +74,10 @@
 | 修改器 | 状态 | 范围 |
 |---|---|---|
 | Ambient occlusion | 待实现 | 当前仅球体解析法线、漫反射与高光 |
-| Assign color | 待实现 | 尚无用户自定义逐粒子颜色 |
+| Assign color | 部分 | 管线节点对选中粒子赋色；无选区时作用于全部粒子；粒子色可检查且进入 GPU 渲染，并随筛选/复制映射；颜色不写入当前结构文件格式 |
 | Color by type | 已实现 | 默认 8 色循环，选中粒子高亮 |
 | 粒子形状 | 部分 | 全局选择 Sphere、Circle、Cube、Cylinder、Spherocylinder；按类型的独立半径/颜色/形状编辑待做 |
-| Color coding | 部分 | GPU 已按所选 Position 或数值粒子属性着色，支持自动/对称范围、离散、反转和仅选中；渐变当前为近似色表，设置仍有全局共享状态，图例与全帧范围待实现 |
+| Color coding | 部分 | GPU 按节点配置的 Position 或数值粒子属性着色，支持自动/对称/手动范围、离散、反转、仅选中和 Keep selection；渐变仍为近似色表，图例与全帧范围待实现 |
 | Affine transformation | 部分 | 按轴平移、统一比例缩放、旋转坐标与晶胞；不是完整 3x4 仿射矩阵 |
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
 | Compute property | 部分 | 安全原生数值表达式逐粒子计算并发布标量属性，可供下游节点读取；不支持向量表达式、单位系统、任意脚本及优化缓存 |
@@ -117,7 +117,7 @@
 | VoroTop analysis | 待实现 | Voronoi 拓扑签名及分类器 |
 | Construct surface mesh | 待实现 | 表面重建、周期网格、法向 |
 | Coordination polyhedra | 待实现 | 邻域凸包 |
-| Create bonds | 待实现 | 邻域计算已存在，键几何渲染未实现 |
+| Create bonds | 部分 | 固定 cutoff 周期邻居键、周期镜像位移、默认拓扑保留与去重；D3D11 可见线、颜色/宽度/可见性；无键圆柱和类型对 cutoff |
 | Create isosurface | 待实现 | 体数据、等值面提取 |
 | Generate trajectory lines | 待实现 | 帧间匹配、周期分段和曲线绘制 |
 

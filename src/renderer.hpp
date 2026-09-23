@@ -42,11 +42,14 @@ struct ParticleStyle {
 };
 static_assert(sizeof(ParticleStyle) == 48);
 class Renderer {
+    struct BondVertex { DirectX::XMFLOAT3 position; };
     struct Chunk {
         ComPtr<ID3D11Buffer> buffer;
         ComPtr<ID3D11ShaderResourceView> srv;
         ComPtr<ID3D11Buffer> propertyBuffer;
         ComPtr<ID3D11ShaderResourceView> propertyView;
+        ComPtr<ID3D11Buffer> colorBuffer;
+        ComPtr<ID3D11ShaderResourceView> colorView;
         UINT count;
     };
     struct Constants {
@@ -54,6 +57,12 @@ class Renderer {
         float radius, shape, colorAxis, colorMin;
         float colorMax, colorMode, colorDiscrete, colorGradient;
         DirectX::XMFLOAT4 colors[8];
+    };
+    struct BondConstants {
+        DirectX::XMFLOAT4X4 viewProjection;
+        DirectX::XMFLOAT2 viewport;
+        float width = 1.5f, pad = 0;
+        DirectX::XMFLOAT4 color{.72f,.78f,.86f,1};
     };
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps;
@@ -67,6 +76,12 @@ class Renderer {
     ComPtr<ID3D11ShaderResourceView> styleView;
     ComPtr<ID3D11Buffer> meshBuffer;
     ComPtr<ID3D11ShaderResourceView> meshView;
+    ComPtr<ID3D11Buffer> bondBuffer, bondConstants;
+    ComPtr<ID3D11VertexShader> bondVS;
+    ComPtr<ID3D11PixelShader> bondPS;
+    ComPtr<ID3D11GeometryShader> bondGS;
+    ComPtr<ID3D11InputLayout> bondLayout;
+    UINT bondVertexCount = 0;
 
   public:
     ComPtr<ID3D11Device> device;
@@ -176,16 +191,19 @@ struct Atom {float3 pos;uint type;};StructuredBuffer<Atom> atoms : register(t0);
 struct Style {float4 color;float4 visual;float4 axes;};StructuredBuffer<Style> styles:register(t1);
 struct Triangle {float4 a;float4 b;float4 c;};StructuredBuffer<Triangle> mesh:register(t2);
 StructuredBuffer<float> propertyValues:register(t3);
+StructuredBuffer<float3> particleColors:register(t4);
 struct V {
  float4 pos:SV_POSITION;float2 uv:TEXCOORD0;float3 center:TEXCOORD1;
  nointerpolation uint type:TEXCOORD2;nointerpolation float3 world:TEXCOORD3;
  nointerpolation float4 appearance:TEXCOORD4;nointerpolation float3 axes:TEXCOORD5;
  nointerpolation float4 color:TEXCOORD6;float3 plane:TEXCOORD7;
  nointerpolation float mappedValue:TEXCOORD8;
+ nointerpolation float3 overrideColor:TEXCOORD9;
 };
 V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
  float2 q[6]={float2(-1,-1),float2(-1,1),float2(1,-1),float2(1,-1),float2(-1,1),float2(1,1)};
- Atom a=atoms[instance];Style s=styles[a.type&0x7fffffff];V o;
+ Atom a=atoms[instance];Style s=styles[a.type&0x3fffffff];V o;
+ o.overrideColor=colors[1].w>.5?particleColors[instance]:float3(-1,-1,-1);
  o.center=mul(float4(a.pos,1),view).xyz;o.world=a.pos;o.uv=q[id];o.type=a.type;
  float rad=s.visual.x>0?s.visual.x:radius;float kind=s.visual.y<0?shape:s.visual.y;
  float3 dims=max(s.axes.xyz,float3(.05,.05,.05))*rad;
@@ -252,9 +270,10 @@ P pixel(V i) {
    n=normalize(mul(float4(normal,0),view).xyz);p=origin+ray*t;r=saturate(1-n.z*n.z);
  }
  float4 clipPos=mul(float4(p,1),proj);P o;o.depth=clipPos.z/clipPos.w;
- float3 base=(i.type&0x80000000)?float3(1,.83,.32):i.color.rgb;
+ float3 base=i.overrideColor.x>=0?i.overrideColor:i.color.rgb;
+ if(i.type&0x80000000)base=float3(1,.83,.32);
  bool selectedOnlyMode=(colorMode>1.5&&colorMode<2.5)||colorMode>3.5;
- if(colorMode>0.5 && (!selectedOnlyMode || (i.type&0x80000000))) { float value = colorMode>2.5 ? i.mappedValue : colorAxis<0.5 ? i.world.x : colorAxis<1.5 ? i.world.y : i.world.z; float u=saturate((value-colorMin)/(abs(colorMax-colorMin)<1e-12?1e-12:colorMax-colorMin)); if(colorDiscrete>0.5) u=min(floor(u*12),11)/11; float3 c0=float3(0.10,.15,.85), c1=float3(.12,.85,.75), c2=float3(.98,.88,.08), c3=float3(.9,.08,.04); if(colorGradient<.5) base=u<.5?lerp(c0,c1,u*2):u<.8?lerp(c1,c2,(u-.5)*3.333):lerp(c2,c3,(u-.8)*5); else if(colorGradient<1.5) base=u<.5?lerp(float3(0.1,.15,.9),float3(1,1,1),u*2):lerp(float3(1,1,1),float3(.9,.05,.05),(u-.5)*2); else if(colorGradient<2.5) base=float3(.5+.5*cos(6.283*(u+float3(0,.33,.67)))); else if(colorGradient<3.5) base=lerp(float3(.02,.02,.02),float3(1,.95,.1),u); else if(colorGradient<4.5) base=float3(u,u,u); else if(colorGradient<5.5) base=lerp(float3(.02,.02,.15),float3(1,.02,.0),u); else if(colorGradient<6.5) base=float3(saturate(1.5-abs(4*u-3)),saturate(1.5-abs(4*u-2)),saturate(1.5-abs(4*u-1))); else if(colorGradient<7.5) base=lerp(float3(.05,.01,.2),float3(1,.3,.02),u); else base=lerp(float3(.27,.01,.33),float3(.99,.9,.14),u); }
+ if(colorMode>0.5 && (!selectedOnlyMode || (i.type&0x40000000))) { float value = colorMode>2.5 ? i.mappedValue : colorAxis<0.5 ? i.world.x : colorAxis<1.5 ? i.world.y : i.world.z; float u=saturate((value-colorMin)/(abs(colorMax-colorMin)<1e-12?1e-12:colorMax-colorMin)); if(colorDiscrete>0.5) u=min(floor(u*12),11)/11; float3 c0=float3(0.10,.15,.85), c1=float3(.12,.85,.75), c2=float3(.98,.88,.08), c3=float3(.9,.08,.04); if(colorGradient<.5) base=u<.5?lerp(c0,c1,u*2):u<.8?lerp(c1,c2,(u-.5)*3.333):lerp(c2,c3,(u-.8)*5); else if(colorGradient<1.5) base=u<.5?lerp(float3(0.1,.15,.9),float3(1,1,1),u*2):lerp(float3(1,1,1),float3(.9,.05,.05),(u-.5)*2); else if(colorGradient<2.5) base=float3(.5+.5*cos(6.283*(u+float3(0,.33,.67)))); else if(colorGradient<3.5) base=lerp(float3(.02,.02,.02),float3(1,.95,.1),u); else if(colorGradient<4.5) base=float3(u,u,u); else if(colorGradient<5.5) base=lerp(float3(.02,.02,.15),float3(1,.02,.0),u); else if(colorGradient<6.5) base=float3(saturate(1.5-abs(4*u-3)),saturate(1.5-abs(4*u-2)),saturate(1.5-abs(4*u-1))); else if(colorGradient<7.5) base=lerp(float3(.05,.01,.2),float3(1,.3,.02),u); else base=lerp(float3(.27,.01,.33),float3(.99,.9,.14),u); }
  float diffuse=max(0,dot(n,normalize(float3(-.45,.65,1))));float rim=pow(1-sqrt(max(0,1-r)),3);
  float spec=pow(max(0,dot(n,normalize(float3(-.22,.32,1)))),36);
  o.color=float4(base*(.28+.72*diffuse)+spec*.3+rim*.045,1);return o;}
@@ -272,6 +291,35 @@ P pixel(V i) {
               "Vertex shader");
         check(device->CreatePixelShader(p->GetBufferPointer(), p->GetBufferSize(), nullptr, &ps),
               "Pixel shader");
+        const char *bondShader = R"(
+cbuffer BondCamera : register(b0) { row_major float4x4 vp; float2 viewport; float width; float pad; float4 color; };
+struct I { float3 p:POSITION; };
+struct O { float4 p:SV_POSITION; };
+O bondVertex(I i) { O o; o.p=mul(float4(i.p,1),vp); return o; }
+[maxvertexcount(4)] void bondGeometry(line O input[2], inout TriangleStream<O> stream) {
+ float2 delta=(input[1].p.xy/input[1].p.w-input[0].p.xy/input[0].p.w)*viewport;
+ float lengthDelta=max(length(delta),1e-5); float2 perpendicular=float2(-delta.y,delta.x)/lengthDelta;
+ float2 offset=perpendicular*width/viewport;
+ O a=input[0],b=input[1];
+ a.p.xy+=offset*a.p.w; b.p.xy+=offset*b.p.w; stream.Append(a); stream.Append(b);
+ a=input[0]; b=input[1]; a.p.xy-=offset*a.p.w; b.p.xy-=offset*b.p.w; stream.Append(a); stream.Append(b);
+}
+float4 bondPixel():SV_TARGET { return color; }
+)";
+        ComPtr<ID3DBlob> bondV, bondP, bondG;
+        check(D3DCompile(bondShader, strlen(bondShader), nullptr, nullptr, nullptr, "bondVertex", "vs_5_0",
+                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bondV, &err), "Bond vertex shader");
+        check(D3DCompile(bondShader, strlen(bondShader), nullptr, nullptr, nullptr, "bondPixel", "ps_5_0",
+                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bondP, &err), "Bond pixel shader");
+        check(D3DCompile(bondShader, strlen(bondShader), nullptr, nullptr, nullptr, "bondGeometry", "gs_5_0",
+                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bondG, &err), "Bond geometry shader");
+        check(device->CreateVertexShader(bondV->GetBufferPointer(), bondV->GetBufferSize(), nullptr, &bondVS), "Bond vertex shader");
+        check(device->CreatePixelShader(bondP->GetBufferPointer(), bondP->GetBufferSize(), nullptr, &bondPS), "Bond pixel shader");
+        check(device->CreateGeometryShader(bondG->GetBufferPointer(), bondG->GetBufferSize(), nullptr, &bondGS), "Bond geometry shader");
+        D3D11_INPUT_ELEMENT_DESC bondElement{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};
+        check(device->CreateInputLayout(&bondElement,1,bondV->GetBufferPointer(),bondV->GetBufferSize(),&bondLayout), "Bond vertex layout");
+        D3D11_BUFFER_DESC bondCb{}; bondCb.ByteWidth=sizeof(BondConstants); bondCb.Usage=D3D11_USAGE_DEFAULT; bondCb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        check(device->CreateBuffer(&bondCb,nullptr,&bondConstants), "Bond camera constants");
         D3D11_BUFFER_DESC cb{};
         cb.ByteWidth = sizeof(Constants);
         cb.Usage = D3D11_USAGE_DEFAULT;
@@ -300,7 +348,24 @@ P pixel(V i) {
         check(swap->GetBuffer(0, IID_PPV_ARGS(&t)), "Backbuffer");
         check(device->CreateRenderTargetView(t.Get(), nullptr, &back), "Backbuffer view");
     }
-    void upload(const atomx::Dataset &d, const std::vector<uint8_t> &selected) {
+    void upload(const atomx::Dataset &d, const std::vector<uint8_t> &selected,
+                const std::vector<uint8_t> &colorSelected = {}) {
+        std::vector<BondVertex> bondVertices;
+        bondVertices.reserve(d.bonds.size() * 2);
+        for (const auto &bond : d.bonds) {
+            if (bond.a >= d.atoms.size() || bond.b >= d.atoms.size()) continue;
+            const auto &a=d.atoms[bond.a], &b=d.atoms[bond.b];
+            bondVertices.push_back({{a.x,a.y,a.z}});
+            bondVertices.push_back({{b.x+float(bond.image[0]*d.cell[0]+bond.image[1]*d.cell[3]+bond.image[2]*d.cell[6]),
+                                     b.y+float(bond.image[0]*d.cell[1]+bond.image[1]*d.cell[4]+bond.image[2]*d.cell[7]),
+                                     b.z+float(bond.image[0]*d.cell[2]+bond.image[1]*d.cell[5]+bond.image[2]*d.cell[8])}});
+        }
+        bondBuffer.Reset(); bondVertexCount=UINT(bondVertices.size());
+        if (!bondVertices.empty()) {
+            D3D11_BUFFER_DESC bondDesc{}; bondDesc.ByteWidth=UINT(bondVertices.size()*sizeof(BondVertex)); bondDesc.Usage=D3D11_USAGE_IMMUTABLE; bondDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA bondData{bondVertices.data(),0,0};
+            check(device->CreateBuffer(&bondDesc,&bondData,&bondBuffer), "Bond vertex buffer");
+        }
         std::vector<Chunk> next;
         const size_t block = 1048576;
         const std::vector<double> *mapped = nullptr;
@@ -312,9 +377,13 @@ P pixel(V i) {
             c.count = UINT(std::min(block, d.atoms.size() - start));
             std::vector<atomx::Atom> tmp(d.atoms.begin() + start,
                                          d.atoms.begin() + start + c.count);
-            for (size_t j = 0; j < tmp.size(); j++)
+            for (size_t j = 0; j < tmp.size(); j++) {
                 if (start + j < selected.size() && selected[start + j])
                     tmp[j].type |= 0x80000000;
+                if ((colorSelected.empty() && start + j < selected.size() && selected[start + j]) ||
+                    (!colorSelected.empty() && start + j < colorSelected.size() && colorSelected[start + j]))
+                    tmp[j].type |= 0x40000000;
+            }
             D3D11_BUFFER_DESC bd{};
             bd.ByteWidth = c.count * sizeof(atomx::Atom);
             bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -347,10 +416,25 @@ P pixel(V i) {
             sv.Buffer.NumElements = c.count;
             check(device->CreateShaderResourceView(c.propertyBuffer.Get(), &sv, &c.propertyView),
                   "Particle property buffer view");
+            if (d.particleColors.size()==d.atoms.size()) {
+                std::vector<DirectX::XMFLOAT3> colors(c.count);
+                for (size_t j=0;j<colors.size();++j) {
+                    const auto &source=d.particleColors[start+j];
+                    colors[j]={source.x,source.y,source.z};
+                }
+                D3D11_BUFFER_DESC colorDesc{}; colorDesc.ByteWidth=UINT(colors.size()*sizeof(DirectX::XMFLOAT3));
+                colorDesc.Usage=D3D11_USAGE_IMMUTABLE; colorDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+                colorDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; colorDesc.StructureByteStride=sizeof(DirectX::XMFLOAT3);
+                D3D11_SUBRESOURCE_DATA colorData{colors.data(),0,0};
+                check(device->CreateBuffer(&colorDesc,&colorData,&c.colorBuffer),"Particle color buffer");
+                sv.Buffer.NumElements=c.count;
+                check(device->CreateShaderResourceView(c.colorBuffer.Get(),&sv,&c.colorView),"Particle color view");
+            }
             next.push_back(std::move(c));
         }
         chunks = std::move(next);
-        gpuBytes = d.atoms.size() * (sizeof(atomx::Atom) + sizeof(float));
+        gpuBytes = d.atoms.size() * (sizeof(atomx::Atom) + sizeof(float) +
+                                      (d.particleColors.size()==d.atoms.size()?sizeof(DirectX::XMFLOAT3):0));
     }
     void target(Target &t, int w, int h) {
         w = std::max(1, w);
@@ -377,12 +461,12 @@ P pixel(V i) {
         check(device->CreateTexture2D(&td, nullptr, &t.depth), "Depth texture");
         check(device->CreateDepthStencilView(t.depth.Get(), nullptr, &t.dsv), "Depth view");
     }
-    DirectX::XMMATRIX matrix(const atomx::Dataset &d, const Camera &cam, float aspect,
+    DirectX::XMMATRIX matrix(const atomx::Dataset &d, const Camera &cam, float aspect, bool includeCell,
                              DirectX::XMMATRIX *viewOut = nullptr,
                              DirectX::XMMATRIX *projOut = nullptr) {
         using namespace DirectX;
         auto lo = d.lo, hi = d.hi;
-        if (d.cell[0] != 0 || d.cell[4] != 0 || d.cell[8] != 0) {
+        if (includeCell && (d.cell[0] != 0 || d.cell[4] != 0 || d.cell[8] != 0)) {
             for (int j = 0; j < 8; j++) {
                 float x = float((j & 1 ? d.cell[0] : 0) + (j & 2 ? d.cell[3] : 0) +
                                 (j & 4 ? d.cell[6] : 0));
@@ -447,7 +531,7 @@ P pixel(V i) {
         return v * p;
     }
     void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, int shape, int renderMode, int colorAxis, int colorGradient, float colorMin, float colorMax, bool colorCoding, bool discrete, bool selectedOnly, const float *bg,
-              bool visible = true) {
+              bool visible = true, bool includeCellInFit = true) {
         using namespace DirectX;
         uploadStyles(d.species.size());
         context->VSSetShaderResources(1, 1, styleView.GetAddressOf());
@@ -467,7 +551,7 @@ P pixel(V i) {
         context->GSSetShader(nullptr, nullptr, 0);
         Constants c{};
         XMMATRIX view, proj;
-        matrix(d, cam, float(t.w) / t.h, &view, &proj);
+        matrix(d, cam, float(t.w) / t.h, includeCellInFit, &view, &proj);
         XMStoreFloat4x4(&c.view, view);
         XMStoreFloat4x4(&c.projection, proj);
         c.radius = radius;
@@ -484,6 +568,7 @@ P pixel(V i) {
                              {.47f, .61f, .85f, 1}, {.8f, .8f, .8f, 1}};
         std::copy(std::begin(colors), std::end(colors), c.colors);
         c.colors[0].w = float(meshTriangleCount);
+        c.colors[1].w = d.particleColors.size()==d.atoms.size()?1.f:0.f;
         context->UpdateSubresource(constants.Get(), 0, nullptr, &c, 0, 0);
         context->VSSetConstantBuffers(0, 1, constants.GetAddressOf());
         context->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
@@ -491,12 +576,36 @@ P pixel(V i) {
             for (auto &ch : chunks) {
                 context->VSSetShaderResources(0, 1, ch.srv.GetAddressOf());
                 context->VSSetShaderResources(3, 1, ch.propertyView.GetAddressOf());
+                context->VSSetShaderResources(4, 1, ch.colorView.GetAddressOf());
                 context->DrawInstanced(6, ch.count, 0, 0);
             }
+        if (visible && d.bondStyle.visible && bondBuffer && bondVertexCount) {
+            BondConstants bondCamera;
+            DirectX::XMStoreFloat4x4(&bondCamera.viewProjection, view * proj);
+            bondCamera.viewport={float(t.w),float(t.h)};
+            bondCamera.width=d.bondStyle.width;
+            bondCamera.color={d.bondStyle.color[0],d.bondStyle.color[1],d.bondStyle.color[2],d.bondStyle.color[3]};
+            context->UpdateSubresource(bondConstants.Get(),0,nullptr,&bondCamera,0,0);
+            UINT stride=sizeof(BondVertex), offset=0;
+            ID3D11Buffer *buffer=bondBuffer.Get();
+            context->IASetInputLayout(bondLayout.Get());
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+            context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
+            context->VSSetShader(bondVS.Get(),nullptr,0);
+            context->PSSetShader(bondPS.Get(),nullptr,0);
+            context->GSSetShader(bondGS.Get(),nullptr,0);
+            context->VSSetConstantBuffers(0,1,bondConstants.GetAddressOf());
+            context->GSSetConstantBuffers(0,1,bondConstants.GetAddressOf());
+            context->PSSetConstantBuffers(0,1,bondConstants.GetAddressOf());
+            context->RSSetState(raster.Get());
+            context->Draw(bondVertexCount,0);
+            context->GSSetShader(nullptr,nullptr,0);
+        }
         ID3D11ShaderResourceView *empty = nullptr;
         context->VSSetShaderResources(0, 1, &empty);
         context->VSSetShaderResources(1, 1, &empty);
         context->VSSetShaderResources(3, 1, &empty);
+        context->VSSetShaderResources(4, 1, &empty);
         context->PSSetShaderResources(2, 1, &empty);
         context->OMSetRenderTargets(0, nullptr, nullptr);
     }
