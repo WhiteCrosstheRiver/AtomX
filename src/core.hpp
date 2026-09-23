@@ -515,6 +515,7 @@ enum class Op {
     ,Histogram
     ,ReduceProperty
     ,AssignColor
+    ,ManualSelection
 };
 struct Modifier {
     Op op;
@@ -538,6 +539,7 @@ struct Modifier {
     float bondWidth = 1.5f;
     std::array<float,4> bondColor{.72f,.78f,.86f,1.f};
     std::array<float,3> assignColor{1.f,.15f,.12f};
+    std::vector<uint32_t> manualSelection;
 };
 struct DataObject {
     enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels };
@@ -1090,6 +1092,8 @@ inline const char *opName(Op op) {
     case Op::SelectType:
         return "Select type";
     case Op::SelectIndex:
+        return "Select particle by index";
+    case Op::ManualSelection:
         return "Manual selection";
     case Op::Invert:
         return "Invert selection";
@@ -1306,6 +1310,15 @@ inline PipelineResult evaluate(const Dataset &source, const std::vector<Modifier
                 for (size_t i=0; i<r.data.atoms.size(); ++i) {
                     if (cancel && (i & 4095) == 0 && *cancel) throw std::runtime_error("Cancelled");
                     r.selected[i] = ParticleExpression(r.data, i, m.property).evaluate() ? 1 : 0;
+                }
+                continue;
+            }
+            if (m.op == Op::ManualSelection) {
+                r.selected.assign(r.data.atoms.size(), 0);
+                for (uint32_t index : m.manualSelection) {
+                    if (index >= r.selected.size())
+                        throw std::runtime_error("Manual selection contains an index outside the current particle data");
+                    r.selected[index] = 1;
                 }
                 continue;
             }

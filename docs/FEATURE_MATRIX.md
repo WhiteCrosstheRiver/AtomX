@@ -40,7 +40,7 @@
 - Color coding is stored per pipeline node and writes the selected Position/scalar values into the evaluated dataset. Automatic/symmetric/manual range, exact cancellable range scanning across XYZ/LAMMPS dump frames (up to 2 million atoms per frame), discrete mapping, inversion, selected-only coloring, and keep-selection are implemented. The viewport and active-view PNG show the selected property and numeric range. Palette shapes still use the current approximate GPU gradients; the legend reproduces those same colors.
 - Fixed-cutoff common-neighbor analysis publishes `Structure Type`, global structure counts, and a result table; periodic FCC, BCC, HCP (triclinic), and an isolated icosahedral-center fixture are covered. Adaptive CNA and production-scale acceleration remain incomplete. The coordination-based DXA helper remains an explicitly approximate prepass.
 - Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts, and renders GPU lines in viewports and image exports. Visibility, color, and pixel width are configurable. Cylinder rendering and type-pair cutoffs remain future work.
-- Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV.
+- Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV. Particle-table manual selection is one persistent pipeline node: click replaces the set, Ctrl-click toggles one particle, and invalid indices are reported rather than silently applied.
 
 ## Analysis
 
@@ -105,7 +105,7 @@
 | Expand selection | 部分 | 通过 cutoff 邻接扩展当前选区，支持 1–64 层及正交周期最小镜像；非正交 PBC 和大规模邻域任务待做 |
 | Expression selection | 部分 | 安全原生表达式支持坐标/类型/标量属性、算术、比较、逻辑和 abs/sqrt/isfinite；不执行脚本，无向量分量语法、单位和帧变量 |
 | Invert selection | 已实现 | 当前管线中的粒子选择取反 |
-| Manual selection | 部分 | 点击粒子表行选择；视口 picking、框选与套索待实现 |
+| Manual selection | 部分 | 粒子表选择存入一个持久 Manual selection 管线节点；单击替换选区、Ctrl 单击切换单个粒子；视口 picking、框选与套索待实现 |
 | Select type | 已实现 | species/type 映射后的类型索引 |
 | Find overlapping particles | 部分 | cutoff 邻居对中的所有端点均被选中；粒子半径感知的 overlap、非正交 PBC 待做 |
 | Ackland-Jones analysis | 待实现 | 邻居键角结构分类 |

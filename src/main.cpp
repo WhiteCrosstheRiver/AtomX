@@ -386,6 +386,8 @@ struct App {
                 if (!node.enabled) continue;
                 if (node.op == Op::CreateBonds)
                     node.outputs.push_back({DataObject::Kind::Bonds, "Bonds", true, i});
+                else if (node.op == Op::ManualSelection)
+                    node.outputs.push_back({DataObject::Kind::Particles, "Manual selection", true, i});
                 else if (node.op == Op::ColorCoding || node.op == Op::ColorType || node.op == Op::AssignColor)
                     node.outputs.push_back({DataObject::Kind::Particles, "Particle colors", true, i});
                 else if (node.op == Op::CommonNeighborAnalysis)
@@ -485,7 +487,8 @@ struct App {
                             : modifier.op == Op::SelectType || modifier.op == Op::SelectIndex ||
                                       modifier.op == Op::SelectRange || modifier.op == Op::Invert ||
                                       modifier.op == Op::Clear || modifier.op == Op::ExpandSelection ||
-                                      modifier.op == Op::SelectOverlapping || modifier.op == Op::ExpressionSelect
+                                      modifier.op == Op::SelectOverlapping || modifier.op == Op::ExpressionSelect ||
+                                      modifier.op == Op::ManualSelection
                                   ? "Selection"
                                   : modifier.op == Op::CoordinationAnalysis || modifier.op == Op::ClusterAnalysis ||
                                             modifier.op == Op::RadialDistribution || modifier.op == Op::Histogram ||
@@ -1237,8 +1240,26 @@ struct App {
                                                       result.selected[j] != 0,
                                                       ImGuiSelectableFlags_SpanAllColumns)) {
                                     checkpoint();
-                                    modifierGraph.insert(makeNode(Modifier{Op::SelectIndex, true, 0, 2, j}));
-                                    update();
+                                    size_t nodeIndex = mods.size();
+                                    if (!mods.empty() && mods.back().enabled && mods.back().op == Op::ManualSelection)
+                                        nodeIndex = mods.size()-1;
+                                    if (nodeIndex == mods.size()) {
+                                        Modifier manual{Op::ManualSelection};
+                                        if (ImGui::GetIO().KeyCtrl)
+                                            for (size_t k=0;k<result.selected.size();++k)
+                                                if (result.selected[k]) manual.manualSelection.push_back(uint32_t(k));
+                                        modifierGraph.insert(makeNode(manual));
+                                        nodeIndex = mods.size()-1;
+                                    }
+                                    auto &indices = mods[nodeIndex].manualSelection;
+                                    if (!ImGui::GetIO().KeyCtrl) indices.assign(1,uint32_t(j));
+                                    else {
+                                        auto found=std::lower_bound(indices.begin(),indices.end(),uint32_t(j));
+                                        if (found!=indices.end() && *found==uint32_t(j)) indices.erase(found);
+                                        else indices.insert(found,uint32_t(j));
+                                    }
+                                    modifierGraph.selected=nodeIndex;
+                                    update(nodeIndex);
                                 }
                                 ImGui::TableNextColumn();
                                 ImGui::TextUnformatted(result.data.species[a.type].c_str());
@@ -1471,6 +1492,10 @@ struct App {
                         if (ImGui::InputInt("Atom index", &index)) {
                             checkpoint(); m.type = std::max(0,index); update();
                         }
+                    }
+                    if (m.op == Op::ManualSelection) {
+                        ImGui::TextDisabled("%zu particles selected. Click a table row to replace; Ctrl-click to toggle.",
+                                            m.manualSelection.size());
                     }
                     if (m.op == Op::SelectType || m.op == Op::EditType) {
                         int t = m.type;
@@ -2230,7 +2255,7 @@ struct App {
                 operation(Op::ExpressionSelect,"Select particles using the safe native scalar expression language.");
                 operation(Op::SelectOverlapping,"Select every particle that belongs to at least one pair closer than the cutoff.");
                 operation(Op::Invert,"Invert selected and unselected particles.");
-                operation(Op::SelectIndex,"Select one atom by its current pipeline index.");
+                operation(Op::ManualSelection,"Select particles in the Particles table; Ctrl-click toggles rows.");
                 operation(Op::SelectType,"Select particles of a specified type.");
                 operation(Op::SelectRange,"Select particles in a coordinate interval.");
                 endCard();

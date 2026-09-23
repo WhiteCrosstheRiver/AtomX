@@ -347,6 +347,20 @@ int main() {
         auto overlapping = evaluate(chain, {{Op::SelectOverlapping,true,0.9f}});
         require(overlapping.selected[0] && overlapping.selected[1] && overlapping.selected[2] &&
                     !overlapping.selected[3], "overlap selection includes every atom in close pairs");
+        Modifier manualSelection{Op::ManualSelection};
+        manualSelection.manualSelection={1,3};
+        auto manuallySelected=evaluate(chain,{manualSelection});
+        require(manuallySelected.selected==std::vector<uint8_t>({0,1,0,1}),
+                "manual selection publishes a stable multi-particle selection");
+        auto manuallyDeleted=evaluate(chain,{manualSelection,Modifier{Op::Delete}});
+        require(manuallyDeleted.data.atoms.size()==2 && manuallyDeleted.selected.size()==2 &&
+                    manuallyDeleted.data.atoms[0].x==0 && manuallyDeleted.data.atoms[1].x==1.6f,
+                "manual selection composes with delete-selected in pipeline order");
+        manualSelection.manualSelection={4};
+        bool invalidManualIndexRejected=false;
+        try { evaluate(chain,{manualSelection}); }
+        catch (const ModifierExecutionError &e) { invalidManualIndexRejected=e.nodeIndex==0; }
+        require(invalidManualIndexRejected,"manual selection reports stale particle indices clearly");
         chain.scalarProperties["Energy"] = {-2, 0, 3, 8};
         Modifier expression{Op::ExpressionSelect};
         expression.property = "Energy >= 0 && (x < 2 || abs(Energy) > 7)";
