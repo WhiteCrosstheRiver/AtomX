@@ -2085,23 +2085,27 @@ struct App {
                     ImGui::PopID();
                 }
                 if (colorCoding) {
-                    heading("COLOR CODING");
+                    heading("ACTIVE COLOR CODING");
                     auto activeColor = std::find_if(mods.rbegin(), mods.rend(), [](const Modifier &m) {
-                        return m.enabled && (m.op == Op::ColorCoding || m.op == Op::ColorType);
+                        return m.enabled && m.op == Op::ColorCoding;
                     });
-                    if (activeColor != mods.rend() && activeColor->op == Op::ColorCoding) {
-                        if (colorPropertyCombo("Input property", activeColor->property, true)) {
-                            checkpoint(); colorAutoRange = true; update();
-                        }
-                    } else {
-                        ImGui::Combo("Input property", &colorAxis, "Position.X\0Position.Y\0Position.Z\0");
+                    if (activeColor != mods.rend()) {
+                        ImGui::Text("Property: %s",activeColor->property.c_str());
+                        const float shownMin=activeColor->colorAutoRange && !activeColor->colorAllFramesRange
+                            ? colorMin : activeColor->colorMin;
+                        const float shownMax=activeColor->colorAutoRange && !activeColor->colorAllFramesRange
+                            ? colorMax : activeColor->colorMax;
+                        ImGui::Text("Range: %.6g to %.6g%s",shownMin,shownMax,
+                                    activeColor->colorAutoRange ? " (automatic)" : " (manual)");
+                        ImGui::Text("Gradient: %s",activeColor->colorGradient>=0 && activeColor->colorGradient<10
+                            ? std::array<const char *,10>{"Rainbow","Blue-White-Red","Cyclic Rainbow","Fast",
+                                "Grayscale","Hot","Jet","Magma","Viridis","Plasma"}[activeColor->colorGradient]
+                            : "Custom");
+                        ImGui::Text("%s%s%s",activeColor->colorSelectedOnly ? "Selected only  " : "All particles  ",
+                                    activeColor->colorDiscrete ? "Discrete  " : "Continuous  ",
+                                    activeColor->colorReverse ? "Reversed" : "");
+                        ImGui::TextDisabled("Edit coloring parameters on the selected Color coding node in Pipeline.");
                     }
-                    ImGui::Combo("Color gradient", &colorGradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0Plasma\0");
-                    if (ImGui::Checkbox("Automatic range", &colorAutoRange) && colorAutoRange) update();
-                    if (ImGui::Checkbox("Symmetric range", &colorSymmetricRange) && colorAutoRange) update();
-                    if (!colorAutoRange) { ImGui::DragFloat("Start value", &colorMin, .01f); ImGui::DragFloat("End value", &colorMax, .01f); }
-                    ImGui::Checkbox("Discretize", &colorDiscrete); ImGui::Checkbox("Reverse range", &colorReverse);
-                    ImGui::Checkbox("Color only selected elements", &colorSelectedOnly);
                 }
                 heading("Position statistics");
                 ImGui::Combo("Property", &propertyAxis, "Position X\0Position Y\0Position Z\0");
