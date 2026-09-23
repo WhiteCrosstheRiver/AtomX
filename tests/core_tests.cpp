@@ -149,6 +149,24 @@ int main() {
         double expectedX=0; for (const auto &atom:fcc.atoms) expectedX+=atom.x; expectedX/=fcc.atoms.size();
         require(std::abs(reduced.data.globalAttributes.at("ReduceProperty.Position.X.mean")-expectedX)<1e-10,
                 "reduce property publishes numeric global mean");
+        Dataset bondedMeasurements;
+        bondedMeasurements.species={"X"};
+        bondedMeasurements.atoms={{0,0,0,0},{1,0,0,0},{1,2,0,0},{9.9f,0,0,0}};
+        bondedMeasurements.cell={10,0,0,0,10,0,0,0,10};
+        bondedMeasurements.bonds={{0,1,{0,0,0}},{1,2,{0,0,0}},{0,3,{-1,0,0}}};
+        Modifier bondLengths{Op::BondLengthDistribution}; bondLengths.type=3;
+        auto bondLengthResult=evaluate(bondedMeasurements,{bondLengths});
+        const auto &bondLengthTable=bondLengthResult.data.tables.back();
+        require(bondLengthTable.name=="Bond length distribution" && bondLengthTable.rows.size()==3 &&
+                    bondLengthResult.data.globalAttributes.at("BondLengthDistribution.count")==3 &&
+                    std::abs(bondLengthResult.data.globalAttributes.at("BondLengthDistribution.minimum")-.1)<1e-5 &&
+                    bondLengthResult.data.globalAttributes.at("BondLengthDistribution.maximum")==2,
+                "bond-length distribution analyzes explicit and periodic-image bonds and publishes a table");
+        bool missingBondTopologyRejected=false;
+        auto noBondTopology=bondedMeasurements; noBondTopology.bonds.clear();
+        try { (void)evaluate(noBondTopology,{bondLengths}); }
+        catch (const ModifierExecutionError &e) { missingBondTopologyRejected=e.nodeIndex==0; }
+        require(missingBondTopologyRejected,"bond-length distribution reports missing topology at its node");
         Dataset rangeFrameA; rangeFrameA.species={"X"}; rangeFrameA.atoms={{1,0,0,0},{3,0,0,0}};
         rangeFrameA.scalarProperties["Q"]={-5,8}; rangeFrameA.vectorProperties["Velocity"]={{0,2,1},{0,-4,3}}; rangeFrameA.bounds();
         Dataset rangeFrameB=rangeFrameA; rangeFrameB.atoms={{-4,0,0,0},{7,0,0,0}};

@@ -573,6 +573,7 @@ struct App {
             op == Op::CoordinationAnalysis || op == Op::ClusterAnalysis || op == Op::RadialDistribution ||
             op == Op::ExpandSelection || op == Op::SelectOverlapping) m.value = cutoff;
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
+        if (op == Op::BondLengthDistribution) m.type = 64;
         if (op == Op::ReduceProperty) m.property = "Position.X";
         if (op == Op::SelectOverlapping) m.property = "Radius";
         if (op == Op::ExpandSelection) m.type = 1;
@@ -1741,6 +1742,13 @@ struct App {
                             ImGui::TextWrapped("Selects both endpoints of every pair closer than this distance. Enable per-particle radii for sphere-overlap testing.");
                         }
                     }
+                    if (m.op == Op::BondLengthDistribution) {
+                        int bins=m.type;
+                        if (ImGui::InputInt("Bins", &bins)) {
+                            checkpoint(); m.type=std::clamp(bins,1,4096); update();
+                        }
+                        ImGui::TextWrapped("Uses explicit pipeline bonds, including periodic image shifts. Add Create bonds upstream if the dataset has no bond topology.");
+                    }
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
                         auto edited = m;
                         bool changed = colorPropertyCombo("Input property", edited.property);
@@ -2550,7 +2558,8 @@ struct App {
             if (ImGui::BeginTable("Modifier categories",4,ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
                 ImGui::TableNextColumn();
                 beginCard("Analysis");
-                for (auto name : {"Atomic strain", "Bader charge integration", "Bond angle distribution", "Bond length distribution", "Bond order"}) planned(name);
+                for (auto name : {"Atomic strain", "Bader charge integration", "Bond angle distribution", "Bond order"}) planned(name);
+                operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
                 operation(Op::ClusterAnalysis,"Connected-component clustering by a periodic minimum-image cutoff; adds per-particle Cluster IDs and a cluster-size table."); planned("Difference between frames");
                 for (auto name : {"Displacement vectors", "Elastic strain calculation", "Find rings", "Grain segmentation"}) planned(name);
                 operation(Op::Histogram,"Build a finite-value histogram data table for a particle scalar or position component.");
@@ -2583,7 +2592,7 @@ struct App {
                 endCard();
                 beginCard("Visualization");
                 for (auto name : {"Add text labels", "Construct surface mesh", "Coordination polyhedra"}) planned(name);
-                operation(Op::CreateBonds,"Create and GPU-render cutoff neighbor bonds with configurable color, width, visibility and periodic image shifts.");
+                operation(Op::CreateBonds,"Create and GPU-render cutoff neighbor bonds as screen-space lines or 3D cylinders with periodic image shifts.");
                 for (auto name : {"Create isosurface", "Generate trajectory lines"}) planned(name);
                 endCard();
                 beginCard("Modifier templates");

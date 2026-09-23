@@ -554,6 +554,7 @@ enum class Op {
     ,ManualSelection
     ,EditCell
     ,AffineTransform
+    ,BondLengthDistribution
 };
 struct Modifier {
     Op op;
@@ -1302,6 +1303,7 @@ inline const char *opName(Op op) {
     case Op::AssignColor: return "Assign color";
     case Op::EditCell: return "Edit simulation cell";
     case Op::AffineTransform: return "Affine transformation";
+    case Op::BondLengthDistribution: return "Bond length distribution";
     default:
         return "Color by type";
     }
@@ -1420,6 +1422,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
             if (m.op == Op::ComputeProperty && (m.property.empty() || m.outputProperty.empty()))
                 throw std::runtime_error("Computed property requires an expression and output name");
             if (m.op == Op::Histogram && (m.type < 1 || m.type > 4096))
+                throw std::runtime_error("Histogram bins must be between 1 and 4096");
+            if (m.op == Op::BondLengthDistribution && (m.type < 1 || m.type > 4096))
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
             if (m.op == Op::ReduceProperty && (m.property.empty() || m.reduceOperation < 0 || m.reduceOperation > 3))
                 throw std::runtime_error("Choose a property and a valid reduction operation");
@@ -1735,6 +1739,48 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                         table.rows.push_back({std::to_string(lo + (bin + .5) * (hi - lo) / m.type), std::to_string(counts[bin])});
                     r.data.tables.push_back(std::move(table));
                 }
+                continue;
+            }
+            if (m.op == Op::BondLengthDistribution) {
+                if (r.data.bonds.empty())
+                    throw std::runtime_error("Bond length distribution requires explicit bonds; add Create bonds first");
+                if (r.data.bonds.size() > 20'000'000)
+                    throw std::runtime_error("Bond length distribution is limited to 20 million bonds");
+                std::vector<double> lengths;
+                lengths.reserve(r.data.bonds.size());
+                double lo=std::numeric_limits<double>::infinity(), hi=0;
+                for (const auto &bond : r.data.bonds) {
+                    if (bond.a >= r.data.atoms.size() || bond.b >= r.data.atoms.size())
+                        throw std::runtime_error("Bond endpoint is outside the particle array");
+                    const auto &a=r.data.atoms[bond.a], &b=r.data.atoms[bond.b];
+                    double dx=double(b.x)-a.x, dy=double(b.y)-a.y, dz=double(b.z)-a.z;
+                    for (int axis=0;axis<3;++axis) {
+                        const double image=bond.image[axis];
+                        dx+=image*r.data.cell[axis*3];
+                        dy+=image*r.data.cell[axis*3+1];
+                        dz+=image*r.data.cell[axis*3+2];
+                    }
+                    const double length=std::sqrt(dx*dx+dy*dy+dz*dz);
+                    if (!std::isfinite(length))
+                        throw std::runtime_error("Bond length is not finite");
+                    lengths.push_back(length); lo=std::min(lo,length); hi=std::max(hi,length);
+                }
+                if (lo==hi) { lo=std::max(0.0,lo-.5); hi+=.5; }
+                std::vector<uint64_t> counts(size_t(m.type));
+                for (double length:lengths) {
+                    const auto bin=std::min(size_t(m.type-1),
+                        size_t((length-lo)/(hi-lo)*m.type));
+                    ++counts[bin];
+                }
+                DataTable table; table.name="Bond length distribution";
+                table.columns={"Bond length", "Bond count"};
+                for (int bin=0;bin<m.type;++bin)
+                    table.rows.push_back({std::to_string(lo+(bin+.5)*(hi-lo)/m.type),
+                                          std::to_string(counts[bin])});
+                r.data.globalAttributes["BondLengthDistribution.count"]=double(lengths.size());
+                r.data.globalAttributes["BondLengthDistribution.minimum"]=*std::min_element(lengths.begin(),lengths.end());
+                r.data.globalAttributes["BondLengthDistribution.maximum"]=*std::max_element(lengths.begin(),lengths.end());
+                r.data.tables.push_back(std::move(table));
                 continue;
             }
             if (m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) {
