@@ -314,6 +314,16 @@ int main() {
         require(preservedBonds.data.bonds.size() == 2 &&
                     preservedBonds.data.bonds[0] == topology.bonds[0],
                 "create bonds preserves existing topology by default");
+        const auto combinedTopology = evaluate(topology,
+            {{Op::CreateBonds,true,.3f}, {Op::CommonNeighborAnalysis,true,.3f},
+             {Op::SelectIndex,true,0,0,2}, {Op::Delete}});
+        require(combinedTopology.data.atoms.size() == 2 &&
+                    combinedTopology.data.bonds.size() == 2 &&
+                    std::all_of(combinedTopology.data.bonds.begin(), combinedTopology.data.bonds.end(),
+                                [&](const Bond &bond) { return bond.a < 2 && bond.b < 2; }) &&
+                    combinedTopology.data.scalarProperties.at("Structure Type").size() == 2 &&
+                    combinedTopology.selected.size() == 2,
+                "create-bonds/CNA/select/delete pipeline preserves properties and remaps periodic topology");
         Dataset pairCutoffData;
         pairCutoffData.species={"A","B"};
         pairCutoffData.atoms={{0,0,0,0},{.8f,0,0,1},{1.6f,0,0,1}};
@@ -580,7 +590,7 @@ int main() {
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice, wrap, "
                      "scale, scientific modifier tables, assign color, roundtrip, malformed input, "
                      "FCC/HCP/BCC/ICO CNA signatures and disordered reference, periodic topology, "
-                     "sampled analysis rejection\n";
+                     "bonds/CNA/select/delete pipeline composition, sampled analysis rejection\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
