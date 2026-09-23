@@ -1531,6 +1531,32 @@ struct App {
                             m.editedPbc = pbc; m.transformCoordinatesWithCell = transform; update();
                         }
                     }
+                    if (m.op == Op::AffineTransform) {
+                        auto matrix = m.affineTransform;
+                        bool changed = false;
+                        ImGui::TextWrapped("Maps particle positions, cell vectors, and origin with a 3 x 4 matrix. Particle vector properties are left unchanged.");
+                        if (ImGui::BeginTable("Affine matrix", 4,
+                                              ImGuiTableFlags_SizingStretchSame)) {
+                            for (const char *column : {"X", "Y", "Z", "Translation"})
+                                ImGui::TableSetupColumn(column);
+                            ImGui::TableHeadersRow();
+                            for (int row = 0; row < 3; ++row) {
+                                ImGui::TableNextRow();
+                                for (int column = 0; column < 4; ++column) {
+                                    ImGui::TableSetColumnIndex(column);
+                                    ImGui::PushID(row * 4 + column);
+                                    ImGui::SetNextItemWidth(-1);
+                                    changed |= ImGui::InputDouble("##affine", &matrix[row * 4 + column],
+                                                                  0, 0, "%.7g");
+                                    ImGui::PopID();
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                        if (changed) {
+                            checkpoint(); m.affineTransform = matrix; update();
+                        }
+                    }
                     if (m.op == Op::CreateBonds || m.op == Op::CommonNeighborAnalysis ||
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
                         m.op == Op::RadialDistribution || m.op == Op::ExpandSelection ||
@@ -2345,7 +2371,7 @@ struct App {
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Modification");
-                for (auto name : {"Affine transformation", "Combine datasets"}) planned(name);
+                operation(Op::AffineTransform,"Apply an invertible 3 x 4 affine matrix to particle positions, simulation-cell vectors and origin."); planned("Combine datasets");
                 operation(Op::ComputeProperty,"Evaluate a scalar expression for every particle and publish the named property.");
                 operation(Op::Delete,"Remove selected particles.");
                 operation(Op::EditCell,"Edit cell origin, vectors and periodic boundaries. Particle coordinates stay fixed unless fractional-coordinate remapping is explicitly enabled."); operation(Op::EditType,"Edit particle type assignments.");

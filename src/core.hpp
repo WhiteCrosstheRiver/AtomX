@@ -551,6 +551,7 @@ enum class Op {
     ,AssignColor
     ,ManualSelection
     ,EditCell
+    ,AffineTransform
 };
 struct Modifier {
     Op op;
@@ -581,6 +582,7 @@ struct Modifier {
     Vec3 editedOrigin{};
     std::array<bool, 3> editedPbc{};
     bool transformCoordinatesWithCell = false;
+    std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
 };
 struct DataObject {
     enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels };
@@ -1293,6 +1295,7 @@ inline const char *opName(Op op) {
     case Op::ReduceProperty: return "Reduce property";
     case Op::AssignColor: return "Assign color";
     case Op::EditCell: return "Edit simulation cell";
+    case Op::AffineTransform: return "Affine transformation";
     default:
         return "Color by type";
     }
@@ -1323,6 +1326,26 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 throw std::runtime_error("Invalid modifier parameters");
             if (m.op == Op::Scale && m.value <= 0)
                 throw std::runtime_error("Scale must be positive");
+            if (m.op == Op::AffineTransform) {
+                for (double value : m.affineTransform)
+                    if (!std::isfinite(value))
+                        throw std::runtime_error("Affine transformation entries must be finite");
+                const std::array<double, 9> linear{
+                    m.affineTransform[0], m.affineTransform[1], m.affineTransform[2],
+                    m.affineTransform[4], m.affineTransform[5], m.affineTransform[6],
+                    m.affineTransform[8], m.affineTransform[9], m.affineTransform[10]};
+                double scale = 0;
+                for (int row = 0; row < 3; ++row) {
+                    double lengthSquared = 0;
+                    for (int column = 0; column < 3; ++column)
+                        lengthSquared += linear[row * 3 + column] * linear[row * 3 + column];
+                    scale = std::max(scale, std::sqrt(lengthSquared));
+                }
+                const double determinant = cellDeterminant(linear);
+                if (!(scale > 0) || !std::isfinite(determinant) ||
+                    std::abs(determinant) <= scale * scale * scale * 1e-12)
+                    throw std::runtime_error("Affine transformation linear part must be non-degenerate");
+            }
             if (m.op == Op::EditCell) {
                 double scale = 0;
                 for (int axis = 0; axis < 3; ++axis) {
@@ -1395,6 +1418,42 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 removed += r.data.vectorProperties.erase(m.property);
                 if (!removed) throw std::runtime_error("Unknown particle property: " + m.property);
                 r.data.propertyComponents.erase(m.property);
+                continue;
+            }
+            if (m.op == Op::AffineTransform) {
+                auto transformPoint = [&](double x, double y, double z, bool point) {
+                    std::array<double, 3> result{};
+                    for (int row = 0; row < 3; ++row) {
+                        result[row] = m.affineTransform[row * 4] * x +
+                                      m.affineTransform[row * 4 + 1] * y +
+                                      m.affineTransform[row * 4 + 2] * z;
+                        if (point) result[row] += m.affineTransform[row * 4 + 3];
+                        if (!std::isfinite(result[row]))
+                            throw std::runtime_error("Affine transformation produced a non-finite coordinate");
+                    }
+                    return result;
+                };
+                for (auto &atom : r.data.atoms) {
+                    const auto transformed = transformPoint(atom.x, atom.y, atom.z, true);
+                    atom.x = float(transformed[0]); atom.y = float(transformed[1]);
+                    atom.z = float(transformed[2]);
+                    if (!std::isfinite(atom.x) || !std::isfinite(atom.y) || !std::isfinite(atom.z))
+                        throw std::runtime_error("Affine transformation exceeds particle coordinate range");
+                }
+                for (int vector = 0; vector < 3; ++vector) {
+                    const int offset = vector * 3;
+                    const auto transformed = transformPoint(r.data.cell[offset],
+                        r.data.cell[offset + 1], r.data.cell[offset + 2], false);
+                    for (int component = 0; component < 3; ++component)
+                        r.data.cell[offset + component] = transformed[component];
+                }
+                const auto transformedOrigin = transformPoint(r.data.origin.x, r.data.origin.y,
+                                                               r.data.origin.z, true);
+                r.data.origin = {float(transformedOrigin[0]), float(transformedOrigin[1]),
+                                 float(transformedOrigin[2])};
+                if (!std::isfinite(r.data.origin.x) || !std::isfinite(r.data.origin.y) ||
+                    !std::isfinite(r.data.origin.z))
+                    throw std::runtime_error("Affine transformation exceeds cell origin range");
                 continue;
             }
             if (m.op == Op::Replicate) {

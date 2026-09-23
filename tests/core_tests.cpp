@@ -177,6 +177,20 @@ int main() {
         try { evaluate(cellEditData,{editCell}); }
         catch (const ModifierExecutionError &e) { singularCellRejected=e.nodeIndex==0; }
         require(singularCellRejected,"simulation-cell editor rejects degenerate vectors at its pipeline node");
+        Modifier affine{Op::AffineTransform};
+        affine.affineTransform={2,1,0,-1, 0,3,0,2, 0,0,.5,4};
+        auto affineResult=evaluate(cellEditData,{affine});
+        require(affineResult.data.atoms[0].x==3 && affineResult.data.atoms[0].y==8 &&
+                    affineResult.data.atoms[0].z==5.5f && affineResult.data.cell[0]==20 &&
+                    affineResult.data.cell[3]==10 && affineResult.data.cell[4]==30 &&
+                    affineResult.data.cell[8]==5 && affineResult.data.origin.x==-1 &&
+                    affineResult.data.origin.y==2 && affineResult.data.origin.z==4,
+                "general affine matrix transforms positions, cell vectors and origin");
+        affine.affineTransform[8]=0; affine.affineTransform[9]=0; affine.affineTransform[10]=0;
+        bool singularAffineRejected=false;
+        try { evaluate(cellEditData,{affine}); }
+        catch (const ModifierExecutionError &e) { singularAffineRejected=e.nodeIndex==0; }
+        require(singularAffineRejected,"singular affine matrices report an error at their pipeline node");
         std::atomic<float> rangeProgress{0};
         auto progressedRange=colorRangeAcrossFrames(rangeFrames.size(),
             [&](size_t i){return rangeFrames.at(i);}, {},"Q",nullptr,&rangeProgress);

@@ -81,7 +81,7 @@
 | Color by type | 已实现 | 默认 8 色循环，选中粒子高亮 |
 | 粒子形状 | 部分 | 全局选择 Sphere、Circle、Cube、Cylinder、Spherocylinder；按类型的独立半径/颜色/形状编辑待做 |
 | Color coding | 部分 | GPU 按节点配置的 Position、标量属性或向量 X/Y/Z 分量着色，向量分量也支持当前帧/全帧范围统计；另支持自动/对称/手动范围、离散、反转、仅选中和 Keep selection；全帧计算限每帧 200 万原子；视口、图例和 PNG 共用 256 项渐变表；Magma/Viridis/Plasma 使用官方 8-bit 色表，其余现有渐变公式仍保留 |
-| Affine transformation | 部分 | 按轴平移、统一比例缩放、旋转坐标与晶胞；不是完整 3x4 仿射矩阵 |
+| Affine transformation | 部分 | 已提供完整可编辑 3x4 矩阵；同步变换粒子、晶胞向量和原点并拒绝奇异矩阵；粒子向量属性暂不变换，需按语义区分方向向量/法向量 |
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
 | Compute property | 部分 | 安全原生数值表达式逐粒子计算并发布标量属性，可供下游节点读取；不支持向量表达式、单位系统、任意脚本及优化缓存 |
 | Delete selected | 已实现 | 非破坏性管线过滤 |
