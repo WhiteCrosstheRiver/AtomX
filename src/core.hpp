@@ -1011,20 +1011,40 @@ class ParticleExpression {
         p = e; return true;
     }
     std::string name() {
-        ws(); size_t b = p;
+        ws();
+        if (p < text.size() && text[p] == '`') {
+            ++p;
+            std::string result;
+            while (p < text.size()) {
+                if (text[p] == '`') {
+                    if (p + 1 < text.size() && text[p + 1] == '`') {
+                        result.push_back('`');
+                        p += 2;
+                        continue;
+                    }
+                    ++p;
+                    if (result.empty()) error("Quoted property name is empty");
+                    return result;
+                }
+                result.push_back(text[p++]);
+            }
+            error("Expected closing backtick for quoted property name");
+        }
+        size_t b = p;
         while (p < text.size()) { char c = text[p]; if (std::isalnum(static_cast<unsigned char>(c)) || c=='_' || c=='.') ++p; else break; }
         if (p == b) error("Expected a property or function name");
         return std::string(text.substr(b,p-b));
     }
     double property(const std::string &n) {
-        const Atom &a = d.atoms.at(atom);
-        if (n == "x" || n == "Position.X") return a.x;
-        if (n == "y" || n == "Position.Y") return a.y;
-        if (n == "z" || n == "Position.Z") return a.z;
-        if (n == "type" || n == "Particle Type") return a.type;
+        const Atom *a = atom < d.atoms.size() ? &d.atoms[atom] : nullptr;
+        if (n == "x" || n == "Position.X") return a ? a->x : 0;
+        if (n == "y" || n == "Position.Y") return a ? a->y : 0;
+        if (n == "z" || n == "Position.Z") return a ? a->z : 0;
+        if (n == "type" || n == "Particle Type") return a ? a->type : 0;
         auto it = d.scalarProperties.find(n);
         if (it == d.scalarProperties.end()) error("Unknown scalar property '" + n + "'");
         if (it->second.size() != d.atoms.size()) error("Property length does not match particle count");
+        if (!a) return 0;
         if (!std::isfinite(it->second[atom])) error("Property is non-finite");
         return it->second[atom];
     }
@@ -1058,7 +1078,8 @@ class ParticleExpression {
     double exprOr() { double v=exprAnd(); for(;;){if(take("||")||word("or")){double q=exprAnd();v=(v!=0||q!=0);}else break;}return v; }
 public:
     ParticleExpression(const Dataset &data, size_t i, std::string_view expression) : d(data), atom(i), text(expression) {}
-    double evaluateNumber() { if(text.empty())error("Expression is empty");double v=exprOr();ws();if(p!=text.size())error("Unexpected token");if(!std::isfinite(v))error("Result is non-finite");return v; }
+    double evaluateNumber() { if(text.empty())error("Expression is empty");if(text.size()>511)error("Expression exceeds 511 characters");double v=exprOr();ws();if(p!=text.size())error("Unexpected token");if(!std::isfinite(v))error("Result is non-finite");return v; }
+    void validate() { (void)evaluateNumber(); }
     bool evaluate() { return evaluateNumber()!=0; }
 };
 
@@ -1373,6 +1394,7 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 continue;
             }
             if (m.op == Op::ExpressionSelect) {
+                ParticleExpression(r.data, 0, m.property).validate();
                 r.selected.resize(r.data.atoms.size());
                 for (size_t i=0; i<r.data.atoms.size(); ++i) {
                     if (cancel && (i & 4095) == 0 && *cancel) throw std::runtime_error("Cancelled");
@@ -1390,6 +1412,7 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 continue;
             }
             if (m.op == Op::ComputeProperty) {
+                ParticleExpression(r.data, 0, m.property).validate();
                 std::vector<double> values(r.data.atoms.size());
                 for (size_t i=0; i<r.data.atoms.size(); ++i) {
                     if (cancel && (i & 4095) == 0 && *cancel) throw std::runtime_error("Cancelled");

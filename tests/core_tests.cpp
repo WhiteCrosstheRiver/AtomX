@@ -404,6 +404,12 @@ int main() {
         require(!expressionResult.selected[0] && expressionResult.selected[1] &&
                     expressionResult.selected[2] && expressionResult.selected[3],
                 "safe expression selection reads scalar properties and boolean expressions");
+        chain.scalarProperties["Potential Energy"] = {-1, 0, 4, 9};
+        expression.property = "`Potential Energy` >= 4";
+        auto spacedPropertySelection = evaluate(chain, {expression});
+        require(!spacedPropertySelection.selected[0] && !spacedPropertySelection.selected[1] &&
+                    spacedPropertySelection.selected[2] && spacedPropertySelection.selected[3],
+                "expression selection resolves scalar properties with spaces using backtick quoting");
         Modifier compute{Op::ComputeProperty};
         compute.property = "x*x + Energy";
         compute.outputProperty = "Derived";
@@ -432,6 +438,20 @@ int main() {
         bool unsafeExpressionRejected = false;
         try { evaluate(chain, {expression}); } catch (const std::runtime_error &) { unsafeExpressionRejected = true; }
         require(unsafeExpressionRejected, "expression rejects unapproved function calls");
+        Dataset emptyExpressionData;
+        Modifier invalidEmptyExpression{Op::ExpressionSelect};
+        invalidEmptyExpression.property = "MissingProperty > 0";
+        bool invalidPropertyOnEmptyDataRejected = false;
+        try { evaluate(emptyExpressionData, {invalidEmptyExpression}); }
+        catch (const ModifierExecutionError &e) { invalidPropertyOnEmptyDataRejected = e.nodeIndex == 0; }
+        require(invalidPropertyOnEmptyDataRejected,
+                "expression validation reports unknown properties on empty datasets");
+        invalidEmptyExpression.property = "x + (";
+        bool syntaxErrorOnEmptyDataRejected = false;
+        try { evaluate(emptyExpressionData, {invalidEmptyExpression}); }
+        catch (const ModifierExecutionError &e) { syntaxErrorOnEmptyDataRejected = e.nodeIndex == 0; }
+        require(syntaxErrorOnEmptyDataRejected,
+                "expression validation reports syntax errors on empty datasets");
         chain.stride = 2;
         bool sampledSelectionRejected = false;
         try { evaluate(chain, {{Op::ExpandSelection,true,0.9f,2,1}}); }

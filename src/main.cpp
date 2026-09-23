@@ -1680,7 +1680,7 @@ struct App {
                         if (ImGui::InputText("Expression", expression, sizeof(expression), ImGuiInputTextFlags_EnterReturnsTrue)) {
                             checkpoint(); m.property = expression; update();
                         }
-                        ImGui::TextWrapped("Use x/y/z, Position.X/Y/Z, type, scalar properties, arithmetic, comparisons, &&, ||, !, abs(), sqrt(), isfinite(). Press Enter to evaluate.");
+                        ImGui::TextWrapped("Use x/y/z, Position.X/Y/Z, type, scalar properties, arithmetic, comparisons, &&, ||, !, abs(), sqrt(), isfinite(). Write `Potential Energy` to reference a property name containing spaces; double a backtick to escape it. Press Enter to evaluate.");
                         size_t selectedParticles = std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
                         ImGui::TextDisabled("Selected: %zu / %zu", selectedParticles, result.data.atoms.size());
                     }
