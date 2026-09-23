@@ -167,6 +167,18 @@ int main() {
         try { (void)evaluate(noBondTopology,{bondLengths}); }
         catch (const ModifierExecutionError &e) { missingBondTopologyRejected=e.nodeIndex==0; }
         require(missingBondTopologyRejected,"bond-length distribution reports missing topology at its node");
+        Modifier bondAngles{Op::BondAngleDistribution}; bondAngles.type=18;
+        auto bondAngleResult=evaluate(bondedMeasurements,{bondAngles});
+        const auto &bondAngleTable=bondAngleResult.data.tables.back();
+        require(bondAngleTable.name=="Bond angle distribution" && bondAngleTable.rows.size()==18 &&
+                    bondAngleResult.data.globalAttributes.at("BondAngleDistribution.count")==2 &&
+                    std::abs(bondAngleResult.data.globalAttributes.at("BondAngleDistribution.minimum")-90)<1e-8 &&
+                    std::abs(bondAngleResult.data.globalAttributes.at("BondAngleDistribution.maximum")-180)<1e-8,
+                "bond-angle distribution enumerates central bond pairs and honors periodic image vectors");
+        bool missingBondAnglesRejected=false;
+        try { (void)evaluate(noBondTopology,{bondAngles}); }
+        catch (const ModifierExecutionError &e) { missingBondAnglesRejected=e.nodeIndex==0; }
+        require(missingBondAnglesRejected,"bond-angle distribution reports missing topology at its node");
         Dataset rangeFrameA; rangeFrameA.species={"X"}; rangeFrameA.atoms={{1,0,0,0},{3,0,0,0}};
         rangeFrameA.scalarProperties["Q"]={-5,8}; rangeFrameA.vectorProperties["Velocity"]={{0,2,1},{0,-4,3}}; rangeFrameA.bounds();
         Dataset rangeFrameB=rangeFrameA; rangeFrameB.atoms={{-4,0,0,0},{7,0,0,0}};

@@ -555,6 +555,7 @@ enum class Op {
     ,EditCell
     ,AffineTransform
     ,BondLengthDistribution
+    ,BondAngleDistribution
 };
 struct Modifier {
     Op op;
@@ -1304,6 +1305,7 @@ inline const char *opName(Op op) {
     case Op::EditCell: return "Edit simulation cell";
     case Op::AffineTransform: return "Affine transformation";
     case Op::BondLengthDistribution: return "Bond length distribution";
+    case Op::BondAngleDistribution: return "Bond angle distribution";
     default:
         return "Color by type";
     }
@@ -1424,6 +1426,8 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
             if (m.op == Op::Histogram && (m.type < 1 || m.type > 4096))
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
             if (m.op == Op::BondLengthDistribution && (m.type < 1 || m.type > 4096))
+                throw std::runtime_error("Histogram bins must be between 1 and 4096");
+            if (m.op == Op::BondAngleDistribution && (m.type < 1 || m.type > 4096))
                 throw std::runtime_error("Histogram bins must be between 1 and 4096");
             if (m.op == Op::ReduceProperty && (m.property.empty() || m.reduceOperation < 0 || m.reduceOperation > 3))
                 throw std::runtime_error("Choose a property and a valid reduction operation");
@@ -1749,7 +1753,10 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 std::vector<double> lengths;
                 lengths.reserve(r.data.bonds.size());
                 double lo=std::numeric_limits<double>::infinity(), hi=0;
+                size_t bondIndex=0;
                 for (const auto &bond : r.data.bonds) {
+                    if ((bondIndex++ & 4095)==0 && cancel && *cancel)
+                        throw std::runtime_error("Cancelled");
                     if (bond.a >= r.data.atoms.size() || bond.b >= r.data.atoms.size())
                         throw std::runtime_error("Bond endpoint is outside the particle array");
                     const auto &a=r.data.atoms[bond.a], &b=r.data.atoms[bond.b];
@@ -1780,6 +1787,59 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                 r.data.globalAttributes["BondLengthDistribution.count"]=double(lengths.size());
                 r.data.globalAttributes["BondLengthDistribution.minimum"]=*std::min_element(lengths.begin(),lengths.end());
                 r.data.globalAttributes["BondLengthDistribution.maximum"]=*std::max_element(lengths.begin(),lengths.end());
+                r.data.tables.push_back(std::move(table));
+                continue;
+            }
+            if (m.op == Op::BondAngleDistribution) {
+                if (r.data.bonds.empty())
+                    throw std::runtime_error("Bond angle distribution requires explicit bonds; add Create bonds first");
+                if (r.data.bonds.size() > 20'000'000)
+                    throw std::runtime_error("Bond angle distribution is limited to 20 million bonds");
+                using Vector=std::array<double,3>;
+                std::vector<std::vector<Vector>> neighbors(r.data.atoms.size());
+                size_t bondIndex=0;
+                for (const auto &bond:r.data.bonds) {
+                    if ((bondIndex++ & 4095)==0 && cancel && *cancel)
+                        throw std::runtime_error("Cancelled");
+                    if (bond.a>=r.data.atoms.size() || bond.b>=r.data.atoms.size())
+                        throw std::runtime_error("Bond endpoint is outside the particle array");
+                    const auto &a=r.data.atoms[bond.a], &b=r.data.atoms[bond.b];
+                    Vector v{double(b.x)-a.x,double(b.y)-a.y,double(b.z)-a.z};
+                    for (int axis=0;axis<3;++axis)
+                        for (int c=0;c<3;++c) v[c]+=bond.image[axis]*r.data.cell[axis*3+c];
+                    if (!std::all_of(v.begin(),v.end(),[](double x){return std::isfinite(x);}))
+                        throw std::runtime_error("Bond angle uses a non-finite bond vector");
+                    neighbors[bond.a].push_back(v);
+                    for (double &component:v) component=-component;
+                    neighbors[bond.b].push_back(v);
+                }
+                std::vector<double> angles;
+                size_t centralIndex=0;
+                for (const auto &incident:neighbors) {
+                    if ((centralIndex++ & 4095)==0 && cancel && *cancel)
+                        throw std::runtime_error("Cancelled");
+                    if (incident.size()>1 && angles.size()+incident.size()*(incident.size()-1)/2>20'000'000)
+                        throw std::runtime_error("Bond angle distribution exceeds 20 million angles");
+                    for (size_t i=0;i<incident.size();++i) for (size_t j=i+1;j<incident.size();++j) {
+                        const auto &a=incident[i], &b=incident[j];
+                        const double la=std::sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]);
+                        const double lb=std::sqrt(b[0]*b[0]+b[1]*b[1]+b[2]*b[2]);
+                        if (!(la>0) || !(lb>0)) throw std::runtime_error("Zero-length bond has no defined angle");
+                        const double cosine=std::clamp((a[0]*b[0]+a[1]*b[1]+a[2]*b[2])/(la*lb),-1.0,1.0);
+                        angles.push_back(std::acos(cosine)*180.0/3.14159265358979323846);
+                    }
+                }
+                if (angles.empty())
+                    throw std::runtime_error("Bond angle distribution requires at least one particle with two bonds");
+                std::vector<uint64_t> counts(size_t(m.type));
+                for (double angle:angles) ++counts[std::min(size_t(m.type-1),size_t(angle/180*m.type))];
+                DataTable table; table.name="Bond angle distribution";
+                table.columns={"Bond angle (degrees)","Angle count"};
+                for (int bin=0;bin<m.type;++bin)
+                    table.rows.push_back({std::to_string((bin+.5)*180.0/m.type),std::to_string(counts[bin])});
+                r.data.globalAttributes["BondAngleDistribution.count"]=double(angles.size());
+                r.data.globalAttributes["BondAngleDistribution.minimum"]=*std::min_element(angles.begin(),angles.end());
+                r.data.globalAttributes["BondAngleDistribution.maximum"]=*std::max_element(angles.begin(),angles.end());
                 r.data.tables.push_back(std::move(table));
                 continue;
             }
