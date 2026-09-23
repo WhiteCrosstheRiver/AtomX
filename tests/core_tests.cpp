@@ -7,6 +7,17 @@ void require(bool b, const char *s) {
 }
 int main() {
     try {
+        auto angleOutputs=modifierOutputs(Modifier{Op::BondAngleDistribution},7);
+        require(angleOutputs.size()==2 &&
+                    angleOutputs[0].kind==DataObject::Kind::Table &&
+                    angleOutputs[1].kind==DataObject::Kind::GlobalAttributes &&
+                    angleOutputs[0].sourceNode==7,
+                "bond analysis pipeline metadata declares its table and global-statistics outputs");
+        auto cnaOutputs=modifierOutputs(Modifier{Op::CommonNeighborAnalysis},2);
+        require(cnaOutputs.size()==3 && cnaOutputs[0].kind==DataObject::Kind::Particles &&
+                    cnaOutputs[1].kind==DataObject::Kind::GlobalAttributes &&
+                    cnaOutputs[2].kind==DataObject::Kind::Table,
+                "CNA pipeline metadata declares every published result object");
         auto p = std::filesystem::temp_directory_path() / "atomx-core-fixture.xyz";
         {
             std::ofstream f(p);

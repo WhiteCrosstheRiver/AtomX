@@ -398,20 +398,7 @@ struct App {
                 node.error.clear();
                 node.outputs.clear();
                 if (!node.enabled) continue;
-                if (node.op == Op::CreateBonds)
-                    node.outputs.push_back({DataObject::Kind::Bonds, "Bonds", true, i});
-                else if (node.op == Op::ManualSelection)
-                    node.outputs.push_back({DataObject::Kind::Particles, "Manual selection", true, i});
-                else if (node.op == Op::ColorCoding || node.op == Op::ColorType || node.op == Op::AssignColor)
-                    node.outputs.push_back({DataObject::Kind::Particles, "Particle colors", true, i});
-                else if (node.op == Op::CommonNeighborAnalysis)
-                    node.outputs.push_back({DataObject::Kind::Particles, "CNA structure types", true, i});
-                else if (node.op == Op::CoordinationAnalysis)
-                    node.outputs.push_back({DataObject::Kind::Particles, "Coordination", true, i});
-                else if (node.op == Op::ClusterAnalysis)
-                    node.outputs.push_back({DataObject::Kind::Particles, "Cluster IDs", true, i});
-                else if (node.op == Op::RadialDistribution || node.op == Op::Histogram)
-                    node.outputs.push_back({DataObject::Kind::Table, opName(node.op), true, i});
+                node.outputs=modifierOutputs(node,i);
             }
             for (int k = 0; k < 3; k++)
                 cachedStats[k] = statistics(result.data, k);
@@ -540,7 +527,8 @@ struct App {
                                   ? "Selection"
                                   : modifier.op == Op::CoordinationAnalysis || modifier.op == Op::ClusterAnalysis ||
                                             modifier.op == Op::RadialDistribution || modifier.op == Op::Histogram ||
-                                            modifier.op == Op::ReduceProperty || modifier.op == Op::CommonNeighborAnalysis
+                                            modifier.op == Op::ReduceProperty || modifier.op == Op::CommonNeighborAnalysis ||
+                                            modifier.op == Op::BondLengthDistribution || modifier.op == Op::BondAngleDistribution
                                         ? "Analysis"
                                         : "Modification";
         return node;

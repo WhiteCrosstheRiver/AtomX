@@ -48,6 +48,7 @@
 - While a source frame or modifier stack is being re-evaluated, the previous result remains visible with a `STALE RESULT` footer marker. Failed evaluations retain that marker until a successful publish.
 - Pipeline evaluation now takes ownership of its working `Dataset` snapshot, removing the extra full-dataset copy between the asynchronous worker input and its result. The application still makes one working copy from the retained source; node-level caching and shared immutable storage remain incomplete.
 - During asynchronous evaluation the status bar reports the active pipeline stage (`i / node count`); this is stage-level progress only, not an estimate of work remaining inside a long-running modifier.
+- Pipeline output descriptors are derived from modifier type in one shared mapping and now include result tables, particle outputs, bond topology, edited cells and global-statistics objects. This is metadata for inspection; per-output visibility/reordering is not yet connected to independent render objects.
 
 ## Analysis
 

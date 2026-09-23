@@ -593,12 +593,45 @@ struct Modifier {
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
 };
 struct DataObject {
-    enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels };
+    enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels, GlobalAttributes };
     Kind kind = Kind::Particles;
     std::string name;
     bool visible = true;
     size_t sourceNode = 0;
 };
+inline const char *opName(Op op);
+inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t sourceNode) {
+    using Kind=DataObject::Kind;
+    std::vector<DataObject> outputs;
+    auto add=[&](Kind kind,std::string name){outputs.push_back({kind,std::move(name),true,sourceNode});};
+    if (modifier.op==Op::CreateBonds) add(Kind::Bonds,"Bonds");
+    if (modifier.op==Op::EditCell) add(Kind::Cell,"Simulation cell");
+    if (modifier.op==Op::ManualSelection) add(Kind::Particles,"Manual selection");
+    if (modifier.op==Op::ColorCoding || modifier.op==Op::ColorType || modifier.op==Op::AssignColor)
+        add(Kind::Particles,"Particle colors");
+    if (modifier.op==Op::ComputeProperty) add(Kind::Particles,modifier.outputProperty);
+    if (modifier.op==Op::CommonNeighborAnalysis) {
+        add(Kind::Particles,"CNA structure types");
+        add(Kind::GlobalAttributes,"Structure counts");
+        add(Kind::Table,"Common neighbor analysis");
+    }
+    if (modifier.op==Op::CoordinationAnalysis) {
+        add(Kind::Particles,"Coordination");
+        add(Kind::GlobalAttributes,"Coordination statistics");
+    }
+    if (modifier.op==Op::ClusterAnalysis) {
+        add(Kind::Particles,"Cluster IDs");
+        add(Kind::GlobalAttributes,"Cluster statistics");
+        add(Kind::Table,"Cluster analysis");
+    }
+    if (modifier.op==Op::RadialDistribution || modifier.op==Op::Histogram ||
+        modifier.op==Op::BondLengthDistribution || modifier.op==Op::BondAngleDistribution)
+        add(Kind::Table,opName(modifier.op));
+    if (modifier.op==Op::RadialDistribution || modifier.op==Op::ReduceProperty ||
+        modifier.op==Op::BondLengthDistribution || modifier.op==Op::BondAngleDistribution)
+        add(Kind::GlobalAttributes,opName(modifier.op)+std::string(" statistics"));
+    return outputs;
+}
 
 // A pipeline node owns the executable modifier parameters as well as the UI,
 // diagnostic and output-object state associated with that stage.
