@@ -297,6 +297,10 @@ int main() {
                     fixedCna.data.globalAttributes.at("CommonNeighborAnalysis.counts.Other") == 0 &&
                     fixedCna.data.tables.size() == 1 && fixedCna.data.tables[0].rows.size() == 5,
                 "CNA publishes OVITO-compatible structure counts");
+        const auto fccSignatures = analyzeCommonNeighbors(fcc, .8f);
+        require(fccSignatures.bondSignatureCounts.at({4,2,1}) == 12 * fcc.atoms.size() &&
+                    fccSignatures.bondSignatureCounts.size() == 1,
+                "fixed-cutoff FCC reference has twelve 1421 signatures per atom");
         Dataset topology;
         topology.species = {"X"};
         topology.atoms = {{.1f,0,0,0},{1.9f,0,0,0},{1,1,1,0}};
@@ -371,6 +375,11 @@ int main() {
         size_t bccCount = std::count(bccCna.data.scalarProperties["Structure Type"].begin(),
                                      bccCna.data.scalarProperties["Structure Type"].end(),3.0);
         require(bccCount == bcc.atoms.size(), "fixed-cutoff common-neighbor analysis identifies periodic BCC");
+        const auto bccSignatures = analyzeCommonNeighbors(bcc, 1.01);
+        require(bccSignatures.bondSignatureCounts.at({4,4,3}) == 6 * bcc.atoms.size() &&
+                    bccSignatures.bondSignatureCounts.at({6,6,5}) == 8 * bcc.atoms.size() &&
+                    bccSignatures.bondSignatureCounts.size() == 2,
+                "fixed-cutoff BCC reference has six 443 and eight 665 signatures per atom");
         Dataset hcp;
         const double root3 = std::sqrt(3.0), cOverA = std::sqrt(8.0/3.0);
         hcp.species = {"X"};
@@ -387,6 +396,11 @@ int main() {
                             hcpCna.data.scalarProperties["Structure Type"].end(),
                             [](double code) { return code == 2; }),
                 "fixed-cutoff CNA identifies ideal HCP in a triclinic periodic cell");
+        const auto hcpSignatures = analyzeCommonNeighbors(hcp, 1.1);
+        require(hcpSignatures.bondSignatureCounts.at({4,2,1}) == 6 * hcp.atoms.size() &&
+                    hcpSignatures.bondSignatureCounts.at({4,2,2}) == 6 * hcp.atoms.size() &&
+                    hcpSignatures.bondSignatureCounts.size() == 2,
+                "fixed-cutoff HCP reference has six 1421 and six 1422 signatures per atom");
         Dataset icosa;
         icosa.species = {"X"};
         const double phi=(1+std::sqrt(5.0))/2, norm=std::sqrt(1+phi*phi);
@@ -400,6 +414,23 @@ int main() {
         auto icoCna=evaluate(icosa,{{Op::CommonNeighborAnalysis,true,1.1f}});
         require(icoCna.data.scalarProperties["Structure Type"][0]==4,
                 "fixed-cutoff CNA identifies an isolated icosahedral center");
+        const auto icoSignatures = analyzeCommonNeighbors(icosa, 1.1);
+        require(icoSignatures.bondSignatureCounts.at({5,5,4}) >= 12,
+                "icosahedral center reference has twelve 554 signatures");
+        Dataset disordered;
+        disordered.species = {"X"};
+        uint32_t randomState = 0x5eed1234u;
+        auto randomCoordinate = [&]() {
+            randomState = randomState * 1664525u + 1013904223u;
+            return float((randomState >> 8) * (1.0 / 16777216.0) * 10.0);
+        };
+        for (int i = 0; i < 128; ++i)
+            disordered.atoms.push_back({randomCoordinate(), randomCoordinate(), randomCoordinate(), 0});
+        const auto disorderedCna = analyzeCommonNeighbors(disordered, 1.7);
+        require(std::all_of(disorderedCna.structure.begin(), disorderedCna.structure.end(),
+                            [](uint8_t kind) { return kind == 0; }) &&
+                    disorderedCna.counts.at("Other") == disordered.atoms.size(),
+                "deterministic disordered reference remains unclassified by ideal CNA signatures");
         Dataset tilted;
         tilted.species={"X"}; tilted.cell={2,0,0, 1,2,0, 0,0,2};
         tilted.pbc={true,true,true}; tilted.atoms={{.15f,.1f,.1f,0},{1.95f,.1f,.1f,0}};
@@ -548,7 +579,8 @@ int main() {
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice, wrap, "
                      "scale, scientific modifier tables, assign color, roundtrip, malformed input, "
-                     "FCC/BCC/HCP/ICO CNA, periodic topology, sampled analysis rejection\n";
+                     "FCC/HCP/BCC/ICO CNA signatures and disordered reference, periodic topology, "
+                     "sampled analysis rejection\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

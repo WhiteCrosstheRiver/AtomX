@@ -38,7 +38,7 @@
 ## Pipeline / analysis status, 2026-09-23
 
 - Color coding is stored per pipeline node and writes the selected Position, scalar, or vector-component values into the evaluated dataset. Automatic/symmetric/manual range, exact cancellable range scanning across XYZ/LAMMPS dump frames (up to 2 million atoms per frame), discrete mapping, inversion, selected-only coloring, and keep-selection are implemented. Current-frame and trajectory-wide range scans support vector components. The viewport and active-view PNG show the selected property and numeric range. The D3D11 viewport, legend and PNG now sample one shared 256-step table; Magma, Viridis and Plasma use Matplotlib's published 256-color tables (8-bit RGB), while other gradients retain AtomX's existing formulas sampled into the common table.
-- Fixed-cutoff common-neighbor analysis publishes `Structure Type`, global structure counts, and a result table; periodic FCC, BCC, HCP (triclinic), and an isolated icosahedral-center fixture are covered. Adaptive CNA and production-scale acceleration remain incomplete. The coordination-based DXA helper remains an explicitly approximate prepass.
+- Fixed-cutoff common-neighbor analysis publishes `Structure Type`, global structure counts, and a result table. Numerical fixtures verify FCC 1421, HCP 1421/1422 in a triclinic periodic cell, BCC 443/665, an isolated icosahedral-center 554 signature, and a deterministic disordered sample classified as Other. Adaptive CNA and production-scale acceleration remain incomplete. The coordination-based DXA helper remains an explicitly approximate prepass.
 - Create bonds preserves and de-duplicates existing topology by default, tracks periodic image shifts, and renders GPU lines in viewports and image exports. It supports one global cutoff or a symmetric per-type-pair cutoff matrix (up to 32 types); visibility, color, and pixel width are configurable. Cylinder rendering remains future work.
 - Coordination, cluster, RDF, histogram, and reduce-property entries execute as pipeline modifiers and publish particle properties, global values, or data tables. Analysis tables are virtualized and export to CSV. Particle-table manual selection is one persistent pipeline node: click replaces the set, Ctrl-click toggles one particle, and invalid indices are reported rather than silently applied.
 - While a source frame or modifier stack is being re-evaluated, the previous result remains visible with a `STALE RESULT` footer marker. Failed evaluations retain that marker until a successful publish.
@@ -115,7 +115,7 @@
 | Ackland-Jones analysis | 待实现 | 邻居键角结构分类 |
 | Centrosymmetry parameter | 待实现 | 最近邻最优配对 |
 | Chill+ | 待实现 | 冰相局域键序参数 |
-| Common neighbor analysis | 部分 | 固定 cutoff 公共近邻签名；周期 FCC 与 BCC fixtures 验证通过。自适应 cutoff、HCP/ICO 专门 fixtures、非正交 PBC 和性能加速仍待完成 |
+| Common neighbor analysis | 部分 | 固定 cutoff 公共近邻签名；FCC/HCP/BCC/二十面体标准键签名计数及确定性无序样本均有数值测试，HCP 使用三斜周期晶胞。自适应 cutoff 与生产规模加速仍待完成 |
 | Identify diamond structure | 待实现 | 多壳层邻域识别 |
 | Polyhedral template matching | 待实现 | 模板匹配、取向和 RMSD |
 | VoroTop analysis | 待实现 | Voronoi 拓扑签名及分类器 |
