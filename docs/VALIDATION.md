@@ -180,3 +180,7 @@
 
 - Histogram 和 Reduce property 的输入属性选择器现包含上游对齐的向量 X/Y/Z 分量；执行器以只读属性视图直接访问分量，不额外复制整列。
 - `core_tests` 验证 Velocity.X 四个 bin 各计一个样本，Velocity.Y 的均值为 5.5；属性 schema 仍只公开当前节点上游已启用的向量属性。
+
+### 邻域分析预算预检
+
+- `neighbors()` 与固定 cutoff CNA 共用 sampled/2M 原子输入预检，并在分配配位、连通分量或邻接工作数组之前执行；2,000,001 原子回归验证两条入口都在限额处拒绝。

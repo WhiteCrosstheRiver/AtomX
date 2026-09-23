@@ -487,6 +487,18 @@ int main() {
         try { evaluate(partial,{{Op::CoordinationAnalysis,true,.8f}}); }
         catch (const ModifierExecutionError &e) { sampledModifierRejected=e.nodeIndex==0; }
         require(sampledModifierRejected,"neighbor analysis modifier rejects sampled data at its node");
+        Dataset oversizedNeighborInput; oversizedNeighborInput.atoms.resize(2000001);
+        bool oversizedNeighborsRejected=false, oversizedCnaRejected=false;
+        try { (void)neighbors(oversizedNeighborInput,.8f); }
+        catch (const std::runtime_error &e) {
+            oversizedNeighborsRejected=std::string(e.what()).find("limited to 2 million")!=std::string::npos;
+        }
+        try { (void)analyzeCommonNeighbors(oversizedNeighborInput,.8); }
+        catch (const std::runtime_error &e) {
+            oversizedCnaRejected=std::string(e.what()).find("limited to 2 million")!=std::string::npos;
+        }
+        require(oversizedNeighborsRejected&&oversizedCnaRejected,
+                "neighbor analysis and CNA reject over-budget inputs before allocating working arrays");
         Dataset pair;
         pair.species = {"X"};
         pair.atoms = {{.1f, 0, 0, 0}, {1.9f, 0, 0, 0}, {1, 1, 1, 0}};

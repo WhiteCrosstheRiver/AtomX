@@ -1154,15 +1154,18 @@ inline void forEachTriclinicNeighborPair(const Dataset &d, double cutoff, Callba
 
 // Visits each cutoff pair once using linked spatial bins. Sampled previews are
 // rejected, while exact minimum-image distances support orthogonal and triclinic PBC.
+inline void validateNeighborAnalysisInput(const Dataset &d) {
+    if (d.sampled())
+        throw std::runtime_error("Neighbor analysis requires full data; increase the import budget.");
+    if (d.atoms.size()>2000000)
+        throw std::runtime_error("Neighbor analysis currently limited to 2 million atoms");
+}
 template <typename Callback>
 inline void forEachNeighborPair(const Dataset &d, double cutoff, Callback &&callback,
                                 std::atomic<bool> *cancel = nullptr) {
-    if (d.sampled())
-        throw std::runtime_error("Neighbor analysis requires full data; increase the import budget.");
+    validateNeighborAnalysisInput(d);
     if (!(cutoff > 0) || !std::isfinite(cutoff))
         throw std::runtime_error("Cutoff must be finite and positive");
-    if (d.atoms.size() > 2000000)
-        throw std::runtime_error("Neighbor analysis currently limited to 2 million atoms");
     const bool hasPeriodic = std::any_of(d.pbc.begin(), d.pbc.end(), [](bool b) { return b; });
     const bool triclinic = d.cell[1] || d.cell[2] || d.cell[3] || d.cell[5] || d.cell[6] || d.cell[7];
     if (hasPeriodic && triclinic) {
@@ -1268,6 +1271,7 @@ struct NeighborAnalysis {
 };
 inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
                                   std::atomic<bool> *cancel = nullptr) {
+    validateNeighborAnalysisInput(d);
     NeighborAnalysis result;
     result.cutoff = cutoff;
     result.coordination.resize(d.atoms.size());
@@ -1403,7 +1407,7 @@ struct CNAResult {
 
 inline CNAResult analyzeCommonNeighbors(const Dataset &d, double cutoff,
                                         std::atomic<bool> *cancel = nullptr) {
-    if (d.sampled()) throw std::runtime_error("CNA requires full data, not a sampled preview");
+    validateNeighborAnalysisInput(d);
     std::vector<std::vector<uint32_t>> adjacency(d.atoms.size());
     forEachNeighborPair(d, cutoff, [&](uint32_t a, uint32_t b, double) {
         adjacency[a].push_back(b); adjacency[b].push_back(a);
