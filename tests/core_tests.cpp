@@ -306,6 +306,17 @@ int main() {
         wave.atoms = {{0,0,0,0},{1,0,0,0},{0,1,0,0},{0,0,1,0}};
         wave.sourceCount = wave.atoms.size(); wave.bounds();
         wave.scalarProperties["Coordination"] = {1,2,3,4};
+        wave.vectorProperties["Velocity"]={{0,1,2},{3,4,5},{6,7,8},{9,10,11}};
+        std::atomic<bool> cancelPropertyCopy{true};
+        bool positionCopyCancelled=false, scalarCopyCancelled=false, vectorCopyCancelled=false;
+        try { (void)particlePropertyValues(wave,"Position.X",&cancelPropertyCopy); }
+        catch (const std::runtime_error &e) { positionCopyCancelled=std::string(e.what())=="Cancelled"; }
+        try { (void)particlePropertyValues(wave,"Coordination",&cancelPropertyCopy); }
+        catch (const std::runtime_error &e) { scalarCopyCancelled=std::string(e.what())=="Cancelled"; }
+        try { (void)particlePropertyValues(wave,"Velocity.Z",&cancelPropertyCopy); }
+        catch (const std::runtime_error &e) { vectorCopyCancelled=std::string(e.what())=="Cancelled"; }
+        require(positionCopyCancelled&&scalarCopyCancelled&&vectorCopyCancelled,
+                "particle-property extraction observes cancellation for position, scalar, and vector inputs");
         std::vector<Modifier> waveMods{{Op::CreateBonds,true,1.01f},
                                        {Op::ColorCoding,true,0,2,0,1,"Coordination"}};
         auto waveResult = evaluate(wave, waveMods);

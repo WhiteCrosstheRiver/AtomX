@@ -131,18 +131,32 @@ struct Dataset {
 };
 
 inline std::vector<double> particlePropertyValues(const Dataset &data,
-                                                  const std::string &property) {
+                                                  const std::string &property,
+                                                  std::atomic<bool> *cancel = nullptr) {
+    auto checkCancelled=[&](size_t index) {
+        if ((index & 65535)==0 && cancel && *cancel)
+            throw std::runtime_error("Cancelled");
+    };
     if (property == "Position.X" || property == "Position.Y" || property == "Position.Z") {
         const int axis = property.back() == 'X' ? 0 : property.back() == 'Y' ? 1 : 2;
         std::vector<double> values;
         values.reserve(data.atoms.size());
-        for (const auto &atom : data.atoms) values.push_back(coordinate(atom, axis));
+        for (size_t i=0;i<data.atoms.size();++i) {
+            checkCancelled(i);
+            values.push_back(coordinate(data.atoms[i], axis));
+        }
         return values;
     }
     if (auto scalar = data.scalarProperties.find(property); scalar != data.scalarProperties.end()) {
         if (scalar->second.size() != data.atoms.size())
             throw std::runtime_error("Particle property length mismatch: " + property);
-        return scalar->second;
+        std::vector<double> values;
+        values.reserve(scalar->second.size());
+        for (size_t i=0;i<scalar->second.size();++i) {
+            checkCancelled(i);
+            values.push_back(scalar->second[i]);
+        }
+        return values;
     }
     if (property.size() > 2 && property[property.size() - 2] == '.') {
         const char component = property.back();
@@ -154,8 +168,11 @@ inline std::vector<double> particlePropertyValues(const Dataset &data,
                     throw std::runtime_error("Particle property length mismatch: " + property);
                 std::vector<double> values;
                 values.reserve(vector->second.size());
-                for (const auto &value : vector->second)
+                for (size_t i=0;i<vector->second.size();++i) {
+                    checkCancelled(i);
+                    const auto &value=vector->second[i];
                     values.push_back(axis == 0 ? value.x : axis == 1 ? value.y : value.z);
+                }
                 return values;
             }
         }
@@ -1591,7 +1608,7 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
             }
             if (m.op == Op::ColorCoding) {
                 r.data.particleColors.clear();
-                r.data.scalarProperties["Color coding"] = particlePropertyValues(r.data, m.property);
+                r.data.scalarProperties["Color coding"] = particlePropertyValues(r.data, m.property, cancel);
                 if (m.colorSelectedOnly) {
                     r.colorSelected = r.selected;
                     if (!m.colorKeepSelection)
@@ -2095,7 +2112,7 @@ inline std::pair<double, double> colorRangeAcrossFrames(
         if (cancel && *cancel) throw std::runtime_error("Cancelled");
         auto evaluated = evaluate(readFrame(frame), upstream, cancel);
         const auto &data = evaluated.data;
-        auto values = particlePropertyValues(data, property);
+        auto values = particlePropertyValues(data, property, cancel);
         for (double value : values) {
             if (cancel && *cancel) throw std::runtime_error("Cancelled");
             if (std::isfinite(value)) { lo = std::min(lo, value); hi = std::max(hi, value); }
