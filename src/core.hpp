@@ -1875,23 +1875,33 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                         dy+=image*r.data.cell[axis*3+1];
                         dz+=image*r.data.cell[axis*3+2];
                     }
-                    const double length=std::sqrt(dx*dx+dy*dy+dz*dz);
+                    const double length=std::hypot(dx,dy,dz);
                     if (!std::isfinite(length))
                         throw std::runtime_error("Bond length is not finite");
                     lengths.push_back(length); lo=std::min(lo,length); hi=std::max(hi,length);
                 }
-                if (lo==hi) { lo=std::max(0.0,lo-.5); hi+=.5; }
+                if (lo==hi) {
+                    const double expandedLo=std::nextafter(lo,-std::numeric_limits<double>::infinity());
+                    const double expandedHi=std::nextafter(hi,std::numeric_limits<double>::infinity());
+                    if (std::isfinite(expandedLo)) lo=expandedLo;
+                    if (std::isfinite(expandedHi)) hi=expandedHi;
+                }
+                const double range=hi-lo;
+                if (!(range>0) || !std::isfinite(range))
+                    throw std::runtime_error("Bond-length range is outside the finite histogram domain");
                 std::vector<uint64_t> counts(size_t(m.type));
                 for (double length:lengths) {
                     const auto bin=std::min(size_t(m.type-1),
-                        size_t((length-lo)/(hi-lo)*m.type));
+                        size_t(std::clamp((length-lo)/range,0.0,1.0)*m.type));
                     ++counts[bin];
                 }
                 DataTable table; table.name="Bond length distribution";
                 table.columns={"Bond length", "Bond count"};
-                for (int bin=0;bin<m.type;++bin)
-                    table.rows.push_back({std::to_string(lo+(bin+.5)*(hi-lo)/m.type),
+                for (int bin=0;bin<m.type;++bin) {
+                    const double center=lo+((bin+.5)/m.type)*range;
+                    table.rows.push_back({std::to_string(center),
                                           std::to_string(counts[bin])});
+                }
                 r.data.globalAttributes["BondLengthDistribution.count"]=double(lengths.size());
                 r.data.globalAttributes["BondLengthDistribution.minimum"]=*std::min_element(lengths.begin(),lengths.end());
                 r.data.globalAttributes["BondLengthDistribution.maximum"]=*std::max_element(lengths.begin(),lengths.end());
@@ -1930,10 +1940,13 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
                         throw std::runtime_error("Bond angle distribution exceeds 20 million angles");
                     for (size_t i=0;i<incident.size();++i) for (size_t j=i+1;j<incident.size();++j) {
                         const auto &a=incident[i], &b=incident[j];
-                        const double la=std::sqrt(a[0]*a[0]+a[1]*a[1]+a[2]*a[2]);
-                        const double lb=std::sqrt(b[0]*b[0]+b[1]*b[1]+b[2]*b[2]);
-                        if (!(la>0) || !(lb>0)) throw std::runtime_error("Zero-length bond has no defined angle");
-                        const double cosine=std::clamp((a[0]*b[0]+a[1]*b[1]+a[2]*b[2])/(la*lb),-1.0,1.0);
+                        const double la=std::hypot(a[0],a[1],a[2]);
+                        const double lb=std::hypot(b[0],b[1],b[2]);
+                        if (!(la>0) || !(lb>0) || !std::isfinite(la) || !std::isfinite(lb))
+                            throw std::runtime_error("Bond angle requires finite, nonzero bond vectors");
+                        const double cosine=std::clamp((a[0]/la)*(b[0]/lb)+
+                                                       (a[1]/la)*(b[1]/lb)+
+                                                       (a[2]/la)*(b[2]/lb),-1.0,1.0);
                         angles.push_back(std::acos(cosine)*180.0/3.14159265358979323846);
                     }
                 }

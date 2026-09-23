@@ -217,6 +217,16 @@ int main() {
         try { (void)evaluate(noBondTopology,{bondLengths}); }
         catch (const ModifierExecutionError &e) { missingBondTopologyRejected=e.nodeIndex==0; }
         require(missingBondTopologyRejected,"bond-length distribution reports missing topology at its node");
+        Dataset largeBondGeometry;
+        largeBondGeometry.species={"X"};
+        largeBondGeometry.atoms={{0,0,0,0},{0,0,0,0},{0,0,0,0}};
+        largeBondGeometry.cell={1e150,0,0,0,1e150,0,0,0,1e150};
+        largeBondGeometry.bonds={{0,1,{1,0,0}},{0,2,{0,1,0}}};
+        const auto largeBondLengths=evaluate(largeBondGeometry,{bondLengths});
+        require(largeBondLengths.data.globalAttributes.at("BondLengthDistribution.count")==2 &&
+                    largeBondLengths.data.globalAttributes.at("BondLengthDistribution.minimum")==1e150 &&
+                    largeBondLengths.data.globalAttributes.at("BondLengthDistribution.maximum")==1e150,
+                "bond-length distribution preserves representable lengths whose naive square overflows");
         Modifier bondAngles{Op::BondAngleDistribution}; bondAngles.type=18;
         auto bondAngleResult=evaluate(bondedMeasurements,{bondAngles});
         const auto &bondAngleTable=bondAngleResult.data.tables.back();
@@ -225,6 +235,10 @@ int main() {
                     std::abs(bondAngleResult.data.globalAttributes.at("BondAngleDistribution.minimum")-90)<1e-8 &&
                     std::abs(bondAngleResult.data.globalAttributes.at("BondAngleDistribution.maximum")-180)<1e-8,
                 "bond-angle distribution enumerates central bond pairs and honors periodic image vectors");
+        const auto largeBondAngles=evaluate(largeBondGeometry,{bondAngles});
+        require(largeBondAngles.data.globalAttributes.at("BondAngleDistribution.count")==1 &&
+                    std::abs(largeBondAngles.data.globalAttributes.at("BondAngleDistribution.minimum")-90)<1e-8,
+                "bond-angle distribution normalizes large finite vectors before the dot product");
         bool missingBondAnglesRejected=false;
         try { (void)evaluate(noBondTopology,{bondAngles}); }
         catch (const ModifierExecutionError &e) { missingBondAnglesRejected=e.nodeIndex==0; }
