@@ -153,6 +153,19 @@ int main() {
                 "RDF integral recovers FCC coordination and histogram pair count");
         for (auto c : n.coordination)
             require(c == 12, "FCC nearest neighbors");
+        const auto rotatedFcc=evaluate(fcc,{{Op::Rotate,true,37.f,2}});
+        const auto rotatedNeighbors=neighbors(rotatedFcc.data,.8f);
+        require(rotatedNeighbors.coordination==n.coordination &&
+                    rotatedNeighbors.pairHistogram==n.pairHistogram && rotatedNeighbors.rdfValid,
+                "triclinic linked-cell search preserves FCC coordination and RDF under rigid cell rotation");
+        Dataset slabFcc=fcc; slabFcc.pbc={true,true,false};
+        const auto slabNeighbors=neighbors(slabFcc,.8f);
+        require(!slabNeighbors.rdfValid,
+                "radial distribution remains explicitly invalid for a partially periodic slab");
+        bool slabRdfRejected=false;
+        try { (void)evaluate(slabFcc,{{Op::RadialDistribution,true,.8f}}); }
+        catch (const ModifierExecutionError &e) { slabRdfRejected=e.nodeIndex==0; }
+        require(slabRdfRejected,"RDF pipeline rejects partially periodic data at its modifier node");
         auto coordinationPipeline = evaluate(fcc, {{Op::CoordinationAnalysis,true,.8f}});
         require(coordinationPipeline.data.scalarProperties.at("Coordination").size() == fcc.atoms.size() &&
                     coordinationPipeline.data.scalarProperties.at("Coordination")[0] == 12 &&
