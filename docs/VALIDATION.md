@@ -60,13 +60,13 @@
 - 手动选区节点测试覆盖多粒子集合、与 Delete selected 的管线顺序组合及越界索引错误；`build/manual-selection-workspace.png` 检查工作区布局。普通鼠标单击 / Ctrl 单击的桌面自动交互尚未验证。
 - 管线 / 轨迹载入期间保留旧画面并在状态栏显示 `STALE RESULT`，成功发布后清除；加载失败恢复进入加载前的标记状态。MSVC 完整测试与普通工作区 smoke 通过；本轮没有用自动 GUI 操作强制制造失败状态，因此 stale 提示未做截图视觉验收。
 - CNA 输出统一为 `Structure Type`，提供全局结构计数和结果表；本地固定样本包含 FCC、BCC、三斜周期 HCP 与孤立 ICO 中心。
-- GPU 渲染回归检查键线像素、隐藏行为、颜色及线宽变化、逐粒子赋色和七种粒子形状。键按 image shift 跨周期展开。
+- GPU 渲染回归检查键线与 3D 圆柱像素、隐藏行为、颜色、线宽及圆柱半径变化、逐粒子赋色和七种粒子形状。键按 image shift 跨周期展开。D3D11 圆柱与屏幕空间线段共用同一键拓扑，活动视口与 PNG 导出共用渲染器。
 - Create bonds 数值测试覆盖类型对阈值矩阵、对称表校验、零阈值禁用和不同元素的候选距离过滤。
 - `--smoke-bond-pairs --smoke 5 --screenshot build/bond-type-cutoffs.png` 实际渲染了 Cu/Ni 类型对编辑面板；检查了下三角的对称提示和默认阈值。没有自动鼠标点击矩阵单元格验证键盘输入/拖动行为。
 - `tests/export_workflow.cpp` 验证帧范围、步长、序列导出、应用管线、拒绝覆盖输入和失败清理；Data Tables 增加 CSV 导出。
 - `--smoke 3 --catalog --screenshot build/phase-catalog.png` 与普通工作区截图运行成功，目视检查四视口和菜单。时间轴标签与单帧计数已改为 1-based 用户显示；未执行自动鼠标逐项点击回归。
 - CMakeLists 已注册与 PowerShell 入口相同的五组测试，但当前环境找不到 `cmake` 命令，因此本次只实跑 `build.ps1`，没有声称 CTest 通过。
-- 仍未完成：缓存复用/节点级按需拷贝、稳定大数据异步索引和可复现交互测试；键圆柱；渐变色与 OVITO 标准色表的数值级比对；高级结构算法、DXA、Voronoi、完整透明/AO及 Intel Arc 实机验证。
+- 仍未完成：缓存复用/节点级按需拷贝、稳定大数据异步索引和可复现交互测试；渐变色与 OVITO 标准色表的数值级比对；高级结构算法、DXA、Voronoi、完整透明/AO及 Intel Arc 实机验证。
 
 ## 2026-09-24 Pipeline 工作集复制
 

@@ -275,6 +275,16 @@ int main(int argc, char **argv) {
         renderer.upload(bonded,{});
         renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
         const auto styledBondImage=imageHash(t);
+        bonded.bondStyle.radius=.08f;
+        renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
+        const auto cylinderBondImage=imageHash(t);
+        if (cylinderBondImage==styledBondImage)
+            throw std::runtime_error("3D bond cylinders must render differently from screen-space lines");
+        bonded.bondStyle.radius=.16f;
+        renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
+        if (imageHash(t)==cylinderBondImage)
+            throw std::runtime_error("Bond cylinder radius must change rendered coverage");
+        bonded.bondStyle.radius=0;
         bonded.bondStyle.width=.5f;
         renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
         if (imageHash(t)==styledBondImage)
@@ -328,7 +338,7 @@ int main(int argc, char **argv) {
         };
         if (readFile(legendPath)==readFile(reversedLegendPath))
             throw std::runtime_error("PNG color legend must reflect reversed/discrete gradient settings");
-        std::cout << "PASS: seven GPU shapes, per-type styles, property/assigned colors, bond lines, legends, color, width and visibility rendered\n";
+        std::cout << "PASS: seven GPU shapes, per-type styles, property/assigned colors, bond lines/cylinders, legends, color, width and visibility rendered\n";
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         DestroyWindow(w);

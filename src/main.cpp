@@ -1911,13 +1911,26 @@ struct App {
                             } else ImGui::TextDisabled(typeCount==0 ? "Load particle types to configure bonds." :
                                                        "Type-pair mode supports at most 32 particle types.");
                             bool visible = m.bondsVisible;
+                            bool cylinders = m.bondCylinders;
                             float width = m.bondWidth;
+                            float bondRadius = m.bondRadius;
                             auto color = m.bondColor;
                             bool changed = ImGui::Checkbox("Show bonds", &visible);
-                            changed |= ImGui::SliderFloat("Line width", &width, .5f, 12.f, "%.1f px");
+                            const char *representations[] = {"Screen-space lines", "3D cylinders"};
+                            int representation = cylinders ? 1 : 0;
+                            if (ImGui::Combo("Bond representation", &representation, representations, 2)) {
+                                cylinders = representation == 1;
+                                changed = true;
+                            }
+                            if (cylinders)
+                                changed |= ImGui::DragFloat("Cylinder radius", &bondRadius, .005f,
+                                                            .001f, 100.f, "%.4g units");
+                            else
+                                changed |= ImGui::SliderFloat("Line width", &width, .5f, 12.f, "%.1f px");
                             changed |= ImGui::ColorEdit3("Bond color", color.data());
                             if (changed) {
-                                checkpoint(); m.bondsVisible=visible; m.bondWidth=width; m.bondColor=color; update();
+                                checkpoint(); m.bondsVisible=visible; m.bondCylinders=cylinders;
+                                m.bondWidth=width; m.bondRadius=bondRadius; m.bondColor=color; update();
                             }
                             ImGui::TextDisabled("%zu bonds", result.data.bonds.size());
                         }

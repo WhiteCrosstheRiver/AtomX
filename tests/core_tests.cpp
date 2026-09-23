@@ -406,6 +406,20 @@ int main() {
         auto pairCutoffResult=evaluate(pairCutoffData,{pairCutoffBonds});
         require(pairCutoffResult.data.bonds==std::vector<Bond>{{0,1,{0,0,0}}},
                 "type-pair bond cutoffs use the symmetric type-pair threshold");
+        pairCutoffBonds.bondCylinders=true;
+        pairCutoffBonds.bondRadius=.14f;
+        auto cylinderBondResult=evaluate(pairCutoffData,{pairCutoffBonds});
+        require(cylinderBondResult.data.bondStyle.radius==.14f,
+                "Create bonds publishes the configured world-space cylinder radius");
+        pairCutoffBonds.bondRadius=0;
+        bool invalidCylinderRadiusRejected=false;
+        try { (void)evaluate(pairCutoffData,{pairCutoffBonds}); }
+        catch (const ModifierExecutionError &e) { invalidCylinderRadiusRejected=e.nodeIndex==0; }
+        require(invalidCylinderRadiusRejected,"invalid cylinder radius is reported at the Create bonds node");
+        pairCutoffBonds.bondCylinders=false;
+        pairCutoffBonds.bondRadius=.08f;
+        require(evaluate(pairCutoffData,{pairCutoffBonds}).data.bondStyle.radius==0,
+                "screen-space line representation remains the default");
         pairCutoffBonds.bondTypeCutoffs={0,0,0,0};
         require(evaluate(pairCutoffData,{pairCutoffBonds}).data.bonds.empty(),
                 "zero type-pair cutoffs disable bond generation without rejecting the node");

@@ -137,7 +137,7 @@ class Renderer {
     struct BondConstants {
         DirectX::XMFLOAT4X4 viewProjection;
         DirectX::XMFLOAT2 viewport;
-        float width = 1.5f, pad = 0;
+        float width = 1.5f, radius = 0;
         DirectX::XMFLOAT4 color{.72f,.78f,.86f,1};
     };
     ComPtr<ID3D11VertexShader> vs;
@@ -395,19 +395,45 @@ P pixel(V i) {
         check(device->CreatePixelShader(p->GetBufferPointer(), p->GetBufferSize(), nullptr, &ps),
               "Pixel shader");
         const char *bondShader = R"(
-cbuffer BondCamera : register(b0) { row_major float4x4 vp; float2 viewport; float width; float pad; float4 color; };
+cbuffer BondCamera : register(b0) { row_major float4x4 vp; float2 viewport; float width; float radius; float4 color; };
 struct I { float3 p:POSITION; };
-struct O { float4 p:SV_POSITION; };
-O bondVertex(I i) { O o; o.p=mul(float4(i.p,1),vp); return o; }
-[maxvertexcount(4)] void bondGeometry(line O input[2], inout TriangleStream<O> stream) {
- float2 delta=(input[1].p.xy/input[1].p.w-input[0].p.xy/input[0].p.w)*viewport;
- float lengthDelta=max(length(delta),1e-5); float2 perpendicular=float2(-delta.y,delta.x)/lengthDelta;
- float2 offset=perpendicular*width/viewport;
- O a=input[0],b=input[1];
- a.p.xy+=offset*a.p.w; b.p.xy+=offset*b.p.w; stream.Append(a); stream.Append(b);
- a=input[0]; b=input[1]; a.p.xy-=offset*a.p.w; b.p.xy-=offset*b.p.w; stream.Append(a); stream.Append(b);
+struct V { float3 p:POSITION; };
+struct O { float4 p:SV_POSITION; float3 normal:NORMAL; };
+V bondVertex(I i) { V o; o.p=i.p; return o; }
+void emit(float3 p,float3 n,inout TriangleStream<O> stream) {
+ O o; o.p=mul(float4(p,1),vp); o.normal=n; stream.Append(o);
 }
-float4 bondPixel():SV_TARGET { return color; }
+[maxvertexcount(72)] void bondGeometry(line V input[2], inout TriangleStream<O> stream) {
+ float3 pa=input[0].p, pb=input[1].p;
+ if (radius>0) {
+  float3 delta=pb-pa; float len=length(delta); if (len<1e-6) return;
+  float3 axis=delta/len;
+  float3 helper=abs(axis.z)<.85 ? float3(0,0,1) : float3(0,1,0);
+  float3 u=normalize(cross(axis,helper)), v=normalize(cross(axis,u));
+  const float tau=6.28318530718;
+  [unroll] for (int side=0;side<8;side++) {
+   float a0=tau*side/8, a1=tau*(side+1)/8;
+   float3 n0=cos(a0)*u+sin(a0)*v, n1=cos(a1)*u+sin(a1)*v;
+   float3 p0=pa+radius*n0, p1=pa+radius*n1, q0=pb+radius*n0, q1=pb+radius*n1;
+   emit(p0,n0,stream); emit(q0,n0,stream); emit(q1,n1,stream); stream.RestartStrip();
+   emit(p0,n0,stream); emit(q1,n1,stream); emit(p1,n1,stream); stream.RestartStrip();
+  }
+ } else {
+  float4 ca=mul(float4(pa,1),vp), cb=mul(float4(pb,1),vp);
+  float2 delta=(cb.xy/cb.w-ca.xy/ca.w)*viewport;
+  float lengthDelta=max(length(delta),1e-5); float2 perpendicular=float2(-delta.y,delta.x)/lengthDelta;
+  float2 offset=perpendicular*width/viewport;
+  O a,b; a.normal=0; b.normal=0; a.p=ca; b.p=cb;
+  a.p.xy+=offset*a.p.w; b.p.xy+=offset*b.p.w; stream.Append(a); stream.Append(b);
+  a.p=ca; b.p=cb; a.p.xy-=offset*a.p.w; b.p.xy-=offset*b.p.w; stream.Append(a); stream.Append(b);
+ }
+}
+float4 bondPixel(O i):SV_TARGET {
+ if (radius<=0) return color;
+ float3 n=normalize(i.normal), light=normalize(float3(-.32,.48,.82));
+ float diffuse=max(dot(n,light),0); float spec=pow(max(dot(n,normalize(light+float3(0,0,1))),0),24)*.16;
+ return float4(color.rgb*(.36+.64*diffuse)+spec,color.a);
+}
 )";
         ComPtr<ID3DBlob> bondV, bondP, bondG;
         check(D3DCompile(bondShader, strlen(bondShader), nullptr, nullptr, nullptr, "bondVertex", "vs_5_0",
@@ -724,6 +750,7 @@ float4 bondPixel():SV_TARGET { return color; }
             DirectX::XMStoreFloat4x4(&bondCamera.viewProjection, view * proj);
             bondCamera.viewport={float(t.w),float(t.h)};
             bondCamera.width=d.bondStyle.width;
+            bondCamera.radius=d.bondStyle.radius;
             bondCamera.color={d.bondStyle.color[0],d.bondStyle.color[1],d.bondStyle.color[2],d.bondStyle.color[3]};
             context->UpdateSubresource(bondConstants.Get(),0,nullptr,&bondCamera,0,0);
             UINT stride=sizeof(BondVertex), offset=0;

@@ -83,6 +83,8 @@ inline void writeDataTableCsv(const std::filesystem::path &path, const DataTable
 struct BondStyle {
     bool visible = true;
     float width = 1.5f;
+    // A positive radius selects a shaded world-space cylinder; zero keeps screen-space lines.
+    float radius = 0;
     std::array<float, 4> color{.72f,.78f,.86f,1.f};
 };
 struct Dataset {
@@ -565,6 +567,7 @@ struct Modifier {
     std::string outputProperty = "Computed property";
     bool discardExistingBonds = false;
     bool bondTypeCutoffsEnabled = false;
+    bool bondCylinders = false;
     std::vector<float> bondTypeCutoffs;
     int colorGradient = 0;
     bool colorAutoRange = true, colorSymmetricRange = false, colorReverse = false;
@@ -575,6 +578,7 @@ struct Modifier {
     int reduceOperation = 2; // min, max, mean, sum
     bool bondsVisible = true;
     float bondWidth = 1.5f;
+    float bondRadius = .08f;
     std::array<float,4> bondColor{.72f,.78f,.86f,1.f};
     std::array<float,3> assignColor{1.f,.15f,.12f};
     std::vector<uint32_t> manualSelection;
@@ -1735,10 +1739,15 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
             }
             if (m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) {
                 if (m.op == Op::CreateBonds) {
-                    if (!std::isfinite(m.bondWidth) || m.bondWidth < .5f || m.bondWidth > 12.f)
+                    if (!m.bondCylinders &&
+                        (!std::isfinite(m.bondWidth) || m.bondWidth < .5f || m.bondWidth > 12.f))
                         throw std::runtime_error("Bond line width must be between 0.5 and 12 pixels");
+                    if (m.bondCylinders &&
+                        (!std::isfinite(m.bondRadius) || m.bondRadius < .001f || m.bondRadius > 100.f))
+                        throw std::runtime_error("Bond cylinder radius must be between 0.001 and 100 units");
                     r.data.bondStyle.visible = m.bondsVisible;
                     r.data.bondStyle.width = m.bondWidth;
+                    r.data.bondStyle.radius = m.bondCylinders ? m.bondRadius : 0.f;
                     r.data.bondStyle.color = m.bondColor;
                     if (m.discardExistingBonds) r.data.bonds.clear();
                     double searchCutoff=m.value;
