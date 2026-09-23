@@ -274,6 +274,19 @@ int main() {
         require(waveResult.data.scalarProperties["Color coding"] ==
                     waveResult.data.scalarProperties["Coordination"],
                 "color coding publishes selected property values, not position coordinates");
+        auto inspectedPrefix = evaluatePrefix(wave, waveMods, 1);
+        require(inspectedPrefix.data.bonds.size() == 3 &&
+                    !inspectedPrefix.data.scalarProperties.contains("Color coding"),
+                "pipeline prefix evaluation exposes data immediately after its selected node");
+        auto finalPrefix = evaluatePrefix(wave, waveMods, waveMods.size());
+        require(finalPrefix.data.scalarProperties.at("Color coding") ==
+                    waveResult.data.scalarProperties.at("Color coding"),
+                "full-length pipeline prefix matches final evaluation");
+        bool invalidInspectionPrefixRejected = false;
+        try { evaluatePrefix(wave, waveMods, waveMods.size() + 1); }
+        catch (const std::runtime_error &) { invalidInspectionPrefixRejected = true; }
+        require(invalidInspectionPrefixRejected,
+                "pipeline inspection rejects node counts beyond the modifier stack");
         wave.vectorProperties["Velocity"]={{1,4,7},{2,5,8},{3,6,9},{4,7,10}};
         Modifier vectorColor{Op::ColorCoding}; vectorColor.property="Velocity.Y";
         auto vectorColorResult=evaluate(wave,{vectorColor});

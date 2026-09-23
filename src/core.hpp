@@ -1927,6 +1927,14 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
     if (activeNode) *activeNode = mods.size();
     return r;
 }
+inline PipelineResult evaluatePrefix(Dataset source, const std::vector<Modifier> &mods,
+                                     size_t nodeCount, std::atomic<bool> *cancel = nullptr,
+                                     std::atomic<size_t> *activeNode = nullptr) {
+    if (nodeCount > mods.size())
+        throw std::runtime_error("Pipeline inspection stage is out of range");
+    std::vector<Modifier> prefix(mods.begin(), mods.begin() + nodeCount);
+    return evaluate(std::move(source), prefix, cancel, activeNode);
+}
 inline std::pair<double, double> colorRangeAcrossFrames(
     size_t frameCount, const std::function<Dataset(size_t)> &readFrame,
     const std::vector<Modifier> &upstream, const std::string &property,

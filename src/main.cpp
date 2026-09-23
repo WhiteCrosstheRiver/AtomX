@@ -261,9 +261,20 @@ struct App {
     Target targets[4];
     std::future<Loaded> job;
     std::future<PipelineResult> pipelineJob;
+    std::future<PipelineResult> inspectorJob;
+    std::optional<PipelineResult> inspectorResult;
     std::atomic<bool> pipelineCancel{false};
+    std::atomic<bool> inspectorCancel{false};
     std::atomic<size_t> pipelineActiveNode{0};
+    std::atomic<size_t> inspectorActiveNode{0};
     bool pipelineBusy = false;
+    bool inspectorBusy = false;
+    bool pipelineDeferredForInspector = false;
+    int inspectorNode = -1;
+    uint64_t inspectorGeneration = 0;
+    std::string inspectorNodeId;
+    std::filesystem::path deferredLoadPath;
+    int deferredLoadFrame = 0;
     uint64_t pipelineGeneration = 0, pipelineJobGeneration = 0;
     std::vector<std::string> pipelineJobNodeIds;
     std::atomic<float> progress{0};
@@ -320,6 +331,8 @@ struct App {
         if (job.valid())
             job.wait();
         if (pipelineJob.valid()) pipelineJob.wait();
+        inspectorCancel = true;
+        if (inspectorJob.valid()) inspectorJob.wait();
         if (analysisJob.valid())
             analysisJob.wait();
         if (dxaJob.valid()) dxaJob.wait();
@@ -463,6 +476,28 @@ struct App {
                 return evaluate(std::move(input), executable, &pipelineCancel, &pipelineActiveNode);
             });
     }
+    void inspectPipelineNode(int nodeIndex) {
+        if (nodeIndex < 0 || nodeIndex >= int(mods.size()) || busy || indexing || pipelineBusy ||
+            inspectorBusy || inspectorJob.valid())
+            return;
+        std::vector<Modifier> executable;
+        executable.reserve(size_t(nodeIndex) + 1);
+        for (int i = 0; i <= nodeIndex; ++i)
+            executable.push_back(static_cast<const Modifier &>(mods[size_t(i)]));
+        Dataset input = source;
+        inspectorNode = nodeIndex;
+        inspectorNodeId = mods[size_t(nodeIndex)].id;
+        inspectorGeneration = pipelineGeneration;
+        inspectorCancel = false;
+        inspectorActiveNode = 0;
+        inspectorBusy = true;
+        inspectorResult.reset();
+        status = "Evaluating selected pipeline node for data inspection...";
+        inspectorJob = std::async(std::launch::async,
+            [this, input = std::move(input), executable = std::move(executable)]() mutable {
+                return evaluate(std::move(input), executable, &inspectorCancel, &inspectorActiveNode);
+            });
+    }
     void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
         const size_t first = dirtyFrom == SIZE_MAX
             ? (mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1))
@@ -474,10 +509,19 @@ struct App {
         }
         modifierGraph.markDirtyFrom(first);
         ++pipelineGeneration;
+        if (inspectorBusy) inspectorCancel = true;
+        inspectorResult.reset();
+        inspectorNode = -1;
+        inspectorNodeId.clear();
         staleResult = true;
         if (pipelineBusy) {
             pipelineCancel = true;
             status = "Cancelling outdated pipeline evaluation...";
+            return;
+        }
+        if (inspectorBusy) {
+            pipelineDeferredForInspector = true;
+            status = "Waiting for cancelled node inspection before updating the pipeline...";
             return;
         }
         launchPipeline();
@@ -580,6 +624,21 @@ struct App {
     void load(const std::filesystem::path &p, int frame = 0) {
         if (busy || p.empty())
             return;
+        if (inspectorBusy) {
+            inspectorCancel = true;
+            deferredLoadPath = p;
+            deferredLoadFrame = frame;
+            inspectorResult.reset();
+            inspectorNode = -1;
+            inspectorNodeId.clear();
+            status = "Waiting for node inspection to stop before loading data...";
+            return;
+        }
+        deferredLoadPath.clear();
+        pipelineDeferredForInspector = false;
+        inspectorResult.reset();
+        inspectorNode = -1;
+        inspectorNodeId.clear();
         staleBeforeLoad = staleResult;
         staleResult = true;
         indexing = p != path || frames.empty();
@@ -656,6 +715,37 @@ struct App {
             });
     }
     void poll() {
+        if (inspectorBusy && inspectorJob.valid() &&
+            inspectorJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            inspectorBusy = false;
+            try {
+                auto inspected = inspectorJob.get();
+                if (inspectorGeneration == pipelineGeneration && inspectorNode >= 0 &&
+                    inspectorNode < int(mods.size()) &&
+                    mods[size_t(inspectorNode)].id == inspectorNodeId) {
+                    inspectorResult = std::move(inspected);
+                    status = "Selected pipeline node output is ready for inspection";
+                } else {
+                    inspectorResult.reset();
+                    inspectorNode = -1;
+                    inspectorNodeId.clear();
+                }
+            } catch (const std::exception &e) {
+                inspectorResult.reset();
+                inspectorNode = -1;
+                inspectorNodeId.clear();
+                if (std::string(e.what()) != "Cancelled") error = e.what();
+            }
+            if (!inspectorBusy && !deferredLoadPath.empty()) {
+                auto queuedPath = std::move(deferredLoadPath);
+                const int queuedFrame = deferredLoadFrame;
+                deferredLoadFrame = 0;
+                load(queuedPath, queuedFrame);
+            } else if (!inspectorBusy && pipelineDeferredForInspector) {
+                pipelineDeferredForInspector = false;
+                launchPipeline();
+            }
+        }
         if (pipelineBusy && pipelineJob.valid() &&
             pipelineJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             const uint64_t finishedGeneration = pipelineJobGeneration;
@@ -1222,25 +1312,65 @@ struct App {
         ImGui::Text("%s particles  |  %zu selected", number(result.data.atoms.size()).c_str(), selectedCount);
         if (showTable) {
             ImGui::BeginChild("Inspector", {-1, dataH}, ImGuiChildFlags_Borders);
-            if (ImGui::BeginTabBar("Data")) {
+            std::string inspectLabel = "Final pipeline output";
+            if (inspectorNode >= 0 && inspectorNode < int(mods.size()))
+                inspectLabel = "Node " + std::to_string(inspectorNode + 1) + ": " +
+                               mods[size_t(inspectorNode)].displayName;
+            if (ImGui::BeginCombo("Inspect output", inspectLabel.c_str())) {
+                if (ImGui::Selectable("Final pipeline output", inspectorNode < 0)) {
+                    inspectorCancel = true;
+                    inspectorNode = -1;
+                    inspectorNodeId.clear();
+                    inspectorResult.reset();
+                }
+                for (size_t i = 0; i < mods.size(); ++i) {
+                    ImGui::PushID(mods[i].id.c_str());
+                    std::string label = "Node " + std::to_string(i + 1) + ": " + mods[i].displayName;
+                    ImGui::BeginDisabled(busy || indexing || pipelineBusy || inspectorBusy);
+                    const bool selected = inspectorNode == int(i);
+                    if (ImGui::Selectable(label.c_str(), selected)) inspectPipelineNode(int(i));
+                    ImGui::EndDisabled();
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            const PipelineResult *inspected = inspectorNode < 0 ? &result :
+                inspectorResult ? &*inspectorResult : nullptr;
+            if (inspectorBusy && inspectorNode >= 0) {
+                ImGui::TextDisabled("Evaluating the selected node output... this may temporarily use additional memory.");
+                const size_t stageCount = size_t(std::max(inspectorNode + 1, 1));
+                const size_t activeStage = std::min(inspectorActiveNode.load(), stageCount);
+                const float inspectionProgress = float(activeStage) / float(stageCount);
+                char overlay[48]{};
+                snprintf(overlay, sizeof(overlay), "%zu / %zu stages", activeStage, stageCount);
+                ImGui::ProgressBar(inspectionProgress, ImVec2(-1, 0), overlay);
+                if (ImGui::Button("Cancel node inspection")) inspectorCancel = true;
+            } else if (inspectorBusy) {
+                ImGui::TextDisabled("Cancelling the previous node inspection...");
+            } else if (!inspected) {
+                ImGui::TextDisabled("Node output is unavailable. Select it again after the pipeline is ready.");
+            }
+            if (inspected && (!inspectorBusy || inspectorNode < 0) && ImGui::BeginTabBar("Data")) {
                 if (ImGui::BeginTabItem("Particles")) {
+                    const size_t inspectedSelected = std::count(inspected->selected.begin(),
+                                                                 inspected->selected.end(), uint8_t(1));
                     ImGui::TextDisabled("%s rows  |  %zu selected%s",
-                                        number(result.data.atoms.size()).c_str(), selectedCount,
-                                        source.sampled() ? "  |  sampled preview" : "");
+                                        number(inspected->data.atoms.size()).c_str(), inspectedSelected,
+                                        inspected->data.sampled() ? "  |  sampled preview" : "");
                     struct PropertyColumn { std::string name; int component; bool vector; bool assignedColor=false; };
                     std::vector<PropertyColumn> properties;
                     std::vector<std::string> scalarNames, vectorNames;
-                    for (const auto &[name, values] : result.data.scalarProperties)
-                        if (values.size() == result.data.atoms.size()) scalarNames.push_back(name);
-                    for (const auto &[name, values] : result.data.vectorProperties)
-                        if (values.size() == result.data.atoms.size()) vectorNames.push_back(name);
+                    for (const auto &[name, values] : inspected->data.scalarProperties)
+                        if (values.size() == inspected->data.atoms.size()) scalarNames.push_back(name);
+                    for (const auto &[name, values] : inspected->data.vectorProperties)
+                        if (values.size() == inspected->data.atoms.size()) vectorNames.push_back(name);
                     std::sort(scalarNames.begin(), scalarNames.end());
                     std::sort(vectorNames.begin(), vectorNames.end());
                     for (const auto &name : scalarNames) properties.push_back({name, -1, false});
                     for (const auto &name : vectorNames)
                         for (int component = 0; component < 3; ++component)
                             properties.push_back({name, component, true});
-                    if (result.data.particleColors.size()==result.data.atoms.size())
+                    if (inspected->data.particleColors.size()==inspected->data.atoms.size())
                         for (int component=0;component<3;++component)
                             properties.push_back({"Color",component,true,true});
                     if (ImGui::BeginTable("Atoms", int(5 + properties.size()),
@@ -1257,14 +1387,14 @@ struct App {
                         }
                         ImGui::TableHeadersRow();
                         ImGuiListClipper clip;
-                        clip.Begin(int(result.data.atoms.size()));
+                        clip.Begin(int(inspected->data.atoms.size()));
                         while (clip.Step())
                             for (int j = clip.DisplayStart; j < clip.DisplayEnd; ++j) {
-                                auto a = result.data.atoms[j];
+                                auto a = inspected->data.atoms[j];
                                 ImGui::TableNextRow();
                                 ImGui::TableNextColumn();
-                                if (ImGui::Selectable(std::to_string(j).c_str(),
-                                                      result.selected[j] != 0,
+                                if (inspectorNode < 0 && ImGui::Selectable(std::to_string(j).c_str(),
+                                                      inspected->selected[j] != 0,
                                                       ImGuiSelectableFlags_SpanAllColumns)) {
                                     checkpoint();
                                     size_t nodeIndex = mods.size();
@@ -1287,9 +1417,9 @@ struct App {
                                     }
                                     modifierGraph.selected=nodeIndex;
                                     update(nodeIndex);
-                                }
+                                } else if (inspectorNode >= 0) ImGui::Text("%d", j);
                                 ImGui::TableNextColumn();
-                                ImGui::TextUnformatted(result.data.species[a.type].c_str());
+                                ImGui::TextUnformatted(inspected->data.species[a.type].c_str());
                                 ImGui::TableNextColumn();
                                 ImGui::Text("%.5f", a.x);
                                 ImGui::TableNextColumn();
@@ -1299,14 +1429,14 @@ struct App {
                                 for (const auto &column : properties) {
                                     ImGui::TableNextColumn();
                                     if (column.assignedColor) {
-                                        const auto &color=result.data.particleColors[size_t(j)];
+                                        const auto &color=inspected->data.particleColors[size_t(j)];
                                         const float component=column.component==0?color.x:column.component==1?color.y:color.z;
                                         if (component<0) ImGui::TextDisabled("type"); else ImGui::Text("%.4f",component);
                                     } else if (!column.vector) {
-                                        const auto &values = result.data.scalarProperties.at(column.name);
+                                        const auto &values = inspected->data.scalarProperties.at(column.name);
                                         ImGui::Text("%.6g", values[j]);
                                     } else {
-                                        const auto &v = result.data.vectorProperties.at(column.name)[j];
+                                        const auto &v = inspected->data.vectorProperties.at(column.name)[j];
                                         ImGui::Text("%.6g", column.component == 0 ? v.x : column.component == 1 ? v.y : v.z);
                                     }
                                 }
@@ -1319,33 +1449,33 @@ struct App {
                     ImGui::TextDisabled("Cell vectors (a, b, c)");
                     for (int row = 0; row < 3; row++)
                         ImGui::Text("%c  %12.4f   %12.4f   %12.4f", 'a' + row,
-                                    result.data.cell[row * 3],
-                                    result.data.cell[row * 3 + 1], result.data.cell[row * 3 + 2]);
+                                    inspected->data.cell[row * 3],
+                                    inspected->data.cell[row * 3 + 1], inspected->data.cell[row * 3 + 2]);
                     ImGui::Separator();
-                    ImGui::Text("Origin: %.6g   %.6g   %.6g", result.data.origin.x,
-                                result.data.origin.y, result.data.origin.z);
-                    ImGui::Text("PBC: %s / %s / %s", result.data.pbc[0] ? "X" : "-",
-                                result.data.pbc[1] ? "Y" : "-", result.data.pbc[2] ? "Z" : "-");
+                    ImGui::Text("Origin: %.6g   %.6g   %.6g", inspected->data.origin.x,
+                                inspected->data.origin.y, inspected->data.origin.z);
+                    ImGui::Text("PBC: %s / %s / %s", inspected->data.pbc[0] ? "X" : "-",
+                                inspected->data.pbc[1] ? "Y" : "-", inspected->data.pbc[2] ? "Z" : "-");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Global attributes")) {
-                    ImGui::TextWrapped("%s", source.comment.c_str());
+                    ImGui::TextWrapped("%s", inspected->data.comment.c_str());
                     std::vector<std::string> names;
-                    names.reserve(result.data.globalAttributes.size());
-                    for (const auto &[name, value] : result.data.globalAttributes) names.push_back(name);
+                    names.reserve(inspected->data.globalAttributes.size());
+                    for (const auto &[name, value] : inspected->data.globalAttributes) names.push_back(name);
                     std::sort(names.begin(), names.end());
                     for (const auto &name : names)
-                        ImGui::Text("%s: %.8g", name.c_str(), result.data.globalAttributes.at(name));
+                        ImGui::Text("%s: %.8g", name.c_str(), inspected->data.globalAttributes.at(name));
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Bonds")) {
-                    ImGui::Text("%zu bonds", result.data.bonds.size());
+                    ImGui::Text("%zu bonds", inspected->data.bonds.size());
                     if (ImGui::BeginTable("Bond rows", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV)) {
                         for (const char *name : {"Particle A", "Particle B", "Image X", "Image Y", "Image Z"}) ImGui::TableSetupColumn(name);
                         ImGui::TableHeadersRow();
-                        ImGuiListClipper clip; clip.Begin(int(result.data.bonds.size()));
+                        ImGuiListClipper clip; clip.Begin(int(inspected->data.bonds.size()));
                         while (clip.Step()) for (int j = clip.DisplayStart; j < clip.DisplayEnd; ++j) {
-                            const auto &bond = result.data.bonds[size_t(j)];
+                            const auto &bond = inspected->data.bonds[size_t(j)];
                             ImGui::TableNextRow();
                             for (int column = 0; column < 5; ++column) {
                                 ImGui::TableNextColumn();
@@ -1358,9 +1488,9 @@ struct App {
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Data Tables")) {
-                    if (result.data.tables.empty()) ImGui::TextDisabled("No analysis tables have been produced.");
-                    for (size_t tableIndex = 0; tableIndex < result.data.tables.size(); ++tableIndex) {
-                        const auto &table = result.data.tables[tableIndex];
+                    if (inspected->data.tables.empty()) ImGui::TextDisabled("No analysis tables have been produced at this output.");
+                    for (size_t tableIndex = 0; tableIndex < inspected->data.tables.size(); ++tableIndex) {
+                        const auto &table = inspected->data.tables[tableIndex];
                         ImGui::PushID(int(tableIndex));
                         if (ImGui::CollapsingHeader(table.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
                             if (ImGui::SmallButton("Export CSV...")) {
@@ -2555,7 +2685,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
         int adapter = -1, smoke = 0;
         bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
-             smokeColorLegend = false, smokeBondPairs = false;
+             smokeColorLegend = false, smokeBondPairs = false, smokeInspectorNode = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
@@ -2565,6 +2695,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 smokeExport = true;
             else if (a == L"--smoke-color-legend") smokeColorLegend = true;
             else if (a == L"--smoke-bond-pairs") smokeBondPairs = true;
+            else if (a == L"--smoke-inspector-node") smokeInspectorNode = true;
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -2613,6 +2744,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             app.showCatalog = smokeCatalog;
             app.showSettings = smokeSettings;
             app.showDataExport = smokeExport;
+            if (smokeInspectorNode) {
+                app.showTable = true;
+                app.add(Op::Translate);
+            }
             if (smokeColorLegend) app.add(Op::ColorCoding);
             if (smokeBondPairs) {
                 app.add(Op::CreateBonds);
@@ -2661,6 +2796,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
             bool done = false;
             int ticks = 0;
+            bool inspectorSmokeStarted = false;
             while (!done) {
                 MSG msg;
                 while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -2689,12 +2825,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 } catch (const std::exception &e) {
                     app.error = e.what();
                 }
+                if (smokeInspectorNode && !inspectorSmokeStarted && !app.busy &&
+                    !app.indexing && !app.pipelineBusy) {
+                    app.inspectPipelineNode(0);
+                    inspectorSmokeStarted = true;
+                }
                 ImGui::Render();
                 float clear[4] = {.15f, .17f, .2f, 1};
                 gpu.context->OMSetRenderTargets(1, gpu.back.GetAddressOf(), nullptr);
                 gpu.context->ClearRenderTargetView(gpu.back.Get(), clear);
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-                if (smoke && !app.busy && !app.pipelineBusy && ++ticks >= smoke) {
+                if (smoke && !app.busy && !app.pipelineBusy && !app.inspectorBusy &&
+                    (!smokeInspectorNode || inspectorSmokeStarted) && ++ticks >= smoke) {
                     if (!app.error.empty())
                         throw std::runtime_error(app.error);
                     if (!shot.empty()) {
