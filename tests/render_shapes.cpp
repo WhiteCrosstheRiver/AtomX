@@ -207,6 +207,30 @@ int main(int argc, char **argv) {
         renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
         if (imageHash(t)==styledBondImage)
             throw std::runtime_error("Bond appearance settings must change rendered output");
+        atomx::Dataset typed;
+        typed.species = {"A", "B"};
+        typed.atoms = {{-.55f, 0, 0, 0}, {.55f, 0, 0, 1}};
+        typed.bounds();
+        renderer.upload(typed, {});
+        renderer.resetStyles(2);
+        renderer.styles[0].color = {1, .05f, .05f, 1};
+        renderer.styles[0].visual = {.22f, 0, 1, 0};
+        renderer.styles[0].axes = {1, 1, 1, 0};
+        renderer.styles[1].color = {.05f, .2f, 1, 1};
+        renderer.styles[1].visual = {.42f, 2, 1, 0};
+        renderer.styles[1].axes = {1.8f, .65f, 1, 0};
+        renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
+        const auto perTypeImage = imageHash(t);
+        renderer.styles[0].visual[2] = 0;
+        renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
+        const auto hiddenTypeImage = imageHash(t);
+        if (hiddenTypeImage == perTypeImage)
+            throw std::runtime_error("Per-type visibility, color, radius, shape and axes must render independently");
+        renderer.styles[0].visual[2] = 1;
+        renderer.styles[1].color = {.05f, 1, .1f, 1};
+        renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
+        if (imageHash(t) == perTypeImage)
+            throw std::runtime_error("Changing one particle type appearance must update GPU output");
         renderer.upload(d, {});
         renderer.styles[0].visual[2] = 0;
         renderer.draw(t, d, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
@@ -227,7 +251,7 @@ int main(int argc, char **argv) {
         };
         if (readFile(legendPath)==readFile(reversedLegendPath))
             throw std::runtime_error("PNG color legend must reflect reversed/discrete gradient settings");
-        std::cout << "PASS: seven GPU shapes, property/assigned colors, bond lines, legends, color, width and visibility rendered\n";
+        std::cout << "PASS: seven GPU shapes, per-type styles, property/assigned colors, bond lines, legends, color, width and visibility rendered\n";
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';
         DestroyWindow(w);
