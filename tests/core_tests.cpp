@@ -18,6 +18,10 @@ int main() {
                     cnaOutputs[1].kind==DataObject::Kind::GlobalAttributes &&
                     cnaOutputs[2].kind==DataObject::Kind::Table,
                 "CNA pipeline metadata declares every published result object");
+        const auto coordinationOutputs=modifierOutputs(Modifier{Op::CoordinationAnalysis},3);
+        require(coordinationOutputs.size()==3 &&
+                    coordinationOutputs[2].kind==DataObject::Kind::Table,
+                "coordination pipeline metadata declares its distribution data table");
         ModifierNode colorSnapshot{Op::ColorCoding};
         colorSnapshot.id="stable-color-node";
         colorSnapshot.colorAllFramesRange=true;
@@ -169,8 +173,10 @@ int main() {
         auto coordinationPipeline = evaluate(fcc, {{Op::CoordinationAnalysis,true,.8f}});
         require(coordinationPipeline.data.scalarProperties.at("Coordination").size() == fcc.atoms.size() &&
                     coordinationPipeline.data.scalarProperties.at("Coordination")[0] == 12 &&
-                    coordinationPipeline.data.globalAttributes.at("CoordinationAnalysis.mean") == 12,
-                "coordination modifier publishes per-particle and global results");
+                    coordinationPipeline.data.globalAttributes.at("CoordinationAnalysis.mean") == 12 &&
+                    coordinationPipeline.data.tables.back().rows==
+                        std::vector<std::vector<std::string>>({{"12",std::to_string(fcc.atoms.size()),"1"}}),
+                "coordination modifier publishes per-particle, global, and distribution-table results");
         auto clusterPipeline = evaluate(fcc, {{Op::ClusterAnalysis,true,.8f}});
         require(clusterPipeline.data.globalAttributes.at("ClusterAnalysis.count") == 1 &&
                     clusterPipeline.data.scalarProperties.at("Cluster").size() == fcc.atoms.size() &&

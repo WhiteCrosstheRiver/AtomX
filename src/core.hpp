@@ -762,6 +762,7 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
     if (modifier.op==Op::CoordinationAnalysis) {
         add(Kind::Particles,"Coordination");
         add(Kind::GlobalAttributes,"Coordination statistics");
+        add(Kind::Table,"Coordination number distribution");
     }
     if (modifier.op==Op::ClusterAnalysis) {
         add(Kind::Particles,"Cluster IDs");
@@ -2015,6 +2016,19 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     r.data.scalarProperties["Coordination"] = std::move(values);
                     r.data.globalAttributes["CoordinationAnalysis.mean"] = analysis.meanCoordination;
                     r.data.globalAttributes["CoordinationAnalysis.neighbor_pairs"] = double(analysis.bonds);
+                    std::map<uint32_t,uint64_t> counts;
+                    for (size_t i=0;i<analysis.coordination.size();++i) {
+                        if ((i&65535)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+                        ++counts[analysis.coordination[i]];
+                    }
+                    DataTable table; table.name="Coordination number distribution";
+                    table.columns={"Coordination number","Particle count","Fraction"};
+                    const double total=double(analysis.coordination.size());
+                    for (const auto &[number,count]:counts)
+                        table.rows.push_back({std::to_string(number),std::to_string(count),
+                            total>0 ? formatDataNumber(double(count)/total) : "0"});
+                    r.data.globalAttributes["CoordinationAnalysis.distinct_numbers"]=double(counts.size());
+                    r.data.tables.push_back(std::move(table));
                 } else if (m.op == Op::ClusterAnalysis) {
                     std::vector<uint64_t> counts(size_t(analysis.clusters)+1);
                     for (auto id:analysis.cluster) if (id && id<counts.size()) ++counts[id];
