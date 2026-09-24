@@ -251,3 +251,10 @@
 - 单元回归：Slice 严格半空间/闭区间/反向/斜法向/零法向错误/选区路径/Operate-on 关闭无操作；Replicate 2×2×2=864、3×1×2=648 与盒子缩放、双轴周期键重映射；修饰器栈组合（顺序相关、上游重算、双节点参数隔离、插入置脏、禁用上游）。
 - GUI 对照：AtomX 与 OVITO 的 Slice 面板逐控件对齐（Cartesian/Miller indices、Distance、Normal x/y/z、Slab width、Reverse orientation、Create selection、Apply to selection only、Visualize plane、Center in simulation cell、计数行、Operate on）；视口半透明切平面渲染验证（见 docs/parity/atomx/v-p1-*.png 与 docs/parity/ovito/v-*.png）。
 - 未验证/遗留：Align view to plane / Align plane to view / Pick three points 未实现；多 Slice 节点时结果行仅显示最后执行节点；Intel GPU 未在本机验证。
+
+## 2026-09-25 N1 验证（Centrosymmetry parameter）
+
+- 数值基准对照（docs/parity/scripts/numeric_baseline.py + 独立暴力参考）：完美 FCC/BCC 全原子 0（<1e-9）；位移 0.5 Å 原子 6.0±1e-3、其 12 邻居 0.25；空位壳层 6.48±1e-2（a²/2 解析值）；热扰动样本逐原子与暴力参考一致（1e-6）。
+- 回归发现与修复：GUI 验收发现少数原子 CSP 达 134（真值 max 1.91）。根因是 XYZ 读取器把缺省 `pbc` 属性默认为非周期（OVITO 默认周期），已修复——该修复同时惠及 CNA/RDF/配位数等全部邻域分析。引擎侧同时加入自适应截断增长重试与欠配位回退（even≥4 用现邻计算，否则 0 并计入 Centrosymmetry.undercoordinated_particles）。
+- GUI 复验：test.xyz 上 CSP 直方图范围 0.134–1.77（修复前 0.17–134.3），与暴力参考同量级；面板控件（邻居数/两模式/仅选中/橙色直方图）与 OVITO 实测一致。
+- 构建门禁全绿；遗留：面板直方图样式较 OVITO 简化；欠配位回退行为为自定文档选择（OVITO 文档未定义）。

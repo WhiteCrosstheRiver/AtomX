@@ -38,7 +38,7 @@ M13,Modification,Smooth trajectory,,docs/parity/ovito/,partial,todo,todo,todo,to
 M14,Modification,Unwrap trajectories,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,N3,,,,Stable-ID PBC unwrap across frames
 M15,Modification,Wrap at periodic boundaries,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Partial PBC axes handled
 S01,Structure identification,Ackland-Jones analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-S02,Structure identification,Centrosymmetry parameter,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,N1,,,,Pair-minimization CSP over 12/8 neighbors
+S02,Structure identification,Centrosymmetry parameter,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,N1,a07407d,Histogram panel simpler than OVITO; under-coordinated fallback documented (even>=4 else 0 + counter)
 S03,Structure identification,Chill+,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,Needs water/bond topology model
 S04,Structure identification,Common neighbor analysis,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Fixed cutoff; no adaptive mode; 128-neighbor cap
 S05,Structure identification,Identify diamond structure,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
