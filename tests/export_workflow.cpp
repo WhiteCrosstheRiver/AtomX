@@ -160,7 +160,7 @@ int main() {
                 const auto item=found->second;
                 requireExport(item.id!=0,"interactive control must expose a stable nonzero ImGui ID");
                 requireExport(item.max.x>item.min.x && item.max.y>item.min.y,
-                              "interactive UI control has an empty rectangle");
+                              ("interactive UI control has an empty rectangle: "+name).c_str());
                 requireExport(item.min.x>=0 && item.min.y>=0 &&
                                   item.max.x<=guiIO.DisplaySize.x && item.max.y<=guiIO.DisplaySize.y,
                               ("interactive UI control exceeds application bounds: "+name).c_str());
@@ -299,6 +299,45 @@ int main() {
             uiScale=1.f;
             ImGui::GetStyle()=baseStyle;
             guiIO.DisplaySize={1560,1000};
+            frame();
+
+            strcpy_s(app.modifierSearch,"Scatter plot");
+            click("pipeline.add-modification");
+            frame();
+            requireExport(app.uiTestItems.contains("catalog.Scatter plot"),
+                          "Scatter plot is available as an executable Analysis catalog operation");
+            click("catalog.Scatter plot");
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            const auto scatterNodeId=app.mods.back().id;
+            requireExport(app.mods.back().op==Op::ScatterPlot &&
+                              app.result.data.tables.back().name=="Scatter plot: Position.X vs Position.Y" &&
+                              app.result.data.tables.back().rows.size()==1 &&
+                              app.uiTestItems.contains("pipeline.scatter-x."+scatterNodeId) &&
+                              app.uiTestItems.contains("pipeline.scatter-y."+scatterNodeId) &&
+                              app.uiTestItems.contains("pipeline.scatter-selected."+scatterNodeId),
+                          "adding Scatter plot computes a data table and exposes per-node property/selection settings");
+            app.showTable=true;
+            app.histogramPreviewTab=true;
+            frame(); // SetSelected queues tab focus at the end of the ImGui frame.
+            frame();
+            requireExport(!app.histogramPreviewTab,
+                          "ImGui SetSelected opens the Data Tables inspector tab");
+            requireExport(app.uiTestItems.contains("inspector.scatter-chart"),
+                          "Data Tables inspector draws the actual scatter chart for the pipeline result");
+            const auto scatterChartRect=app.uiTestItems.at("inspector.scatter-chart");
+            const bool scatterChartFits=scatterChartRect.max.x>scatterChartRect.min.x &&
+                              scatterChartRect.max.y>scatterChartRect.min.y &&
+                              scatterChartRect.min.x>=0 && scatterChartRect.min.y>=0 &&
+                              scatterChartRect.max.x<=guiIO.DisplaySize.x &&
+                              scatterChartRect.max.y<=guiIO.DisplaySize.y;
+            requireExport(scatterChartFits,
+                          ("scatter chart rectangle "+std::to_string(scatterChartRect.min.x)+","+
+                           std::to_string(scatterChartRect.min.y)+"-"+
+                           std::to_string(scatterChartRect.max.x)+","+
+                           std::to_string(scatterChartRect.max.y)+" in display "+
+                           std::to_string(guiIO.DisplaySize.x)+"x"+
+                           std::to_string(guiIO.DisplaySize.y)).c_str());
 
             const size_t previouslyPublishedAtoms=app.result.data.atoms.size();
             const size_t previouslyPublishedTableRows=app.result.data.tables.back().rows.size();

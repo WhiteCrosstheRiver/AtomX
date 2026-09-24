@@ -231,3 +231,9 @@
 - 同一进程内交互流程在 1280×900、1560×1000、1600×1000（1.5× ImGui 样式缩放）和 1920×1080（2×样式缩放）下重复点击 Copy/Delete 并检查其控件边界。本项验证窗口宽度与 ImGui 几何缩放，不等同于操作系统 DPI、字体重建或真实桌面分辨率测试。
 - 异步管线回归在有效 RDF 结果后加入参数非法的 Scale 节点和下游非法 Reduce property 节点；等待 App 实际轮询后台任务后，断言失败归属 Scale、下游节点未报错、旧粒子和表格结果保持不变且 `staleResult` 仍置位。
 - `build.ps1` 五组核心、格式、GPU 形状和导出/ImGui 交互测试全部通过；GPU 组运行于 NVIDIA GeForce RTX 5090 D v2。本测试验证进程内 ImGui 事件路由，不声称 Windows 桌面鼠标注入、无障碍树、Intel 硬件或其他阶段功能已验收。
+
+### Scatter plot Pipeline 功能验证
+
+- `core_tests` 使用 `Position.X` 对 `Velocity.Z` 验证输入选区筛选、稳定的粒子索引列、选区不被修改、样本数/绘制数统计、上游属性缺失、空选区、NaN 过滤及取消响应。
+- 250,001 对有限输入验证 Data Table 明确标注确定性预览，输出固定 250,000 行，同时保留精确总样本数。Pipeline 输出元数据声明 Data Table 和统计对象。
+- `export_workflow` 通过 Add modification 下拉真实添加 Scatter plot，等待实际后台重算，检查生成表格及 X/Y/selected 参数控件，再打开 Data Tables 页面并确认散点图控件已绘制。CSV 使用同一张结果表；超限时导出的是明确标注的预览样本，不是所有输入点。

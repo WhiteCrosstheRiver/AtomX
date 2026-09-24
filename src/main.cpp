@@ -592,7 +592,8 @@ struct App {
                                   : modifier.op == Op::CoordinationAnalysis || modifier.op == Op::ClusterAnalysis ||
                                             modifier.op == Op::RadialDistribution || modifier.op == Op::Histogram ||
                                             modifier.op == Op::ReduceProperty || modifier.op == Op::CommonNeighborAnalysis ||
-                                            modifier.op == Op::BondLengthDistribution || modifier.op == Op::BondAngleDistribution
+                                            modifier.op == Op::BondLengthDistribution || modifier.op == Op::BondAngleDistribution ||
+                                            modifier.op == Op::ScatterPlot
                                         ? "Analysis"
                                         : "Modification";
         return node;
@@ -1358,7 +1359,8 @@ struct App {
         auto avail = ImGui::GetContentRegionAvail();
         float dataH = showTable ? U(280) : 0;
         float gap = ImGui::GetStyle().ItemSpacing.y;
-        float sceneH = std::max(U(150), avail.y - dataH - U(128) - ImGui::GetFrameHeight() - gap*(showTable ? 4 : 3));
+        const float sceneChrome = U(showTable ? 278.f : 128.f);
+        float sceneH = std::max(U(150), avail.y - dataH - sceneChrome - ImGui::GetFrameHeight() - gap*(showTable ? 4 : 3));
         if (quad) {
             float vw = (avail.x - ImGui::GetStyle().ItemSpacing.x) * .5f, vh = (sceneH - gap) * .5f;
             viewport(0, vw, vh);
@@ -1566,8 +1568,9 @@ struct App {
                     }
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Data Tables", nullptr,
-                                        histogramPreviewTab ? ImGuiTabItemFlags_SetSelected : 0)) {
+                const bool dataTablesOpen=ImGui::BeginTabItem("Data Tables", nullptr,
+                                        histogramPreviewTab ? ImGuiTabItemFlags_SetSelected : 0);
+                if (dataTablesOpen) {
                     histogramPreviewTab = false;
                     if (inspected->data.tables.empty()) ImGui::TextDisabled("No analysis tables have been produced at this output.");
                     for (size_t tableIndex = 0; tableIndex < inspected->data.tables.size(); ++tableIndex) {
@@ -1632,6 +1635,56 @@ struct App {
                                     int(visibleBins.size()), 0, nullptr, 0, scaleMaximum, {-1, U(72)});
                                 if (ImGui::IsItemHovered())
                                     ImGui::SetTooltip("Bin centers are listed in the table below.");
+                            }
+                            if (table.name.rfind("Scatter plot: ",0)==0 &&
+                                table.columns.size()>=2 && !table.rows.empty()) {
+                                std::vector<std::pair<double,double>> points;
+                                points.reserve(table.rows.size());
+                                double minX=std::numeric_limits<double>::infinity();
+                                double maxX=-minX,minY=minX,maxY=-minX;
+                                for (const auto &row:table.rows) {
+                                    if (row.size()<2) continue;
+                                    const double x=std::stod(row[0]), y=std::stod(row[1]);
+                                    points.emplace_back(x,y);
+                                    minX=std::min(minX,x); maxX=std::max(maxX,x);
+                                    minY=std::min(minY,y); maxY=std::max(maxY,y);
+                                }
+                                if (!points.empty()) {
+                                    const ImVec2 chartSize{ImGui::GetContentRegionAvail().x,U(150)};
+                                    ImGui::InvisibleButton("##scatter-plot",chartSize);
+                                    recordUiTestItem("inspector.scatter-chart","##scatter-plot");
+                                    const ImVec2 chartMin=ImGui::GetItemRectMin();
+                                    const ImVec2 chartMax=ImGui::GetItemRectMax();
+                                    auto *draw=ImGui::GetWindowDrawList();
+                                    draw->AddRectFilled(chartMin,chartMax,ImGui::GetColorU32(ImGuiCol_FrameBg),U(3));
+                                    draw->AddRect(chartMin,chartMax,ImGui::GetColorU32(ImGuiCol_Border),U(3));
+                                    const float pad=U(12), innerW=std::max(1.f,chartMax.x-chartMin.x-pad*2),
+                                                innerH=std::max(1.f,chartMax.y-chartMin.y-pad*2);
+                                    const double scaleX=std::max(std::abs(minX),std::abs(maxX));
+                                    const double scaleY=std::max(std::abs(minY),std::abs(maxY));
+                                    const double loX=scaleX?minX/scaleX:0, hiX=scaleX?maxX/scaleX:1;
+                                    const double loY=scaleY?minY/scaleY:0, hiY=scaleY?maxY/scaleY:1;
+                                    const double spanX=hiX-loX, spanY=hiY-loY;
+                                    const size_t step=std::max<size_t>(1,(points.size()+29999)/30000);
+                                    const ImU32 pointColor=ImGui::GetColorU32(accent);
+                                    for (size_t i=0;i<points.size();i+=step) {
+                                        const double x=scaleX?points[i].first/scaleX:0;
+                                        const double y=scaleY?points[i].second/scaleY:0;
+                                        const float fx=float(spanX>0?(x-loX)/spanX:.5);
+                                        const float fy=float(spanY>0?(y-loY)/spanY:.5);
+                                        draw->AddCircleFilled({chartMin.x+pad+std::clamp(fx,0.f,1.f)*innerW,
+                                                               chartMax.y-pad-std::clamp(fy,0.f,1.f)*innerH},
+                                                              U(1.8f),pointColor);
+                                    }
+                                    draw->AddText({chartMin.x+pad,chartMin.y+pad},
+                                                  ImGui::GetColorU32(ImGuiCol_TextDisabled),table.columns[1].c_str());
+                                    draw->AddText({chartMax.x-pad-U(80),chartMax.y-pad-U(14)},
+                                                  ImGui::GetColorU32(ImGuiCol_TextDisabled),table.columns[0].c_str());
+                                    if (ImGui::IsItemHovered())
+                                        ImGui::SetTooltip("%zu plotted pairs%s",points.size(),
+                                            table.name.find("deterministic preview")!=std::string::npos
+                                                ? " (deterministic preview subset)" : "");
+                                }
                             }
                             if (ImGui::BeginTable("table", int(table.columns.size()), ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, {-1, U(240)})) {
                                 for (const auto &column : table.columns) ImGui::TableSetupColumn(column.c_str());
@@ -1950,6 +2003,25 @@ struct App {
                             ImGui::TextDisabled(m.op==Op::BondLengthDistribution ?
                                 "Density is normalized per length unit." : "Density is normalized per degree.");
                         ImGui::TextWrapped("Uses explicit pipeline bonds, including periodic image shifts. Add Create bonds upstream if the dataset has no bond topology.");
+                    }
+                    if (m.op==Op::ScatterPlot) {
+                        auto edited=m;
+                        bool changed=colorPropertyCombo("X property",edited.scatterXProperty,true);
+                        recordUiTestItem(std::string("pipeline.scatter-x.")+m.id,"X property");
+                        changed|=colorPropertyCombo("Y property",edited.scatterYProperty,true);
+                        recordUiTestItem(std::string("pipeline.scatter-y.")+m.id,"Y property");
+                        if (ImGui::Checkbox("Use only selected particles",&edited.scatterSelectedOnly))
+                            changed=true;
+                        recordUiTestItem(std::string("pipeline.scatter-selected.")+m.id,
+                                         "Use only selected particles");
+                        ImGui::TextDisabled("Non-finite pairs are skipped; large plots use a deterministic exported preview sample.");
+                        if (changed) {
+                            checkpoint();
+                            m.scatterXProperty=std::move(edited.scatterXProperty);
+                            m.scatterYProperty=std::move(edited.scatterYProperty);
+                            m.scatterSelectedOnly=edited.scatterSelectedOnly;
+                            update();
+                        }
                     }
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
                         auto edited = m;
@@ -2804,7 +2876,8 @@ struct App {
                 operation(Op::RadialDistribution,"Compute a periodic 3D radial distribution table from the current pipeline data.");
                 operation(Op::ReduceProperty,"Reduce a scalar particle property to a global minimum, maximum, mean, or sum.");
                 operation(Op::CoordinationAnalysis,"Compute periodic neighbor counts and publish the Coordination particle property.");
-                for (auto name : {"Scatter plot", "Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
+                operation(Op::ScatterPlot,"Plot two upstream particle properties and export the finite data pairs as a table; large inputs are deterministically sampled.");
+                for (auto name : {"Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Modification");

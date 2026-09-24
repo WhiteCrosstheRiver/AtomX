@@ -719,6 +719,71 @@ int main() {
         selectedHistogram.histogramNormalization=1;
         Modifier chosenParticles{Op::ManualSelection};
         chosenParticles.manualSelection={1,3};
+        Modifier selectedScatter{Op::ScatterPlot};
+        selectedScatter.scatterXProperty="Position.X";
+        selectedScatter.scatterYProperty="Velocity.Z";
+        selectedScatter.scatterSelectedOnly=true;
+        const auto selectedScatterResult=evaluate(wave,{chosenParticles,selectedScatter});
+        const auto &scatterTable=selectedScatterResult.data.tables.back();
+        require(scatterTable.columns==std::vector<std::string>({"Position.X","Velocity.Z","Particle index"}) &&
+                    scatterTable.rows.size()==2 && scatterTable.rows[0]==std::vector<std::string>({"1","5","1"}) &&
+                    scatterTable.rows[1]==std::vector<std::string>({"0","11","3"}) &&
+                    selectedScatterResult.data.globalAttributes.at("ScatterPlot.samples")==2 &&
+                    selectedScatterResult.data.globalAttributes.at("ScatterPlot.plotted")==2 &&
+                    selectedScatterResult.selected==std::vector<uint8_t>({0,1,0,1}),
+                "scatter plot publishes selected finite property pairs and preserves the input selection");
+        const auto scatterOutputs=modifierOutputs(selectedScatter,1);
+        require(std::any_of(scatterOutputs.begin(),scatterOutputs.end(),[](const DataObject &output) {
+                    return output.kind==DataObject::Kind::Table;
+                }) && std::any_of(scatterOutputs.begin(),scatterOutputs.end(),[](const DataObject &output) {
+                    return output.kind==DataObject::Kind::GlobalAttributes;
+                }),
+                "scatter plot node metadata declares its exported data table and sample statistics");
+        Modifier noScatterPoints{Op::ManualSelection};
+        Modifier selectedEmptyScatter=selectedScatter;
+        bool selectedScatterEmptyRejected=false;
+        try { (void)evaluate(wave,{noScatterPoints,selectedEmptyScatter}); }
+        catch (const ModifierExecutionError &e) {
+            selectedScatterEmptyRejected=e.nodeIndex==1 &&
+                std::string(e.what()).find("selected elements")!=std::string::npos;
+        }
+        require(selectedScatterEmptyRejected,
+                "selected-only scatter plot reports an empty population at its owning node");
+        std::atomic<bool> cancelScatter{true};
+        bool scatterCancellationReported=false;
+        try { (void)evaluate(wave,{selectedScatter},&cancelScatter); }
+        catch (const ModifierExecutionError &e) {
+            scatterCancellationReported=e.nodeIndex==0 && std::string(e.what())=="Cancelled";
+        }
+        require(scatterCancellationReported,"scatter plot observes pipeline task cancellation");
+        Dataset nonFiniteScatter=wave;
+        nonFiniteScatter.scalarProperties["Energy"]={1,std::numeric_limits<double>::quiet_NaN(),3,4};
+        Modifier finiteScatter{Op::ScatterPlot};
+        finiteScatter.scatterXProperty="Position.Y";
+        finiteScatter.scatterYProperty="Energy";
+        const auto finiteScatterResult=evaluate(nonFiniteScatter,{finiteScatter});
+        require(finiteScatterResult.data.tables.back().rows.size()==3 &&
+                    finiteScatterResult.data.globalAttributes.at("ScatterPlot.samples")==3,
+                "scatter plot skips non-finite pairs and reports the exact plotted population");
+        Dataset largeScatterData;
+        constexpr size_t largeScatterCount=250001;
+        largeScatterData.atoms.reserve(largeScatterCount);
+        for (size_t i=0;i<largeScatterCount;++i)
+            largeScatterData.atoms.push_back({float(i),float(i%101),0,0});
+        largeScatterData.sourceCount=largeScatterData.atoms.size();
+        Modifier largeScatter{Op::ScatterPlot};
+        const auto largeScatterResult=evaluate(largeScatterData,{largeScatter});
+        require(largeScatterResult.data.tables.back().name.find("deterministic preview")!=std::string::npos &&
+                    largeScatterResult.data.tables.back().rows.size()==250000 &&
+                    largeScatterResult.data.globalAttributes.at("ScatterPlot.samples")==double(largeScatterCount) &&
+                    largeScatterResult.data.globalAttributes.at("ScatterPlot.plotted")==250000,
+                "large scatter plots deterministically sample to the documented point budget");
+        finiteScatter.scatterYProperty="Missing scatter property";
+        bool missingScatterPropertyRejected=false;
+        try { (void)evaluate(wave,{finiteScatter}); }
+        catch (const ModifierExecutionError &e) { missingScatterPropertyRejected=e.nodeIndex==0; }
+        require(missingScatterPropertyRejected,
+                "scatter plot reports unavailable upstream properties at its own pipeline node");
         const auto selectedHistogramResult=evaluate(wave,{chosenParticles,selectedHistogram});
         const auto &selectedHistogramTable=selectedHistogramResult.data.tables.back();
         double relativeFrequencySum=0;

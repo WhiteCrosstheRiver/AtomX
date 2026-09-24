@@ -638,6 +638,7 @@ enum class Op {
     ,AffineTransform
     ,BondLengthDistribution
     ,BondAngleDistribution
+    ,ScatterPlot
 };
 struct Modifier {
     Op op;
@@ -660,6 +661,8 @@ struct Modifier {
     bool colorLegend = true;
     float colorMin = 0, colorMax = 1;
     int reduceOperation = 2; // min, max, mean, sum
+    std::string scatterXProperty = "Position.X", scatterYProperty = "Position.Y";
+    bool scatterSelectedOnly = false;
     bool bondsVisible = true;
     float bondWidth = 1.5f;
     float bondRadius = .08f;
@@ -772,11 +775,13 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Table,"Cluster analysis");
     }
     if (modifier.op==Op::RadialDistribution || modifier.op==Op::Histogram ||
-        modifier.op==Op::BondLengthDistribution || modifier.op==Op::BondAngleDistribution)
+        modifier.op==Op::BondLengthDistribution || modifier.op==Op::BondAngleDistribution ||
+        modifier.op==Op::ScatterPlot)
         add(Kind::Table,opName(modifier.op));
     if (modifier.op==Op::RadialDistribution || modifier.op==Op::Histogram ||
         modifier.op==Op::ReduceProperty ||
-        modifier.op==Op::BondLengthDistribution || modifier.op==Op::BondAngleDistribution)
+        modifier.op==Op::BondLengthDistribution || modifier.op==Op::BondAngleDistribution ||
+        modifier.op==Op::ScatterPlot)
         add(Kind::GlobalAttributes,opName(modifier.op)+std::string(" statistics"));
     return outputs;
 }
@@ -1599,6 +1604,7 @@ inline const char *opName(Op op) {
     case Op::AffineTransform: return "Affine transformation";
     case Op::BondLengthDistribution: return "Bond length distribution";
     case Op::BondAngleDistribution: return "Bond angle distribution";
+    case Op::ScatterPlot: return "Scatter plot";
     default:
         return "Color by type";
     }
@@ -1783,6 +1789,8 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 throw std::runtime_error("Choose a supported bond-distribution normalization mode");
             if (m.op == Op::ReduceProperty && (m.property.empty() || m.reduceOperation < 0 || m.reduceOperation > 3))
                 throw std::runtime_error("Choose a property and a valid reduction operation");
+            if (m.op==Op::ScatterPlot && (m.scatterXProperty.empty() || m.scatterYProperty.empty()))
+                throw std::runtime_error("Choose both scatter-plot properties");
             if (m.op == Op::Histogram || m.op == Op::ReduceProperty)
                 (void)numericParticlePropertyView(r.data,m.property);
             if (m.op == Op::RemoveProperty) {
@@ -2096,6 +2104,51 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     r.data.globalAttributes["RadialDistribution.cutoff"] = m.value;
                     r.data.tables.push_back(std::move(table));
                 }
+                continue;
+            }
+            if (m.op==Op::ScatterPlot) {
+                constexpr size_t maxScatterPoints=250000;
+                const auto xProperty=numericParticlePropertyView(r.data,m.scatterXProperty);
+                const auto yProperty=numericParticlePropertyView(r.data,m.scatterYProperty);
+                const size_t valueCount=r.data.atoms.size();
+                if (m.scatterSelectedOnly && r.selected.size()!=valueCount)
+                    throw std::runtime_error("Selection length does not match the particle count");
+                auto selectedAt=[&](size_t i){return !m.scatterSelectedOnly || r.selected[i]!=0;};
+                size_t validCount=0;
+                for (size_t i=0;i<valueCount;++i) {
+                    if ((i&4095)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+                    if (!selectedAt(i)) continue;
+                    if (std::isfinite(xProperty.value(r.data,i)) &&
+                        std::isfinite(yProperty.value(r.data,i))) ++validCount;
+                }
+                if (validCount==0)
+                    throw std::runtime_error(m.scatterSelectedOnly
+                        ? "The selected elements contain no finite scatter-plot pairs"
+                        : "No finite property pairs are available for the scatter plot");
+                const size_t plottedCount=std::min(validCount,maxScatterPoints);
+                DataTable table;
+                table.name="Scatter plot: "+m.scatterXProperty+" vs "+m.scatterYProperty;
+                if (validCount>maxScatterPoints) table.name+=" (deterministic preview)";
+                table.columns={m.scatterXProperty,m.scatterYProperty,"Particle index"};
+                table.rows.reserve(plottedCount);
+                size_t ordinal=0;
+                size_t nextSampleOrdinal=0;
+                for (size_t i=0;i<valueCount;++i) {
+                    if ((i&4095)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+                    if (!selectedAt(i)) continue;
+                    const double x=xProperty.value(r.data,i), y=yProperty.value(r.data,i);
+                    if (!std::isfinite(x) || !std::isfinite(y)) continue;
+                    if (ordinal==nextSampleOrdinal) {
+                        table.rows.push_back({formatDataNumber(x),formatDataNumber(y),std::to_string(i)});
+                        const size_t nextIndex=table.rows.size();
+                        if (nextIndex<plottedCount)
+                            nextSampleOrdinal=(nextIndex*validCount)/plottedCount;
+                    }
+                    ++ordinal;
+                }
+                r.data.globalAttributes["ScatterPlot.samples"]=double(validCount);
+                r.data.globalAttributes["ScatterPlot.plotted"]=double(table.rows.size());
+                r.data.tables.push_back(std::move(table));
                 continue;
             }
             if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
