@@ -1238,6 +1238,51 @@ int main() {
         try { evaluate(cellEditData,{affine}); }
         catch (const ModifierExecutionError &e) { singularAffineRejected=e.nodeIndex==0; }
         require(singularAffineRejected,"singular affine matrices report an error at their pipeline node");
+        // P2 OVITO parity: "Enter rotation" composition for a 90-degree z
+        // rotation about the cell center (translation becomes c - R*c).
+        {
+            Dataset rotationFixture = fccLattice(3); // 10.8^3 box, 108 atoms
+            const double center = 5.4;
+            Modifier rotateZ{Op::AffineTransform};
+            rotateZ.affineTransform = {0,-1,0, center + center,
+                                       1, 0, 0, 0,
+                                       0, 0, 1, 0};
+            auto rotated = evaluate(rotationFixture, {rotateZ});
+            require(std::abs(rotated.data.atoms[0].x - 10.8) < 1e-4 &&
+                        std::abs(rotated.data.atoms[0].y) < 1e-4 &&
+                        std::abs(rotated.data.atoms[0].z) < 1e-4,
+                    "affine rotation about the cell center maps the box corner onto the rotated corner");
+            require(std::abs(rotated.data.cell[0]) < 1e-4 &&
+                        std::abs(rotated.data.cell[1] - 10.8) < 1e-4 &&
+                        std::abs(rotated.data.cell[3] + 10.8) < 1e-4 &&
+                        std::abs(rotated.data.cell[4]) < 1e-4,
+                    "affine rotation applies the linear part to the cell vectors");
+            // Reduced cell coordinates: fractional (0.5, 0, 0.5) on the 10.8 box.
+            Modifier reducedShift{Op::AffineTransform};
+            reducedShift.affineTransform = {1,0,0,.5, 0,1,0,0, 0,0,1,.5};
+            reducedShift.affineReducedCoords = true;
+            auto shifted = evaluate(rotationFixture, {reducedShift});
+            require(std::abs(shifted.data.atoms[0].x - 5.4) < 1e-4 &&
+                        std::abs(shifted.data.atoms[0].z - 5.4) < 1e-4 &&
+                        std::abs(shifted.data.cell[0] - 10.8) < 1e-4 &&
+                        std::abs(shifted.data.origin.x - 5.4) < 1e-4,
+                    "reduced-cell-coordinate translation resolves the fractional shift through the cell");
+            // Only selected: the selected particle transforms, others stay; the
+            // simulation cell always follows the full linear part.
+            Modifier selectedScale{Op::AffineTransform};
+            selectedScale.affineTransform = {2,0,0,0, 0,1,0,0, 0,0,1,0};
+            selectedScale.affineOnlySelected = true;
+            Dataset selectionFixture = rotationFixture;
+            std::vector<uint8_t> onlyFourth(selectionFixture.atoms.size(), 0);
+            onlyFourth[4] = 1; // atom 4 sits at (3.6, 0, 0)
+            PipelineResult partialTransform{std::move(selectionFixture), onlyFourth,
+                                            std::vector<uint8_t>(rotationFixture.atoms.size(), 1)};
+            auto scaledSelection = evaluateFrom(std::move(partialTransform), {selectedScale});
+            require(std::abs(scaledSelection.data.atoms[4].x - 7.2) < 1e-4 &&
+                        std::abs(scaledSelection.data.atoms[1].x - rotationFixture.atoms[1].x) < 1e-5 &&
+                        std::abs(scaledSelection.data.cell[0] - 21.6) < 1e-4,
+                    "only-selected affine transform moves the selection while the cell follows the linear part");
+        }
         std::atomic<float> rangeProgress{0};
         auto progressedRange=colorRangeAcrossFrames(rangeFrames.size(),
             [&](size_t i){return rangeFrames.at(i);}, {},"Q",nullptr,&rangeProgress);
@@ -1916,6 +1961,106 @@ int main() {
                                          {Op::ExpandSelection,true,0.9f,2,2}});
         require(expanded.selected[0] && expanded.selected[1] && expanded.selected[2] &&
                     !expanded.selected[3], "selection expands through multiple neighbor shells");
+        // P2 OVITO parity: expansion modes, iterations and precondition errors.
+        {
+            Modifier nearest{Op::ExpandSelection};
+            nearest.expandMode = 1;
+            nearest.expandNeighbors = 3;
+            nearest.type = 1;
+            Dataset mixedDistances;
+            mixedDistances.species = {"X"};
+            mixedDistances.atoms = {{0,0,0,0},{0.8f,0,0,0},{1.6f,0,0,0},
+                                    {5,0,0,0},{5.5f,0,0,0},{6,0,0,0}};
+            mixedDistances.bounds();
+            PipelineResult nearestSeed{mixedDistances, std::vector<uint8_t>{1,0,0,0,0,0},
+                                       std::vector<uint8_t>(6, 1)};
+            auto nearestExpanded = evaluateFrom(std::move(nearestSeed), {nearest});
+            require(nearestExpanded.selected == std::vector<uint8_t>({1,1,1,1,0,0}),
+                    "N-nearest expansion picks exactly the N nearest particles per selected center");
+            Modifier nearestStep = nearest;
+            nearestStep.expandNeighbors = 1;
+            nearestStep.type = 2; // two iterations
+            Dataset spaced;
+            spaced.species = {"X"};
+            spaced.atoms = {{0,0,0,0},{1,0,0,0},{1.9f,0,0,0}};
+            spaced.bounds();
+            PipelineResult iterationSeed{spaced, std::vector<uint8_t>{1,0,0},
+                                         std::vector<uint8_t>(3, 1)};
+            auto iterated = evaluateFrom(std::move(iterationSeed), {nearestStep});
+            require(iterated.selected == std::vector<uint8_t>({1,1,1}),
+                    "two expansion iterations step one nearest neighbor each time");
+            Modifier bonded{Op::ExpandSelection};
+            bonded.expandMode = 2;
+            bonded.value = .9f;
+            bonded.type = 1;
+            Dataset bondedChain;
+            bondedChain.species = {"X"};
+            bondedChain.atoms = {{0,0,0,0},{0.8f,0,0,0},{1.6f,0,0,0},{5,0,0,0}};
+            bondedChain.bonds = {{0,1},{1,2}};
+            bondedChain.bounds();
+            PipelineResult bondedSeed{bondedChain, std::vector<uint8_t>{1,0,0,0},
+                                      std::vector<uint8_t>(4, 1)};
+            auto bondedExpanded = evaluateFrom(std::move(bondedSeed), {bonded});
+            require(bondedExpanded.selected == std::vector<uint8_t>({1,1,0,0}),
+                    "bonded expansion follows the input bond topology");
+            Modifier molecule{Op::ExpandSelection};
+            molecule.expandMode = 3;
+            molecule.value = .9f;
+            molecule.type = 1;
+            Dataset twoMolecules;
+            twoMolecules.species = {"X"};
+            twoMolecules.atoms = {{0,0,0,0},{0.8f,0,0,0},{3,0,0,0},{3.8f,0,0,0}};
+            twoMolecules.bonds = {{0,1},{2,3}};
+            twoMolecules.bounds();
+            PipelineResult moleculeSeed{twoMolecules, std::vector<uint8_t>{1,0,0,0},
+                                        std::vector<uint8_t>(4, 1)};
+            auto moleculeExpanded = evaluateFrom(std::move(moleculeSeed), {molecule});
+            require(moleculeExpanded.selected == std::vector<uint8_t>({1,1,0,0}),
+                    "same-molecule expansion selects whole bonded molecules");
+            bool emptySelectionRejected = false;
+            try { evaluate(chain, {Modifier{Op::ExpandSelection, true, .9f, 2, 1}}); }
+            catch (const ModifierExecutionError &e) {
+                emptySelectionRejected = e.nodeIndex == 0 &&
+                    std::string(e.what()) == "This operation requires an input particles selection.";
+            }
+            require(emptySelectionRejected,
+                    "expansion without an input selection reports the OVITO error text");
+            bool missingBondsRejected = false;
+            try { evaluate(chain, {{Op::SelectIndex, true, 0, 0, 0}, bonded}); }
+            catch (const ModifierExecutionError &e) {
+                missingBondsRejected = e.nodeIndex == 1 &&
+                    std::string(e.what()) == "Expand selection requires an existing bond topology";
+            }
+            require(missingBondsRejected,
+                    "bonded/molecule expansion without bond topology reports the OVITO error text");
+        }
+        // P2 OVITO parity: Select type multi-type union semantics.
+        {
+            Dataset mixedTypes = fccLattice(3);
+            mixedTypes.species = {"Cu", "Ni"};
+            for (size_t i = 0; i < mixedTypes.atoms.size(); ++i)
+                mixedTypes.atoms[i].type = i % 4 == 0 ? 0u : 1u;
+            auto countSelected = [](const PipelineResult &result) {
+                return std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
+            };
+            Modifier bothTypes{Op::SelectType};
+            bothTypes.selectedTypes = {0, 1};
+            require(countSelected(evaluate(mixedTypes, {bothTypes})) == 108,
+                    "select type with both types checked selects the union of 108 particles");
+            Modifier copperOnly{Op::SelectType};
+            copperOnly.selectedTypes = {0};
+            require(countSelected(evaluate(mixedTypes, {copperOnly})) == 27,
+                    "select type with Cu checked selects the 27 copper particles");
+            Modifier nickelOnly{Op::SelectType};
+            nickelOnly.selectedTypes = {1};
+            require(countSelected(evaluate(mixedTypes, {nickelOnly})) == 81,
+                    "select type with Ni checked selects the 81 nickel particles");
+            Modifier noneChecked{Op::SelectType};
+            noneChecked.selectedTypes = {};
+            noneChecked.type = -1;
+            require(countSelected(evaluate(mixedTypes, {noneChecked})) == 0,
+                    "select type with no checked types publishes an empty selection");
+        }
         auto overlapping = evaluate(chain, {{Op::SelectOverlapping,true,0.9f}});
         require(overlapping.selected[0] && overlapping.selected[1] && overlapping.selected[2] &&
                     !overlapping.selected[3], "overlap selection includes every atom in close pairs");

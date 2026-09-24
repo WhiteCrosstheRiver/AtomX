@@ -747,19 +747,72 @@ struct App {
         if (op == Op::ColorType) { colorCoding = true; colorAxis = 0; colorAutoRange = true; }
         if (op == Op::ColorCoding) { colorCoding = true; colorAutoRange = true; }
         if (op == Op::CommonNeighborAnalysis || op == Op::CreateBonds ||
-            op == Op::CoordinationAnalysis || op == Op::ClusterAnalysis || op == Op::RadialDistribution ||
-            op == Op::ExpandSelection || op == Op::SelectOverlapping) m.value = cutoff;
+            op == Op::CoordinationAnalysis || op == Op::ClusterAnalysis ||
+            op == Op::RadialDistribution || op == Op::SelectOverlapping) m.value = cutoff;
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
         if (op == Op::BondLengthDistribution) m.type = 64;
         if (op == Op::BondAngleDistribution) m.type = 90;
         if (op == Op::ReduceProperty) m.property = "Position.X";
         if (op == Op::SelectOverlapping) m.property = "Radius";
-        if (op == Op::ExpandSelection) m.type = 1;
+        if (op == Op::ExpandSelection) {
+            m.value = 3.2f; // OVITO default cutoff distance
+            m.type = 1;
+            m.expandNeighbors = 10;
+        }
+        if (op == Op::SelectType) m.selectedTypes = {0};
         if (op == Op::ExpressionSelect) m.property = "Position.X > 0";
         if (op == Op::ComputeProperty) m.property = "x*x + y*y + z*z";
         modifierGraph.insert(makeNode(m));
         update();
         status = std::string("Added ") + opName(op);
+    }
+    // Display-only synchronous preview of the simulation cell entering pipeline
+    // node `nodeIndex`: applies the cell-affecting modifiers upstream without
+    // touching particles. Used by the affine panel's read-only cell readout.
+    std::pair<std::array<double, 9>, Vec3> pipelineCellBefore(size_t nodeIndex) const {
+        std::array<double, 9> cellVectors = source.cell;
+        Vec3 origin = source.origin;
+        const size_t end = std::min(nodeIndex, mods.size());
+        for (size_t i = 0; i < end; ++i) {
+            const auto &mod = mods[i];
+            if (!mod.enabled) continue;
+            if (mod.op == Op::EditCell) {
+                cellVectors = mod.editedCell;
+                origin = mod.editedOrigin;
+            } else if (mod.op == Op::AffineTransform) {
+                std::array<double, 9> next{};
+                for (int row = 0; row < 3; ++row)
+                    for (int component = 0; component < 3; ++component)
+                        next[row * 3 + component] =
+                            mod.affineTransform[row * 4] * cellVectors[component] +
+                            mod.affineTransform[row * 4 + 1] * cellVectors[3 + component] +
+                            mod.affineTransform[row * 4 + 2] * cellVectors[6 + component];
+                cellVectors = next;
+                origin = {float(mod.affineTransform[0] * origin.x + mod.affineTransform[1] * origin.y +
+                                mod.affineTransform[2] * origin.z + mod.affineTransform[3]),
+                          float(mod.affineTransform[4] * origin.x + mod.affineTransform[5] * origin.y +
+                                mod.affineTransform[6] * origin.z + mod.affineTransform[7]),
+                          float(mod.affineTransform[8] * origin.x + mod.affineTransform[9] * origin.y +
+                                mod.affineTransform[10] * origin.z + mod.affineTransform[11])};
+            } else if (mod.op == Op::Scale) {
+                for (auto &v : cellVectors) v *= mod.value;
+                origin = {float(origin.x * mod.value), float(origin.y * mod.value),
+                          float(origin.z * mod.value)};
+            } else if (mod.op == Op::Rotate) {
+                const int u = (mod.axis + 1) % 3, v = (mod.axis + 2) % 3;
+                const double angle = mod.value * 0.0174532925199433;
+                for (int row = 0; row < 3; ++row) {
+                    const double x = cellVectors[row * 3 + u], y = cellVectors[row * 3 + v];
+                    cellVectors[row * 3 + u] = x * std::cos(angle) - y * std::sin(angle);
+                    cellVectors[row * 3 + v] = x * std::sin(angle) + y * std::cos(angle);
+                }
+            } else if (mod.op == Op::Replicate && mod.replicateAdjustBox) {
+                for (int axis = 0; axis < 3; ++axis)
+                    for (int component = 0; component < 3; ++component)
+                        cellVectors[axis * 3 + component] *= mod.replicateN[axis];
+            }
+        }
+        return {cellVectors, origin};
     }
     bool colorPropertyCombo(const char *label, std::string &property,
                             bool includeVectorComponents = false) {
@@ -2096,32 +2149,169 @@ struct App {
                     }
                     if (m.op == Op::AffineTransform) {
                         auto matrix = m.affineTransform;
+                        bool reducedCoords = m.affineReducedCoords;
+                        bool onlySelected = m.affineOnlySelected;
                         bool transformVectors = m.transformVectorProperties;
                         bool changed = false;
-                        ImGui::TextWrapped("Maps particle positions, cell vectors, and origin with a 3 x 4 matrix. Translation is not applied to vectors.");
-                        if (ImGui::BeginTable("Affine matrix", 4,
+                        ImGui::Text("Transformation matrix:");
+                        ImGui::TextDisabled("Translate/Scale/Shear:");
+                        if (ImGui::BeginTable("Translate/Scale/Shear", 3,
                                               ImGuiTableFlags_SizingStretchSame)) {
-                            for (const char *column : {"X", "Y", "Z", "Translation"})
+                            for (const char *column : {"a", "b", "c"})
                                 ImGui::TableSetupColumn(column);
                             ImGui::TableHeadersRow();
                             for (int row = 0; row < 3; ++row) {
                                 ImGui::TableNextRow();
-                                for (int column = 0; column < 4; ++column) {
+                                for (int column = 0; column < 3; ++column) {
                                     ImGui::TableSetColumnIndex(column);
                                     ImGui::PushID(row * 4 + column);
                                     ImGui::SetNextItemWidth(-1);
-                                    changed |= ImGui::InputDouble("##affine", &matrix[row * 4 + column],
+                                    changed |= ImGui::InputDouble("##affine-linear",
+                                                                  &matrix[row * 4 + column],
                                                                   0, 0, "%.7g");
                                     ImGui::PopID();
                                 }
                             }
                             ImGui::EndTable();
                         }
-                        changed |= ImGui::Checkbox("Transform vector properties", &transformVectors);
-                        ImGui::TextDisabled("Applies the 3 x 3 linear part. Normal vectors are not inverse-transpose transformed.");
+                        ImGui::SameLine();
+                        static int rotationAxis = 2;
+                        static double rotationAngle = 90;
+                        static double rotationCenter[3] = {0, 0, 0};
+                        static bool rotationCenterSeeded = false;
+                        if (ImGui::Button("Enter rotation")) {
+                            const auto [seedCell, seedOrigin] =
+                                pipelineCellBefore(modifierGraph.selected);
+                            rotationCenter[0] = seedOrigin.x + (seedCell[0] + seedCell[3] + seedCell[6]) * .5;
+                            rotationCenter[1] = seedOrigin.y + (seedCell[1] + seedCell[4] + seedCell[7]) * .5;
+                            rotationCenter[2] = seedOrigin.z + (seedCell[2] + seedCell[5] + seedCell[8]) * .5;
+                            rotationCenterSeeded = true;
+                            ImGui::OpenPopup("Enter rotation");
+                        }
+                        if (ImGui::BeginPopup("Enter rotation")) {
+                            if (!rotationCenterSeeded) rotationCenterSeeded = true;
+                            ImGui::Combo("Rotation axis", &rotationAxis,
+                                         "X axis\0Y axis\0Z axis\0Custom vector...\0");
+                            float customAxis[3] = {0, 0, 1};
+                            if (rotationAxis == 3)
+                                ImGui::DragFloat3("Axis vector", customAxis, .01f, -1.f, 1.f, "%.3f");
+                            ImGui::InputDouble("Rotation angle (degrees)", &rotationAngle, 0, 0, "%.6g");
+                            for (int axis = 0; axis < 3; ++axis) {
+                                if (axis) ImGui::SameLine();
+                                ImGui::PushID(400 + axis);
+                                ImGui::SetNextItemWidth(U(72));
+                                ImGui::InputScalar(axis == 0 ? "X" : axis == 1 ? "Y" : "Z",
+                                                   ImGuiDataType_Double, &rotationCenter[axis],
+                                                   nullptr, nullptr, "%.6g");
+                                ImGui::PopID();
+                            }
+                            if (ImGui::Button("Enter")) {
+                                std::array<double, 3> axis{rotationAxis == 0 ? 1.0 : 0.0,
+                                                           rotationAxis == 1 ? 1.0 : 0.0,
+                                                           rotationAxis == 2 ? 1.0 : 0.0};
+                                if (rotationAxis == 3)
+                                    axis = {customAxis[0], customAxis[1], customAxis[2]};
+                                const double norm = std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] +
+                                                              axis[2] * axis[2]);
+                                if (norm > 0 && std::isfinite(norm)) {
+                                    for (auto &component : axis) component /= norm;
+                                    const double radians =
+                                        rotationAngle * (3.14159265358979323846 / 180.0);
+                                    const double c = std::cos(radians), s = std::sin(radians),
+                                                 ic = 1 - c;
+                                    const double x = axis[0], y = axis[1], z = axis[2];
+                                    const std::array<double, 9> rotation{
+                                        x * x * ic + c, x * y * ic - z * s, x * z * ic + y * s,
+                                        y * x * ic + z * s, y * y * ic + c, y * z * ic - x * s,
+                                        z * x * ic - y * s, z * y * ic + x * s, z * z * ic + c};
+                                    std::array<double, 12> next = m.affineTransform;
+                                    for (int row = 0; row < 3; ++row) {
+                                        for (int column = 0; column < 3; ++column)
+                                            next[row * 4 + column] =
+                                                rotation[row * 3] * m.affineTransform[column] +
+                                                rotation[row * 3 + 1] * m.affineTransform[4 + column] +
+                                                rotation[row * 3 + 2] * m.affineTransform[8 + column];
+                                        next[row * 4 + 3] =
+                                            rotation[row * 3] * m.affineTransform[3] +
+                                            rotation[row * 3 + 1] * m.affineTransform[7] +
+                                            rotation[row * 3 + 2] * m.affineTransform[11] +
+                                            rotationCenter[row] -
+                                            (rotation[row * 3] * rotationCenter[0] +
+                                             rotation[row * 3 + 1] * rotationCenter[1] +
+                                             rotation[row * 3 + 2] * rotationCenter[2]);
+                                    }
+                                    matrix = next;
+                                    changed = true;
+                                }
+                                ImGui::CloseCurrentPopup();
+                            }
+                            ImGui::EndPopup();
+                        }
+                        ImGui::TextDisabled("Translation:");
+                        for (int axis = 0; axis < 3; ++axis) {
+                            if (axis) ImGui::SameLine();
+                            ImGui::PushID(300 + axis);
+                            ImGui::SetNextItemWidth(U(88));
+                            changed |= ImGui::InputDouble(axis == 0 ? "X" : axis == 1 ? "Y" : "Z",
+                                                          &matrix[axis * 4 + 3], 0, 0, "%.7g");
+                            ImGui::PopID();
+                        }
+                        changed |= ImGui::Checkbox("In reduced cell coordinates", &reducedCoords);
+                        if (reducedCoords)
+                            ImGui::TextDisabled("The translation is given in fractional cell coordinates and resolved through the simulation cell.");
+                        const auto [inputCell, inputOrigin] =
+                            pipelineCellBefore(modifierGraph.selected);
+                        ImGui::Text("Transform simulation cell:");
+                        ImGui::TextDisabled("Transform cell vectors:");
+                        if (ImGui::BeginTable("Transformed cell vectors", 4,
+                                              ImGuiTableFlags_SizingStretchSame)) {
+                            for (const char *column : {"Vector", "X", "Y", "Z"})
+                                ImGui::TableSetupColumn(column);
+                            ImGui::TableHeadersRow();
+                            for (int row = 0; row < 3; ++row) {
+                                ImGui::TableNextRow();
+                                ImGui::TableSetColumnIndex(0);
+                                ImGui::TextDisabled("%c", 'a' + row);
+                                for (int component = 0; component < 3; ++component) {
+                                    ImGui::TableSetColumnIndex(component + 1);
+                                    ImGui::TextDisabled("%.5g",
+                                        matrix[row * 4] * inputCell[component] +
+                                        matrix[row * 4 + 1] * inputCell[3 + component] +
+                                        matrix[row * 4 + 2] * inputCell[6 + component]);
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                        ImGui::TextDisabled("Transform cell origin:");
+                        for (int axis = 0; axis < 3; ++axis) {
+                            if (axis) ImGui::SameLine();
+                            ImGui::TextDisabled("%.5g", matrix[axis * 4] * inputOrigin.x +
+                                                        matrix[axis * 4 + 1] * inputOrigin.y +
+                                                        matrix[axis * 4 + 2] * inputOrigin.z +
+                                                        matrix[axis * 4 + 3]);
+                        }
+                        heading("Operate on");
+                        changed |= ImGui::Checkbox("Transform only selected particles/vertices",
+                                                   &onlySelected);
+                        ImGui::BeginDisabled();
+                        bool all = true;
+                        ImGui::Checkbox("Simulation cell <all>", &all);
+                        ImGui::Checkbox("Particles <all>", &all);
+                        ImGui::Checkbox("Surfaces <not present>", &all);
+                        ImGui::Checkbox("Triangle meshes <not present>", &all);
+                        ImGui::EndDisabled();
+                        int vectorsOperate = transformVectors ? 0 : 1;
+                        if (ImGui::Combo("Vector properties", &vectorsOperate, "<all>\0<none>\0"))
+                            transformVectors = vectorsOperate == 0;
+                        changed |= transformVectors != m.transformVectorProperties;
+                        ImGui::TextDisabled("Cell vectors, the cell origin and vector properties take only the linear part; the translation never applies to them.");
                         if (changed) {
-                            checkpoint(); m.affineTransform = matrix;
-                            m.transformVectorProperties = transformVectors; update();
+                            checkpoint();
+                            m.affineTransform = matrix;
+                            m.affineReducedCoords = reducedCoords;
+                            m.affineOnlySelected = onlySelected;
+                            m.transformVectorProperties = transformVectors;
+                            update();
                         }
                     }
                     if (m.op == Op::ClusterAnalysis) {
@@ -2144,7 +2334,7 @@ struct App {
                     }
                     if (m.op == Op::CreateBonds || m.op == Op::CommonNeighborAnalysis ||
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
-                        m.op == Op::RadialDistribution || m.op == Op::ExpandSelection) {
+                        m.op == Op::RadialDistribution) {
                         if (!(m.op==Op::CreateBonds && m.bondTypeCutoffsEnabled) &&
                             !(m.op==Op::ClusterAnalysis && m.clusterByBonds)) {
                             float value = m.value;
@@ -2361,11 +2551,53 @@ struct App {
                         ImGui::TextDisabled("%zu particles selected. Click a table row to replace; Ctrl-click to toggle.",
                                             m.manualSelection.size());
                     }
-                    if (m.op == Op::SelectType || m.op == Op::EditType) {
+                    if (m.op == Op::EditType) {
                         int t = m.type;
                         if (ImGui::InputInt("Type index", &t)) {
                             checkpoint();
                             m.type = std::clamp(t, 0, std::max(0, int(source.species.size()) - 1));
+                            update();
+                        }
+                    }
+                    if (m.op == Op::SelectType) {
+                        ImGui::TextWrapped("Check one or more particle types; the selection is replaced with all particles of the checked types.");
+                        bool changed = false;
+                        const bool legacySingle = m.selectedTypes.empty();
+                        std::vector<uint32_t> types =
+                            legacySingle ? std::vector<uint32_t>{m.type >= 0 ? uint32_t(m.type) : 0}
+                                         : m.selectedTypes;
+                        if (source.species.empty())
+                            ImGui::TextDisabled("The dataset has no particle types.");
+                        else if (ImGui::BeginTable("Type selection", 2,
+                                                   ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                            ImGui::TableSetupColumn("Name");
+                            ImGui::TableSetupColumn("Id");
+                            ImGui::TableHeadersRow();
+                            for (size_t i = 0; i < source.species.size(); ++i) {
+                                ImGui::TableNextRow();
+                                ImGui::TableSetColumnIndex(0);
+                                ImGui::PushID(int(i));
+                                bool checked = std::find(types.begin(), types.end(), uint32_t(i)) !=
+                                               types.end();
+                                if (ImGui::Checkbox(source.species[i].c_str(), &checked)) {
+                                    if (checked)
+                                        types.push_back(uint32_t(i));
+                                    else
+                                        types.erase(std::remove(types.begin(), types.end(),
+                                                                uint32_t(i)),
+                                                    types.end());
+                                    changed = true;
+                                }
+                                ImGui::TableSetColumnIndex(1);
+                                ImGui::TextDisabled("%zu", i + 1);
+                                ImGui::PopID();
+                            }
+                            ImGui::EndTable();
+                        }
+                        if (changed) {
+                            checkpoint();
+                            m.selectedTypes = types;
+                            m.type = types.empty() ? -1 : int(types.front());
                             update();
                         }
                     }
@@ -2532,12 +2764,48 @@ struct App {
                         }
                     }
                     if (m.op == Op::ExpandSelection) {
-                        float c = m.value;
-                        if (ImGui::DragFloat("Cutoff", &c, .01f, .001f, 100.f)) { checkpoint(); m.value = c; update(); }
-                        size_t selectedParticles = std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
-                        int steps = m.type;
-                        if (ImGui::InputInt("Expansion steps", &steps)) { checkpoint(); m.type = std::clamp(steps, 1, 64); update(); }
-                        ImGui::TextDisabled("Selected: %zu / %zu", selectedParticles, result.data.atoms.size());
+                        int mode = m.expandMode;
+                        bool changed = false;
+                        ImGui::Text("Expansion mode");
+                        changed |= ImGui::RadioButton("...within the range of: cutoff distance",
+                                                      &mode, 0);
+                        if (mode == 0) {
+                            float cutoffValue = m.value;
+                            ImGui::SetNextItemWidth(U(140));
+                            if (ImGui::DragFloat("Cutoff distance", &cutoffValue, .01f, .0001f,
+                                                 100000.f, "%.5g")) {
+                                m.value = cutoffValue;
+                                changed = true;
+                            }
+                        }
+                        changed |= ImGui::RadioButton("...among the N nearest neighbors", &mode, 1);
+                        if (mode == 1) {
+                            int neighborCount = m.expandNeighbors;
+                            if (ImGui::InputInt("N", &neighborCount)) {
+                                m.expandNeighbors = std::clamp(neighborCount, 1, 100000);
+                                changed = true;
+                            }
+                        }
+                        changed |= ImGui::RadioButton("...bonded to a selected particle", &mode, 2);
+                        changed |= ImGui::RadioButton("...of the same molecule", &mode, 3);
+                        if ((mode == 2 || mode == 3) && result.data.bonds.empty())
+                            ImGui::TextColored({1.f, .62f, .18f, 1.f},
+                                               "Expand selection requires an existing bond topology; add Create bonds upstream.");
+                        ImGui::Text("Iteration settings");
+                        int iterations = m.type;
+                        if (ImGui::InputInt("Number of iterations", &iterations)) {
+                            m.type = std::clamp(iterations, 1, 64);
+                            changed = true;
+                        }
+                        size_t selectedParticles =
+                            std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
+                        ImGui::TextDisabled("Selected: %zu / %zu", selectedParticles,
+                                            result.data.atoms.size());
+                        if (changed) {
+                            checkpoint();
+                            m.expandMode = mode;
+                            update();
+                        }
                     }
                     if (m.op == Op::SelectOverlapping) {
                         const size_t selectedParticles = std::count(result.selected.begin(), result.selected.end(), uint8_t(1));
@@ -3189,12 +3457,12 @@ struct App {
                 ImGui::TableNextColumn();
                 beginCard("Selection");
                 operation(Op::Clear,"Clear the current selection.");
-                operation(Op::ExpandSelection,"Expand the current selection through cutoff-neighbor shells.");
+                operation(Op::ExpandSelection,"Expand the current selection by cutoff range, nearest neighbors, bonds, or molecule.");
                 operation(Op::ExpressionSelect,"Select particles using the safe native scalar expression language.");
                 operation(Op::SelectOverlapping,"Select overlapping pairs using either a distance cutoff or the sum of a scalar radius property, with periodic minimum-image distances.");
                 operation(Op::Invert,"Invert selected and unselected particles.");
                 operation(Op::ManualSelection,"Select particles in the Particles table; Ctrl-click toggles rows.");
-                operation(Op::SelectType,"Select particles of a specified type.");
+                operation(Op::SelectType,"Select particles of one or more checked particle types.");
                 operation(Op::SelectRange,"Select particles in a coordinate interval.");
                 endCard();
                 beginCard("Python modifiers");

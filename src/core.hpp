@@ -706,6 +706,13 @@ struct Modifier {
     int cspNeighbors = 12;
     int cspMode = 0; // 0 = Conventional CSP, 1 = Minimum-weight matching CSP
     bool cspOnlySelected = false;
+    bool affineReducedCoords = false;
+    bool affineOnlySelected = false;
+    int expandMode = 0; // 0 cutoff range, 1 N nearest, 2 bonded, 3 same molecule
+    int expandNeighbors = 10;
+    // Particle types checked in the Select type panel; empty falls back to the
+    // legacy single-type field (m.type < 0 selects nothing).
+    std::vector<uint32_t> selectedTypes;
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -1430,6 +1437,71 @@ inline NeighborAnalysis clustersFromBonds(const Dataset &data,std::atomic<bool> 
     result.clusters=uint32_t(ids.size());
     return result;
 }
+// OVITO Expand selection, "N nearest neighbors" mode: for every selected
+// particle, mark its N nearest minimum-image neighbors. The exact shared
+// neighbor kernel runs with an adaptively grown cutoff until every selected
+// center sees at least N candidates (bounded by half the shortest periodic
+// cell translation, mirroring the CSP neighbor search).
+inline void expandSelectionNearestNeighbors(const Dataset &data, int neighborCount,
+                                            const std::vector<uint8_t> &selected,
+                                            std::vector<uint8_t> &expanded,
+                                            std::atomic<bool> *cancel = nullptr) {
+    validateNeighborAnalysisInput(data);
+    if (neighborCount < 1)
+        throw std::runtime_error("Neighbor count must be positive");
+    if (selected.size()!=data.atoms.size() || expanded.size()!=data.atoms.size())
+        throw std::runtime_error("Selection length does not match particle count");
+    struct Entry { uint32_t index; double distanceSquared; };
+    std::vector<std::vector<Entry>> adjacency(data.atoms.size());
+    double cutoff = 1.0;
+    const double volume = std::abs(cellDeterminant(data.cell));
+    if (volume > 0 && data.atoms.size() > 1) {
+        const double density = double(data.atoms.size()) / volume;
+        cutoff = 2.0 * std::cbrt(3.0 * double(neighborCount) /
+                                 (4.0 * 3.14159265358979323846 * density));
+    }
+    if (!(cutoff > 0) || !std::isfinite(cutoff)) cutoff = 1.0;
+    double maxCutoff = std::numeric_limits<double>::infinity();
+    for (int axis = 0; axis < 3; ++axis)
+        if (data.pbc[axis])
+            maxCutoff = std::min(maxCutoff, .5 * std::sqrt(
+                data.cell[axis*3]*data.cell[axis*3] + data.cell[axis*3+1]*data.cell[axis*3+1] +
+                data.cell[axis*3+2]*data.cell[axis*3+2]));
+    bool found = false;
+    for (int attempt = 0; attempt < 64 && !found; ++attempt) {
+        if (cutoff > maxCutoff) cutoff = maxCutoff;
+        for (auto &list : adjacency) list.clear();
+        try {
+            forEachNeighborPair(data, cutoff, [&](uint32_t i, uint32_t j, double distanceSquared) {
+                adjacency[i].push_back({j, distanceSquared});
+                adjacency[j].push_back({i, distanceSquared});
+            }, cancel);
+        } catch (const std::exception &e) {
+            if (std::string(e.what()) == "Cancelled") throw;
+            if (attempt == 0) throw;
+            break; // keep the last completed pass for under-coordinated centers
+        }
+        found = true;
+        for (size_t i = 0; i < data.atoms.size(); ++i)
+            if (selected[i] && adjacency[i].size() < size_t(neighborCount)) { found = false; break; }
+        if (!found) {
+            if (cutoff >= maxCutoff) break;
+            cutoff = std::min(cutoff * 1.3, maxCutoff);
+        }
+    }
+    for (size_t i = 0; i < data.atoms.size(); ++i) {
+        if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+        if (!selected[i]) continue;
+        auto &list = adjacency[i];
+        const size_t take = std::min(list.size(), size_t(neighborCount));
+        if (!take) continue;
+        std::nth_element(list.begin(), list.begin() + (take - 1), list.end(),
+                         [](const Entry &a, const Entry &b) {
+                             return a.distanceSquared < b.distanceSquared;
+                         });
+        for (size_t k = 0; k < take; ++k) expanded[list[k].index] = 1;
+    }
+}
 class ParticleExpression {
     const Dataset &d; size_t atom; std::string_view text; size_t p = 0;
     void ws() { while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p; }
@@ -1976,8 +2048,16 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                         if (m.bondTypeCutoffs[a*typeCount+b]!=m.bondTypeCutoffs[b*typeCount+a])
                             throw std::runtime_error("Type-pair bond cutoff matrix must be symmetric");
             }
-            if (m.op == Op::ExpandSelection && (!(m.value > 0) || !std::isfinite(m.value)))
-                throw std::runtime_error("Cutoff must be finite and positive");
+            if (m.op == Op::ExpandSelection) {
+                if (m.expandMode < 0 || m.expandMode > 3)
+                    throw std::runtime_error("Invalid expansion mode");
+                if (m.expandMode == 0 && (!(m.value > 0) || !std::isfinite(m.value)))
+                    throw std::runtime_error("Cutoff must be finite and positive");
+                if (m.expandMode == 1 && (m.expandNeighbors < 1 || m.expandNeighbors > 100000))
+                    throw std::runtime_error("Neighbor count must be a positive value");
+                if (m.expandMode >= 2 && r.data.bonds.empty())
+                    throw std::runtime_error("Expand selection requires an existing bond topology");
+            }
             if (m.op == Op::SelectOverlapping) {
                 if (!m.overlapUseRadii && (!(m.value > 0) || !std::isfinite(m.value)))
                     throw std::runtime_error("Pair cutoff must be finite and positive");
@@ -2041,19 +2121,41 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 continue;
             }
             if (m.op == Op::AffineTransform) {
+                // Point data (positions, cell origin) receives the translation
+                // column; vector data and cell vectors only the linear part.
+                std::array<double, 3> pointTranslation{
+                    m.affineTransform[3], m.affineTransform[7], m.affineTransform[11]};
+                if (m.affineReducedCoords) {
+                    // x' = M*(x + H*t): the fractional shift H*t is resolved
+                    // against the input cell, then premultiplied by M.
+                    const double t[3]{m.affineTransform[3], m.affineTransform[7],
+                                      m.affineTransform[11]};
+                    std::array<double, 3> cellShift{};
+                    for (int axis = 0; axis < 3; ++axis)
+                        for (int component = 0; component < 3; ++component)
+                            cellShift[component] += t[axis] * r.data.cell[axis * 3 + component];
+                    for (int row = 0; row < 3; ++row)
+                        pointTranslation[row] = m.affineTransform[row * 4] * cellShift[0] +
+                                                m.affineTransform[row * 4 + 1] * cellShift[1] +
+                                                m.affineTransform[row * 4 + 2] * cellShift[2];
+                }
                 auto transformPoint = [&](double x, double y, double z, bool point) {
                     std::array<double, 3> result{};
                     for (int row = 0; row < 3; ++row) {
                         result[row] = m.affineTransform[row * 4] * x +
                                       m.affineTransform[row * 4 + 1] * y +
                                       m.affineTransform[row * 4 + 2] * z;
-                        if (point) result[row] += m.affineTransform[row * 4 + 3];
+                        if (point) result[row] += pointTranslation[row];
                         if (!std::isfinite(result[row]))
                             throw std::runtime_error("Affine transformation produced a non-finite coordinate");
                     }
                     return result;
                 };
-                for (auto &atom : r.data.atoms) {
+                for (size_t index = 0; index < r.data.atoms.size(); ++index) {
+                    if (cancel && (index & 65535) == 0 && *cancel)
+                        throw std::runtime_error("Cancelled");
+                    if (m.affineOnlySelected && !r.selected[index]) continue;
+                    auto &atom = r.data.atoms[index];
                     const auto transformed = transformPoint(atom.x, atom.y, atom.z, true);
                     atom.x = float(transformed[0]); atom.y = float(transformed[1]);
                     atom.z = float(transformed[2]);
@@ -2221,12 +2323,39 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 continue;
             }
             if (m.op == Op::ExpandSelection) {
+                if (r.selected.size() != r.data.atoms.size())
+                    throw std::runtime_error("Selection length does not match the particle count");
+                if (std::find(r.selected.begin(), r.selected.end(), uint8_t(1)) == r.selected.end())
+                    throw std::runtime_error("This operation requires an input particles selection.");
                 for (int step = 0; step < m.type; ++step) {
                     auto expanded = r.selected;
-                    forEachNeighborPair(r.data, m.value, [&](uint32_t i, uint32_t j, double) {
-                        if (r.selected[i]) expanded[j] = 1;
-                        if (r.selected[j]) expanded[i] = 1;
-                    }, cancel);
+                    switch (m.expandMode) {
+                    case 0:
+                        forEachNeighborPair(r.data, m.value, [&](uint32_t i, uint32_t j, double) {
+                            if (r.selected[i]) expanded[j] = 1;
+                            if (r.selected[j]) expanded[i] = 1;
+                        }, cancel);
+                        break;
+                    case 1:
+                        expandSelectionNearestNeighbors(r.data, m.expandNeighbors, r.selected,
+                                                        expanded, cancel);
+                        break;
+                    case 2:
+                        for (const auto &bond : r.data.bonds) {
+                            if (r.selected[bond.a]) expanded[bond.b] = 1;
+                            if (r.selected[bond.b]) expanded[bond.a] = 1;
+                        }
+                        break;
+                    default: {
+                        const auto clusters = clustersFromBonds(r.data, cancel);
+                        std::unordered_set<uint32_t> molecules;
+                        for (size_t i = 0; i < r.selected.size(); ++i)
+                            if (r.selected[i]) molecules.insert(clusters.cluster[i]);
+                        for (size_t i = 0; i < expanded.size(); ++i)
+                            if (molecules.count(clusters.cluster[i])) expanded[i] = 1;
+                        break;
+                    }
+                    }
                     r.selected = std::move(expanded);
                 }
                 continue;
@@ -2790,7 +2919,11 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                            slicePasses(a);
                     break;
                 case Op::SelectType:
-                    sel = a.type == uint32_t(m.type);
+                    if (m.selectedTypes.empty())
+                        sel = m.type >= 0 && a.type == uint32_t(m.type);
+                    else
+                        sel = std::find(m.selectedTypes.begin(), m.selectedTypes.end(),
+                                        a.type) != m.selectedTypes.end();
                     break;
                 case Op::SelectIndex:
                     sel = i == size_t(m.type);
