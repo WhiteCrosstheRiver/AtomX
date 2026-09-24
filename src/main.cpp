@@ -700,6 +700,7 @@ struct App {
                                   : modifier.op == Op::CoordinationAnalysis || modifier.op == Op::ClusterAnalysis ||
                                             modifier.op == Op::RadialDistribution || modifier.op == Op::Histogram ||
                                             modifier.op == Op::ReduceProperty || modifier.op == Op::CommonNeighborAnalysis ||
+                                            modifier.op == Op::CentrosymmetryParameter ||
                                             modifier.op == Op::BondLengthDistribution || modifier.op == Op::BondAngleDistribution ||
                                             modifier.op == Op::ScatterPlot
                                         ? "Analysis"
@@ -2169,6 +2170,54 @@ struct App {
                         }
                         ImGui::TextDisabled("Unselected particles are excluded as both analysis centers and neighbors.");
                     }
+                    if (m.op == Op::CentrosymmetryParameter) {
+                        int neighbors = m.cspNeighbors;
+                        if (ImGui::InputInt("Number of neighbors", &neighbors)) {
+                            checkpoint();
+                            m.cspNeighbors = std::clamp(neighbors, 2, 64);
+                            if (m.cspNeighbors % 2) --m.cspNeighbors;
+                            update();
+                        }
+                        recordUiTestItem(std::string("pipeline.csp-neighbors.") + m.id,
+                                         "Number of neighbors");
+                        int mode = m.cspMode;
+                        bool changed = ImGui::RadioButton("Conventional CSP", &mode, 0);
+                        changed |= ImGui::RadioButton("Minimum-weight matching CSP", &mode, 1);
+                        bool onlySelected = m.cspOnlySelected;
+                        changed |= ImGui::Checkbox("Only selected particles", &onlySelected);
+                        if (changed) {
+                            checkpoint();
+                            m.cspMode = mode;
+                            m.cspOnlySelected = onlySelected;
+                            update();
+                        }
+                        ImGui::TextDisabled("Use the ideal coordination number of the lattice: 12 for FCC/HCP, 8 for BCC.");
+                        if (onlySelected)
+                            ImGui::TextDisabled("Unselected particles are skipped as centers and report a CSP of 0.");
+                        if (auto cspValues = result.data.scalarProperties.find("Centrosymmetry");
+                            cspValues != result.data.scalarProperties.end() && !cspValues->second.empty()) {
+                            std::array<float, 64> bins{};
+                            double lo = 0, hi = 0;
+                            bool first = true;
+                            for (double value : cspValues->second)
+                                if (std::isfinite(value)) {
+                                    if (first) { lo = hi = value; first = false; }
+                                    else { lo = std::min(lo, value); hi = std::max(hi, value); }
+                                }
+                            if (!first) {
+                                if (hi <= lo) hi = lo + 1e-12;
+                                for (double value : cspValues->second)
+                                    if (std::isfinite(value))
+                                        bins[std::clamp(size_t((value - lo) / (hi - lo) * 63),
+                                                        size_t(0), size_t(63))] += 1;
+                                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, {1.f, .49f, .05f, 1.f});
+                                ImGui::PlotHistogram("##csp-histogram", bins.data(), int(bins.size()),
+                                                     0, "Centrosymmetry", 0.f, FLT_MAX, {-1, 75});
+                                ImGui::PopStyleColor();
+                                ImGui::TextDisabled("CSP range %.4g - %.4g", lo, hi);
+                            }
+                        }
+                    }
                     if (m.op == Op::SelectOverlapping) {
                         bool useRadii = m.overlapUseRadii;
                         if (ImGui::Checkbox("Use per-particle radii", &useRadii)) {
@@ -3124,7 +3173,8 @@ struct App {
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Structure identification");
-                for (auto name : {"Ackland-Jones analysis", "Centrosymmetry parameter", "Chill+"}) planned(name);
+                operation(Op::CentrosymmetryParameter,"Computes the centrosymmetry parameter to identify atoms in defective crystal environments (stacking faults, surfaces, dislocations).");
+                for (auto name : {"Ackland-Jones analysis", "Chill+"}) planned(name);
                 operation(Op::CommonNeighborAnalysis,"Fixed-cutoff Honeycutt–Andersen pair signatures; FCC and BCC are verified against periodic reference crystals. Unsupported or ambiguous motifs remain Other.");
                 for (auto name : {"Identify diamond structure", "Polyhedral template matching", "VoroTop analysis"}) planned(name);
                 endCard();

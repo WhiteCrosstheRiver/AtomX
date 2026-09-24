@@ -24,6 +24,108 @@ static Dataset fccLattice(int cells) {
     d.bounds();
     return d;
 }
+// Perfect BCC parity fixture (a = 3.0, one species) for the CSP tests; the
+// eight (±1.5, ±1.5, ±1.5) A nearest neighbors form exact opposite pairs.
+static Dataset bccLattice(int cells) {
+    Dataset d;
+    d.species = {"Fe"};
+    const double a = 3.0;
+    d.cell = {a * cells, 0, 0, 0, a * cells, 0, 0, 0, a * cells};
+    const double basis[2][3] = {{0, 0, 0}, {.5, .5, .5}};
+    for (int z = 0; z < cells; ++z)
+        for (int y = 0; y < cells; ++y)
+            for (int x = 0; x < cells; ++x)
+                for (auto &b : basis)
+                    d.atoms.push_back({float((x + b[0]) * a), float((y + b[1]) * a),
+                                       float((z + b[2]) * a), 0});
+    d.sourceCount = d.atoms.size();
+    d.bounds();
+    return d;
+}
+// Indices of the count nearest neighbors of atom center under minimum image,
+// independent of any AtomX search code (plain double-precision loops).
+static std::vector<size_t> bruteForceNearestNeighbors(const Dataset &d, size_t center, size_t count) {
+    std::vector<std::pair<double, size_t>> distances;
+    for (size_t j = 0; j < d.atoms.size(); ++j) {
+        if (j == center) continue;
+        double delta[3];
+        for (int axis = 0; axis < 3; ++axis) {
+            delta[axis] = double(coordinate(d.atoms[j], axis)) - double(coordinate(d.atoms[center], axis));
+            if (d.pbc[axis]) delta[axis] -= std::round(delta[axis] / d.cell[axis * 4]) * d.cell[axis * 4];
+        }
+        distances.push_back({std::sqrt(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2]), j});
+    }
+    std::sort(distances.begin(), distances.end());
+    std::vector<size_t> result;
+    for (size_t i = 0; i < count && i < distances.size(); ++i) result.push_back(distances[i].second);
+    return result;
+}
+// Independent brute-force CSP reference: plain minimum-image loops, exact
+// nearest-neighbor pick by distance, then greedy or min-weight-matching pair
+// sums -- shares no code with the engine's linked-cell search.
+static double bruteForceCsp(const Dataset &d, size_t center, int count, int mode) {
+    std::vector<std::pair<double, size_t>> distances;
+    for (size_t j = 0; j < d.atoms.size(); ++j) {
+        if (j == center) continue;
+        double distanceSquared = 0;
+        for (int axis = 0; axis < 3; ++axis) {
+            double delta = double(coordinate(d.atoms[j], axis)) - double(coordinate(d.atoms[center], axis));
+            if (d.pbc[axis]) delta -= std::round(delta / d.cell[axis * 4]) * d.cell[axis * 4];
+            distanceSquared += delta * delta;
+        }
+        distances.push_back({distanceSquared, j});
+    }
+    std::sort(distances.begin(), distances.end());
+    const size_t take = std::min(distances.size(), size_t(count));
+    std::vector<std::array<double, 3>> vectors;
+    for (size_t k = 0; k < take; ++k) {
+        const size_t j = distances[k].second;
+        std::array<double, 3> vector{};
+        for (int axis = 0; axis < 3; ++axis) {
+            double delta = double(coordinate(d.atoms[j], axis)) - double(coordinate(d.atoms[center], axis));
+            if (d.pbc[axis]) delta -= std::round(delta / d.cell[axis * 4]) * d.cell[axis * 4];
+            vector[axis] = delta;
+        }
+        vectors.push_back(vector);
+    }
+    double best = std::numeric_limits<double>::infinity();
+    if (mode == 0) {
+        std::vector<double> weights;
+        for (size_t a = 0; a < vectors.size(); ++a)
+            for (size_t b = a + 1; b < vectors.size(); ++b) {
+                double weight = 0;
+                for (int xyz = 0; xyz < 3; ++xyz) {
+                    const double s = vectors[a][xyz] + vectors[b][xyz];
+                    weight += s * s;
+                }
+                weights.push_back(weight);
+            }
+        std::sort(weights.begin(), weights.end());
+        best = 0;
+        for (size_t i = 0; i < vectors.size() / 2; ++i) best += weights[i];
+    } else {
+        const size_t n = vectors.size();
+        std::vector<double> dp(size_t(1) << n, std::numeric_limits<double>::infinity());
+        dp[0] = 0;
+        for (size_t mask = 0; mask + 1 < dp.size(); ++mask) {
+            if (dp[mask] == std::numeric_limits<double>::infinity()) continue;
+            size_t first = 0;
+            while (mask & (size_t(1) << first)) ++first;
+            for (size_t b = first + 1; b < n; ++b) {
+                if (mask & (size_t(1) << b)) continue;
+                double weight = 0;
+                for (int xyz = 0; xyz < 3; ++xyz) {
+                    const double s = vectors[first][xyz] + vectors[b][xyz];
+                    weight += s * s;
+                }
+                double &target = dp[mask | (size_t(1) << first) | (size_t(1) << b)];
+                target = std::min(target, dp[mask] + weight);
+            }
+        }
+        best = dp.back();
+    }
+    return best;
+}
 // Independent brute-force references for the composable-stack tests: mirrored
 // particle positions are regenerated with plain loops and counted with the
 // documented strict slice rule, so stacked pipelines are checked against an
@@ -417,6 +519,256 @@ int main() {
             failed = true;
         }
         require(failed, "truncated input rejected");
+        // S02 Centrosymmetry parameter parity (docs/parity/numeric-baseline.md D).
+        // Particle positions are stored as float, so perfect-crystal CSP values
+        // carry ~1e-13 float-quantization noise instead of being bit-exact 0.
+        const double cspPerfectTolerance = 1e-9;
+        Dataset cspFcc = fccCell;
+        cspFcc.pbc = {true, true, true};
+        {
+            Modifier csp{Op::CentrosymmetryParameter};
+            const auto perfect = evaluate(cspFcc, {csp});
+            const auto &values = perfect.data.scalarProperties.at("Centrosymmetry");
+            require(values.size() == fccCell.atoms.size() &&
+                        perfect.data.globalAttributes.at("Centrosymmetry.max") < cspPerfectTolerance &&
+                        std::all_of(values.begin(), values.end(),
+                                    [&](double v) { return std::abs(v) < cspPerfectTolerance; }),
+                    "conventional CSP is 0 for every atom of the perfect FCC crystal (N = 12)");
+            Modifier matching = csp;
+            matching.cspMode = 1;
+            const auto perfectMatching = evaluate(cspFcc, {matching});
+            const auto &matchingValues = perfectMatching.data.scalarProperties.at("Centrosymmetry");
+            require(std::all_of(matchingValues.begin(), matchingValues.end(),
+                                [&](double v) { return std::abs(v) < cspPerfectTolerance; }),
+                    "minimum-weight matching CSP is 0 for the perfect FCC crystal");
+        }
+        {
+            auto displaced = cspFcc;
+            displaced.atoms[0].x += 0.5f;
+            displaced.bounds();
+            Modifier csp{Op::CentrosymmetryParameter};
+            const auto result = evaluate(displaced, {csp});
+            const auto &values = result.data.scalarProperties.at("Centrosymmetry");
+            require(std::abs(values[0] - 6.0) < 1e-3,
+                    "FCC atom displaced by (0.5, 0, 0) A reaches CSP = 6.0");
+            const auto nearest = bruteForceNearestNeighbors(displaced, 0, 12);
+            bool neighborsClean = true, othersClean = true;
+            std::vector<bool> touched(displaced.atoms.size(), false);
+            for (size_t index : nearest) {
+                touched[index] = true;
+                if (std::abs(values[index] - 0.25) > 1e-3) neighborsClean = false;
+            }
+            for (size_t i = 1; i < values.size(); ++i)
+                if (!touched[i] && std::abs(values[i]) > cspPerfectTolerance) othersClean = false;
+            require(neighborsClean,
+                    "the 12 first-shell neighbors of the displaced atom reach CSP = 0.25");
+            require(othersClean,
+                    "atoms beyond the disturbed second shell keep a clean CSP of 0");
+        }
+        {
+            auto vacancy = cspFcc;
+            vacancy.atoms.erase(vacancy.atoms.begin());
+            vacancy.sourceCount = vacancy.atoms.size();
+            vacancy.bounds();
+            const auto shell = bruteForceNearestNeighbors(cspFcc, 0, 12);
+            Modifier csp{Op::CentrosymmetryParameter};
+            const auto result = evaluate(vacancy, {csp});
+            const auto &values = result.data.scalarProperties.at("Centrosymmetry");
+            require(values.size() == 107, "vacancy fixture keeps 107 atoms");
+            bool shellAt648 = true, othersClean = true;
+            std::vector<bool> touched(values.size(), false);
+            for (size_t original : shell) {
+                const size_t shifted = original - 1; // only atom 0 was removed
+                touched[shifted] = true;
+                if (std::abs(values[shifted] - 6.48) > 1e-2) shellAt648 = false;
+            }
+            for (size_t i = 0; i < values.size(); ++i)
+                if (!touched[i] && std::abs(values[i]) > cspPerfectTolerance) othersClean = false;
+            require(shellAt648 && othersClean,
+                    "the 12 vacancy neighbors reach the analytic a^2/2 = 6.48 while the rest stay 0");
+            Modifier matching = csp;
+            matching.cspMode = 1;
+            const auto matchingResult = evaluate(vacancy, {matching});
+            const auto &matchingValues = matchingResult.data.scalarProperties.at("Centrosymmetry");
+            bool matchingBound = true;
+            for (size_t i = 0; i < values.size(); ++i)
+                if (matchingValues[i] < values[i] - 1e-9) matchingBound = false;
+            require(matchingBound,
+                    "greedy pairing is a relaxed lower bound (shared endpoints allowed), so "
+                    "minimum-weight matching never undercuts it on the vacancy fixture");
+        }
+        {
+            auto bcc = bccLattice(4);
+            bcc.pbc = {true, true, true};
+            Modifier csp{Op::CentrosymmetryParameter};
+            csp.cspNeighbors = 8;
+            const auto perfect = evaluate(bcc, {csp});
+            const auto &values = perfect.data.scalarProperties.at("Centrosymmetry");
+            require(values.size() == 128 &&
+                        std::all_of(values.begin(), values.end(),
+                                    [&](double v) { return std::abs(v) < cspPerfectTolerance; }),
+                    "perfect BCC with N = 8 stays at CSP = 0 for all 128 atoms");
+            auto displacedBcc = bcc;
+            displacedBcc.atoms[0].x += 0.5f;
+            displacedBcc.bounds();
+            const auto disturbed = evaluate(displacedBcc, {csp});
+            require(disturbed.data.scalarProperties.at("Centrosymmetry")[0] > 1.0,
+                    "a displaced BCC atom receives a clearly positive CSP");
+        }
+        {
+            auto displaced = cspFcc;
+            displaced.atoms[0].x += 0.5f;
+            displaced.bounds();
+            Modifier selectDisplaced{Op::SelectIndex};
+            selectDisplaced.type = 0;
+            Modifier csp{Op::CentrosymmetryParameter};
+            csp.cspOnlySelected = true;
+            const auto result = evaluate(displaced, {selectDisplaced, csp});
+            const auto &values = result.data.scalarProperties.at("Centrosymmetry");
+            require(std::abs(values[0] - 6.0) < 1e-3 &&
+                        std::all_of(values.begin() + 1, values.end(),
+                                    [](double v) { return v == 0; }),
+                    "only-selected mode computes centers from the selection and reports 0 elsewhere");
+            Modifier odd{Op::CentrosymmetryParameter};
+            odd.cspNeighbors = 11;
+            bool oddRejected = false;
+            try { (void)evaluate(cspFcc, {odd}); }
+            catch (const ModifierExecutionError &e) {
+                oddRejected = e.nodeIndex == 0 &&
+                    std::string(e.what()).find("even") != std::string::npos;
+            }
+            require(oddRejected, "odd neighbor counts are rejected at the modifier node");
+            const auto cspOutputs = modifierOutputs(Modifier{Op::CentrosymmetryParameter}, 5);
+            require(cspOutputs.size() == 2 && cspOutputs[0].kind == DataObject::Kind::Particles &&
+                        cspOutputs[0].name == "Centrosymmetry" &&
+                        cspOutputs[1].kind == DataObject::Kind::GlobalAttributes &&
+                        cspOutputs[0].sourceNode == 5,
+                    "CSP pipeline metadata declares its particle property and statistics outputs");
+            const auto choices = pipelineInputPropertyChoices(
+                fccCell, std::vector<Modifier>{{Op::CentrosymmetryParameter}}, 1);
+            require(std::find(choices.begin(), choices.end(), "Centrosymmetry") != choices.end(),
+                    "Centrosymmetry is selectable as a downstream property");
+        }
+        {
+            // Thermal-displacement regression: sin-based per-atom jitter of the
+            // same ~0.12 A amplitude as the OVITO ground-truth trajectory must
+            // keep every CSP small and match an independent brute-force
+            // reference atom-by-atom (guards against neighbor-set truncation).
+            auto thermal = cspFcc;
+            for (size_t i = 0; i < thermal.atoms.size(); ++i) {
+                const double phase = 0.7 * double(i);
+                thermal.atoms[i].x += float(0.12 * std::sin(1.1 * thermal.atoms[i].x + phase));
+                thermal.atoms[i].y += float(0.12 * std::sin(1.3 * thermal.atoms[i].y + 1.7 * phase));
+                thermal.atoms[i].z += float(0.12 * std::sin(0.9 * thermal.atoms[i].z + 2.3 * phase));
+            }
+            thermal.bounds();
+            Modifier csp{Op::CentrosymmetryParameter};
+            const auto result = evaluate(thermal, {csp});
+            const auto &values = result.data.scalarProperties.at("Centrosymmetry");
+            require(std::all_of(values.begin(), values.end(),
+                                [](double v) { return v >= 0 && v < 3.0; }),
+                    "thermally displaced FCC keeps every conventional CSP below 3.0");
+            Modifier matching = csp;
+            matching.cspMode = 1;
+            const auto matchingResult = evaluate(thermal, {matching});
+            const auto &matchingValues = matchingResult.data.scalarProperties.at("Centrosymmetry");
+            require(std::all_of(matchingValues.begin(), matchingValues.end(),
+                                [](double v) { return v >= 0 && v < 3.0; }),
+                    "thermally displaced FCC keeps every matching-mode CSP below 3.0");
+            bool referenceMatch = true;
+            for (size_t atomSample = 0; atomSample < 10; ++atomSample) {
+                const size_t index = (atomSample * 37) % thermal.atoms.size();
+                if (std::abs(values[index] - bruteForceCsp(thermal, index, 12, 0)) > 1e-6 ||
+                    std::abs(matchingValues[index] - bruteForceCsp(thermal, index, 12, 1)) > 1e-6)
+                    referenceMatch = false;
+            }
+            require(referenceMatch,
+                    "engine CSP matches the independent brute-force reference on 10 sampled thermal atoms in both modes");
+        }
+        {
+            // Retry path: a 2D square lattice in a partially periodic cell
+            // starts from the 1.0 A default cutoff (no volume to estimate from)
+            // and must grow it through the retry loop before every center sees
+            // its 4 in-plane neighbors; a fixed small cutoff would truncate.
+            Dataset square;
+            square.species = {"X"};
+            square.cell = {15, 0, 0, 0, 15, 0, 0, 0, 0};
+            square.pbc = {true, true, false};
+            for (int y = 0; y < 5; ++y)
+                for (int x = 0; x < 5; ++x)
+                    square.atoms.push_back({float(x * 3), float(y * 3), 0, 0});
+            square.sourceCount = square.atoms.size();
+            square.bounds();
+            Modifier csp{Op::CentrosymmetryParameter};
+            csp.cspNeighbors = 4;
+            const auto result = evaluate(square, {csp});
+            const auto &values = result.data.scalarProperties.at("Centrosymmetry");
+            require(values.size() == 25 && result.data.globalAttributes.at("Centrosymmetry.max") < 1e-9 &&
+                        result.data.globalAttributes.at("Centrosymmetry.undercoordinated_particles") == 0,
+                    "cutoff retry recovers the 4 in-plane neighbors of a partially periodic square lattice");
+        }
+        {
+            // Extra interstitial atoms perturb only their nearest crystal
+            // neighbors. Four atoms in octahedral voids (1.8 A from the six
+            // surrounding face centers) enter exactly those six neighbor sets
+            // and shift their CSP to 3.24, while the other 102 crystal atoms
+            // keep a clean CSP of 0; N = 12 stays reachable for all 112 atoms.
+            Dataset polluted = cspFcc;
+            polluted.atoms.push_back({1.8f, 1.8f, 1.8f, 0});
+            polluted.atoms.push_back({5.4f, 5.4f, 1.8f, 0});
+            polluted.atoms.push_back({5.4f, 1.8f, 5.4f, 0});
+            polluted.atoms.push_back({1.8f, 5.4f, 5.4f, 0});
+            polluted.sourceCount = polluted.atoms.size();
+            polluted.bounds();
+            Modifier csp{Op::CentrosymmetryParameter};
+            const auto result = evaluate(polluted, {csp});
+            const auto &values = result.data.scalarProperties.at("Centrosymmetry");
+            const auto interstitialCsp = [&](double v) {
+                return std::abs(v - 3.24) < 1e-4;
+            };
+            require(values.size() == 112 &&
+                        std::count_if(values.begin(), values.begin() + 108,
+                                      interstitialCsp) == 24 &&
+                        std::all_of(values.begin(), values.begin() + 108,
+                                    [&](double v) { return v < 1e-9 || interstitialCsp(v); }) &&
+                        std::all_of(values.begin() + 108, values.end(),
+                                    [](double v) { return v > 1e-9; }) &&
+                        result.data.globalAttributes.at("Centrosymmetry.undercoordinated_particles") == 0,
+                    "interstitial atoms perturb exactly their 24 surrounding shell atoms and leave the rest clean");
+        }
+        {
+            // Under-coordination fallback: five clustered atoms in a periodic
+            // cell can only reach 4 neighbors each (even, >= 4), so the CSP is
+            // computed from those 4 vectors instead of the requested 12.
+            Dataset clustered;
+            clustered.species = {"X"};
+            clustered.cell = {8, 0, 0, 0, 8, 0, 0, 0, 8};
+            clustered.pbc = {true, true, true};
+            clustered.atoms = {{0, 0, 0, 0}, {2, 0, 0, 0}, {0, 2, 0, 0}, {0, 0, 2, 0}, {2, 2, 2, 0}};
+            clustered.sourceCount = clustered.atoms.size();
+            clustered.bounds();
+            Modifier csp{Op::CentrosymmetryParameter};
+            const auto result = evaluate(clustered, {csp});
+            const auto &values = result.data.scalarProperties.at("Centrosymmetry");
+            require(result.data.globalAttributes.at("Centrosymmetry.undercoordinated_particles") == 0 &&
+                        std::abs(values[0] - 16.0) < 1e-9,
+                    "centers with only four reachable neighbors fall back to a valid even pairing (CSP = 16)");
+            // Three atoms in a strongly layered cell reach no neighbors at all
+            // inside half the shortest translation: CSP 0 plus a warning count.
+            Dataset layered;
+            layered.species = {"X"};
+            layered.cell = {3.6, 0, 0, 0, 3.6, 0, 0, 0, 10.8};
+            layered.pbc = {true, true, true};
+            layered.atoms = {{0, 0, 0, 0}, {1.8f, 1.8f, 3.6f, 0}, {0, 0, 7.2f, 0}};
+            layered.sourceCount = layered.atoms.size();
+            layered.bounds();
+            const auto starved = evaluate(layered, {csp});
+            require(starved.data.globalAttributes.at("Centrosymmetry.undercoordinated_particles") == 3 &&
+                        std::all_of(starved.data.scalarProperties.at("Centrosymmetry").begin(),
+                                    starved.data.scalarProperties.at("Centrosymmetry").end(),
+                                    [](double v) { return v == 0; }),
+                    "centers with no reachable neighbors report CSP 0 and are counted as under-coordinated");
+        }
         auto fcc = crystal(4);
         fcc.pbc = {true, true, true};
         auto n = neighbors(fcc, .8f);

@@ -309,12 +309,19 @@ inline Dataset readXYZ(const std::filesystem::path &path, const Frame &fr,
     std::istringstream lattice(attribute(fr.comment, "Lattice"));
     for (auto &v : d.cell)
         lattice >> v;
+    // OVITO parity: an XYZ frame without an explicit pbc attribute is treated
+    // as fully periodic whenever a Lattice is present (the extended-XYZ file
+    // format has no standard default, and OVITO assumes a periodic cell).
+    const bool explicitPbc = !attribute(fr.comment, "pbc").empty();
     std::istringstream periodic(attribute(fr.comment, "pbc"));
     for (auto &b : d.pbc) {
         std::string v;
         periodic >> v;
         b = v == "T" || v == "1" || v == "true";
     }
+    if (!explicitPbc &&
+        std::any_of(d.cell.begin(), d.cell.end(), [](double v) { return v != 0; }))
+        d.pbc = {true, true, true};
     int speciesCol = 0, posCol = 1;
     struct Column {
         std::string name;
@@ -639,6 +646,7 @@ enum class Op {
     ,BondLengthDistribution
     ,BondAngleDistribution
     ,ScatterPlot
+    ,CentrosymmetryParameter
 };
 struct Modifier {
     Op op;
@@ -695,6 +703,9 @@ struct Modifier {
     bool sliceOperateOnParticles = true;
     int replicateN[3]{1, 1, 1};
     bool replicateAdjustBox = true;
+    int cspNeighbors = 12;
+    int cspMode = 0; // 0 = Conventional CSP, 1 = Minimum-weight matching CSP
+    bool cspOnlySelected = false;
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -735,6 +746,9 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
             break;
         case Op::CommonNeighborAnalysis:
             scalar.insert("Structure Type");
+            break;
+        case Op::CentrosymmetryParameter:
+            scalar.insert("Centrosymmetry");
             break;
         default:
             break;
@@ -778,6 +792,10 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Particles,"Coordination");
         add(Kind::GlobalAttributes,"Coordination statistics");
         add(Kind::Table,"Coordination number distribution");
+    }
+    if (modifier.op==Op::CentrosymmetryParameter) {
+        add(Kind::Particles,"Centrosymmetry");
+        add(Kind::GlobalAttributes,"Centrosymmetry statistics");
     }
     if (modifier.op==Op::ClusterAnalysis) {
         add(Kind::Particles,"Cluster IDs");
@@ -1570,6 +1588,166 @@ inline CNAResult analyzeCommonNeighbors(const Dataset &d, double cutoff,
     return result;
 }
 
+// Kelchner–Plimpton–Hamilton centrosymmetry parameter (OVITO S02). For every
+// analyzed center, the N nearest minimum-image neighbor vectors are paired up;
+// the CSP is the sum of the N/2 pair resultant weights |r_i + r_j|^2.
+// Conventional mode greedily keeps the N/2 lightest pairs of all N(N-1)/2
+// (LAMMPS compute centro/atom); matching mode solves the minimum-weight
+// perfect pairing exactly (Larsen, arXiv:2003.08879).
+struct CentrosymmetryResult {
+    std::vector<double> values;
+    double maxValue = 0;
+    // Centers with fewer than N neighbors that could not even produce a valid
+    // even pairing (>= 4 remaining); they report a CSP of 0 (OVITO behavior
+    // for such systems is undocumented; see docs/parity/reference/S02).
+    size_t underCoordinated = 0;
+};
+inline double centrosymmetryPairWeight(const std::array<double,3> &a, const std::array<double,3> &b) {
+    const double x = a[0] + b[0], y = a[1] + b[1], z = a[2] + b[2];
+    return x * x + y * y + z * z;
+}
+inline double centrosymmetryGreedy(const std::vector<std::array<double,3>> &v) {
+    const size_t n = v.size();
+    std::vector<double> weights;
+    weights.reserve(n * (n - 1) / 2);
+    for (size_t a = 0; a < n; ++a)
+        for (size_t b = a + 1; b < n; ++b)
+            weights.push_back(centrosymmetryPairWeight(v[a], v[b]));
+    const size_t half = n / 2;
+    std::nth_element(weights.begin(), weights.begin() + half, weights.end());
+    double sum = 0;
+    for (size_t i = 0; i < half; ++i) sum += weights[i];
+    return sum;
+}
+inline double centrosymmetryMatching(const std::vector<std::array<double,3>> &v) {
+    const size_t n = v.size();
+    std::vector<double> dp(size_t(1) << n, std::numeric_limits<double>::infinity());
+    dp[0] = 0;
+    for (size_t mask = 0; mask + 1 < dp.size(); ++mask) {
+        if (!std::isfinite(dp[mask])) continue;
+        size_t first = 0;
+        while (mask & (size_t(1) << first)) ++first;
+        for (size_t b = first + 1; b < n; ++b) {
+            if (mask & (size_t(1) << b)) continue;
+            double &target = dp[mask | (size_t(1) << first) | (size_t(1) << b)];
+            target = std::min(target, dp[mask] + centrosymmetryPairWeight(v[first], v[b]));
+        }
+    }
+    return dp.back();
+}
+inline CentrosymmetryResult centrosymmetry(const Dataset &d, int neighborCount, int mode,
+                                           const std::vector<uint8_t> *selection = nullptr,
+                                           std::atomic<bool> *cancel = nullptr) {
+    validateNeighborAnalysisInput(d);
+    if (neighborCount < 2 || neighborCount > 64 || neighborCount % 2)
+        throw std::runtime_error("Number of neighbors must be a positive, even integer");
+    if (mode != 0 && mode != 1)
+        throw std::runtime_error("Centrosymmetry mode must be conventional or minimum-weight matching");
+    if (mode == 1 && neighborCount > 20)
+        throw std::runtime_error("Minimum-weight matching supports at most 20 neighbors");
+    if (selection && selection->size() != d.atoms.size())
+        throw std::runtime_error("Selection length does not match particle count");
+    CentrosymmetryResult result;
+    result.values.assign(d.atoms.size(), 0.0);
+    if (d.atoms.empty()) return result;
+    const auto searchCell = neighborSearchCell(d);
+    const auto inverse = cellInverse(searchCell);
+    std::vector<std::array<double,3>> fractional(d.atoms.size());
+    for (size_t i = 0; i < d.atoms.size(); ++i) {
+        if (cancel && (i & 65535) == 0 && *cancel) throw std::runtime_error("Cancelled");
+        fractional[i] = fractionalPosition(d, d.atoms[i], inverse);
+    }
+    struct NeighborEntry { uint32_t index; double distanceSquared; std::array<int32_t,3> image; };
+    std::vector<std::vector<NeighborEntry>> adjacency(d.atoms.size());
+    // Adaptive cutoff: grow until every analyzed center sees at least N distinct
+    // minimum-image neighbors, but never past half the shortest periodic cell
+    // translation, which is the exact-search limit of the shared kernel.
+    const double volume = std::abs(cellDeterminant(d.cell));
+    double cutoff = 1.0;
+    if (volume > 0 && d.atoms.size() > 1) {
+        const double density = double(d.atoms.size()) / volume;
+        cutoff = 2.0 * std::cbrt(3.0 * double(neighborCount) /
+                                 (4.0 * 3.14159265358979323846 * density));
+    }
+    if (!(cutoff > 0) || !std::isfinite(cutoff)) cutoff = 1.0;
+    double maxCutoff = std::numeric_limits<double>::infinity();
+    for (int axis = 0; axis < 3; ++axis)
+        if (d.pbc[axis]) {
+            const double length = std::sqrt(d.cell[axis*3] * d.cell[axis*3] +
+                                            d.cell[axis*3+1] * d.cell[axis*3+1] +
+                                            d.cell[axis*3+2] * d.cell[axis*3+2]);
+            maxCutoff = std::min(maxCutoff, 0.5 * length);
+        }
+    bool found = false;
+    for (int attempt = 0; attempt < 24 && !found; ++attempt) {
+        if (cutoff > maxCutoff) cutoff = maxCutoff;
+        for (auto &list : adjacency) list.clear();
+        try {
+            forEachNeighborPair(d, cutoff, [&](uint32_t i, uint32_t j, double distanceSquared,
+                                               std::array<int32_t,3> image) {
+                adjacency[i].push_back({j, distanceSquared, image});
+                adjacency[j].push_back({i, distanceSquared,
+                                        {int32_t(-image[0]), int32_t(-image[1]), int32_t(-image[2])}});
+            }, cancel);
+        } catch (const std::exception &e) {
+            if (std::string(e.what()) == "Cancelled") throw;
+            if (attempt == 0)
+                throw std::runtime_error(
+                    "The simulation cell is too small to resolve " + std::to_string(neighborCount) +
+                    " nearest neighbors; reduce the neighbor count or enlarge the cell");
+            break; // keep the previous pass for the under-coordination fallback
+        }
+        found = true;
+        for (size_t i = 0; i < d.atoms.size() && found; ++i) {
+            if (cancel && (i & 65535) == 0 && *cancel) throw std::runtime_error("Cancelled");
+            if (selection && !(*selection)[i]) continue;
+            if (adjacency[i].size() < size_t(neighborCount)) found = false;
+        }
+        if (!found) {
+            if (cutoff >= maxCutoff) break;
+            cutoff = std::min(cutoff * 1.3, maxCutoff);
+        }
+    }
+    for (size_t i = 0; i < d.atoms.size(); ++i) {
+        if (cancel && (i & 65535) == 0 && *cancel) throw std::runtime_error("Cancelled");
+        if (selection && !(*selection)[i]) continue; // OVITO: unselected centers report 0
+        auto &list = adjacency[i];
+        // Guarantee N neighbors where possible; centers the grown cutoff still
+        // under-coordinates fall back to the found neighbors when they form a
+        // valid even pairing (>= 4), and to a CSP of 0 otherwise.
+        size_t take = std::min(list.size(), size_t(neighborCount));
+        if (list.size() < size_t(neighborCount)) {
+            if (list.size() >= 4 && list.size() % 2 == 0)
+                take = list.size();
+            else {
+                ++result.underCoordinated;
+                continue;
+            }
+        }
+        std::nth_element(list.begin(), list.begin() + (take - 1), list.end(),
+                         [](const NeighborEntry &a, const NeighborEntry &b) {
+                             return a.distanceSquared < b.distanceSquared;
+                         });
+        std::vector<std::array<double,3>> vectors;
+        vectors.reserve(take);
+        for (size_t k = 0; k < take; ++k) {
+            const auto &entry = list[k];
+            std::array<double,3> vector{};
+            for (int axis = 0; axis < 3; ++axis) {
+                const double f = fractional[entry.index][axis] - fractional[i][axis] -
+                                 double(entry.image[axis]);
+                for (int xyz = 0; xyz < 3; ++xyz) vector[xyz] += f * searchCell[axis * 3 + xyz];
+            }
+            vectors.push_back(vector);
+        }
+        const double csp = mode == 0 ? centrosymmetryGreedy(vectors)
+                                     : centrosymmetryMatching(vectors);
+        result.values[i] = csp;
+        result.maxValue = std::max(result.maxValue, csp);
+    }
+    return result;
+}
+
 inline const char *opName(Op op) {
     switch (op) {
     case Op::Rotate: return "Rotate";
@@ -1615,6 +1793,7 @@ inline const char *opName(Op op) {
     case Op::BondLengthDistribution: return "Bond length distribution";
     case Op::BondAngleDistribution: return "Bond angle distribution";
     case Op::ScatterPlot: return "Scatter plot";
+    case Op::CentrosymmetryParameter: return "Centrosymmetry parameter";
     default:
         return "Color by type";
     }
@@ -2119,6 +2298,16 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 r.data.cell = m.editedCell;
                 r.data.origin = m.editedOrigin;
                 r.data.pbc = m.editedPbc;
+                continue;
+            }
+            if (m.op == Op::CentrosymmetryParameter) {
+                auto csp = centrosymmetry(r.data, m.cspNeighbors, m.cspMode,
+                                          m.cspOnlySelected ? &r.selected : nullptr, cancel);
+                r.data.scalarProperties["Centrosymmetry"] = std::move(csp.values);
+                r.data.globalAttributes["Centrosymmetry.max"] = csp.maxValue;
+                r.data.globalAttributes["Centrosymmetry.neighbor_count"] = double(m.cspNeighbors);
+                r.data.globalAttributes["Centrosymmetry.undercoordinated_particles"] =
+                    double(csp.underCoordinated);
                 continue;
             }
             if (m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
