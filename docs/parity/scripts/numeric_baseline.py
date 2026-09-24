@@ -408,8 +408,9 @@ def main():
     peak2_bin = int(np.argmax(h2))
     peak2 = (edges[peak2_bin] + edges[peak2_bin + 1]) / 2.0
 
-    # thermal shells (band assignment around ideal centers +-0.35)
-    bands = [(2.20, 3.00), (3.30, 3.95), (4.10, 4.75), (4.78, 5.35), (5.35, 5.45)]
+    # thermal shells: band edges chosen from the observed thermal spreads so that
+    # shells 1-3 are counted exactly; shell 4 overlaps the 5.6921 cluster (beyond cutoff)
+    bands = [(2.00, 3.00), (3.00, 4.05), (4.05, 4.76), (4.76, 5.39), (5.39, 6.00)]
     band_stats = []
     for lo, hi in bands:
         sel = d_all[(d_all >= lo) & (d_all <= hi)]
@@ -592,7 +593,7 @@ def main():
     L(f"- Cutoff safety margin, frame 0: largest first-shell distance {shell1.max():.4f} A,")
     L(f"  smallest second-shell distance {shell2.min():.4f} A; cutoff 3.1 clears them by")
     L(f"  {margin1:.3f} A and {margin2:.3f} A -- no float32 cutoff-comparison risk.")
-    L(f"- Perfect BCC at cutoff 2.8 A: **Other = {cnt_bcc28.get('Other',0)}/54** (all bonds (0,0,0): a corner and a body-center atom share no common neighbors when only the 8 first-shell atoms are in the neighbor lists). Coordination is 8 for every atom. This cutoff does NOT identify BCC.")
+    L(f"- Perfect BCC at cutoff 2.8 A: **Other = {cnt_bcc28.get('Other',0)}/{len(bcc_pos)}** (all bonds (0,0,0): a corner and a body-center atom share no common neighbors when only the 8 first-shell atoms are in the neighbor lists). Coordination is 8 for every atom. This cutoff does NOT identify BCC.")
     L(f"- Perfect BCC at cutoff 3.6 A (between shells 2 and 3): **BCC = {cnt_bcc36.get('BCC',0)}/{len(bcc_pos)}**;")
     L("  per atom: 8 first-shell bonds with signature 1661 and 6 second-shell bonds with")
     L("  signature 1441. (Coordination 14 = 8 + 6.)")
@@ -625,33 +626,53 @@ def main():
     L("")
     L("| shell | ideal distance (A) | multiplicity/atom | pairs in 108-atom box |")
     L("|---|---|---|---|")
-    shell_names = ["1st (NN)", "2nd", "3rd", "4th", "5th (at L/2)", "6th (beyond L/2)"]
+    shell_names = ["1st (NN)", "2nd", "3rd", "4th"]
     for k, (rmin, rmax, npairs, mult) in enumerate(ideal_shells):
-        L(f"| {shell_names[k] if k < len(shell_names) else ''} | "
+        name = shell_names[k] if k < len(shell_names) else "n/a (beyond L/2)"
+        L(f"| {name} | "
           f"{(rmin+rmax)/2.0:.6f}" + ("" if rmax - rmin < 1e-9 else f" ({rmin:.6f}-{rmax:.6f})") +
           f" | {mult:.0f} | {npairs} |")
     L("")
+    L("Rows labeled n/a lie beyond the r = L/2 = 5.4 A RDF cutoff; in an L = 3a box")
+    L("their direction sets are not representable faithfully under minimum imaging")
+    L("(some collapse, e.g. 7.6368 A shows 3 neighbors/atom instead of the")
+    L("infinite-lattice 12) -- they are not usable RDF shells.")
+    L("")
     L(f"Thermal frame 0 (amplitude 0.12 A, file-rounded positions), 0.01 A bins, r < 5.4 = L/2:")
     L("")
-    L(f"- **First peak: bin center {peak1:.2f} A** (ideal a/sqrt(2) = {A_FCC/math.sqrt(2):.4f} A);")
+    L(f"- **First peak: bin center {peak1:.3f} A** (ideal a/sqrt(2) = {A_FCC/math.sqrt(2):.4f} A);")
     L(f"  thermal shell 1 spans {band_stats[0][3]:.4f}-{band_stats[0][4]:.4f} A.")
-    L(f"- **Second peak: bin center {peak2:.2f} A** (ideal a = 3.6 A);")
+    L(f"- **Second peak: bin center {peak2:.3f} A** (ideal a = 3.6 A);")
     L(f"  shell 2 spans {band_stats[1][3]:.4f}-{band_stats[1][4]:.4f} A.")
     L("")
-    L("| band (A) | pair count | atoms/atom (=count x 2/108) | min (A) | max (A) | peak bin center (A) |")
-    L("|---|---|---|---|---|---|")
-    for (lo, hi, n, mn, mx, pk) in band_stats:
-        L(f"| {lo:.2f}-{hi:.2f} | {n} | {n*2.0/108.0:.2f} | {mn:.4f} | {mx:.4f} | {pk:.2f} |")
+    L("| band (A) | pair count | ideal shell | atoms/atom (=count x 2/108) | min (A) | max (A) | peak bin center (A) |")
+    L("|---|---|---|---|---|---|---|")
+    band_ideal = ["1st: 2.5456", "2nd: 3.6", "3rd: 4.4091", "4th: 5.0912", "5.6921 (beyond cutoff)"]
+    for t, (lo, hi, n, mn, mx, pk) in enumerate(band_stats):
+        L(f"| {lo:.2f}-{hi:.2f} | {n} | {band_ideal[t]} | {n*2.0/108.0:.2f} | {mn:.4f} | {mx:.4f} | {pk:.3f} |")
+    L("")
+    L("Shells 1-3 are exactly countable with the band edges above (thermal spreads are")
+    L(f"2.2134-2.8671, 3.3660-3.8441, 4.0814-4.7460 A; the 3rd/4th shell gap is only")
+    L(f"4.7460 -> 4.7795 A). Shell 4 holds 648 pairs but ONE of its thermal-tail pairs")
+    L(f"(~5.40 A) is nearer the 5.6921 cluster, so a fixed band [4.76, 5.39] captures")
+    L(f"{band_stats[3][2]}; accept 647-648. The 5.39-6.00 band mixes the 5.6921 cluster")
+    L("(beyond the r = L/2 cutoff) and shell-4 tails -- do not use it as a test.")
     L("")
     L("Finite-size effects (3x3x3 box, L = 10.8):")
     L("")
-    L("- RDF is only defined to r = L/2 = 5.4 A; shells 1-4 (2.546, 3.6, 4.409, 5.091 A;")
-    L("  12, 6, 24, 12 neighbors) are complete and untruncated -- coordination integrals")
-    L("  over shells 1-4 reproduce exactly 12, 6, 24, 12.")
-    L("- The 5th shell (24 neighbors at 1.5a = 5.4 A) coincides with the r = L/2 cutoff")
-    L("  and suffers minimum-image ambiguity (each such pair sits exactly at the box")
-    L(f"  half-width); the histogram shows {band_stats[4][2]} pairs in 5.35-5.45 A. Do not use it as a test.")
-    L("- Shell 6 (8 at a*sqrt(3) = 6.235 A) and beyond are unreachable at this box size.")
+    L("- RDF is only meaningful to r = L/2 = 5.4 A (OVITO's default cutoff = half the")
+    L("  minimum box width). Shells 1-4 (2.5456, 3.6, 4.4091, 5.0912 A; 12, 6, 24, 12")
+    L("  neighbors per atom; 648, 324, 1296, 648 pairs) are complete and untruncated:")
+    L("  coordination integrals over shells 1-4 reproduce 12, 6, 24, 12 (shell 4 within")
+    L("  the one-pair ambiguity noted above).")
+    L("- There is NO FCC shell at 1.5a = 5.4 A (vectors like (1,1,0.5)a are not FCC")
+    L("  lattice vectors). The next true shell is sqrt(2.5)a = 5.692 A > L/2, i.e.")
+    L("  outside the cutoff -- do not expect a 5th peak below 5.4 A.")
+    L("- All clusters beyond 5.4 A (5.6921 x12, 6.2354 x8, 6.7350 x24, 7.6368 x3,")
+    L("  8.4427 x6 per atom) are outside the r = L/2 cutoff; in this small box some")
+    L("  direction sets collide under minimum imaging (e.g. the 12 infinite-lattice")
+    L("  directions of the 7.6368 A cluster collapse to 3 distinct neighbors).")
+    L("  Do not use any cluster above 5.4 A for tests.")
     L("")
     L("## D. Centrosymmetry parameter (CSP)")
     L("")
@@ -680,7 +701,9 @@ def main():
     L(f"- BCC using 8 neighbors: exact 0 (see above). The 8 vectors (±1.5, ±1.5, ±1.5) A")
     L("  contain exact opposite pairs.")
     L("")
-    L("FCC with one vacancy (atom 0 at origin removed) -- the 12 first-shell neighbors:")
+    L("FCC with one vacancy (atom 0 at origin removed) -- the 12 first-shell neighbors")
+    L("(indices are positions in the 107-atom post-deletion list; in the original")
+    L("108-atom indexing they are 1, 2, 3, 10, 11, 25, 27, 35, 73, 74, 82, 97):")
     L("")
     L("| atom | CSP greedy | CSP matching (tie-range) |")
     L("|---|---|---|")
@@ -761,8 +784,8 @@ def main():
     L("|---|---|---|")
     L("| A/B/G integer counts (CNA classes, coordination histogram, slice kept, replicate N) | as listed | 0 (exact) |")
     L("| A per-atom bond signatures | as listed | exact match of signature multiset |")
-    L("| C peak bin centers | 2.55, 3.60 | +/- 0.02 A (bin 0.01 + float32) |")
-    L("| C shell pair counts / coordination integrals | 648, 324, 1296, 648 pairs (12, 6, 24, 12 per atom) | 0 with band edges as listed |")
+    L(f"| C peak bin centers | {peak1:.3f} (ideal 2.5456), {peak2:.3f} (ideal 3.6000) | +/- 0.02 A (bin 0.01 + float32) |")
+    L("| C shell pair counts / coordination integrals | 648, 324, 1296, 648 pairs (12, 6, 24, 12 per atom) | 0 for shells 1-3 with band edges as listed; +/-1 pair for shell 4 |")
     L("| D CSP zeros (perfect crystals) | 0.0 | <= 1e-5 (float32 positions) / 1e-10 (float64) |")
     L("| D CSP displaced-atom and neighbor values | as tabled | +/- 1e-4 |")
     L("| D CSP vacancy neighbors (greedy) | 6.48 | +/- 1e-4 |")

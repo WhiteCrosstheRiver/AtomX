@@ -46,7 +46,7 @@ Key facts:
 - Cutoff safety margin, frame 0: largest first-shell distance 2.8671 A,
   smallest second-shell distance 3.3660 A; cutoff 3.1 clears them by
   0.233 A and 0.266 A -- no float32 cutoff-comparison risk.
-- Perfect BCC at cutoff 2.8 A: **Other = 128/54** (all bonds (0,0,0): a corner and a body-center atom share no common neighbors when only the 8 first-shell atoms are in the neighbor lists). Coordination is 8 for every atom. This cutoff does NOT identify BCC.
+- Perfect BCC at cutoff 2.8 A: **Other = 128/128** (all bonds (0,0,0): a corner and a body-center atom share no common neighbors when only the 8 first-shell atoms are in the neighbor lists). Coordination is 8 for every atom. This cutoff does NOT identify BCC.
 - Perfect BCC at cutoff 3.6 A (between shells 2 and 3): **BCC = 128/128**;
   per atom: 8 first-shell bonds with signature 1661 and 6 second-shell bonds with
   signature 1441. (Coordination 14 = 8 + 6.)
@@ -79,36 +79,54 @@ Ideal FCC shells (a = 3.6, computed from the perfect fixture, exact):
 | 2nd | 3.600000 | 6 | 324 |
 | 3rd | 4.409082 | 24 | 1296 |
 | 4th | 5.091169 | 12 | 648 |
-| 5th (at L/2) | 5.692100 | 12 | 648 |
-| 6th (beyond L/2) | 6.235383 | 8 | 432 |
-|  | 6.734983 | 24 | 1296 |
-|  | 7.636753 | 3 | 162 |
-|  | 8.442748 | 6 | 324 |
+| n/a (beyond L/2) | 5.692100 | 12 | 648 |
+| n/a (beyond L/2) | 6.235383 | 8 | 432 |
+| n/a (beyond L/2) | 6.734983 | 24 | 1296 |
+| n/a (beyond L/2) | 7.636753 | 3 | 162 |
+| n/a (beyond L/2) | 8.442748 | 6 | 324 |
+
+Rows labeled n/a lie beyond the r = L/2 = 5.4 A RDF cutoff; in an L = 3a box
+their direction sets are not representable faithfully under minimum imaging
+(some collapse, e.g. 7.6368 A shows 3 neighbors/atom instead of the
+infinite-lattice 12) -- they are not usable RDF shells.
 
 Thermal frame 0 (amplitude 0.12 A, file-rounded positions), 0.01 A bins, r < 5.4 = L/2:
 
-- **First peak: bin center 2.54 A** (ideal a/sqrt(2) = 2.5456 A);
+- **First peak: bin center 2.535 A** (ideal a/sqrt(2) = 2.5456 A);
   thermal shell 1 spans 2.2134-2.8671 A.
-- **Second peak: bin center 3.59 A** (ideal a = 3.6 A);
+- **Second peak: bin center 3.595 A** (ideal a = 3.6 A);
   shell 2 spans 3.3660-3.8441 A.
 
-| band (A) | pair count | atoms/atom (=count x 2/108) | min (A) | max (A) | peak bin center (A) |
-|---|---|---|---|---|---|
-| 2.20-3.00 | 648 | 12.00 | 2.2134 | 2.8671 | 2.53 |
-| 3.30-3.95 | 324 | 6.00 | 3.3660 | 3.8441 | 3.59 |
-| 4.10-4.75 | 1294 | 23.96 | 4.1089 | 4.7460 | 4.35 |
-| 4.78-5.35 | 640 | 11.85 | 4.8028 | 5.3472 | 5.10 |
-| 5.35-5.45 | 20 | 0.37 | 5.3552 | 5.4492 | 5.44 |
+| band (A) | pair count | ideal shell | atoms/atom (=count x 2/108) | min (A) | max (A) | peak bin center (A) |
+|---|---|---|---|---|---|---|
+| 2.00-3.00 | 648 | 1st: 2.5456 | 12.00 | 2.2134 | 2.8671 | 2.535 |
+| 3.00-4.05 | 324 | 2nd: 3.6 | 6.00 | 3.3660 | 3.8441 | 3.595 |
+| 4.05-4.76 | 1296 | 3rd: 4.4091 | 24.00 | 4.0814 | 4.7460 | 4.355 |
+| 4.76-5.39 | 647 | 4th: 5.0912 | 11.98 | 4.7795 | 5.3809 | 5.105 |
+| 5.39-6.00 | 659 | 5.6921 (beyond cutoff) | 12.20 | 5.3956 | 5.9927 | 5.645 |
+
+Shells 1-3 are exactly countable with the band edges above (thermal spreads are
+2.2134-2.8671, 3.3660-3.8441, 4.0814-4.7460 A; the 3rd/4th shell gap is only
+4.7460 -> 4.7795 A). Shell 4 holds 648 pairs but ONE of its thermal-tail pairs
+(~5.40 A) is nearer the 5.6921 cluster, so a fixed band [4.76, 5.39] captures
+647; accept 647-648. The 5.39-6.00 band mixes the 5.6921 cluster
+(beyond the r = L/2 cutoff) and shell-4 tails -- do not use it as a test.
 
 Finite-size effects (3x3x3 box, L = 10.8):
 
-- RDF is only defined to r = L/2 = 5.4 A; shells 1-4 (2.546, 3.6, 4.409, 5.091 A;
-  12, 6, 24, 12 neighbors) are complete and untruncated -- coordination integrals
-  over shells 1-4 reproduce exactly 12, 6, 24, 12.
-- The 5th shell (24 neighbors at 1.5a = 5.4 A) coincides with the r = L/2 cutoff
-  and suffers minimum-image ambiguity (each such pair sits exactly at the box
-  half-width); the histogram shows 20 pairs in 5.35-5.45 A. Do not use it as a test.
-- Shell 6 (8 at a*sqrt(3) = 6.235 A) and beyond are unreachable at this box size.
+- RDF is only meaningful to r = L/2 = 5.4 A (OVITO's default cutoff = half the
+  minimum box width). Shells 1-4 (2.5456, 3.6, 4.4091, 5.0912 A; 12, 6, 24, 12
+  neighbors per atom; 648, 324, 1296, 648 pairs) are complete and untruncated:
+  coordination integrals over shells 1-4 reproduce 12, 6, 24, 12 (shell 4 within
+  the one-pair ambiguity noted above).
+- There is NO FCC shell at 1.5a = 5.4 A (vectors like (1,1,0.5)a are not FCC
+  lattice vectors). The next true shell is sqrt(2.5)a = 5.692 A > L/2, i.e.
+  outside the cutoff -- do not expect a 5th peak below 5.4 A.
+- All clusters beyond 5.4 A (5.6921 x12, 6.2354 x8, 6.7350 x24, 7.6368 x3,
+  8.4427 x6 per atom) are outside the r = L/2 cutoff; in this small box some
+  direction sets collide under minimum imaging (e.g. the 12 infinite-lattice
+  directions of the 7.6368 A cluster collapse to 3 distinct neighbors).
+  Do not use any cluster above 5.4 A for tests.
 
 ## D. Centrosymmetry parameter (CSP)
 
@@ -145,7 +163,9 @@ FCC + atom 0 displaced by (0.5, 0, 0) A -- atom-index -> CSP (A^2):
 - BCC using 8 neighbors: exact 0 (see above). The 8 vectors (±1.5, ±1.5, ±1.5) A
   contain exact opposite pairs.
 
-FCC with one vacancy (atom 0 at origin removed) -- the 12 first-shell neighbors:
+FCC with one vacancy (atom 0 at origin removed) -- the 12 first-shell neighbors
+(indices are positions in the 107-atom post-deletion list; in the original
+108-atom indexing they are 1, 2, 3, 10, 11, 25, 27, 35, 73, 74, 82, 97):
 
 | atom | CSP greedy | CSP matching (tie-range) |
 |---|---|---|
@@ -236,8 +256,8 @@ coordination distribution 12: 864 -- identical to the unreplicated cell (periodi
 |---|---|---|
 | A/B/G integer counts (CNA classes, coordination histogram, slice kept, replicate N) | as listed | 0 (exact) |
 | A per-atom bond signatures | as listed | exact match of signature multiset |
-| C peak bin centers | 2.55, 3.60 | +/- 0.02 A (bin 0.01 + float32) |
-| C shell pair counts / coordination integrals | 648, 324, 1296, 648 pairs (12, 6, 24, 12 per atom) | 0 with band edges as listed |
+| C peak bin centers | 2.535 (ideal 2.5456), 3.595 (ideal 3.6000) | +/- 0.02 A (bin 0.01 + float32) |
+| C shell pair counts / coordination integrals | 648, 324, 1296, 648 pairs (12, 6, 24, 12 per atom) | 0 for shells 1-3 with band edges as listed; +/-1 pair for shell 4 |
 | D CSP zeros (perfect crystals) | 0.0 | <= 1e-5 (float32 positions) / 1e-10 (float64) |
 | D CSP displaced-atom and neighbor values | as tabled | +/- 1e-4 |
 | D CSP vacancy neighbors (greedy) | 6.48 | +/- 1e-4 |
