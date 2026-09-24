@@ -240,6 +240,28 @@ int main() {
             requireExport(app.mods[0].rdfBins==16 && app.mods[1].rdfBins==8 &&
                               app.result.data.tables.back().rows.size()==8,
                           "copied node parameters are independent and drive its real recomputation");
+            click("pipeline.node.enabled."+copiedNodeId);
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            requireExport(!app.mods[1].enabled && app.result.data.tables.back().rows.size()==16,
+                          "disabling a node bypasses its work and publishes the upstream table");
+            click("pipeline.node.enabled."+copiedNodeId);
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            requireExport(app.mods[1].enabled && app.result.data.tables.back().rows.size()==8,
+                          "re-enabling a node restores its computed output");
+            click("pipeline.node.down."+copiedNodeId);
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            requireExport(app.mods[0].id==copiedNodeId && app.mods[1].id==originalNodeId &&
+                              app.result.data.tables.back().rows.size()==16,
+                          "visual down moves the node earlier in execution order");
+            click("pipeline.node.up."+copiedNodeId);
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            requireExport(app.mods[0].id==originalNodeId && app.mods[1].id==copiedNodeId &&
+                              app.result.data.tables.back().rows.size()==8,
+                          "visual up moves the node later in execution order");
             click("pipeline.node.delete."+copiedNodeId);
             requireExport(app.mods.size()==1 && app.mods[0].id==originalNodeId,
                           "pipeline Delete removes only the selected copied node");

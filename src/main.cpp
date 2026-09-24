@@ -1690,7 +1690,9 @@ struct App {
                     const float labelWidth=std::max(0.f,ImGui::GetContentRegionAvail().x-
                         ImGui::GetFrameHeight()-actionWidth-itemSpacing*5);
                     bool enabled = m.enabled;
-                    if (ImGui::Checkbox("##enabled", &enabled)) {
+                    bool enabledChanged=ImGui::Checkbox("##enabled", &enabled);
+                    recordUiTestItem(std::string("pipeline.node.enabled.")+m.id);
+                    if (enabledChanged) {
                         checkpoint();
                         m.enabled = enabled;
                         update(size_t(i));
@@ -1702,13 +1704,21 @@ struct App {
                         modifierGraph.selected = size_t(i);
                     recordUiTestItem(std::string("pipeline.node.select.")+m.id);
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("↑") && i > 0) {
-                        checkpoint(); modifierGraph.move(size_t(i), size_t(i - 1)); update(size_t(i - 1));
+                    ImGui::BeginDisabled(i + 1 >= int(mods.size()));
+                    bool moveUpPressed=ImGui::SmallButton("↑");
+                    ImGui::EndDisabled();
+                    recordUiTestItem(std::string("pipeline.node.up.")+m.id);
+                    if (moveUpPressed && i + 1 < int(mods.size())) {
+                        checkpoint(); modifierGraph.move(size_t(i), size_t(i + 1)); update(size_t(i));
                         ImGui::PopID(); break;
                     }
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("↓") && i + 1 < int(mods.size())) {
-                        checkpoint(); modifierGraph.move(size_t(i), size_t(i + 1)); update(size_t(i));
+                    ImGui::BeginDisabled(i == 0);
+                    bool moveDownPressed=ImGui::SmallButton("↓");
+                    ImGui::EndDisabled();
+                    recordUiTestItem(std::string("pipeline.node.down.")+m.id);
+                    if (moveDownPressed && i > 0) {
+                        checkpoint(); modifierGraph.move(size_t(i), size_t(i - 1)); update(size_t(i - 1));
                         ImGui::PopID(); break;
                     }
                     ImGui::SameLine();
