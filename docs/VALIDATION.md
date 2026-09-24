@@ -287,3 +287,10 @@
 - Unwrap trajectories：与 OVITO 一致的无参面板；首帧恒等、跨界折叠（10.5→11.3 折为 +0.8）、跨帧链式累积、跳帧自举；非周期轴不受影响。
 - 遗留：Freeze 默认属性为首个可冻结标量（OVITO 默认 Particle Type，AtomX 中类型非数值属性）；Unwrap 累加器为节点单槽，跳帧后从包裹坐标自举。
 - 构建门禁全绿；GUI 现场验收通过。
+
+## 2026-09-25 P4 波次验证（紧凑 OVITO 风格界面 + 拖拽打开）
+
+- 视觉验收对照用户提供的两张 OVITO 截图：顶部一行紧凑图标工具栏（分组+分隔线+悬停提示）、右下紧凑传输簇（传输图标+帧号步进器+缩放/平移/视图图标）、右栏 Pipelines: 选择器 + 四图标操作行 + 节点列表右侧竖排图标条。截图 docs/parity/atomx/p4-*.png。
+- 图标字体：运行时合并 Segoe MDL2 Assets（segmdl2.ttf，含备选），逐字形 FindGlyphNoFallback 校验，缺失时回退文字按钮（回退契约有测试钉住）；smoke-report 记录 icon_font=Segoe MDL2 Assets。
+- 拖拽打开：伪造 HDROP 注入真实 WM_DROPFILES（与资源管理器拖放同代码路径）端到端验证——test.xyz 加载 108 粒子/30 帧，标题与数据源面板同步。注意 DROPFILES 结构体 pFiles 位于偏移 0（首次注入字段序写反导致静默失败，已修正注入脚本并留档 docs/parity/scripts/drop.ps1）。多文件拖入提示 "M more dropped file(s) ignored"；解析失败走现有失败弹窗。
+- 构建门禁全绿（零警告）；既有交互回归按节点 id 键全部通过。
