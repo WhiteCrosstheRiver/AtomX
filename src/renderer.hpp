@@ -140,6 +140,10 @@ class Renderer {
         float width = 1.5f, radius = 0;
         DirectX::XMFLOAT4 color{.72f,.78f,.86f,1};
     };
+    struct PlaneConstants {
+        DirectX::XMFLOAT4X4 viewProjection;
+        DirectX::XMFLOAT4 color;
+    };
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> ps;
     ComPtr<ID3D11Buffer> constants;
@@ -160,6 +164,16 @@ class Renderer {
     ComPtr<ID3D11GeometryShader> bondGS;
     ComPtr<ID3D11InputLayout> bondLayout;
     UINT bondVertexCount = 0;
+    // Translucent slice-plane overlay: an unlit, alpha-blended polygon drawn
+    // after atoms and bonds with depth testing but no depth writes.
+    ComPtr<ID3D11VertexShader> planeVS;
+    ComPtr<ID3D11PixelShader> planePS;
+    ComPtr<ID3D11InputLayout> planeLayout;
+    ComPtr<ID3D11Buffer> planeConstants;
+    ComPtr<ID3D11Buffer> planeBuffer;
+    ComPtr<ID3D11BlendState> planeBlend;
+    ComPtr<ID3D11DepthStencilState> planeDepth;
+    UINT planeVertexCount = 0;
 
   public:
     ComPtr<ID3D11Device> device;
@@ -218,6 +232,21 @@ class Renderer {
         styleBuffer = std::move(buffer);
         styleView = std::move(view);
         cachedStyles = styles;
+    }
+    // Publishes the slice-plane overlay geometry as a pre-triangulated polygon.
+    // An empty list clears the overlay; vertices are in world space.
+    void setSlicePlane(const std::vector<DirectX::XMFLOAT3> &triangles) {
+        planeBuffer.Reset();
+        planeVertexCount = 0;
+        if (triangles.empty())
+            return;
+        D3D11_BUFFER_DESC planeDesc{};
+        planeDesc.ByteWidth = UINT(triangles.size() * sizeof(DirectX::XMFLOAT3));
+        planeDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        planeDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA planeData{triangles.data(), 0, 0};
+        check(device->CreateBuffer(&planeDesc, &planeData, &planeBuffer), "Slice plane vertex buffer");
+        planeVertexCount = UINT(triangles.size());
     }
     void init(HWND window, int requested = -1) {
         ComPtr<IDXGIFactory1> factory;
@@ -449,6 +478,26 @@ float4 bondPixel(O i):SV_TARGET {
         check(device->CreateInputLayout(&bondElement,1,bondV->GetBufferPointer(),bondV->GetBufferSize(),&bondLayout), "Bond vertex layout");
         D3D11_BUFFER_DESC bondCb{}; bondCb.ByteWidth=sizeof(BondConstants); bondCb.Usage=D3D11_USAGE_DEFAULT; bondCb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         check(device->CreateBuffer(&bondCb,nullptr,&bondConstants), "Bond camera constants");
+        const char *planeShader = R"(
+cbuffer SlicePlaneCamera : register(b0) { row_major float4x4 viewProjection; float4 color; };
+struct SlicePlaneInput { float3 position:POSITION; };
+struct SlicePlaneVertex { float4 position:SV_POSITION; };
+SlicePlaneVertex slicePlaneVertex(SlicePlaneInput i) {
+ SlicePlaneVertex o; o.position=mul(float4(i.position,1),viewProjection); return o;
+}
+float4 slicePlanePixel():SV_TARGET { return color; }
+)";
+        ComPtr<ID3DBlob> planeV, planeP;
+        check(D3DCompile(planeShader, strlen(planeShader), nullptr, nullptr, nullptr, "slicePlaneVertex", "vs_5_0",
+                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &planeV, &err), "Slice plane vertex shader");
+        check(D3DCompile(planeShader, strlen(planeShader), nullptr, nullptr, nullptr, "slicePlanePixel", "ps_5_0",
+                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &planeP, &err), "Slice plane pixel shader");
+        check(device->CreateVertexShader(planeV->GetBufferPointer(), planeV->GetBufferSize(), nullptr, &planeVS), "Slice plane vertex shader");
+        check(device->CreatePixelShader(planeP->GetBufferPointer(), planeP->GetBufferSize(), nullptr, &planePS), "Slice plane pixel shader");
+        D3D11_INPUT_ELEMENT_DESC planeElement{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0};
+        check(device->CreateInputLayout(&planeElement,1,planeV->GetBufferPointer(),planeV->GetBufferSize(),&planeLayout), "Slice plane vertex layout");
+        D3D11_BUFFER_DESC planeCb{}; planeCb.ByteWidth=sizeof(PlaneConstants); planeCb.Usage=D3D11_USAGE_DEFAULT; planeCb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        check(device->CreateBuffer(&planeCb,nullptr,&planeConstants), "Slice plane constants");
         D3D11_BUFFER_DESC cb{};
         cb.ByteWidth = sizeof(Constants);
         cb.Usage = D3D11_USAGE_DEFAULT;
@@ -466,6 +515,18 @@ float4 bondPixel(O i):SV_TARGET {
         ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
         ds.DepthFunc = D3D11_COMPARISON_LESS;
         check(device->CreateDepthStencilState(&ds, &depthState), "Depth state");
+        ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        check(device->CreateDepthStencilState(&ds, &planeDepth), "Slice plane depth state");
+        D3D11_BLEND_DESC blend{};
+        blend.RenderTarget[0].BlendEnable = TRUE;
+        blend.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        check(device->CreateBlendState(&blend, &planeBlend), "Slice plane blend state");
     }
     void resize() {
         if (!swap)
@@ -767,6 +828,28 @@ float4 bondPixel(O i):SV_TARGET {
             context->RSSetState(raster.Get());
             context->Draw(bondVertexCount,0);
             context->GSSetShader(nullptr,nullptr,0);
+        }
+        if (planeBuffer && planeVertexCount >= 3) {
+            PlaneConstants planeCamera;
+            DirectX::XMStoreFloat4x4(&planeCamera.viewProjection, view * proj);
+            planeCamera.color = {.58f, .61f, .66f, .30f};
+            context->UpdateSubresource(planeConstants.Get(),0,nullptr,&planeCamera,0,0);
+            UINT stride=sizeof(DirectX::XMFLOAT3), offset=0;
+            ID3D11Buffer *buffer=planeBuffer.Get();
+            context->IASetInputLayout(planeLayout.Get());
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
+            context->VSSetShader(planeVS.Get(),nullptr,0);
+            context->PSSetShader(planePS.Get(),nullptr,0);
+            context->GSSetShader(nullptr,nullptr,0);
+            context->VSSetConstantBuffers(0,1,planeConstants.GetAddressOf());
+            context->PSSetConstantBuffers(0,1,planeConstants.GetAddressOf());
+            context->RSSetState(raster.Get());
+            context->OMSetDepthStencilState(planeDepth.Get(),0);
+            context->OMSetBlendState(planeBlend.Get(),nullptr,~0u);
+            context->Draw(planeVertexCount,0);
+            context->OMSetBlendState(nullptr,nullptr,~0u);
+            context->OMSetDepthStencilState(depthState.Get(),0);
         }
         ID3D11ShaderResourceView *empty = nullptr;
         context->VSSetShaderResources(0, 1, &empty);

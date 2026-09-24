@@ -685,6 +685,16 @@ struct Modifier {
     bool histogramSelectedOnly = false;
     bool histogramSelectRange = false;
     double histogramRangeStart = 0, histogramRangeEnd = 1;
+    float sliceNormal[3]{1, 0, 0};
+    double sliceDistance = 0;
+    double sliceWidth = 0;
+    bool sliceInvert = false;
+    bool sliceShowPlane = false;
+    bool sliceCreateSelection = false;
+    bool sliceApplySelectionOnly = false;
+    bool sliceOperateOnParticles = true;
+    int replicateN[3]{1, 1, 1};
+    bool replicateAdjustBox = true;
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -1715,6 +1725,55 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     std::abs(determinant) <= scale * scale * scale * 1e-12)
                     throw std::runtime_error("Simulation cell vectors must form a non-degenerate cell");
             }
+            // Slice plane parameters, with the normal pre-normalized once for the
+            // per-particle loop below.
+            double sliceNormalUnit[3] = {};
+            if (m.op == Op::Slice) {
+                const double nx = m.sliceNormal[0], ny = m.sliceNormal[1], nz = m.sliceNormal[2];
+                if (!std::isfinite(m.sliceDistance) || !std::isfinite(m.sliceWidth) ||
+                    !std::isfinite(nx) || !std::isfinite(ny) || !std::isfinite(nz))
+                    throw std::runtime_error("Slice distance, width and normal must be finite");
+                if (m.sliceWidth < 0)
+                    throw std::runtime_error("Slice width must not be negative");
+                const double length = std::sqrt(nx * nx + ny * ny + nz * nz);
+                if (!(length > 0))
+                    throw std::runtime_error("Slice normal vector must be non-zero");
+                sliceNormalUnit[0] = nx / length;
+                sliceNormalUnit[1] = ny / length;
+                sliceNormalUnit[2] = nz / length;
+            }
+            // Shared strict slice-plane predicate: half-space keep is h < d
+            // (reverse: h > d); slab keep is the closed |h - d| <= w/2 (reverse:
+            // strictly outside). No epsilon: float particle storage against the
+            // double plane distance reproduces OVITO's boundary-layer counts.
+            const auto slicePasses = [&](const Atom &particle) {
+                const double h = sliceNormalUnit[0] * particle.x +
+                                 sliceNormalUnit[1] * particle.y +
+                                 sliceNormalUnit[2] * particle.z;
+                if (m.sliceWidth > 0) {
+                    const double offset = std::abs(h - m.sliceDistance);
+                    return m.sliceInvert ? offset > m.sliceWidth * .5
+                                         : offset <= m.sliceWidth * .5;
+                }
+                return m.sliceInvert ? h > m.sliceDistance : h < m.sliceDistance;
+            };
+            if (m.op == Op::Slice && m.sliceOperateOnParticles && m.sliceCreateSelection) {
+                size_t kept = 0;
+                for (size_t i = 0; i < r.data.atoms.size(); ++i) {
+                    if (cancel && (i & 65535) == 0 && *cancel)
+                        throw std::runtime_error("Cancelled");
+                    const bool passes =
+                        (!m.sliceApplySelectionOnly || r.selected[i]) &&
+                        slicePasses(r.data.atoms[i]);
+                    r.selected[i] = uint8_t(passes);
+                    kept += passes;
+                }
+                r.data.globalAttributes["Slice.input_particles"] = double(r.data.atoms.size());
+                r.data.globalAttributes["Slice.particles_deleted"] = 0;
+                r.data.globalAttributes["Slice.particles_remaining"] = double(r.data.atoms.size());
+                r.data.globalAttributes["Slice.particles_selected"] = double(kept);
+                continue;
+            }
             if (m.op == Op::EditType && (m.type < 0 || size_t(m.type) >= r.data.species.size()))
                 throw std::runtime_error("Particle type is out of range");
             if (m.op == Op::SelectRange && m.upper < m.value)
@@ -1855,53 +1914,83 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 continue;
             }
             if (m.op == Op::Replicate) {
-                if (m.type < 1 || m.type > 32 || r.data.atoms.size() > 20000000 / size_t(m.type))
+                const int copies[3]{m.replicateN[0], m.replicateN[1], m.replicateN[2]};
+                for (int count : copies)
+                    if (count < 1 || count > 32)
+                        throw std::runtime_error("Replication copies must be between 1 and 32 along each cell vector");
+                const size_t total = size_t(copies[0]) * size_t(copies[1]) * size_t(copies[2]);
+                if (r.data.atoms.size() > 20000000 / total)
                     throw std::runtime_error("Replication exceeds the 20 million atom budget");
-                size_t n = r.data.atoms.size();
+                for (int axis = 0; axis < 3; ++axis)
+                    if (copies[axis] > 1 && r.data.cell[axis * 3] == 0 &&
+                        r.data.cell[axis * 3 + 1] == 0 && r.data.cell[axis * 3 + 2] == 0)
+                        throw std::runtime_error("Replication requires a nonzero simulation cell vector");
+                const size_t n = r.data.atoms.size();
                 const auto originalBonds = r.data.bonds;
-                auto offset = m.axis * 3;
-                if (r.data.cell[offset] == 0 && r.data.cell[offset+1] == 0 && r.data.cell[offset+2] == 0)
-                    throw std::runtime_error("Replication requires a nonzero simulation cell vector");
-                r.data.atoms.reserve(n * m.type); r.selected.reserve(n * m.type);
-                for (int copy = 1; copy < m.type; ++copy)
-                    for (size_t i = 0; i < n; ++i) {
-                        auto a = r.data.atoms[i];
-                        a.x += float(copy * r.data.cell[offset]);
-                        a.y += float(copy * r.data.cell[offset+1]);
-                        a.z += float(copy * r.data.cell[offset+2]);
-                        r.data.atoms.push_back(a); r.selected.push_back(r.selected[i]);
-                        r.colorSelected.push_back(r.colorSelected[i]);
-                    }
-                for (int k=0;k<3;++k) r.data.cell[offset+k] *= m.type;
+                // Image (i,j,k) lives at particle slot i + j*Na + k*Na*Nb so the
+                // copy order runs along a, then b, then c.
+                const size_t copyStride[3]{1, size_t(copies[0]), size_t(copies[0]) * size_t(copies[1])};
+                r.data.atoms.reserve(n * total); r.selected.reserve(n * total);
+                r.colorSelected.reserve(n * total);
+                for (int cz = 0; cz < copies[2]; ++cz)
+                    for (int cy = 0; cy < copies[1]; ++cy)
+                        for (int cx = 0; cx < copies[0]; ++cx) {
+                            if (!cx && !cy && !cz) continue;
+                            const double shift[3]{
+                                cx * r.data.cell[0] + cy * r.data.cell[3] + cz * r.data.cell[6],
+                                cx * r.data.cell[1] + cy * r.data.cell[4] + cz * r.data.cell[7],
+                                cx * r.data.cell[2] + cy * r.data.cell[5] + cz * r.data.cell[8]};
+                            for (size_t i = 0; i < n; ++i) {
+                                auto a = r.data.atoms[i];
+                                a.x += float(shift[0]);
+                                a.y += float(shift[1]);
+                                a.z += float(shift[2]);
+                                r.data.atoms.push_back(a); r.selected.push_back(r.selected[i]);
+                                r.colorSelected.push_back(r.colorSelected[i]);
+                            }
+                        }
+                if (m.replicateAdjustBox)
+                    for (int axis = 0; axis < 3; ++axis)
+                        for (int component = 0; component < 3; ++component)
+                            r.data.cell[axis * 3 + component] *= copies[axis];
                 for (auto &[name, values] : r.data.scalarProperties) {
                     auto original = values;
-                    for (int copy = 1; copy < m.type; ++copy)
+                    for (size_t copy = 1; copy < total; ++copy)
                         values.insert(values.end(), original.begin(), original.end());
                 }
                 for (auto &[name, values] : r.data.vectorProperties) {
                     auto original = values;
-                    for (int copy = 1; copy < m.type; ++copy)
+                    for (size_t copy = 1; copy < total; ++copy)
                         values.insert(values.end(), original.begin(), original.end());
                 }
                 if (!r.data.particleColors.empty()) {
                     auto original=r.data.particleColors;
-                    for (int copy=1;copy<m.type;++copy)
+                    for (size_t copy=1;copy<total;++copy)
                         r.data.particleColors.insert(r.data.particleColors.end(),original.begin(),original.end());
                 }
                 r.data.bonds.clear();
-                r.data.bonds.reserve(originalBonds.size() * size_t(m.type));
-                for (int copy = 0; copy < m.type; ++copy) {
-                    for (auto bond : originalBonds) {
-                        if (bond.a >= n || bond.b >= n)
-                            throw std::runtime_error("Cannot replicate invalid bond topology");
-                        const int64_t unwrappedTarget = int64_t(copy) + bond.image[m.axis];
-                        const int64_t targetCopy = (unwrappedTarget % m.type + m.type) % m.type;
-                        bond.image[m.axis] = int32_t((unwrappedTarget - targetCopy) / m.type);
-                        bond.a += uint32_t(copy * n);
-                        bond.b += uint32_t(targetCopy * n);
-                        r.data.bonds.push_back(bond);
-                    }
-                }
+                r.data.bonds.reserve(originalBonds.size() * total);
+                for (int cz = 0; cz < copies[2]; ++cz)
+                    for (int cy = 0; cy < copies[1]; ++cy)
+                        for (int cx = 0; cx < copies[0]; ++cx) {
+                            const int image[3]{cx, cy, cz};
+                            for (auto bond : originalBonds) {
+                                if (bond.a >= n || bond.b >= n)
+                                    throw std::runtime_error("Cannot replicate invalid bond topology");
+                                uint32_t target = bond.b;
+                                for (int axis = 0; axis < 3; ++axis) {
+                                    const int64_t unwrapped = int64_t(image[axis]) + bond.image[axis];
+                                    const int64_t targetCopy =
+                                        (unwrapped % copies[axis] + copies[axis]) % copies[axis];
+                                    bond.image[axis] = int32_t((unwrapped - targetCopy) / copies[axis]);
+                                    target += uint32_t(targetCopy * copyStride[axis] * n);
+                                }
+                                bond.b = target;
+                                bond.a += uint32_t((size_t(cx) * copyStride[0] + size_t(cy) * copyStride[1] +
+                                                   size_t(cz) * copyStride[2]) * n);
+                                r.data.bonds.push_back(bond);
+                            }
+                        }
                 continue;
             }
             if (m.op == Op::Wrap) {
@@ -2507,7 +2596,9 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     break;
                 }
                 case Op::Slice:
-                    keep = coordinate(a, m.axis) <= m.value;
+                    keep = !m.sliceOperateOnParticles ||
+                           (m.sliceApplySelectionOnly && !r.selected[i]) ||
+                           slicePasses(a);
                     break;
                 case Op::SelectType:
                     sel = a.type == uint32_t(m.type);
@@ -2561,6 +2652,11 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             if (!r.data.particleColors.empty()) r.data.particleColors.resize(out);
             r.selected.resize(out);
             r.colorSelected.resize(out);
+            if (m.op == Op::Slice && m.sliceOperateOnParticles && !m.sliceCreateSelection) {
+                r.data.globalAttributes["Slice.input_particles"] = double(particleMap.size());
+                r.data.globalAttributes["Slice.particles_deleted"] = double(particleMap.size() - out);
+                r.data.globalAttributes["Slice.particles_remaining"] = double(out);
+            }
             if (m.op == Op::Delete || m.op == Op::Slice) {
                 std::vector<Bond> remapped;
                 remapped.reserve(r.data.bonds.size());

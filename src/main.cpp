@@ -199,6 +199,96 @@ struct PipelineJobResult {
     size_t checkpointNode = SIZE_MAX;
     std::optional<PipelineResult> checkpoint;
 };
+// Intersection polygon of the slice plane n.r = d with the simulation cell,
+// returned as a fan-triangulated overlay mesh. The polygon is shrunk slightly
+// toward its centroid so it does not coincide with the cell edges. An empty
+// result means the plane misses the cell (or the parameters are unusable) and
+// the viewport overlay is skipped.
+static std::vector<DirectX::XMFLOAT3> slicePlaneTriangles(const float normalIn[3],
+                                                          double distance,
+                                                          const Dataset &data) {
+    std::vector<DirectX::XMFLOAT3> triangles;
+    double n[3]{normalIn[0], normalIn[1], normalIn[2]};
+    const double length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (!(length > 0) || !std::isfinite(distance))
+        return triangles;
+    for (double &component : n) component /= length;
+    const double origin[3]{data.origin.x, data.origin.y, data.origin.z};
+    double corners[8][3]{}, heights[8]{};
+    for (int corner = 0; corner < 8; ++corner) {
+        const double weights[3]{double(corner & 1), double(corner & 2) * .5,
+                                double(corner & 4) * .25};
+        for (int c = 0; c < 3; ++c)
+            corners[corner][c] = origin[c] + weights[0] * data.cell[c] +
+                                 weights[1] * data.cell[3 + c] + weights[2] * data.cell[6 + c];
+        heights[corner] = n[0] * corners[corner][0] + n[1] * corners[corner][1] +
+                          n[2] * corners[corner][2] - distance;
+    }
+    double scale = 1;
+    for (int corner = 0; corner < 8; ++corner)
+        for (int c = 0; c < 3; ++c)
+            scale = std::max(scale, std::abs(corners[corner][c]));
+    std::vector<std::array<double, 3>> points;
+    const double epsilon = scale * 1e-9;
+    for (int bit = 1; bit < 8; bit <<= 1)
+        for (int corner = 0; corner < 8; ++corner) {
+            if (!(corner & bit)) continue;
+            const int other = corner ^ bit;
+            if ((heights[corner] > 0) == (heights[other] > 0)) continue;
+            const double t = heights[corner] / (heights[corner] - heights[other]);
+            std::array<double, 3> point{};
+            for (int c = 0; c < 3; ++c)
+                point[c] = corners[corner][c] + (corners[other][c] - corners[corner][c]) * t;
+            const bool duplicate = std::any_of(points.begin(), points.end(),
+                [&](const std::array<double, 3> &known) {
+                    return std::abs(known[0] - point[0]) < epsilon &&
+                           std::abs(known[1] - point[1]) < epsilon &&
+                           std::abs(known[2] - point[2]) < epsilon;
+                });
+            if (!duplicate) points.push_back(point);
+        }
+    if (points.size() < 3) return triangles;
+    std::array<double, 3> centroid{};
+    for (const auto &point : points)
+        for (int c = 0; c < 3; ++c) centroid[c] += point[c] / double(points.size());
+    double u[3]{n[1] - n[2], n[2] - n[0], n[0] - n[1]};
+    double uLength = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    if (!(uLength > 0)) {
+        // The normal is parallel to (1,1,1); fall back to any fixed helper axis.
+        const double helper[3]{std::abs(n[2]) < .9 ? 0. : 1., 0., std::abs(n[2]) < .9 ? 1. : 0.};
+        u[0] = n[1] * helper[2] - n[2] * helper[1];
+        u[1] = n[2] * helper[0] - n[0] * helper[2];
+        u[2] = n[0] * helper[1] - n[1] * helper[0];
+        uLength = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        if (!(uLength > 0)) return triangles;
+    }
+    for (double &component : u) component /= uLength;
+    const double v[3]{n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2],
+                      n[0] * u[1] - n[1] * u[0]};
+    std::sort(points.begin(), points.end(), [&](const auto &a, const auto &b) {
+        const auto angle = [&](const std::array<double, 3> &p) {
+            double d[3]{p[0] - centroid[0], p[1] - centroid[1], p[2] - centroid[2]};
+            return std::atan2(d[0] * v[0] + d[1] * v[1] + d[2] * v[2],
+                              d[0] * u[0] + d[1] * u[1] + d[2] * u[2]);
+        };
+        return angle(a) < angle(b);
+    });
+    constexpr double inset = .985;
+    std::vector<DirectX::XMFLOAT3> polygon;
+    polygon.reserve(points.size());
+    for (auto point : points) {
+        for (int c = 0; c < 3; ++c)
+            point[c] = centroid[c] + (point[c] - centroid[c]) * inset;
+        polygon.push_back({float(point[0]), float(point[1]), float(point[2])});
+    }
+    triangles.reserve((polygon.size() - 2) * 3);
+    for (size_t i = 1; i + 1 < polygon.size(); ++i) {
+        triangles.push_back(polygon[0]);
+        triangles.push_back(polygon[i]);
+        triangles.push_back(polygon[i + 1]);
+    }
+    return triangles;
+}
 struct App {
     HWND window;
     desktop::Preferences preferences;
@@ -363,6 +453,22 @@ struct App {
         if (exportJob.valid())
             exportJob.wait();
     }
+    // Refreshes the slice-plane viewport overlay from the last enabled Slice
+    // node that requests it. Overlay failures degrade to "no plane" rather
+    // than failing the pipeline result.
+    void updateSlicePlaneVisual() {
+        std::vector<DirectX::XMFLOAT3> triangles;
+        for (auto it = mods.rbegin(); it != mods.rend(); ++it)
+            if (it->enabled && it->op == Op::Slice && it->sliceShowPlane) {
+                triangles = slicePlaneTriangles(it->sliceNormal, it->sliceDistance, result.data);
+                break;
+            }
+        try {
+            gpu.setSlicePlane(triangles);
+        } catch (...) {
+            try { gpu.setSlicePlane({}); } catch (...) {}
+        }
+    }
     void publishPipeline(PipelineResult next) {
         try {
             auto activeColor = std::find_if(mods.rbegin(), mods.rend(), [](const Modifier &m) {
@@ -424,6 +530,7 @@ struct App {
             gpu.upload(next.data, next.selected, next.colorSelected);
             syncAppearance(next.data.species);
             result = std::move(next);
+            updateSlicePlaneVisual();
             for (auto &camera : cameras)
                 if (camera.fitSelected) refreshSelectionFit(camera,result.data,result.selected);
             for (size_t i = 0; i < modifierGraph.nodes.size(); ++i) {
@@ -610,10 +717,23 @@ struct App {
     void add(Op op) {
         checkpoint();
         Modifier m{op};
-        if (op == Op::Slice)
-            m.value = (result.data.lo.z + result.data.hi.z) * .5f;
+        if (op == Op::Slice) {
+            m.sliceNormal[0] = 1; m.sliceNormal[1] = 0; m.sliceNormal[2] = 0;
+            const double center[3]{
+                double(result.data.origin.x) +
+                    (result.data.cell[0] + result.data.cell[3] + result.data.cell[6]) * .5,
+                double(result.data.origin.y) +
+                    (result.data.cell[1] + result.data.cell[4] + result.data.cell[7]) * .5,
+                double(result.data.origin.z) +
+                    (result.data.cell[2] + result.data.cell[5] + result.data.cell[8]) * .5};
+            m.sliceDistance = m.sliceNormal[0] * center[0] + m.sliceNormal[1] * center[1] +
+                              m.sliceNormal[2] * center[2];
+        }
         if (op == Op::Scale) m.value = 1;
-        if (op == Op::Replicate) m.type = 2;
+        if (op == Op::Replicate) {
+            m.replicateN[0] = 1; m.replicateN[1] = 1; m.replicateN[2] = 1;
+            m.replicateAdjustBox = true;
+        }
         if (op == Op::Rotate) m.value = 90;
         if (op == Op::SelectRange) {
             m.value = result.data.lo.z; m.upper = result.data.hi.z;
@@ -1812,7 +1932,91 @@ struct App {
                     auto &m = mods[modifierGraph.selected];
                     ImGui::PushID(m.id.c_str());
                     heading(m.displayName.empty() ? opName(m.op) : m.displayName.c_str());
-                    if (m.op == Op::Slice || m.op == Op::Translate || m.op == Op::Scale || m.op == Op::Rotate || m.op == Op::SelectRange) {
+                    if (m.op == Op::Slice) {
+                        float normal[3]{m.sliceNormal[0], m.sliceNormal[1], m.sliceNormal[2]};
+                        double distance = m.sliceDistance, width = m.sliceWidth;
+                        bool reverse = m.sliceInvert, visualize = m.sliceShowPlane;
+                        bool createSelection = m.sliceCreateSelection;
+                        bool applySelectionOnly = m.sliceApplySelectionOnly;
+                        bool operateOnParticles = m.sliceOperateOnParticles;
+                        bool changed = false, centerPlane = false;
+                        int mode = 1;
+                        ImGui::RadioButton("Cartesian", &mode, 1);
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled();
+                        ImGui::RadioButton("Miller indices", &mode, 2);
+                        ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Miller index input requires OVITO Pro and is not implemented.");
+                        ImGui::SetNextItemWidth(U(140));
+                        changed |= ImGui::DragScalar("Distance", ImGuiDataType_Double, &distance,
+                                                     .02f, nullptr, nullptr, "%.4g");
+                        ImGui::SetNextItemWidth(U(140));
+                        changed |= ImGui::DragFloat("Normal (x)", &normal[0], .01f);
+                        ImGui::SetNextItemWidth(U(140));
+                        changed |= ImGui::DragFloat("Normal (y)", &normal[1], .01f);
+                        ImGui::SetNextItemWidth(U(140));
+                        changed |= ImGui::DragFloat("Normal (z)", &normal[2], .01f);
+                        const double minimumWidth = 0;
+                        ImGui::SetNextItemWidth(U(140));
+                        changed |= ImGui::DragScalar("Slab width", ImGuiDataType_Double, &width,
+                                                     .02f, &minimumWidth, nullptr, "%.4g");
+                        changed |= ImGui::Checkbox("Reverse orientation", &reverse);
+                        changed |= ImGui::Checkbox("Create selection (do not delete)", &createSelection);
+                        changed |= ImGui::Checkbox("Apply to selection only", &applySelectionOnly);
+                        changed |= ImGui::Checkbox("Visualize plane", &visualize);
+                        if (ImGui::Button("Center in simulation cell"))
+                            centerPlane = true;
+                        const auto &sliceAttributes = result.data.globalAttributes;
+                        auto sliceInput = sliceAttributes.find("Slice.input_particles");
+                        auto sliceDeleted = sliceAttributes.find("Slice.particles_deleted");
+                        auto sliceRemaining = sliceAttributes.find("Slice.particles_remaining");
+                        if (sliceInput != sliceAttributes.end() &&
+                            sliceDeleted != sliceAttributes.end() &&
+                            sliceRemaining != sliceAttributes.end())
+                            ImGui::TextDisabled("%.0f input particles / %.0f deleted / %.0f remaining",
+                                                sliceInput->second, sliceDeleted->second,
+                                                sliceRemaining->second);
+                        heading("Operate on");
+                        changed |= ImGui::Checkbox("Particles", &operateOnParticles);
+                        ImGui::BeginDisabled();
+                        bool absent = false;
+                        for (const char *kind : {"Surfaces (not present)", "Voxel grids (not present)",
+                                                 "Dislocations (not present)", "Lines (not present)",
+                                                 "Vectors (not present)"}) {
+                            ImGui::PushID(kind);
+                            ImGui::Checkbox(kind, &absent);
+                            ImGui::PopID();
+                        }
+                        ImGui::EndDisabled();
+                        if (changed || centerPlane) {
+                            checkpoint();
+                            m.sliceNormal[0] = normal[0];
+                            m.sliceNormal[1] = normal[1];
+                            m.sliceNormal[2] = normal[2];
+                            m.sliceDistance = distance;
+                            m.sliceInvert = reverse;
+                            m.sliceWidth = std::max(width, 0.0);
+                            m.sliceShowPlane = visualize;
+                            m.sliceCreateSelection = createSelection;
+                            m.sliceApplySelectionOnly = applySelectionOnly;
+                            m.sliceOperateOnParticles = operateOnParticles;
+                            if (centerPlane) {
+                                const double n[3]{m.sliceNormal[0], m.sliceNormal[1], m.sliceNormal[2]};
+                                const double length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+                                if (length > 0)
+                                    m.sliceDistance =
+                                        (n[0] * (double(result.data.origin.x) + (result.data.cell[0] +
+                                             result.data.cell[3] + result.data.cell[6]) * .5) +
+                                         n[1] * (double(result.data.origin.y) + (result.data.cell[1] +
+                                             result.data.cell[4] + result.data.cell[7]) * .5) +
+                                         n[2] * (double(result.data.origin.z) + (result.data.cell[2] +
+                                             result.data.cell[5] + result.data.cell[8]) * .5)) / length;
+                            }
+                            update();
+                        }
+                    }
+                    if (m.op == Op::Translate || m.op == Op::Scale || m.op == Op::Rotate || m.op == Op::SelectRange) {
                         float v = m.value;
                         ImGui::SetNextItemWidth(U(140));
                         if (ImGui::DragFloat("Value", &v, .1f)) {
@@ -1842,6 +2046,18 @@ struct App {
                         auto pbc = m.editedPbc;
                         bool transform = m.transformCoordinatesWithCell;
                         bool changed = false;
+                        double originValues[3]{origin.x, origin.y, origin.z};
+                        ImGui::Text("Cell origin");
+                        for (int axis = 0; axis < 3; ++axis) {
+                            if (axis) ImGui::SameLine();
+                            ImGui::PushID(100 + axis);
+                            ImGui::SetNextItemWidth(U(88));
+                            changed |= ImGui::InputDouble(axis == 0 ? "X" : axis == 1 ? "Y" : "Z",
+                                                         &originValues[axis], 0, 0, "%.6g");
+                            ImGui::PopID();
+                        }
+                        origin = {float(originValues[0]), float(originValues[1]),
+                                  float(originValues[2])};
                         heading("Cell vectors");
                         if (ImGui::BeginTable("Edited cell vectors", 4,
                                               ImGuiTableFlags_SizingStretchSame)) {
@@ -1862,18 +2078,7 @@ struct App {
                             }
                             ImGui::EndTable();
                         }
-                        ImGui::Text("Origin");
-                        float originValues[3]{origin.x, origin.y, origin.z};
-                        for (int axis = 0; axis < 3; ++axis) {
-                            if (axis) ImGui::SameLine();
-                            ImGui::PushID(100 + axis);
-                            ImGui::SetNextItemWidth(U(88));
-                            changed |= ImGui::InputFloat(axis == 0 ? "X" : axis == 1 ? "Y" : "Z",
-                                                        &originValues[axis], 0, 0, "%.6g");
-                            ImGui::PopID();
-                        }
-                        origin = {originValues[0], originValues[1], originValues[2]};
-                        ImGui::Text("Periodic boundaries");
+                        ImGui::Text("Periodic boundary flags");
                         for (int axis = 0; axis < 3; ++axis) {
                             if (axis) ImGui::SameLine();
                             ImGui::PushID(200 + axis);
@@ -2076,12 +2281,25 @@ struct App {
                         }
                     }
                     if (m.op == Op::Replicate) {
-                        int count = m.type, axis = m.axis;
-                        if (ImGui::InputInt("Copies", &count)) {
-                            checkpoint(); m.type = std::clamp(count,1,32); update();
+                        int counts[3]{m.replicateN[0], m.replicateN[1], m.replicateN[2]};
+                        bool adjustBox = m.replicateAdjustBox;
+                        bool changed = false;
+                        ImGui::Text("Number of copies");
+                        for (int axis = 0; axis < 3; ++axis) {
+                            if (axis) ImGui::SameLine();
+                            ImGui::PushID(axis);
+                            ImGui::SetNextItemWidth(U(88));
+                            changed |= ImGui::InputInt(axis == 0 ? "Na" : axis == 1 ? "Nb" : "Nc",
+                                                       &counts[axis]);
+                            ImGui::PopID();
                         }
-                        if (ImGui::Combo("Cell vector", &axis,"A\0B\0C\0")) {
-                            checkpoint(); m.axis = axis; update();
+                        changed |= ImGui::Checkbox("Adjust box size", &adjustBox);
+                        if (changed) {
+                            checkpoint();
+                            for (int axis = 0; axis < 3; ++axis)
+                                m.replicateN[axis] = std::clamp(counts[axis], 1, 32);
+                            m.replicateAdjustBox = adjustBox;
+                            update();
                         }
                     }
                     if (m.op == Op::SelectIndex) {
@@ -2896,8 +3114,8 @@ struct App {
                 operation(Op::EditCell,"Edit cell origin, vectors and periodic boundaries. Particle coordinates stay fixed unless fractional-coordinate remapping is explicitly enabled."); operation(Op::EditType,"Edit particle type assignments.");
                 for (auto name : {"Freeze property", "Load trajectory", "Python script (deferred)"}) planned(name);
                 operation(Op::RemoveProperty,"Remove a scalar or vector particle property by name.");
-                operation(Op::Replicate,"Repeat the system along a cell vector.");
-                operation(Op::Slice,"Keep particles below the chosen coordinate plane.");
+                operation(Op::Replicate,"Duplicate the structure along the three cell vectors and resize the simulation cell.");
+                operation(Op::Slice,"Cut the structure at a plane: keep one side, or a slab of adjustable width.");
                 for (auto name : {"Smooth trajectory", "Unwrap trajectories"}) planned(name);
                 operation(Op::Wrap,"Wrap positions into orthogonal or triclinic periodic cells, including partially periodic cells.");
                 operation(Op::Translate,"Translate particle positions along an axis.");

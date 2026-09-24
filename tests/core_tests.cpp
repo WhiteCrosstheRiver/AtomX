@@ -5,6 +5,82 @@ void require(bool b, const char *s) {
     if (!b)
         throw std::runtime_error(s);
 }
+// P1 parity fixture matching the OVITO ground-truth dataset: FCC cells with
+// lattice constant 3.6, so a 3x3x3 block fills a 10.8^3 box with 108 atoms in
+// six z-layers of 18 (z = 0, 1.8, 3.6, 5.4, 7.2, 9).
+static Dataset fccLattice(int cells) {
+    Dataset d;
+    d.species = {"Cu"};
+    const double a = 3.6;
+    d.cell = {a * cells, 0, 0, 0, a * cells, 0, 0, 0, a * cells};
+    const double basis[4][3] = {{0, 0, 0}, {0, .5, .5}, {.5, 0, .5}, {.5, .5, 0}};
+    for (int z = 0; z < cells; ++z)
+        for (int y = 0; y < cells; ++y)
+            for (int x = 0; x < cells; ++x)
+                for (auto &b : basis)
+                    d.atoms.push_back({float((x + b[0]) * a), float((y + b[1]) * a),
+                                       float((z + b[2]) * a), 0});
+    d.sourceCount = d.atoms.size();
+    d.bounds();
+    return d;
+}
+// Independent brute-force references for the composable-stack tests: mirrored
+// particle positions are regenerated with plain loops and counted with the
+// documented strict slice rule, so stacked pipelines are checked against an
+// alternate implementation instead of hardcoded totals.
+static size_t referenceSliceCount(const Dataset &data, const Modifier &m) {
+    double n[3]{m.sliceNormal[0], m.sliceNormal[1], m.sliceNormal[2]};
+    const double length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (!(length > 0)) return 0;
+    for (double &component : n) component /= length;
+    size_t kept = 0;
+    for (const auto &a : data.atoms) {
+        const double h = n[0] * a.x + n[1] * a.y + n[2] * a.z;
+        const double offset = std::abs(h - m.sliceDistance);
+        const bool passes = m.sliceWidth > 0
+            ? (m.sliceInvert ? offset > m.sliceWidth * .5 : offset <= m.sliceWidth * .5)
+            : (m.sliceInvert ? h > m.sliceDistance : h < m.sliceDistance);
+        kept += passes;
+    }
+    return kept;
+}
+static Dataset referenceReplicate(const Dataset &source, int na, int nb, int nc) {
+    Dataset d;
+    d.species = source.species;
+    for (int k = 0; k < nc; ++k)
+        for (int j = 0; j < nb; ++j)
+            for (int i = 0; i < na; ++i)
+                for (auto a : source.atoms) {
+                    a.x += float(i * source.cell[0] + j * source.cell[3] + k * source.cell[6]);
+                    a.y += float(i * source.cell[1] + j * source.cell[4] + k * source.cell[7]);
+                    a.z += float(i * source.cell[2] + j * source.cell[5] + k * source.cell[8]);
+                    d.atoms.push_back(a);
+                }
+    d.cell = source.cell;
+    for (int c = 0; c < 3; ++c) d.cell[c] *= na;
+    for (int c = 0; c < 3; ++c) d.cell[3 + c] *= nb;
+    for (int c = 0; c < 3; ++c) d.cell[6 + c] *= nc;
+    d.bounds();
+    return d;
+}
+static Dataset referenceSliceFilter(const Dataset &data, const Modifier &m) {
+    Dataset d = data;
+    d.atoms.clear();
+    double n[3]{m.sliceNormal[0], m.sliceNormal[1], m.sliceNormal[2]};
+    const double length = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (!(length > 0)) return d;
+    for (double &component : n) component /= length;
+    for (const auto &a : data.atoms) {
+        const double h = n[0] * a.x + n[1] * a.y + n[2] * a.z;
+        const double offset = std::abs(h - m.sliceDistance);
+        const bool passes = m.sliceWidth > 0
+            ? (m.sliceInvert ? offset > m.sliceWidth * .5 : offset <= m.sliceWidth * .5)
+            : (m.sliceInvert ? h > m.sliceDistance : h < m.sliceDistance);
+        if (passes) d.atoms.push_back(a);
+    }
+    d.bounds();
+    return d;
+}
 int main() {
     try {
         auto angleOutputs=modifierOutputs(Modifier{Op::BondAngleDistribution},7);
@@ -76,7 +152,11 @@ int main() {
         auto r = evaluate(d, {{Op::SelectType, true, 0, 2, 1}, {Op::Delete}});
         require(r.data.atoms.size() == 2 && d.atoms.size() == 4,
                 "selection deletion nondestructive");
-        r = evaluate(d, {{Op::Slice, true, 4, 2}});
+        Modifier sliceByZ{Op::Slice};
+        sliceByZ.sliceNormal[0] = 0;
+        sliceByZ.sliceNormal[2] = 1;
+        sliceByZ.sliceDistance = 4;
+        r = evaluate(d, {sliceByZ});
         require(r.data.atoms.size() == 2, "slice");
         r = evaluate(d, {{Op::Wrap}});
         require(r.data.atoms.back().x == 1 && r.data.atoms.back().z == 9, "periodic wrapping");
@@ -93,7 +173,9 @@ int main() {
         r = evaluate(d, {{Op::SelectRange, true, 2, 0, 0, 7}, {Op::EditType,true,0,2,0}});
         require(r.selected[1] && r.selected[2] && !r.selected[0] && r.data.atoms[1].type == 0,
                 "range selection and selected type assignment");
-        r = evaluate(d, {{Op::SelectType,true,0,2,1}, {Op::Replicate,true,0,0,3}});
+        Modifier replicateAlongA{Op::Replicate};
+        replicateAlongA.replicateN[0] = 3;
+        r = evaluate(d, {{Op::SelectType,true,0,2,1}, replicateAlongA});
         require(r.data.atoms.size() == 12 && r.data.cell[0] == 30 &&
                 r.data.atoms[8].x == 20 && r.selected[9], "replication cell positions selection");
         Dataset periodicBondReplication; periodicBondReplication.species={"X"};
@@ -101,7 +183,7 @@ int main() {
         periodicBondReplication.cell={2,0,0,0,2,0,0,0,2};
         periodicBondReplication.pbc={true,false,false};
         periodicBondReplication.bonds={{0,1,{1,0,0}}};
-        Modifier replicatePeriodicBond{Op::Replicate}; replicatePeriodicBond.type=2; replicatePeriodicBond.axis=0;
+        Modifier replicatePeriodicBond{Op::Replicate}; replicatePeriodicBond.replicateN[0]=2;
         const auto replicatedPeriodicBond=evaluate(periodicBondReplication,{replicatePeriodicBond});
         require(replicatedPeriodicBond.data.bonds==std::vector<Bond>{{0,3,{0,0,0}},{2,1,{1,0,0}}} &&
                     std::all_of(replicatedPeriodicBond.data.bonds.begin(),replicatedPeriodicBond.data.bonds.end(),
@@ -110,6 +192,198 @@ int main() {
                                     return std::abs(vector[0]-3)<1e-6 && vector[1]==0 && vector[2]==0;
                                 }),
                 "replication remaps periodic bond endpoints and image shifts while preserving bond vectors");
+        // P1 parity: OVITO-verified Slice plane semantics on a 3x3x3 FCC block
+        // (a=3.6, 10.8^3 box, 108 atoms; default normal (1,0,0) gives six
+        // x-layers of 18 at x = 0, 1.8, 3.6, 5.4, 7.2, 9).
+        const auto fccCell = fccLattice(3);
+        require(fccCell.atoms.size() == 108 && std::abs(fccCell.cell[0] - 10.8) < 1e-12,
+                "FCC parity fixture has 108 atoms in a 10.8 cube");
+        Modifier sliceMidplane{Op::Slice};
+        sliceMidplane.sliceDistance = 5.4;
+        require(evaluate(fccCell, {sliceMidplane}).data.atoms.size() == 54,
+                "slice keeps the strict lower half-space and cuts the layer exactly on the plane (54/108)");
+        Modifier sliceInverted = sliceMidplane;
+        sliceInverted.sliceInvert = true;
+        require(evaluate(fccCell, {sliceInverted}).data.atoms.size() == 54,
+                "reverse orientation keeps the opposite side including the boundary layer (54/108)");
+        Modifier sliceSlab = sliceMidplane;
+        sliceSlab.sliceDistance = 0.9;
+        sliceSlab.sliceWidth = 1.8;
+        require(evaluate(fccCell, {sliceSlab}).data.atoms.size() == 36,
+                "closed slab centered on the plane keeps both boundary layers (d=0.9, w=1.8 -> 36)");
+        Modifier sliceFarReversed = sliceMidplane;
+        sliceFarReversed.sliceDistance = 3.0;
+        sliceFarReversed.sliceInvert = true;
+        require(evaluate(fccCell, {sliceFarReversed}).data.atoms.size() == 72,
+                "reversed slice at an off-plane distance keeps the four far layers (d=3.0 -> 72)");
+        Modifier sliceTilted{Op::Slice};
+        sliceTilted.sliceNormal[0] = 1;
+        sliceTilted.sliceNormal[1] = 1;
+        sliceTilted.sliceDistance = 1.5;
+        Modifier sliceTiltedReversed = sliceTilted;
+        sliceTiltedReversed.sliceInvert = true;
+        const auto tiltedSlice = evaluate(fccLattice(1), {sliceTilted});
+        const auto tiltedSliceReversed = evaluate(fccLattice(1), {sliceTiltedReversed});
+        require(tiltedSlice.data.atoms.size() == 3 && tiltedSliceReversed.data.atoms.size() == 1 &&
+                    referenceSliceCount(fccLattice(1), sliceTilted) == 3,
+                "tilted normal (1,1,0)/sqrt(2) splits the 4-atom cell into 3 and 1 by projected height");
+        Modifier zeroNormal{Op::Slice};
+        zeroNormal.sliceNormal[0] = 0;
+        zeroNormal.sliceNormal[2] = 0;
+        bool zeroNormalRejected = false;
+        try { (void)evaluate(fccCell, {zeroNormal}); }
+        catch (const ModifierExecutionError &e) {
+            zeroNormalRejected = e.nodeIndex == 0 &&
+                std::string(e.what()).find("non-zero") != std::string::npos;
+        }
+        require(zeroNormalRejected, "zero-length slice normal reports an error at its node");
+        const auto sliceDeleted = evaluate(fccCell, {sliceMidplane});
+        require(sliceDeleted.data.globalAttributes.at("Slice.input_particles") == 108 &&
+                    sliceDeleted.data.globalAttributes.at("Slice.particles_deleted") == 54 &&
+                    sliceDeleted.data.globalAttributes.at("Slice.particles_remaining") == 54,
+                "deleting slice publishes input/deleted/remaining statistics");
+        Modifier sliceSelectInstead = sliceMidplane;
+        sliceSelectInstead.sliceCreateSelection = true;
+        const auto sliceSelected = evaluate(fccCell, {sliceSelectInstead});
+        require(sliceSelected.data.atoms.size() == 108 &&
+                    size_t(std::count(sliceSelected.selected.begin(), sliceSelected.selected.end(),
+                                      uint8_t(1))) == 54 &&
+                    sliceSelected.data.globalAttributes.at("Slice.particles_deleted") == 0 &&
+                    sliceSelected.data.globalAttributes.at("Slice.particles_selected") == 54,
+                "create-selection slice keeps every particle and selects exactly the kept half");
+        Modifier sliceApplySelected = sliceSelectInstead;
+        sliceApplySelected.sliceApplySelectionOnly = true;
+        Modifier twoOfMany{Op::ManualSelection};
+        twoOfMany.manualSelection = {0, 8};
+        const auto sliceAppliedToSelection = evaluate(fccCell, {twoOfMany, sliceApplySelected});
+        require(sliceAppliedToSelection.data.atoms.size() == 108 &&
+                    size_t(std::count(sliceAppliedToSelection.selected.begin(),
+                                      sliceAppliedToSelection.selected.end(), uint8_t(1))) == 1,
+                "apply-to-selection slices only previously selected particles (atom 8 fails the plane)");
+        Modifier sliceDeleteSelectedOnly = sliceMidplane;
+        sliceDeleteSelectedOnly.sliceApplySelectionOnly = true;
+        const auto sliceDeletedSelectedOnly = evaluate(fccCell, {twoOfMany, sliceDeleteSelectedOnly});
+        require(sliceDeletedSelectedOnly.data.atoms.size() == 107,
+                "apply-to-selection deleting slice removes only selected particles beyond the plane");
+        Modifier sliceNoParticles = sliceMidplane;
+        sliceNoParticles.sliceOperateOnParticles = false;
+        require(evaluate(fccCell, {sliceNoParticles}).data.atoms.size() == 108,
+                "disabling Particles in operate-on leaves the data untouched");
+        Modifier replicateAll{Op::Replicate};
+        replicateAll.replicateN[0] = 2;
+        replicateAll.replicateN[1] = 2;
+        replicateAll.replicateN[2] = 2;
+        const auto replicatedCube = evaluate(fccCell, {replicateAll});
+        require(replicatedCube.data.atoms.size() == 864 &&
+                    std::abs(replicatedCube.data.cell[0] - 21.6) < 1e-12 &&
+                    std::abs(replicatedCube.data.cell[4] - 21.6) < 1e-12 &&
+                    std::abs(replicatedCube.data.cell[8] - 21.6) < 1e-12,
+                "2x2x2 replication produces 864 atoms and scales every cell vector to 21.6");
+        Modifier replicateFixedBox = replicateAll;
+        replicateFixedBox.replicateAdjustBox = false;
+        const auto replicatedUnadjusted = evaluate(fccCell, {replicateFixedBox});
+        require(replicatedUnadjusted.data.atoms.size() == 864 &&
+                    replicatedUnadjusted.data.cell == fccCell.cell,
+                "adjust-box off keeps the original cell around the replicated particles");
+        Modifier replicateMixed{Op::Replicate};
+        replicateMixed.replicateN[0] = 3;
+        replicateMixed.replicateN[2] = 2;
+        const auto replicatedMixed = evaluate(fccCell, {replicateMixed});
+        require(replicatedMixed.data.atoms.size() == 648 &&
+                    std::abs(replicatedMixed.data.cell[0] - 32.4) < 1e-12 &&
+                    std::abs(replicatedMixed.data.cell[4] - 10.8) < 1e-12 &&
+                    std::abs(replicatedMixed.data.cell[8] - 21.6) < 1e-12,
+                "3x1x2 replication scales only the replicated directions (32.4, 10.8, 21.6)");
+        Dataset twoAxisBondCell;
+        twoAxisBondCell.species = {"X"};
+        twoAxisBondCell.atoms = {{0,0,0,0},{1,0,0,0}};
+        twoAxisBondCell.cell = {2,0,0,0,2,0,0,0,2};
+        twoAxisBondCell.pbc = {true,true,true};
+        twoAxisBondCell.bonds = {{0,1,{1,0,0}}};
+        Modifier replicateBondPlane{Op::Replicate};
+        replicateBondPlane.replicateN[0] = 2;
+        replicateBondPlane.replicateN[1] = 2;
+        const auto replicatedBondPlane = evaluate(twoAxisBondCell, {replicateBondPlane});
+        require(replicatedBondPlane.data.atoms.size() == 8 &&
+                    replicatedBondPlane.data.bonds ==
+                        std::vector<Bond>{{0,3,{0,0,0}},{2,1,{1,0,0}},{4,7,{0,0,0}},{6,5,{1,0,0}}} &&
+                    std::all_of(replicatedBondPlane.data.bonds.begin(),
+                                replicatedBondPlane.data.bonds.end(),
+                                [&](const Bond &bond) {
+                                    const auto vector = bondVector(replicatedBondPlane.data, bond);
+                                    return std::abs(vector[0]-3)<1e-6 && vector[1]==0 && vector[2]==0;
+                                }),
+                "two-axis replication remaps periodic bond endpoints and image shifts in both directions");
+        // Composable-stack semantics: each modifier consumes the previous stage.
+        Modifier replicateX2{Op::Replicate};
+        replicateX2.replicateN[0] = 2;
+        const auto replicatedThenSliced = evaluate(fccCell, {replicateX2, sliceMidplane});
+        const size_t expectedReplicatedThenSliced =
+            referenceSliceCount(referenceReplicate(fccCell, 2, 1, 1), sliceMidplane);
+        require(replicatedThenSliced.data.atoms.size() == expectedReplicatedThenSliced &&
+                    expectedReplicatedThenSliced != 108,
+                "slice consumes the replicated upstream output (216 -> reference count, not 108)");
+        Modifier cellDoubling{Op::EditCell};
+        cellDoubling.editedCell = {21.6,0,0, 0,21.6,0, 0,0,21.6};
+        cellDoubling.transformCoordinatesWithCell = true;
+        const auto remappedThenSliced = evaluate(fccCell, {cellDoubling, sliceMidplane});
+        Dataset referenceDoubled = fccCell;
+        for (auto &a : referenceDoubled.atoms) { a.x *= 2; a.y *= 2; a.z *= 2; }
+        require(remappedThenSliced.data.atoms.size() ==
+                    referenceSliceCount(referenceDoubled, sliceMidplane),
+                "slice counts reflect the edited upstream cell geometry after fractional remapping");
+        const auto replicateThenSlice = evaluate(fccCell, {replicateX2, sliceMidplane});
+        const auto sliceThenReplicate = evaluate(fccCell, {sliceMidplane, replicateX2});
+        require(replicateThenSlice.data.atoms.size() ==
+                    referenceSliceCount(referenceReplicate(fccCell, 2, 1, 1), sliceMidplane) &&
+                    sliceThenReplicate.data.atoms.size() ==
+                        2 * referenceSliceCount(fccCell, sliceMidplane) &&
+                    replicateThenSlice.data.atoms.size() != sliceThenReplicate.data.atoms.size(),
+                "modifier order matters: replicate-then-slice and slice-then-replicate keep different counts");
+        Modifier sliceUpper = sliceMidplane;
+        sliceUpper.sliceDistance = 3.0;
+        require(evaluate(fccCell, {sliceMidplane, sliceUpper}).data.atoms.size() ==
+                    referenceSliceCount(referenceSliceFilter(fccCell, sliceMidplane), sliceUpper),
+                "two stacked slices compose in order");
+        Modifier sliceEdited = sliceMidplane;
+        sliceEdited.sliceDistance = 0.9;
+        const auto editedUpstream = evaluate(fccCell, {sliceEdited, sliceUpper});
+        require(editedUpstream.data.atoms.size() ==
+                    referenceSliceCount(referenceSliceFilter(fccCell, sliceEdited), sliceUpper) &&
+                    sliceUpper.sliceDistance == 3.0 && sliceUpper.sliceWidth == 0 &&
+                    !sliceUpper.sliceInvert,
+                "editing the first slice recomputes the second without touching its parameters");
+        PipelineGraph stackedGraph;
+        ModifierNode sliceFirst{Op::Slice};
+        sliceFirst.id = "slice-first";
+        sliceFirst.sliceDistance = 5.4;
+        stackedGraph.insert(sliceFirst);
+        ModifierNode replicateSecond{Op::Replicate};
+        replicateSecond.id = "replicate-second";
+        replicateSecond.replicateN[0] = 2;
+        stackedGraph.insert(replicateSecond);
+        stackedGraph.nodes[0].dirty = false;
+        stackedGraph.nodes[1].dirty = false;
+        ModifierNode lateSlice{Op::Slice};
+        lateSlice.id = "late-slice";
+        lateSlice.sliceDistance = 5.4;
+        stackedGraph.insert(lateSlice, 1);
+        require(stackedGraph.nodes[0].id == "slice-first" && !stackedGraph.nodes[0].dirty &&
+                    stackedGraph.nodes[1].id == "late-slice" && stackedGraph.nodes[1].dirty &&
+                    stackedGraph.nodes[2].id == "replicate-second" && stackedGraph.nodes[2].dirty,
+                "inserting a node marks only itself and downstream stages dirty");
+        stackedGraph.nodes[0].enabled = false;
+        const auto withoutDisabled = evaluate(fccCell, stackedGraph);
+        require(withoutDisabled.data.atoms.size() == 108 &&
+                    withoutDisabled.data.atoms.size() ==
+                        evaluate(fccCell, {sliceMidplane, replicateX2}).data.atoms.size(),
+                "disabling an upstream node recomputes the downstream stack as if it were absent");
+        stackedGraph.nodes[0].enabled = true;
+        stackedGraph.move(2, 0);
+        require(stackedGraph.nodes[0].id == "replicate-second" &&
+                    stackedGraph.nodes[0].replicateN[0] == 2 &&
+                    stackedGraph.nodes[2].sliceDistance == 5.4,
+                "reordering preserves each node's own parameters");
         r = evaluate(d, {{Op::Rotate,true,90,2}});
         require(std::abs(r.data.atoms[1].x + 4) < 1e-5 &&
                 std::abs(r.data.atoms[1].y - 3) < 1e-5 &&
@@ -988,7 +1262,9 @@ int main() {
                                             {Op::SelectIndex,true,0,0,1},{Op::Delete}});
         require(assignedDeleted.data.particleColors.size()==3&&assignedDeleted.data.particleColors[1].x==1,
                 "assigned colors stay aligned when selected particles are deleted");
-        auto assignedReplicated=evaluate(wave,{assignRed,{Op::Replicate,true,0,0,2}});
+        Modifier replicateWave{Op::Replicate};
+        replicateWave.replicateN[0] = 2;
+        auto assignedReplicated=evaluate(wave,{assignRed,replicateWave});
         require(assignedReplicated.data.particleColors.size()==8&&assignedReplicated.data.particleColors[7].z==0,
                 "assigned colors are duplicated with replicated particles");
         auto typeColors=evaluate(wave,{assignRed,{Op::ColorType}});
@@ -1125,8 +1401,9 @@ int main() {
                     periodicBonds.data.bonds[0].a == 0 && periodicBonds.data.bonds[0].b == 1 &&
                     periodicBonds.data.bonds[0].image == std::array<int32_t,3>{1,0,0},
                 "created bonds preserve periodic image shift");
-        auto periodicReplicate = evaluate(periodicBonds.data,
-                                          {{Op::Replicate,true,0,0,2}});
+        Modifier replicateBondedCell{Op::Replicate};
+        replicateBondedCell.replicateN[0] = 2;
+        auto periodicReplicate = evaluate(periodicBonds.data, {replicateBondedCell});
         require(periodicReplicate.data.bonds.size() == 2 &&
                     periodicReplicate.data.bonds[0].a == 0 &&
                     periodicReplicate.data.bonds[0].b == 4 &&
@@ -1146,8 +1423,11 @@ int main() {
                     deletedTopology.data.bonds.size() == 1 &&
                     deletedTopology.data.bonds[0].a == 0 && deletedTopology.data.bonds[0].b == 1,
                 "delete remaps retained bond endpoints and removes incident bonds");
-        auto slicedTopology = evaluate(deleteTopology,
-                                       {{Op::Slice,true,.5f,0}, {Op::Delete}});
+        Modifier sliceByX{Op::Slice};
+        sliceByX.sliceNormal[0] = 1;
+        sliceByX.sliceNormal[2] = 0;
+        sliceByX.sliceDistance = .5f;
+        auto slicedTopology = evaluate(deleteTopology, {sliceByX, {Op::Delete}});
         require(slicedTopology.data.atoms.size() == 1 && slicedTopology.data.bonds.empty(),
                 "slice plus delete leaves no dangling bond endpoints");
         Dataset bcc;
@@ -1393,7 +1673,8 @@ int main() {
         auto lmpData = readLammpsData(lmp);
         require(lmpData.atoms.size() == fcc.atoms.size(), "LAMMPS data roundtrip");
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
-        std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice, wrap, "
+        std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "
+                     "semantics, three-axis replication, stack composition, wrap, "
                      "scale, scientific modifier tables, assign color, roundtrip, malformed input, "
                      "FCC/HCP/BCC/ICO CNA signatures and disordered reference, periodic topology, "
                      "disconnected cluster labels, radius-aware periodic overlap selection, "
