@@ -223,3 +223,9 @@
 ### 邻域分析预算预检
 
 - `neighbors()` 与固定 cutoff CNA 共用 sampled/2M 原子输入预检，并在分配配位、连通分量或邻接工作数组之前执行；2,000,001 原子回归验证两条入口都在限额处拒绝。
+
+### Pipeline 窄面板真实交互验证
+
+- `export_workflow` 以实际 `App` 与 Dear ImGui 帧循环注入鼠标和键盘事件：通过 Add modification 菜单添加 RDF，编辑 bins 并检查实际结果表行数，使用工具栏 Undo/Redo 恢复并重算参数，再复制节点、仅修改副本并删除副本，检查原节点参数仍保持不变。
+- 测试对登记控件的 ImGui ID、非空矩形和应用边界作断言，并检查目标在鼠标按下帧确实 hovered/clicked。它发现 Pipeline 节点行中的 Copy/Delete 按钮因列宽少计水平 padding 被子窗口裁剪；现按按钮真实文字与 padding 计算名称列宽。RDF 输入框宽度也改为适配右侧剩余空间。
+- `build.ps1` 五组核心、格式、GPU 形状和导出/ImGui 交互测试全部通过；GPU 组运行于 NVIDIA GeForce RTX 5090 D v2。本测试验证进程内 ImGui 事件路由，不声称 Windows 桌面鼠标注入、无障碍树、Intel 硬件或其他阶段功能已验收。

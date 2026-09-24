@@ -153,19 +153,27 @@ int main() {
                 app.ui();
                 ImGui::Render();
             };
-            auto click=[&](const std::string &name) {
+            auto click=[&](const std::string &name,float xFraction=.5f) {
                 auto found=app.uiTestItems.find(name);
                 requireExport(found!=app.uiTestItems.end(),"required interactive UI control was not recorded");
                 const auto item=found->second;
                 requireExport(item.id!=0,"interactive control must expose a stable nonzero ImGui ID");
                 requireExport(item.max.x>item.min.x && item.max.y>item.min.y,
                               "interactive UI control has an empty rectangle");
-                const ImVec2 point{(item.min.x+item.max.x)*.5f,(item.min.y+item.max.y)*.5f};
+                requireExport(item.min.x>=0 && item.min.y>=0 &&
+                                  item.max.x<=guiIO.DisplaySize.x && item.max.y<=guiIO.DisplaySize.y,
+                              ("interactive UI control exceeds application bounds: "+name).c_str());
+                const ImVec2 point{item.min.x+(item.max.x-item.min.x)*xFraction,
+                                   (item.min.y+item.max.y)*.5f};
                 guiIO.AddMousePosEvent(point.x,point.y);
                 guiIO.AddMouseButtonEvent(0,true); frame();
                 auto down=app.uiTestItems.find(name);
-                requireExport(down!=app.uiTestItems.end() && down->second.hovered && down->second.clicked,
-                              "simulated pointer must hit and activate the recorded control");
+                if (down==app.uiTestItems.end() || !down->second.hovered || !down->second.clicked)
+                    throw std::runtime_error("simulated pointer missed control: "+name+
+                        " rect="+std::to_string(item.min.x)+","+std::to_string(item.min.y)+"-"+
+                        std::to_string(item.max.x)+","+std::to_string(item.max.y)+
+                        " hovered="+(down!=app.uiTestItems.end()&&down->second.hovered?"true":"false")+
+                        " clicked="+(down!=app.uiTestItems.end()&&down->second.clicked?"true":"false"));
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
             frame();
@@ -184,9 +192,10 @@ int main() {
             if (app.pipelineJob.valid()) app.pipelineJob.wait();
             app.selectPipeline=true;
             frame();
-            requireExport(app.uiTestItems.contains("pipeline.rdf-bins"),
+            const auto originalNodeId=app.mods[0].id;
+            requireExport(app.uiTestItems.contains("pipeline.rdf-bins."+originalNodeId),
                           "selected modifier exposes its RDF parameter control");
-            click("pipeline.rdf-bins");
+            click("pipeline.rdf-bins."+originalNodeId,.28f); // Aim inside the numeric text area, away from the spin buttons.
             guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,true);
             guiIO.AddKeyEvent(ImGuiKey_A,true); frame();
             guiIO.AddKeyEvent(ImGuiKey_A,false);
@@ -199,6 +208,43 @@ int main() {
             requireExport(app.mods[0].rdfBins==16 && app.result.data.tables.back().rows.size()==16 &&
                               app.error.empty(),
                           "keyboard editing changes the actual RDF modifier and its computed table");
+            click("toolbar.undo");
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            requireExport(app.mods[0].rdfBins==128 && app.result.data.tables.back().rows.size()==128,
+                          "Undo control restores the modifier parameters and recomputes its original table");
+            click("toolbar.redo");
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            requireExport(app.mods[0].rdfBins==16 && app.result.data.tables.back().rows.size()==16,
+                          "Redo control restores the edited modifier parameters and recomputes its table");
+            click("pipeline.node.copy."+originalNodeId);
+            requireExport(app.mods.size()==2 && app.mods[1].op==Op::RadialDistribution &&
+                              app.mods[1].rdfBins==16,
+                          "pipeline Copy duplicates the selected node and its independent parameters");
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            const auto copiedNodeId=app.mods[1].id;
+            click("pipeline.node.select."+copiedNodeId);
+            frame();
+            click("pipeline.rdf-bins."+copiedNodeId,.28f);
+            guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,true);
+            guiIO.AddKeyEvent(ImGuiKey_A,true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_A,false);
+            guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,false);
+            guiIO.AddInputCharactersUTF8("8"); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Enter,true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Enter,false); frame();
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            requireExport(app.mods[0].rdfBins==16 && app.mods[1].rdfBins==8 &&
+                              app.result.data.tables.back().rows.size()==8,
+                          "copied node parameters are independent and drive its real recomputation");
+            click("pipeline.node.delete."+copiedNodeId);
+            requireExport(app.mods.size()==1 && app.mods[0].id==originalNodeId,
+                          "pipeline Delete removes only the selected copied node");
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
         }
         ImGui::DestroyContext();
         for (const auto &e : std::filesystem::directory_iterator(dir))

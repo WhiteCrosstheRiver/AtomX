@@ -1005,10 +1005,14 @@ struct App {
         if (ImGui::Button("Import##toolbar"))
             open();
         ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
-        if (ImGui::Button("Undo##toolbar"))
+        bool undoPressed=ImGui::Button("Undo##toolbar");
+        recordUiTestItem("toolbar.undo","Undo##toolbar");
+        if (undoPressed)
             history(false);
         ImGui::SameLine();
-        if (ImGui::Button("Redo##toolbar"))
+        bool redoPressed=ImGui::Button("Redo##toolbar");
+        recordUiTestItem("toolbar.redo","Redo##toolbar");
+        if (redoPressed)
             history(true);
         ImGui::SameLine();
         if (ImGui::Button("Select##toolbar")) active = active;
@@ -1676,6 +1680,15 @@ struct App {
                 for (int i = int(mods.size()) - 1; i >= 0; i--) {
                     auto &m = mods[i];
                     ImGui::PushID(m.id.c_str());
+                    const auto &style=ImGui::GetStyle();
+                    const float itemSpacing=style.ItemSpacing.x;
+                    const float actionWidth=
+                        ImGui::CalcTextSize("↑").x+style.FramePadding.x*2+
+                        ImGui::CalcTextSize("↓").x+style.FramePadding.x*2+
+                        ImGui::CalcTextSize("Copy").x+style.FramePadding.x*2+
+                        ImGui::CalcTextSize("×").x+style.FramePadding.x*2;
+                    const float labelWidth=std::max(0.f,ImGui::GetContentRegionAvail().x-
+                        ImGui::GetFrameHeight()-actionWidth-itemSpacing*5);
                     bool enabled = m.enabled;
                     if (ImGui::Checkbox("##enabled", &enabled)) {
                         checkpoint();
@@ -1684,8 +1697,10 @@ struct App {
                     }
                     ImGui::SameLine();
                     const char *name = m.displayName.empty() ? opName(m.op) : m.displayName.c_str();
-                    if (ImGui::Selectable(name, modifierGraph.selected == size_t(i)))
+                    if (ImGui::Selectable(name, modifierGraph.selected == size_t(i),
+                                          ImGuiSelectableFlags_None,{labelWidth,0}))
                         modifierGraph.selected = size_t(i);
+                    recordUiTestItem(std::string("pipeline.node.select.")+m.id);
                     ImGui::SameLine();
                     if (ImGui::SmallButton("↑") && i > 0) {
                         checkpoint(); modifierGraph.move(size_t(i), size_t(i - 1)); update(size_t(i - 1));
@@ -1697,7 +1712,9 @@ struct App {
                         ImGui::PopID(); break;
                     }
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("Copy")) {
+                    bool copyPressed=ImGui::SmallButton("Copy");
+                    recordUiTestItem(std::string("pipeline.node.copy.")+m.id);
+                    if (copyPressed) {
                         checkpoint();
                         auto copy = m;
                         copy.id = std::to_string(nextModifierId++);
@@ -1709,7 +1726,9 @@ struct App {
                     if (!m.error.empty())
                         ImGui::TextColored({1, .32f, .28f, 1}, "!");
                     if (ImGui::IsItemHovered() && !m.error.empty()) ImGui::SetTooltip("%s", m.error.c_str());
-                    if (ImGui::SmallButton("×")) {
+                    bool deletePressed=ImGui::SmallButton("×");
+                    recordUiTestItem(std::string("pipeline.node.delete.")+m.id);
+                    if (deletePressed) {
                         checkpoint();
                         modifierGraph.erase(size_t(i));
                         update(size_t(i));
@@ -1860,10 +1879,13 @@ struct App {
                     }
                     if (m.op==Op::RadialDistribution) {
                         int bins=m.rdfBins;
+                        const float binsLabelWidth=ImGui::CalcTextSize("RDF histogram bins").x+
+                                                   ImGui::GetStyle().ItemInnerSpacing.x;
+                        ImGui::SetNextItemWidth(std::max(U(50),ImGui::GetContentRegionAvail().x-binsLabelWidth));
                         if (ImGui::InputInt("RDF histogram bins",&bins)) {
                             checkpoint(); m.rdfBins=std::clamp(bins,1,4096); update();
                         }
-                        recordUiTestItem("pipeline.rdf-bins","RDF histogram bins");
+                        recordUiTestItem(std::string("pipeline.rdf-bins.")+m.id,"RDF histogram bins");
                     }
                     if (m.op==Op::RadialDistribution || m.op==Op::CoordinationAnalysis) {
                         bool onlySelected=m.neighborOnlySelected;
