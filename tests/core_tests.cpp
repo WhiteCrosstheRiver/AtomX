@@ -200,10 +200,21 @@ int main() {
         const auto selectedNeighborReference=neighbors(fcc,.8f,nullptr,nullptr,16,
                                                        &selectedRdfResult.selected);
         uint64_t selectedRdfPairs=0;
-        for (const auto &row : selectedRdfResult.data.tables.back().rows)
+        double selectedRdfValue=0, selectedRdfRadius=0;
+        for (const auto &row : selectedRdfResult.data.tables.back().rows) {
             selectedRdfPairs+=std::stoull(row[1]);
+            if (std::stoull(row[1])) {
+                selectedRdfRadius=std::stod(row[0]);
+                selectedRdfValue=std::stod(row[2]);
+            }
+        }
+        const double rdfBinWidth=.8/16;
+        const double rdfShell=(4.0/3.0)*3.141592653589793*(
+            std::pow(selectedRdfRadius+rdfBinWidth/2,3)-std::pow(selectedRdfRadius-rdfBinWidth/2,3));
+        const double expectedSelectedRdf=2.0/(2.0*(2.0/std::abs(cellDeterminant(fcc.cell)))*rdfShell);
         require(selectedRdfResult.data.tables.back().rows.size()==16 &&
                     selectedRdfPairs==1 &&
+                    std::abs(selectedRdfValue-expectedSelectedRdf)<1e-4 &&
                     selectedNeighborReference.rdfValid && selectedNeighborReference.bonds==1 &&
                     selectedNeighborReference.coordination[0]==1 && selectedNeighborReference.coordination[1]==1 &&
                     std::all_of(selectedNeighborReference.coordination.begin()+2,
