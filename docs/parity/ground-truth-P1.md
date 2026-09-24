@@ -94,6 +94,29 @@ OVITO 的 Add modification 功能是**可组合流水线栈**，已在本会话�
 - `Operate on:` combo + 属性 combo（Particle Type）
 - **类型复选框列表**（Name | Id 列头，Id 1/2 各一行）——多选，不是单一 index 输入
 
+## V03 Create bonds（干净会话核实，P3 参考）
+
+面板（见 `v-bonds-panel.png`）：
+1. `Creation mode`: combo（"by cutoff distance" 默认）+ `Cutoff radius: 3.2`
+2. `Options`：`...existing bonds` 复选框、`...inter-molecular bonds` 复选框（灰）、`...utoff: 0`
+3. 结果框：`<N> bonds.`
+4. `New bond type` 分节
+5. `Bonds display` 分节：`Width: 0.4`、`Flat shading` 复选框、`Bond type (see inspector)` 链接、`...m color:` 颜色字段、灰显 `...ze bond order property`（Pro）
+
+## C04 Color coding（干净会话核实，P3 参考）
+
+面板（见 `v-color-panel.png`）：
+1. `Operate on:` combo
+2. `Property:` combo——**列出上游修饰器发布的属性**（栈里有 CSP 时出现 "Centrosymmetry"）
+3. `Gradient:` combo，**默认 Rainbow**；下方大幅渐变色条预览
+4. Start/End 数值字段（自动填充当前帧属性范围）
+5. 复选框：`Automatic range` / `Symmetric range` / `Discretize`（默认全不勾）
+6. 按钮：`Adjust range` / `Adjust range (all frames)` / `Reverse range`
+7. `...only selected elements` 复选框 + 灰显 `...selection`
+
+注意与 AtomX 现实现的差异：AtomX 默认自动范围勾选、无 Adjust range 按钮、
+渐变条预览样式不同（Legend 除外）、无 Property 上游联动来源标注。
+
 ## 复现命令要点
 
 桌面自动化：`codes\_gui_auto\{activate,click,key,shot,crop}.ps1`。
