@@ -790,6 +790,7 @@ struct App {
         if (op == Op::CommonNeighborAnalysis || op == Op::CreateBonds ||
             op == Op::CoordinationAnalysis || op == Op::ClusterAnalysis ||
             op == Op::RadialDistribution || op == Op::SelectOverlapping) m.value = cutoff;
+        if (op == Op::CreateBonds) m.value = 3.2f; // OVITO default cutoff radius
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
         if (op == Op::BondLengthDistribution) m.type = 64;
         if (op == Op::BondAngleDistribution) m.type = 90;
@@ -2373,11 +2374,10 @@ struct App {
                             ? "Connected components follow the input bond topology; selected-only mode assigns ID 0 to other particles."
                             : "Connected components follow the periodic minimum-image cutoff. Unselected particles get Cluster ID 0 when selected-only is enabled.");
                     }
-                    if (m.op == Op::CreateBonds || m.op == Op::CommonNeighborAnalysis ||
+                    if (m.op == Op::CommonNeighborAnalysis ||
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
                         m.op == Op::RadialDistribution) {
-                        if (!(m.op==Op::CreateBonds && m.bondTypeCutoffsEnabled) &&
-                            !(m.op==Op::ClusterAnalysis && m.clusterByBonds)) {
+                        if (!(m.op==Op::ClusterAnalysis && m.clusterByBonds)) {
                             float value = m.value;
                             if (ImGui::DragFloat("Cutoff distance", &value, .01f, .0001f, 100000.f, "%.5g")) {
                                 checkpoint(); m.value = value; update();
@@ -2719,37 +2719,94 @@ struct App {
                     if (m.op == Op::ColorCoding) {
                         bool changed = false;
                         auto edited = m;
+                        heading("Operate on");
+                        ImGui::BeginDisabled();
+                        bool operateParticles = true;
+                        ImGui::Checkbox("Particles", &operateParticles);
+                        ImGui::EndDisabled();
                         auto property = edited.property;
-                        if (colorPropertyCombo("Input property", property, true)) {
+                        if (colorPropertyCombo("Property", property, true)) {
                             edited.property = std::move(property); edited.colorAutoRange = true;
                             edited.colorAllFramesRange = false; changed = true;
                         }
+                        recordUiTestItem(std::string("pipeline.color-property.")+m.id, "Property");
                         int gradient = edited.colorGradient;
-                        if (ImGui::Combo("Color gradient", &gradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0Plasma\0")) { edited.colorGradient = gradient; changed = true; }
+                        if (ImGui::Combo("Gradient", &gradient, "Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0Plasma\0")) { edited.colorGradient = gradient; changed = true; }
+                        recordUiTestItem(std::string("pipeline.color-gradient.")+m.id, "Gradient");
+                        { // Gradient bar preview between the Start and End fields, like OVITO.
+                            ImDrawList *drawList = ImGui::GetWindowDrawList();
+                            const ImVec2 barTopLeft = ImGui::GetCursorScreenPos();
+                            const float barWidth = ImGui::GetContentRegionAvail().x;
+                            const float barHeight = U(44);
+                            const int segments = 32;
+                            for (int segment = 0; segment < segments; ++segment) {
+                                const auto color = sampleColorGradient(
+                                    edited.colorGradient,
+                                    (float(segment) + .5f) / float(segments));
+                                const float x0 = barTopLeft.x + barWidth * float(segment) / float(segments);
+                                const float x1 = barTopLeft.x + barWidth * float(segment + 1) / float(segments);
+                                drawList->AddRectFilled({x0, barTopLeft.y}, {x1, barTopLeft.y + barHeight},
+                                                        IM_COL32(uint8_t(std::clamp(color[0], 0.f, 1.f) * 255.f),
+                                                                 uint8_t(std::clamp(color[1], 0.f, 1.f) * 255.f),
+                                                                 uint8_t(std::clamp(color[2], 0.f, 1.f) * 255.f), 255));
+                            }
+                            ImGui::Dummy({barWidth, barHeight});
+                        }
+                        if (edited.colorAutoRange) {
+                            double lo = 0, hi = 0;
+                            const bool hasRange = propertyValueRange(result.data, edited.property, lo, hi);
+                            ImGui::BeginDisabled(!hasRange);
+                            float low = hasRange ? float(lo) : 0.f, high = hasRange ? float(hi) : 0.f;
+                            ImGui::DragFloat("Start value", &low, .01f);
+                            ImGui::DragFloat("End value", &high, .01f);
+                            ImGui::EndDisabled();
+                            if (!hasRange)
+                                ImGui::TextDisabled("The property has no finite values on this frame.");
+                        } else {
+                            float low = edited.colorMin, high = edited.colorMax;
+                            if (ImGui::DragFloat("Start value", &low, .01f)) { edited.colorMin = low; edited.colorAllFramesRange = false; changed = true; }
+                            if (ImGui::DragFloat("End value", &high, .01f)) { edited.colorMax = high; edited.colorAllFramesRange = false; changed = true; }
+                        }
                         bool automatic = edited.colorAutoRange;
                         if (ImGui::Checkbox("Automatic range", &automatic)) { edited.colorAutoRange = automatic; changed = true; }
                         bool symmetric = edited.colorSymmetricRange;
                         if (ImGui::Checkbox("Symmetric range", &symmetric)) { edited.colorSymmetricRange = symmetric; changed = true; }
-                        if (!edited.colorAutoRange) {
-                            float low = edited.colorMin, high = edited.colorMax;
-                            if (ImGui::DragFloat("Start value", &low, .01f)) { edited.colorMin = low; changed = true; }
-                            if (ImGui::DragFloat("End value", &high, .01f)) { edited.colorMax = high; changed = true; }
+                        bool discrete = edited.colorDiscrete;
+                        if (ImGui::Checkbox("Discretize", &discrete)) { edited.colorDiscrete = discrete; changed = true; }
+                        double rangeLo = 0, rangeHi = 0;
+                        const bool hasCurrentRange = propertyValueRange(result.data, edited.property, rangeLo, rangeHi);
+                        ImGui::BeginDisabled(!hasCurrentRange);
+                        if (ImGui::Button("Adjust range")) {
+                            checkpoint();
+                            edited.colorMin = float(rangeLo);
+                            edited.colorMax = float(rangeHi);
+                            edited.colorAutoRange = false;
+                            edited.colorAllFramesRange = false;
+                            m.colorMin = edited.colorMin;
+                            m.colorMax = edited.colorMax;
+                            m.colorAutoRange = edited.colorAutoRange;
+                            m.colorAllFramesRange = edited.colorAllFramesRange;
+                            update();
                         }
+                        ImGui::EndDisabled();
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled(colorRangeRunning || busy || indexing || pipelineBusy || frames.empty());
+                        if (ImGui::Button("Adjust range (all frames)"))
+                            computeColorRangeAllFrames(modifierGraph.selected);
+                        ImGui::EndDisabled();
+                        ImGui::SameLine();
+                        if (ImGui::Button("Reverse range")) { edited.colorReverse = !edited.colorReverse; changed = true; }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Reverses the gradient mapping between the range endpoints.");
+                        recordUiTestItem(std::string("pipeline.color-reverse.")+m.id, "Reverse range");
                         bool selectedOnly = edited.colorSelectedOnly;
                         if (ImGui::Checkbox("Color only selected elements", &selectedOnly)) { edited.colorSelectedOnly = selectedOnly; changed = true; }
-                        bool discrete = edited.colorDiscrete, reverse = edited.colorReverse;
-                        if (ImGui::Checkbox("Discretize", &discrete)) { edited.colorDiscrete = discrete; changed = true; }
-                        if (ImGui::Checkbox("Reverse range", &reverse)) { edited.colorReverse = reverse; changed = true; }
                         bool keepSelection = edited.colorKeepSelection;
                         if (ImGui::Checkbox("Keep selection", &keepSelection)) { edited.colorKeepSelection = keepSelection; changed = true; }
                         bool showLegend = edited.colorLegend;
                         if (ImGui::Checkbox("Show color legend", &showLegend)) {
                             checkpoint(); m.colorLegend = showLegend; colorLegend = showLegend;
                         }
-                        ImGui::BeginDisabled(colorRangeRunning || busy || indexing || pipelineBusy || frames.empty());
-                        if (ImGui::Button("Compute range across all frames"))
-                            computeColorRangeAllFrames(modifierGraph.selected);
-                        ImGui::EndDisabled();
                         if (colorRangeRunning) {
                             ImGui::ProgressBar(colorRangeProgress.load(), ImVec2(-1, 0), "Scanning trajectory");
                             if (ImGui::Button("Cancel range calculation")) colorRangeCancel = true;
@@ -2776,10 +2833,50 @@ struct App {
                     }
                     if (m.op == Op::CommonNeighborAnalysis || m.op == Op::CreateBonds) {
                         if (m.op == Op::CreateBonds) {
+                            heading("Operate on");
+                            ImGui::BeginDisabled();
+                            bool operateParticles = true, operateBonds = true;
+                            ImGui::Checkbox("Particles", &operateParticles);
+                            ImGui::Checkbox("Bonds", &operateBonds);
+                            ImGui::EndDisabled();
+                            ImGui::SeparatorText("Creation mode");
+                            ImGui::BeginDisabled();
+                            int creationMode = 0;
+                            ImGui::Combo("Creation mode", &creationMode, "by cutoff distance\0");
+                            ImGui::EndDisabled();
+                            float bondCutoff = m.value;
+                            if (m.bondTypeCutoffsEnabled) {
+                                ImGui::BeginDisabled();
+                                ImGui::DragFloat("Cutoff radius", &bondCutoff, .01f, .0001f, 100000.f, "%.5g");
+                                ImGui::EndDisabled();
+                                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                                    ImGui::SetTooltip("The type-pair cutoff table controls bond creation");
+                            } else if (ImGui::DragFloat("Cutoff radius", &bondCutoff, .01f, .0001f, 100000.f, "%.5g")) {
+                                checkpoint(); m.value = bondCutoff; update();
+                            }
+                            recordUiTestItem(std::string("pipeline.bonds-cutoff.")+m.id, "Cutoff radius");
+                            ImGui::SeparatorText("Options");
                             bool discard = m.discardExistingBonds;
                             if (ImGui::Checkbox("Discard existing bonds", &discard)) {
                                 checkpoint(); m.discardExistingBonds = discard; update();
                             }
+                            ImGui::TextDisabled("Checked: input bonds are removed before new cutoff bonds are created.");
+                            double lowerCutoff = m.bondLowerCutoff;
+                            if (ImGui::InputDouble("Lower cutoff", &lowerCutoff, 0, 0, "%.5g")) {
+                                checkpoint();
+                                m.bondLowerCutoff = std::max(0.0, lowerCutoff);
+                                update();
+                            }
+                            ImGui::TextDisabled("Pairs closer than the lower cutoff are not bonded.");
+                            ImGui::TextDisabled("%zu bonds.", result.data.bonds.size());
+                            ImGui::SeparatorText("New bond type");
+                            ImGui::BeginDisabled();
+                            int newBondType = 0;
+                            ImGui::Combo("Bond type", &newBondType, "Default\0");
+                            ImGui::EndDisabled();
+                            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                                ImGui::SetTooltip("Not implemented yet");
+                            ImGui::SeparatorText("Bonds display");
                             const size_t typeCount=result.data.species.size();
                             if (typeCount>0 && typeCount<=32) {
                                 bool usePairCutoffs=m.bondTypeCutoffsEnabled;
@@ -2849,7 +2946,6 @@ struct App {
                                 checkpoint(); m.bondsVisible=visible; m.bondCylinders=cylinders;
                                 m.bondWidth=width; m.bondRadius=bondRadius; m.bondColor=color; update();
                             }
-                            ImGui::TextDisabled("%zu bonds", result.data.bonds.size());
                         }
                         else {
                             size_t counts[5]{};
@@ -3510,14 +3606,14 @@ struct App {
                 ImGui::TableNextColumn();
                 beginCard("Analysis");
                 for (auto name : {"Atomic strain", "Bader charge integration", "Bond order"}) planned(name);
-                operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
                 operation(Op::BondAngleDistribution,"Build a 0–180 degree histogram from pairs of incident bonds, resolving periodic image shifts.");
+                operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
                 operation(Op::ClusterAnalysis,"Build connected components by a periodic cutoff or existing bond topology; adds per-particle Cluster IDs and a cluster-size table."); planned("Difference between frames");
+                operation(Op::CoordinationAnalysis,"Compute periodic neighbor counts and publish the Coordination particle property.");
                 operation(Op::DisplacementVectors,"Match particles against a reference animation frame and publish the Displacement vector and Displacement Magnitude particle properties.");
                 operation(Op::Histogram,"Build a finite-value histogram data table for a particle scalar or position component.");
                 operation(Op::RadialDistribution,"Compute a periodic 3D radial distribution table from the current pipeline data.");
                 operation(Op::ReduceProperty,"Reduce a scalar particle property to a global minimum, maximum, mean, or sum.");
-                operation(Op::CoordinationAnalysis,"Compute periodic neighbor counts and publish the Coordination particle property.");
                 operation(Op::ScatterPlot,"Plot two upstream particle properties and export the finite data pairs as a table; large inputs are deterministically sampled.");
                 for (auto name : {"Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
                 endCard();
@@ -3530,17 +3626,19 @@ struct App {
                 for (auto name : {"Freeze property", "Load trajectory", "Python script (deferred)"}) planned(name);
                 operation(Op::RemoveProperty,"Remove a scalar or vector particle property by name.");
                 operation(Op::Replicate,"Duplicate the structure along the three cell vectors and resize the simulation cell.");
-                operation(Op::Slice,"Cut the structure at a plane: keep one side, or a slab of adjustable width.");
-                for (auto name : {"Smooth trajectory", "Unwrap trajectories"}) planned(name);
-                operation(Op::Wrap,"Wrap positions into orthogonal or triclinic periodic cells, including partially periodic cells.");
-                operation(Op::Translate,"Translate particle positions along an axis.");
-                operation(Op::Scale,"Scale positions and simulation cell uniformly.");
                 operation(Op::Rotate,"Rotate positions and cell vectors around an axis (degrees).");
+                operation(Op::Scale,"Scale positions and simulation cell uniformly.");
+                operation(Op::Slice,"Cut the structure at a plane: keep one side, or a slab of adjustable width.");
+                planned("Smooth trajectory");
+                operation(Op::Translate,"Translate particle positions along an axis.");
+                planned("Unwrap trajectories");
+                operation(Op::Wrap,"Wrap positions into orthogonal or triclinic periodic cells, including partially periodic cells.");
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Structure identification");
+                planned("Ackland-Jones analysis");
                 operation(Op::CentrosymmetryParameter,"Computes the centrosymmetry parameter to identify atoms in defective crystal environments (stacking faults, surfaces, dislocations).");
-                for (auto name : {"Ackland-Jones analysis", "Chill+"}) planned(name);
+                planned("Chill+");
                 operation(Op::CommonNeighborAnalysis,"Fixed-cutoff Honeycutt–Andersen pair signatures; FCC and BCC are verified against periodic reference crystals. Unsupported or ambiguous motifs remain Other.");
                 for (auto name : {"Identify diamond structure", "Polyhedral template matching", "VoroTop analysis"}) planned(name);
                 endCard();
@@ -3560,8 +3658,8 @@ struct App {
                 operation(Op::SelectOverlapping,"Select overlapping pairs using either a distance cutoff or the sum of a scalar radius property, with periodic minimum-image distances.");
                 operation(Op::Invert,"Invert selected and unselected particles.");
                 operation(Op::ManualSelection,"Select particles in the Particles table; Ctrl-click toggles rows.");
-                operation(Op::SelectType,"Select particles of one or more checked particle types.");
                 operation(Op::SelectRange,"Select particles in a coordinate interval.");
+                operation(Op::SelectType,"Select particles of one or more checked particle types.");
                 endCard();
                 beginCard("Python modifiers");
                 for (auto name : {"Assign shared visual element", "Calculate local entropy", "Identify fcc planar faults", "Render LAMMPS regions", "Shrink-wrap simulation box"}) planned(name);

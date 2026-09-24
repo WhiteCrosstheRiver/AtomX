@@ -245,6 +245,27 @@ inline std::vector<double> particlePropertyValues(const Dataset &data,
     throw std::runtime_error("Unknown particle property: " + property);
 }
 
+// Finite-value min/max of a particle property on an evaluated dataset.
+// Returns false when the property is unavailable or holds no finite values;
+// used by the color coding panel's "Adjust range" button.
+inline bool propertyValueRange(const Dataset &data, const std::string &property,
+                               double &lo, double &hi) {
+    std::vector<double> values;
+    try {
+        values = particlePropertyValues(data, property);
+    } catch (const std::exception &) {
+        return false;
+    }
+    lo = std::numeric_limits<double>::infinity();
+    hi = -std::numeric_limits<double>::infinity();
+    for (double value : values)
+        if (std::isfinite(value)) {
+            lo = std::min(lo, value);
+            hi = std::max(hi, value);
+        }
+    return std::isfinite(lo) && std::isfinite(hi);
+}
+
 inline std::string attribute(const std::string &s, const std::string &key) {
     auto p = s.find(key + "=");
     if (p == std::string::npos)
@@ -660,6 +681,7 @@ struct Modifier {
     bool adaptive = false;
     std::string outputProperty = "Computed property";
     bool discardExistingBonds = false;
+    double bondLowerCutoff = 0;
     bool bondTypeCutoffsEnabled = false;
     bool bondCylinders = false;
     std::vector<float> bondTypeCutoffs;
@@ -674,7 +696,7 @@ struct Modifier {
     bool scatterSelectedOnly = false;
     bool bondsVisible = true;
     float bondWidth = 1.5f;
-    float bondRadius = .08f;
+    float bondRadius = .2f; // cylinder diameter 0.4 units, matching OVITO's default bond width
     std::array<float,4> bondColor{.72f,.78f,.86f,1.f};
     std::array<float,3> assignColor{1.f,.15f,.12f};
     std::vector<uint32_t> manualSelection;
@@ -2963,6 +2985,10 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     double searchCutoff=m.value;
                     if (m.bondTypeCutoffsEnabled)
                         searchCutoff=*std::max_element(m.bondTypeCutoffs.begin(),m.bondTypeCutoffs.end());
+                    if (!std::isfinite(m.bondLowerCutoff) || m.bondLowerCutoff < 0)
+                        throw std::runtime_error("Lower bond cutoff must be a finite, non-negative distance");
+                    if (searchCutoff>0 && m.bondLowerCutoff>=searchCutoff)
+                        throw std::runtime_error("Lower bond cutoff must be smaller than the cutoff radius");
                     if (searchCutoff>0) {
                         for (const auto &atom : r.data.atoms)
                             if (atom.type>=r.data.species.size())
@@ -2970,6 +2996,9 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                         forEachNeighborPair(r.data, searchCutoff,
                                             [&](uint32_t i, uint32_t j, double distanceSquared,
                                                 std::array<int32_t, 3> image) {
+                                                if (m.bondLowerCutoff>0 &&
+                                                    distanceSquared<m.bondLowerCutoff*m.bondLowerCutoff)
+                                                    return;
                                                 if (m.bondTypeCutoffsEnabled) {
                                                     const size_t typeCount=r.data.species.size();
                                                     const size_t a=std::min(r.data.atoms[i].type,r.data.atoms[j].type);

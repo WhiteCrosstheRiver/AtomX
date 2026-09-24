@@ -2267,7 +2267,7 @@ int main() {
             relativeDisplacement.displacementRelative = true;
             relativeDisplacement.displacementOffset = -1;
             auto evaluated = evaluate(frames[2], {relativeDisplacement}, nullptr, nullptr,
-                                      [&](size_t node) -> const Dataset & {
+                                      [&](size_t) -> const Dataset & {
                                           const auto reference =
                                               resolveDisplacementReferenceFrame(
                                                   relativeDisplacement, 2, int(frames.size()));
@@ -2341,6 +2341,61 @@ int main() {
             mean /= double(referenceFrame.atoms.size());
             require(std::abs(mean - analyticMean) < 3e-4,
                     "thermal sine trajectory matches the analytic mean displacement magnitude");
+        }
+        {
+            // P3 parity: Create bonds lower-cutoff distance filter. FCC a=3.6
+            // has first-shell neighbors at a/sqrt(2) = 2.5456; a lower cutoff
+            // above that distance must remove them all.
+            auto lattice = fccLattice(2);
+            lattice.pbc = {true, true, true};
+            Modifier bonds{Op::CreateBonds};
+            bonds.value = 3.0f;
+            const auto unfiltered = evaluate(lattice, {bonds});
+            require(unfiltered.data.bonds.size() == 12 * lattice.atoms.size() / 2,
+                    "cutoff 3.0 bonds each FCC atom to its twelve first-shell neighbors");
+            Modifier filtered = bonds;
+            filtered.bondLowerCutoff = 2.6;
+            const auto noShortBonds = evaluate(lattice, {filtered});
+            require(noShortBonds.data.bonds.empty(),
+                    "lower cutoff above the first-shell distance removes all cutoff bonds");
+            filtered.bondLowerCutoff = 2.0;
+            const auto keptBonds = evaluate(lattice, {filtered});
+            require(keptBonds.data.bonds.size() == unfiltered.data.bonds.size(),
+                    "lower cutoff below the first-shell distance keeps all cutoff bonds");
+            Modifier invalidLower = bonds;
+            invalidLower.bondLowerCutoff = 3.0;
+            bool rejected = false;
+            try { (void)evaluate(lattice, {invalidLower}); }
+            catch (const std::exception &) { rejected = true; }
+            require(rejected, "lower cutoff at or above the cutoff radius is rejected");
+        }
+        {
+            // P3 parity: color coding default gradient, property range helper
+            // (drives the panel's Adjust range button) and upstream property
+            // schema choices.
+            Modifier colorCoding{Op::ColorCoding};
+            require(colorCoding.colorGradient == 0,
+                    "color coding defaults to the Rainbow gradient");
+            auto rangeData = fccLattice(1);
+            rangeData.scalarProperties["Energy"] = {1.0, -2.0, 5.0, 0.5};
+            double lo = 0, hi = 0;
+            require(propertyValueRange(rangeData, "Energy", lo, hi) &&
+                        lo == -2.0 && hi == 5.0,
+                    "propertyValueRange reports the finite min/max of a scalar property");
+            rangeData.scalarProperties["Energy"] = {1.0, std::nan(""), 3.0, 0.5};
+            require(propertyValueRange(rangeData, "Energy", lo, hi) &&
+                        lo == 0.5 && hi == 3.0,
+                    "propertyValueRange skips non-finite property values");
+            require(!propertyValueRange(rangeData, "Missing property", lo, hi),
+                    "propertyValueRange reports false for an unavailable property");
+            const auto choices = pipelineInputPropertyChoices(
+                fccLattice(1),
+                std::vector<Modifier>{{Op::CentrosymmetryParameter}, {Op::DisplacementVectors}},
+                2, false);
+            require(std::find(choices.begin(), choices.end(), "Centrosymmetry") != choices.end() &&
+                        std::find(choices.begin(), choices.end(), "Displacement Magnitude") !=
+                            choices.end(),
+                    "color coding property choices list upstream modifier outputs");
         }
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "
