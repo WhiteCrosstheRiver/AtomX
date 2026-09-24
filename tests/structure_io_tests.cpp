@@ -154,6 +154,38 @@ int main() {
             failed = true;
         }
         require(failed, "unsupported compression explicit");
+        // Drag-and-drop routes through the same io::detect acceptance check as
+        // the Open dialog: every supported drop extension must be detected
+        // without content sniffing, unknown extensions must reject.
+        for (const char *ext : {".xyz", ".extxyz", ".cif", ".data", ".lmp",
+                                ".dump", ".lammpstrj", ".pdb", ".ent", ".gro"}) {
+            const auto dropped = dir / ("drop-test" + std::string(ext));
+            {
+                std::ofstream f(dropped);
+                f << "stub\n";
+            }
+            failed = false;
+            try {
+                io::detect(dropped);
+            } catch (...) {
+                failed = true;
+            }
+            require(!failed, (std::string("dropped file accepted by extension: ") + ext).c_str());
+        }
+        {
+            const auto dropped = dir / "drop-test.txt";
+            {
+                std::ofstream f(dropped);
+                f << "not a structure\n";
+            }
+            failed = false;
+            try {
+                io::detect(dropped);
+            } catch (...) {
+                failed = true;
+            }
+            require(failed, "unsupported dropped extension rejected");
+        }
         std::atomic<bool> cancelled{true};
         failed = false;
         try {

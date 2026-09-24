@@ -26,6 +26,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 static Renderer *renderer = nullptr;
 static bool resized = false;
 static std::filesystem::path dropped;
+static int droppedExtra = 0; // Additional files in a multi-file drop (first wins).
 static std::string utf8(const std::wstring &s) {
     if (s.empty())
         return {};
@@ -81,10 +82,14 @@ static LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             resized = true;
         return 0;
     case WM_DROPFILES: {
+        HDROP hDrop = (HDROP)wp;
         wchar_t p[32768];
-        DragQueryFileW((HDROP)wp, 0, p, 32768);
+        // Keep it simple: the first dropped file is opened; any further files
+        // are ignored and reported through the status bar.
+        droppedExtra = std::max(0, int(DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0)) - 1);
+        DragQueryFileW(hDrop, 0, p, 32768);
         dropped = p;
-        DragFinish((HDROP)wp);
+        DragFinish(hDrop);
         return 0;
     }
     case WM_DESTROY:
@@ -120,7 +125,43 @@ static std::string number(uint64_t n) {
 static float uiScale = 1;
 static float U(float value) { return value * uiScale; }
 static ImFont *headingFont = nullptr;
+static ImFont *iconFont = nullptr;
+static const char *iconFontName = "text fallback"; // Reported by the smoke run.
 static ImVec4 accent{.10f,.34f,.62f,1};
+// Segoe MDL2 Assets codepoints used by the compact icon buttons. The range
+// table feeds the merged icon font; every button also carries a text fallback
+// for the case where the system font is unavailable or a glyph is missing.
+static const ImWchar iconGlyphRanges[] = {
+    0xE70D,0xE70D, 0xE70E,0xE70E, 0xE713,0xE713, 0xE714,0xE714,
+    0xE722,0xE722, 0xE768,0xE768, 0xE769,0xE769, 0xE76B,0xE76B,
+    0xE76C,0xE76C, 0xE792,0xE792, 0xE799,0xE799, 0xE7A6,0xE7A7,
+    0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE7C9,0xE7C9, 0xE81E,0xE81E,
+    0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893, 0xE8A3,0xE8A3,
+    0xE8A7,0xE8A7, 0xE8A9,0xE8A9, 0xE8AA,0xE8AA, 0xE8B5,0xE8B5,
+    0xE8C8,0xE8C8, 0xE8E5,0xE8E5, 0xE8F1,0xE8F1, 0xE91B,0xE91B,
+    0xE72C,0xE72C, 0xE74D,0xE74D, 0xE7F4,0xE7F4, 0xE192,0xE192,
+    0};
+// Encodes a Unicode codepoint as UTF-8 (NUL terminated), returns the length.
+static int glyphUtf8(unsigned codepoint, char out[8]) {
+    if (codepoint < 0x80) {
+        out[0] = char(codepoint); out[1] = 0;
+        return 1;
+    }
+    if (codepoint < 0x800) {
+        out[0] = char(0xC0 | (codepoint >> 6));
+        out[1] = char(0x80 | (codepoint & 0x3F));
+        out[2] = 0;
+        return 2;
+    }
+    out[0] = char(0xE0 | (codepoint >> 12));
+    out[1] = char(0x80 | ((codepoint >> 6) & 0x3F));
+    out[2] = char(0x80 | (codepoint & 0x3F));
+    out[3] = 0;
+    return 3;
+}
+static bool glyphAvailable(unsigned codepoint) {
+    return iconFont && iconFont->FindGlyphNoFallback(ImWchar(codepoint)) != nullptr;
+}
 static void theme(int choice = 1) {
     ImGui::GetStyle() = ImGuiStyle{};
     if (choice == 1) ImGui::StyleColorsLight(); else ImGui::StyleColorsDark();
@@ -394,6 +435,7 @@ struct App {
     std::atomic<bool> cancel{false};
     bool busy = false, staleResult = false, staleBeforeLoad = false;
     std::string status = "Ready", error;
+    std::string dropNotice; // Appended to the load status for multi-file drops.
     std::string readerName = "Generated crystal";
     double lastFrame = 0;
     int exportW = 1920, exportH = 1080;
@@ -1199,7 +1241,9 @@ struct App {
                         c.zoom = 1;
                 }
                 update(SIZE_MAX, true);
-                status = "Loaded " + number(source.sourceCount) + " atoms";
+                status = "Opened " + utf8(path.filename().wstring()) + ": " +
+                         number(source.sourceCount) + " atoms" + dropNotice;
+                dropNotice.clear();
             } catch (const std::exception &e) {
                 error = e.what();
                 playing = false;
@@ -1212,8 +1256,16 @@ struct App {
             if (requested != current) load(path, requested);
         }
         if (!dropped.empty()) {
-            load(dropped);
+            auto droppedPath = std::move(dropped);
             dropped.clear();
+            const int extraFiles = droppedExtra;
+            droppedExtra = 0;
+            // Same loading path as the Open button and the CLI file argument;
+            // unsupported formats surface through the existing error popup.
+            dropNotice = extraFiles > 0
+                ? " (" + std::to_string(extraFiles) + " more dropped file(s) ignored)"
+                : "";
+            load(droppedPath);
         }
     }
     void open() {
@@ -1249,6 +1301,43 @@ struct App {
         uiTestItems[name]={id,ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),
                            ImGui::IsItemHovered(),ImGui::IsItemClicked()};
     }
+    // Compact flat icon button in the OVITO style. Renders the Segoe MDL2
+    // glyph when the icon font loaded and carries the specific glyph; falls
+    // back to the historical text label (never a blank button) otherwise. The
+    // stable UI-test name, the tooltip and the action are identical in both
+    // modes. highlight renders the accent background for toggled tools.
+    bool iconButton(const char *name, unsigned glyph, const char *fallbackText,
+                    const char *tip, bool highlight = false, float square = 0,
+                    const char *recordName = nullptr) {
+        char label[8];
+        const bool useGlyph = glyphAvailable(glyph);
+        if (useGlyph)
+            glyphUtf8(glyph, label);
+        else
+            snprintf(label, sizeof(label), "%s", fallbackText);
+        ImGui::PushID(name);
+        if (highlight) ImGui::PushStyleColor(ImGuiCol_Button, accent);
+        const ImVec2 size = square > 0 ? ImVec2{square, square} : ImVec2{0, 0};
+        const bool pressed = ImGui::Button(label, size);
+        if (highlight) ImGui::PopStyleColor();
+        ImGui::PopID();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+        recordUiTestItem(recordName ? recordName : name);
+        return pressed;
+    }
+    // Subtle vertical separator drawn between toolbar button groups.
+    void toolbarSeparator(float rowHeight) {
+        ImGui::SameLine();
+        const auto p = ImGui::GetCursorScreenPos();
+        auto *draw = ImGui::GetWindowDrawList();
+        const float height = U(16);
+        const float y = (rowHeight - height) * .5f;
+        draw->AddLine({p.x + U(2), p.y + y}, {p.x + U(2), p.y + y + height},
+                      ImGui::GetColorU32(ImGuiCol_Separator), U(1));
+        ImGui::Dummy({U(5), 0});
+        ImGui::SameLine();
+    }
+    bool usingIconFont() const { return iconFont != nullptr; }
     void control(const char *id, int kind, const char *tip) {
         ImGui::PushStyleColor(ImGuiCol_Button, {0,0,0,0});
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
@@ -1278,8 +1367,14 @@ struct App {
             d->AddLine({c.x,c.y-9},{c.x,c.y},color,1.7f);
         }
     }
+    float leftWidth() const { return showWorkspace ? U(220) : 0.f; }
+    float rightWidth() const { return U(preferences.size >= 19 ? 400.f : 370.f); }
+    float titleBarHeight() const { return U(42); }
+    float toolBarHeight() const { return U(34); }
+    float topInset() const { return titleBarHeight() + toolBarHeight(); }
     void top(float w) {
-        fixed("Title", 0, 0, w, U(42));
+        const float titleH = titleBarHeight(), barH = toolBarHeight();
+        fixed("Title", 0, 0, w, titleH);
         ImGui::SetCursorPosY(U(4));
         ImGui::Image((ImTextureID)(intptr_t)logo.Get(), {U(32),U(32)});
         ImGui::SameLine(); ImGui::SetCursorPosY(U(9));
@@ -1291,55 +1386,74 @@ struct App {
         control("##tray",2,"Close to system tray (keep running)"); ImGui::SameLine();
         control("##exit",3,"Power off: exit AtomX completely");
         ImGui::End();
-        fixed("Top", 0, U(42), w, U(48));
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(11), U(7)});
-        if (ImGui::Button("Open##toolbar"))
+        // Compact OVITO-style toolbar: grouped icon-only flat buttons with
+        // subtle separators; every action, tooltip and recorded UI-test name
+        // of the former text toolbar is preserved.
+        fixed("Top", 0, titleH, w, barH);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(6), U(4)});
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(2), U(4)});
+        ImGui::SetCursorPosY(U(3));
+        if (iconButton("toolbar.open", 0xE8E5, "Open",
+                       "Open a structure file (Ctrl+O)"))
             open();
         ImGui::SameLine();
-        if (ImGui::Button("Import##toolbar"))
+        if (iconButton("toolbar.import", 0xE8B5, "Import",
+                       "Import data from a structure file"))
             open();
-        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
-        bool undoPressed=ImGui::Button("Undo##toolbar");
-        recordUiTestItem("toolbar.undo","Undo##toolbar");
-        if (undoPressed)
+        toolbarSeparator(barH);
+        if (iconButton("toolbar.undo", 0xE7A7, "Undo",
+                       "Undo the last pipeline edit (Ctrl+Z)"))
             history(false);
         ImGui::SameLine();
-        bool redoPressed=ImGui::Button("Redo##toolbar");
-        recordUiTestItem("toolbar.redo","Redo##toolbar");
-        if (redoPressed)
+        if (iconButton("toolbar.redo", 0xE7A6, "Redo",
+                       "Redo an undone pipeline edit (Ctrl+Y)"))
             history(true);
+        toolbarSeparator(barH);
+        if (iconButton("toolbar.select", 0xE799, "Select", "Selection tool"))
+            active = active;
         ImGui::SameLine();
-        if (ImGui::Button("Select##toolbar")) active = active;
+        if (iconButton("toolbar.orbit", 0xE7B8, "Orbit",
+                       "Orbit the active viewport"))
+            cameras[active].mode = 7;
         ImGui::SameLine();
-        if (ImGui::Button("Orbit##toolbar")) cameras[active].mode = 7;
-        ImGui::SameLine();
-        if (ImGui::Button("Rotate##toolbar")) cameras[active].yaw += .35f;
-        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
-        if (ImGui::Button("Snapshot##toolbar"))
+        if (iconButton("toolbar.rotate", 0xE72C, "Rotate",
+                       "Rotate the view"))
+            cameras[active].yaw += .35f;
+        toolbarSeparator(barH);
+        if (iconButton("toolbar.snapshot", 0xE722, "Snapshot",
+                       "Save a snapshot image"))
             exportImage();
         ImGui::SameLine();
-        if (ImGui::Button(quad ? "Single view##toolbar" : "Four views##toolbar"))
+        if (iconButton("toolbar.views", quad ? 0xE8A7 : 0xE8A9,
+                       quad ? "Single view" : "Four views",
+                       quad ? "Maximize active viewport" : "Show four viewports"))
             quad = !quad;
         ImGui::SameLine();
-        if (ImGui::Button("Fit all##toolbar"))
+        if (iconButton("toolbar.fit", 0xE8AA, "Fit all",
+                       "Fit all viewports to the data")) {
             for (int i=0;i<4;++i) fitCamera(i,false);
-        ImGui::SameLine();
-        if (ImGui::Button("Modifiers##toolbar"))
+        }
+        toolbarSeparator(barH);
+        if (iconButton("toolbar.modifiers", 0xE81E, "Modifiers",
+                       "Show the modifier catalog"))
             showCatalog = true;
         ImGui::SameLine();
-        if (ImGui::Button("Render##toolbar"))
+        if (iconButton("toolbar.render", 0xE7F4, "Render",
+                       "Render the active viewport to an image"))
             exportImage();
+        toolbarSeparator(barH);
+        if (iconButton("toolbar.settings", 0xE713, "Settings",
+                       "Open the settings dialog"))
+            showSettings = true;
         ImGui::SameLine();
-        if (ImGui::Button("Settings##toolbar")) showSettings = true;
-        ImGui::SameLine();
-        if (ImGui::Button("Workspace##toolbar")) showWorkspace = !showWorkspace;
-        ImGui::PopStyleVar();
+        if (iconButton("toolbar.workspace", 0xE91B, "Workspace",
+                       "Toggle the workspace side panel"))
+            showWorkspace = !showWorkspace;
+        ImGui::PopStyleVar(2);
         ImGui::End();
     }
-    float leftWidth() const { return showWorkspace ? U(220) : 0.f; }
-    float rightWidth() const { return U(preferences.size >= 19 ? 400.f : 370.f); }
     void left(float h) {
-        fixed("Workspace", 0, U(90), leftWidth(), h - U(120));
+        fixed("Workspace", 0, topInset(), leftWidth(), h - topInset() - U(30));
         heading("WORKSPACE");
         ImGui::TextColored(accent, "ATOMIC STRUCTURES");
         ImGui::Spacing();
@@ -1534,21 +1648,33 @@ struct App {
         playing = false;
         pendingFrame = std::clamp(frame, 0, int(frames.size())-1);
     }
-    bool transport(const char *id, int kind, const char *tip) {
-        bool pressed = ImGui::Button(id, {U(34),U(30)});
-        auto p = ImGui::GetItemRectMin();
-        auto *d = ImGui::GetWindowDrawList();
-        auto color = ImGui::GetColorU32(ImGuiCol_Text);
-        ImVec2 c{p.x+U(17),p.y+U(15)};
-        if (kind == 2 && playing) {
-            d->AddRectFilled({c.x-U(5),c.y-U(6)},{c.x-U(2),c.y+U(6)},color);
-            d->AddRectFilled({c.x+U(2),c.y-U(6)},{c.x+U(5),c.y+U(6)},color);
-        } else {
-            float direction = kind < 2 ? -1.f : 1.f;
-            d->AddTriangleFilled({c.x+direction*U(5),c.y},{c.x-direction*U(4),c.y-U(6)},
-                                 {c.x-direction*U(4),c.y+U(6)},color);
-            if (kind == 0 || kind == 4)
-                d->AddLine({c.x+direction*U(8),c.y-U(7)}, {c.x+direction*U(8),c.y+U(7)},color,U(2));
+    bool transport(const char *name, unsigned glyph, int kind, const char *tip) {
+        // Compact transport icon button; keeps the legacy vector-drawn arrows
+        // when the Segoe MDL2 icon font is unavailable so the cluster never
+        // degrades to blank or text-only buttons.
+        char label[8];
+        const bool useGlyph = glyphAvailable(glyph);
+        if (useGlyph)
+            glyphUtf8(glyph, label);
+        ImGui::PushID(name);
+        const bool pressed = useGlyph ? ImGui::Button(label, {U(26), U(26)})
+                                      : ImGui::Button("##transport", {U(26), U(26)});
+        const auto p = ImGui::GetItemRectMin();
+        ImGui::PopID();
+        if (!useGlyph) {
+            auto *d = ImGui::GetWindowDrawList();
+            auto color = ImGui::GetColorU32(ImGuiCol_Text);
+            ImVec2 c{p.x+U(13),p.y+U(13)};
+            if (kind == 2 && playing) {
+                d->AddRectFilled({c.x-U(4),c.y-U(5)},{c.x-U(1),c.y+U(5)},color);
+                d->AddRectFilled({c.x+U(1),c.y-U(5)},{c.x+U(4),c.y+U(5)},color);
+            } else {
+                float direction = kind < 2 ? -1.f : 1.f;
+                d->AddTriangleFilled({c.x+direction*U(4),c.y},{c.x-direction*U(3),c.y-U(5)},
+                                     {c.x-direction*U(3),c.y+U(5)},color);
+                if (kind == 0 || kind == 4)
+                    d->AddLine({c.x+direction*U(7),c.y-U(6)}, {c.x+direction*U(7),c.y+U(6)},color,U(2));
+            }
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
         return pressed;
@@ -1556,50 +1682,76 @@ struct App {
     void timeline() {
         ImGui::BeginChild("Trajectory timeline", {-1,U(128)}, ImGuiChildFlags_Borders,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        // Compact OVITO-style spacing for the whole timeline area.
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(4), U(2)});
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(3), U(4)});
         int last = std::max(0,int(frames.size())-1);
         int selected = pendingFrame >= 0 ? pendingFrame : current;
+        auto &style = ImGui::GetStyle();
+        const float gap = style.ItemSpacing.x;
+        const float square = U(26), separatorWidth = gap + U(5) + gap;
+        // The frame spinner group contains the field and both steppers; its
+        // total width equals the item width requested below.
+        const float frameField = U(96);
+        const std::string totalLabel = " / " + std::to_string(std::max<size_t>(frames.size(), 1));
+        const float totalWidth = ImGui::CalcTextSize(totalLabel.c_str()).x + gap;
+        // Exact width of the right-aligned transport/tool cluster.
+        const float cluster =
+            5*square + 4*gap + separatorWidth + frameField + totalWidth + square + gap +
+            separatorWidth + 4*square + 3*gap + separatorWidth + 2*square + gap;
         ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(accent, "TRAJECTORY"); ImGui::SameLine();
-        ImGui::BeginDisabled(frames.size()<2 || indexing && busy);
-        if (transport("##first",0,"First frame (Home)")) seekFrame(0); ImGui::SameLine();
-        if (transport("##previous",1,"Previous frame (Left)")) seekFrame(selected-1); ImGui::SameLine();
-        if (transport("##play",2,"Play / pause")) playing = !playing; ImGui::SameLine();
-        if (transport("##next",3,"Next frame (Right)")) seekFrame(selected+1); ImGui::SameLine();
-        if (transport("##last",4,"Last frame (End)")) seekFrame(last);
-        ImGui::SameLine(); ImGui::SetNextItemWidth(U(90));
-        int edit = selected + 1;
-        if (ImGui::InputInt("##frame number", &edit, 0, 0)) seekFrame(std::max(0,edit-1));
-        ImGui::EndDisabled();
-        ImGui::SameLine(); ImGui::Text("/ %zu", std::max<size_t>(frames.size(), 1));
-        if (frames.empty()) ImGui::SetItemTooltip("No trajectory frames are loaded");
-        ImGui::SameLine(); ImGui::TextDisabled("  %s", playing ? "Playing" : "Paused");
-        ImGui::SameLine();
-        auto toolButton = [&](const char* label, int tool, const char* tip) {
-            bool selectedTool = viewportTool == tool;
-            if (selectedTool) ImGui::PushStyleColor(ImGuiCol_Button, accent);
-            bool pressed = ImGui::SmallButton(label);
-            if (selectedTool) ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
-            if (pressed) viewportTool = tool;
-        };
-        toolButton("Zoom", 0, "Zoom active viewport (drag or wheel)"); ImGui::SameLine();
-        toolButton("Pan", 1, "Pan active viewport"); ImGui::SameLine();
-        toolButton("Orbit", 2, "Orbit active viewport"); ImGui::SameLine();
-        toolButton("FOV", 3, "Adjust perspective field of view"); ImGui::SameLine();
-        if (ImGui::SmallButton(quad ? "Max" : "Views")) quad = !quad;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", quad ? "Maximize active viewport" : "Show four viewports");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Clock")) animationSettings = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Animation settings");
-        ImGui::SameLine();
-        if (autoKey) ImGui::PushStyleColor(ImGuiCol_Button, accent);
-        if (ImGui::SmallButton("Key")) autoKey = !autoKey;
-        if (autoKey) ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle auto-key mode");
-        if (ImGui::GetContentRegionAvail().x > U(220)) {
+        ImGui::TextColored(accent, "TRAJECTORY");
+        const float labelEnd = ImGui::GetItemRectMax().x;
+        const float windowRight = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - style.WindowPadding.x;
+        const float clusterStart = std::max(labelEnd + U(10), windowRight - cluster);
+        const char *hintText = frames.size() > 1 ? "  Drag ruler to scrub" : "  Single frame";
+        const float hintWidth = ImGui::CalcTextSize(hintText).x + gap;
+        if (labelEnd + U(6) + hintWidth <= clusterStart) {
             ImGui::SameLine();
-            ImGui::TextDisabled(frames.size()>1 ? "  Drag ruler to scrub" : "  Single frame");
+            ImGui::TextDisabled("%s", hintText);
         }
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), clusterStart - ImGui::GetWindowPos().x));
+        ImGui::BeginDisabled(frames.size()<2 || indexing && busy);
+        if (transport("##first",0xE892,0,"First frame (Home)")) seekFrame(0); ImGui::SameLine();
+        if (transport("##previous",0xE76B,1,"Previous frame (Left)")) seekFrame(selected-1); ImGui::SameLine();
+        if (transport("##play",playing ? 0xE769 : 0xE768,2,"Play / pause")) playing = !playing; ImGui::SameLine();
+        if (transport("##next",0xE76C,3,"Next frame (Right)")) seekFrame(selected+1); ImGui::SameLine();
+        if (transport("##last",0xE893,4,"Last frame (End)")) seekFrame(last);
+        toolbarSeparator(ImGui::GetFrameHeight());
+        ImGui::SetNextItemWidth(U(96));
+        int edit = selected + 1;
+        if (ImGui::InputInt("##frame number", &edit, 1, 100)) seekFrame(std::max(0,edit-1));
+        ImGui::SameLine();
+        ImGui::Text("%s", totalLabel.c_str());
+        if (frames.empty()) ImGui::SetItemTooltip("No trajectory frames are loaded");
+        ImGui::SameLine();
+        if (iconButton("timeline.clock", 0xE823, "Clock", "Animation settings", false, square))
+            animationSettings = true;
+        ImGui::EndDisabled();
+        toolbarSeparator(ImGui::GetFrameHeight());
+        ImGui::SameLine();
+        auto toolButton = [&](const char* name, unsigned glyph, const char* fallback,
+                              int tool, const char* tip) {
+            if (iconButton(name, glyph, fallback, tip, viewportTool == tool, square))
+                viewportTool = tool;
+        };
+        toolButton("timeline.zoom", 0xE8A3, "Zoom", 0, "Zoom active viewport (drag or wheel)");
+        ImGui::SameLine();
+        toolButton("timeline.pan", 0xE7C9, "Pan", 1, "Pan active viewport");
+        ImGui::SameLine();
+        toolButton("timeline.orbit", 0xE7B8, "Orbit", 2, "Orbit active viewport");
+        ImGui::SameLine();
+        toolButton("timeline.fov", 0xE714, "FOV", 3, "Adjust perspective field of view");
+        toolbarSeparator(ImGui::GetFrameHeight());
+        ImGui::SameLine();
+        if (iconButton("timeline.views", quad ? 0xE8A7 : 0xE8A9, quad ? "Max" : "Views",
+                       quad ? "Maximize active viewport" : "Show four viewports", false, square))
+            quad = !quad;
+        ImGui::SameLine();
+        if (iconButton("timeline.key", 0xE192, "Key", "Toggle auto-key mode", autoKey, square))
+            autoKey = !autoKey;
+        ImGui::PopStyleVar(2);
         auto p = ImGui::GetCursorScreenPos();
         float width = ImGui::GetContentRegionAvail().x, height = U(65);
         ImGui::InvisibleButton("##frame ruler", {width,height}, ImGuiButtonFlags_EnableNav);
@@ -1645,7 +1797,8 @@ struct App {
         ImGui::EndChild();
     }
     void center(float w, float h) {
-        fixed("Viewport workspace", leftWidth(), U(90), w - leftWidth() - rightWidth(), h - U(120));
+        fixed("Viewport workspace", leftWidth(), topInset(), w - leftWidth() - rightWidth(),
+              h - topInset() - U(30));
         ImGui::Text("%s", path.empty() ? "Cu-Ni specimen"
                                                          : utf8(path.filename().wstring()).c_str());
         ImGui::Separator();
@@ -2013,34 +2166,68 @@ struct App {
         ImGui::End();
     }
     void right(float w, float h) {
-        fixed("Properties", w - rightWidth(), U(90), rightWidth(), h - U(120));
+        fixed("Properties", w - rightWidth(), topInset(), rightWidth(), h - topInset() - U(30));
         if (ImGui::BeginTabBar("Settings")) {
             if (ImGui::BeginTabItem("Pipeline", nullptr, selectPipeline ? ImGuiTabItemFlags_SetSelected : 0)) {
                 selectPipeline = false;
                 heading("Pipeline editor");
-                if (ImGui::Button("Add modification...", {-1, U(32)}))
+                // OVITO-style data-source header: bold "Pipelines:" label and a
+                // selector combo showing the live data source; the single entry
+                // reflects real state and selecting it is a no-op.
+                ImGui::AlignTextToFramePadding();
+                if (headingFont) ImGui::PushFont(headingFont);
+                ImGui::TextUnformatted("Pipelines:");
+                if (headingFont) ImGui::PopFont();
+                ImGui::SameLine();
+                const std::string sourceLabel = path.empty()
+                    ? readerName
+                    : utf8(path.filename().wstring()) + "  [" + readerName + "]";
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo("##pipeline-source", sourceLabel.c_str())) {
+                    ImGui::Selectable(sourceLabel.c_str(), true);
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Data source feeding the pipeline");
+                // Row of four compact actions wired to the existing commands.
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(6), U(4)});
+                if (iconButton("pipeline.open", 0xE8E5, "Open",
+                               "Open a structure file (Ctrl+O)"))
+                    open();
+                ImGui::SameLine();
+                if (iconButton("pipeline.snapshot", 0xE722, "Snapshot",
+                               "Save a snapshot image"))
+                    exportImage();
+                ImGui::SameLine();
+                if (iconButton("pipeline.visibility", 0xE7B3, "Visible",
+                               particles ? "Hide particles" : "Show particles", particles))
+                    particles = !particles;
+                ImGui::SameLine();
+                if (iconButton("pipeline.settings", 0xE713, "Settings",
+                               "Open the settings dialog"))
+                    showSettings = true;
+                ImGui::PopStyleVar();
+                if (ImGui::Button("Add modification...", {-1, U(28)}))
                     showCatalog = true;
                 recordUiTestItem("pipeline.add-modification");
                 {
                     auto p = ImGui::GetItemRectMax();
-                    ImGui::GetWindowDrawList()->AddTriangleFilled({p.x-U(18),p.y-U(18)},{p.x-U(10),p.y-U(18)},{p.x-U(14),p.y-U(13)},ImGui::GetColorU32(ImGuiCol_Text));
+                    const float cy = p.y - U(14);
+                    ImGui::GetWindowDrawList()->AddTriangleFilled({p.x-U(18),cy-U(4)},{p.x-U(10),cy-U(4)},{p.x-U(14),cy+U(1)},ImGui::GetColorU32(ImGuiCol_Text));
                 }
                 catalogAnchor = {ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + 2};
                 ImGui::BeginChild("Stack", {-1, U(205)}, ImGuiChildFlags_Borders);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(4), U(2)});
                 if (mods.empty())
                     ImGui::TextWrapped("Add a modification to start processing.");
+                bool stackMutated = false;
+                constexpr float stripGutter = 30.f; // Room for the right-side action strip.
                 for (int i = int(mods.size()) - 1; i >= 0; i--) {
                     auto &m = mods[i];
                     ImGui::PushID(m.id.c_str());
-                    const auto &style=ImGui::GetStyle();
-                    const float itemSpacing=style.ItemSpacing.x;
-                    const float actionWidth=
-                        ImGui::CalcTextSize("↑").x+style.FramePadding.x*2+
-                        ImGui::CalcTextSize("↓").x+style.FramePadding.x*2+
-                        ImGui::CalcTextSize("Copy").x+style.FramePadding.x*2+
-                        ImGui::CalcTextSize("×").x+style.FramePadding.x*2;
-                    const float labelWidth=std::max(0.f,ImGui::GetContentRegionAvail().x-
-                        ImGui::GetFrameHeight()-actionWidth-itemSpacing*5);
+                    const auto &style = ImGui::GetStyle();
+                    const float labelWidth = std::max(0.f, ImGui::GetContentRegionAvail().x -
+                        ImGui::GetFrameHeight() - style.ItemSpacing.x * 2 - U(stripGutter));
                     bool enabled = m.enabled;
                     bool enabledChanged=ImGui::Checkbox("##enabled", &enabled);
                     recordUiTestItem(std::string("pipeline.node.enabled.")+m.id);
@@ -2055,52 +2242,86 @@ struct App {
                                           ImGuiSelectableFlags_None,{labelWidth,0}))
                         modifierGraph.selected = size_t(i);
                     recordUiTestItem(std::string("pipeline.node.select.")+m.id);
-                    ImGui::SameLine();
-                    ImGui::BeginDisabled(i + 1 >= int(mods.size()));
-                    bool moveUpPressed=ImGui::SmallButton("↑");
-                    ImGui::EndDisabled();
-                    recordUiTestItem(std::string("pipeline.node.up.")+m.id);
-                    if (moveUpPressed && i + 1 < int(mods.size())) {
-                        checkpoint(); modifierGraph.move(size_t(i), size_t(i + 1)); update(size_t(i));
-                        ImGui::PopID(); break;
-                    }
-                    ImGui::SameLine();
-                    ImGui::BeginDisabled(i == 0);
-                    bool moveDownPressed=ImGui::SmallButton("↓");
-                    ImGui::EndDisabled();
-                    recordUiTestItem(std::string("pipeline.node.down.")+m.id);
-                    if (moveDownPressed && i > 0) {
-                        checkpoint(); modifierGraph.move(size_t(i), size_t(i - 1)); update(size_t(i - 1));
-                        ImGui::PopID(); break;
-                    }
-                    ImGui::SameLine();
-                    bool copyPressed=ImGui::SmallButton("Copy");
-                    recordUiTestItem(std::string("pipeline.node.copy.")+m.id);
-                    if (copyPressed) {
-                        checkpoint();
-                        auto copy = m;
-                        copy.id = std::to_string(nextModifierId++);
-                        copy.error.clear(); copy.outputs.clear(); copy.dirty = true;
-                        modifierGraph.insert(std::move(copy), size_t(i + 1));
-                        update(); ImGui::PopID(); break;
-                    }
-                    ImGui::SameLine();
-                    if (!m.error.empty())
+                    if (!m.error.empty()) {
+                        ImGui::SameLine();
                         ImGui::TextColored({1, .32f, .28f, 1}, "!");
-                    if (ImGui::IsItemHovered() && !m.error.empty()) ImGui::SetTooltip("%s", m.error.c_str());
-                    bool deletePressed=ImGui::SmallButton("×");
-                    recordUiTestItem(std::string("pipeline.node.delete.")+m.id);
-                    if (deletePressed) {
-                        checkpoint();
-                        modifierGraph.erase(size_t(i));
-                        update(size_t(i));
-                        ImGui::PopID();
-                        break;
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m.error.c_str());
                     }
                     ImGui::PopID();
                 }
+                ImGui::PopStyleVar();
                 ImGui::EndChild();
-                if (!mods.empty() && modifierGraph.selected < mods.size()) {
+                // Vertical action strip pinned to the stack's right edge. It
+                // acts on the selected node; every button keeps its recorded
+                // UI-test name keyed by that node id. Overlaid as a borderless
+                // transparent child on top of the stack region.
+                if (!mods.empty()) {
+                    constexpr float stripButton = 24.f;
+                    const ImVec2 stackMin = ImGui::GetItemRectMin(), stackMax = ImGui::GetItemRectMax();
+                    const ImVec2 flowCursor = ImGui::GetCursorPos();
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, {0,0,0,0});
+                    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {U(1), U(2)});
+                    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(2), U(2)});
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(4), U(2)});
+                    ImGui::SetCursorScreenPos({stackMax.x - U(stripGutter), stackMin.y + U(3)});
+                    if (ImGui::BeginChild("##node-actions", {U(stripGutter) - U(2), U(4*stripButton + 3*2 + 6)},
+                                          ImGuiChildFlags_None,
+                                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground)) {
+                        if (modifierGraph.selected < mods.size()) {
+                            const size_t selectedNode = modifierGraph.selected;
+                            const std::string selectId = mods[selectedNode].id;
+                            if (iconButton("pipeline.strip.delete", 0xE74D, "x",
+                                           "Delete the selected modification", false,
+                                           U(stripButton), ("pipeline.node.delete."+selectId).c_str())) {
+                                checkpoint();
+                                modifierGraph.erase(selectedNode);
+                                update(selectedNode);
+                                stackMutated = true;
+                            }
+                            ImGui::BeginDisabled(selectedNode + 1 >= mods.size());
+                            if (iconButton("pipeline.strip.up", 0xE70E, "^",
+                                           "Move the selected modification up (later in the pipeline)",
+                                           false, U(stripButton),
+                                           ("pipeline.node.up."+selectId).c_str())) {
+                                checkpoint();
+                                modifierGraph.move(selectedNode, selectedNode + 1);
+                                update(selectedNode);
+                                stackMutated = true;
+                            }
+                            ImGui::EndDisabled();
+                            ImGui::BeginDisabled(selectedNode == 0);
+                            if (iconButton("pipeline.strip.down", 0xE70D, "v",
+                                           "Move the selected modification down (earlier in the pipeline)",
+                                           false, U(stripButton),
+                                           ("pipeline.node.down."+selectId).c_str())) {
+                                checkpoint();
+                                modifierGraph.move(selectedNode, selectedNode - 1);
+                                update(selectedNode - 1);
+                                stackMutated = true;
+                            }
+                            ImGui::EndDisabled();
+                            if (iconButton("pipeline.strip.copy", 0xE8C8, "Copy",
+                                           "Duplicate the selected modification", false,
+                                           U(stripButton), ("pipeline.node.copy."+selectId).c_str())) {
+                                checkpoint();
+                                auto copy = mods[selectedNode];
+                                copy.id = std::to_string(nextModifierId++);
+                                copy.error.clear(); copy.outputs.clear(); copy.dirty = true;
+                                modifierGraph.insert(std::move(copy), selectedNode + 1);
+                                update();
+                                stackMutated = true;
+                            }
+                        }
+                    }
+                    ImGui::EndChild();
+                    ImGui::PopStyleVar(3);
+                    ImGui::PopStyleColor();
+                    // The overlay child is an item in the Properties flow;
+                    // restore the cursor so the parameter section follows the
+                    // stack rather than the strip.
+                    ImGui::SetCursorPos(flowCursor);
+                }
+                if (!stackMutated && !mods.empty() && modifierGraph.selected < mods.size()) {
                     auto &m = mods[modifierGraph.selected];
                     ImGui::PushID(m.id.c_str());
                     heading(m.displayName.empty() ? opName(m.op) : m.displayName.c_str());
@@ -3436,8 +3657,27 @@ struct App {
         auto &io = ImGui::GetIO();
         io.Fonts->Clear();
         const char *fonts[] = {"C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/consola.ttf"};
-        if (!io.Fonts->AddFontFromFileTTF(fonts[preferences.font], float(preferences.size)*uiScale))
-            io.Fonts->AddFontDefault();
+        ImFont *base = io.Fonts->AddFontFromFileTTF(fonts[preferences.font], float(preferences.size)*uiScale);
+        if (!base) base = io.Fonts->AddFontDefault();
+        // Merge the Windows Segoe MDL2 Assets icon set into the base font so a
+        // single ImFont renders text and icons. Missing system font degrades to
+        // the historical text buttons; the app stays fully usable either way.
+        iconFont = nullptr;
+        iconFontName = "text fallback";
+        const float iconSize = U(15.5f);
+        for (const char *iconFile : {"C:/Windows/Fonts/segmdl2.ttf",
+                                     "C:/Windows/Fonts/SegoeMDL2.ttf",
+                                     "C:/Windows/Fonts/segfluent.ttf"}) {
+            ImFontConfig merge{};
+            merge.MergeMode = true;
+            merge.GlyphMinAdvanceX = iconSize;
+            merge.GlyphOffset = {0, U(.5f)};
+            if (io.Fonts->AddFontFromFileTTF(iconFile, iconSize, &merge, iconGlyphRanges)) {
+                iconFont = base;
+                iconFontName = "Segoe MDL2 Assets";
+                break;
+            }
+        }
         headingFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeuib.ttf", float(preferences.size)*uiScale);
         ImGui_ImplDX11_CreateDeviceObjects();
     }
@@ -4066,7 +4306,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                            << "\nsample_stride=" << app.source.stride
                            << "\ntrajectory_frames=" << std::max<size_t>(app.frames.size(), 1)
                            << "\ngpu_bytes=" << gpu.gpuBytes << "\nframes=" << ticks
-                           << "\nfps=" << io.Framerate << "\n";
+                           << "\nfps=" << io.Framerate
+                           << "\nicon_font=" << iconFontName << "\n";
                     done = true;
                 }
                 check(gpu.swap->Present(1, 0), "Present");

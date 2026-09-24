@@ -145,6 +145,14 @@ int main() {
             app.selectPipeline=true;
             app.refreshFont=false;
             app.captureUiTestItems=true;
+            // The headless harness builds only the default font, so every
+            // compact icon button renders its text fallback here. This pins
+            // the graceful-degradation contract: identical recorded names,
+            // rectangles and actions with and without the Segoe MDL2 icon
+            // font (the real icon path is asserted by the smoke run through
+            // the icon_font line of smoke-report.txt).
+            requireExport(!app.usingIconFont(),
+                          "icon font stays unloaded in the headless text-fallback harness");
             strcpy_s(app.modifierSearch,"Radial distribution function (RDF)");
             const ImGuiStyle baseStyle=ImGui::GetStyle();
             auto frame=[&]() {
