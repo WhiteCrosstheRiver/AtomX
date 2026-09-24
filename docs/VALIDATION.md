@@ -273,3 +273,10 @@
 - 面板与 OVITO 实测同构：Same pipeline（External file 灰显注明未实现）/ Frame number 0 / Relative to current frame offset −1 / Mapping off-To reference-To current / Minimum image convention。
 - 遗留：参考构型取原始数据源帧（OVITO 取该帧的上游修饰后结果）；External file 未实现；Displacements 箭头可视元素未渲染（属性已发布供 Histogram/Color coding 消费）。
 - 构建门禁全绿；GUI 面板现场验收通过。
+
+## 2026-09-25 P3 波次验证（Create bonds / Color coding / 目录册字母序）
+
+- 构建门禁全绿；GUI 现场验证目录册 Modification 卡片已字母序（额外项穿插），双面板截图见 docs/parity/atomx/p3-{bonds,color}-panel.png。
+- Create bonds：Creation mode + cutoff 默认 3.2、Lower cutoff 最小距离过滤（192 键在 lower 2.6 时为 0 的回归）、计数行、New bond type 诚实占位。
+- Color coding：OVITO 顺序 + 32 段渐变条预览 + Adjust range/(all frames)/Reverse range + Rainbow 默认 + 自动范围实时端值；上游属性联动（Centrosymmetry、Displacement Magnitude 出现在可选列表）。
+- 遗留：Flat shading 未实现（着色器无条件法线，未造假）；Reverse range 以反转渐变映射实现（引擎要求端点递增）；线宽度保持像素制。

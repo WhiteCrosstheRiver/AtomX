@@ -53,7 +53,7 @@ Q06,Selection,Manual selection,,docs/parity/ovito/,pass,pass,partial,pass,partia
 Q07,Selection,Select type,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,P2,,,,Multi-type checkbox table (Name|Id); union replaces selection
 V01,Visualization,Add text labels,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 V02,Visualization,Construct surface mesh,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-V03,Visualization,Create bonds,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P3,,,,Global cutoff + pairwise matrix; panel layout to align
+V03,Visualization,Create bonds,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,P3,6a5b0ed,Panel aligned (Creation mode/Options/Lower cutoff/New bond type stub/Bonds display); flat shading omitted honestly; screen-space width stays pixel-based
 V04,Visualization,Create isosurface,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 V05,Visualization,Coordination polyhedra,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 V06,Visualization,Generate trajectory lines,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
@@ -65,5 +65,5 @@ P05,Python modifiers,Shrink-wrap simulation box,,docs/parity/ovito/,partial,todo
 C01,Coloring,Ambient occlusion,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 C02,Coloring,Assign color,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Not written to structure files on export
 C03,Coloring,Color by type,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,8-color palette
-C04,Coloring,Color coding,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P3,,,,Gradients not numerically matched to OVITO tables
+C04,Coloring,Color coding,,docs/parity/ovito/,pass,pass,partial,pass,pass,partial,P3,6a5b0ed,Panel reordered + gradient bar + Adjust range buttons + Rainbow default; Reverse range toggles gradient reversal instead of swapping endpoints; gradient tables still AtomX approximations
 TPL,Modifier templates,Manage templates...,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,Save/apply/serialize modifier presets
