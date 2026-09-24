@@ -117,6 +117,29 @@ OVITO 的 Add modification 功能是**可组合流水线栈**，已在本会话�
 注意与 AtomX 现实现的差异：AtomX 默认自动范围勾选、无 Adjust range 按钮、
 渐变条预览样式不同（Legend 除外）、无 Property 上游联动来源标注。
 
+## A09 Displacement vectors（干净会话核实，N2 规格）
+
+面板标题 `Calculate displacements`（见 `v-displ-panel.png`）：
+1. `Mapping of simulation cell`：单选 `To reference` / `To current`（默认未选 = 不映射）
+2. `Minimum image convention` 复选框（默认禁用，启用后需满足条件）
+3. 参考配置来源单选：`Use animation frame ... reference configuration`（含 `frame number: 0`
+   与 `relative to current frame ... offset: -1` 两种，默认 offset -1）/ `external file`
+   （`Reference configuration source: same pipeline / external file`）
+4. 添加节点时自动新增 `Displacements` 可视元素行（箭头显示对象，可独立开关）
+5. 输出属性：`Displacement`（矢量）+ `Displacement Magnitude`（标量，见 R1 A09 单）
+
+## M07 Freeze property（干净会话核实，N3 规格）
+
+面板（见 `v-freeze-panel.png`）：`Operate on:` combo、`Property to freeze:` combo
+（默认 Particle Type）、`...property:` combo、`...frame: 0` 整数字段（快照帧）。
+节点行内联显示所冻结属性名（"Freeze property  Particle Type"）。
+
+## M14 Unwrap trajectories（干净会话核实，N3 规格）
+
+面板为空——无任何用户参数（见 `v-unwrap-panel.png`），依赖稳定粒子标识
+（OVITO 用 Particle Identifier）跨帧自动累积周期跨越。实现要点是 ID 匹配
+与逐帧最小镜像累积，而非参数面板。
+
 ## 复现命令要点
 
 桌面自动化：`codes\_gui_auto\{activate,click,key,shot,crop}.ps1`。
