@@ -1824,9 +1824,13 @@ struct App {
                         if (ImGui::Checkbox("Group by existing bonds",&useBonds)) {
                             checkpoint(); m.clusterByBonds=useBonds; update();
                         }
+                        bool onlySelected=m.clusterOnlySelected;
+                        if (ImGui::Checkbox("Use only selected particles",&onlySelected)) {
+                            checkpoint(); m.clusterOnlySelected=onlySelected; update();
+                        }
                         ImGui::TextDisabled(useBonds
-                            ? "Connected components follow the input bond topology."
-                            : "Connected components follow the periodic minimum-image cutoff.");
+                            ? "Connected components follow the input bond topology; selected-only mode assigns ID 0 to other particles."
+                            : "Connected components follow the periodic minimum-image cutoff. Unselected particles get Cluster ID 0 when selected-only is enabled.");
                     }
                     if (m.op == Op::CreateBonds || m.op == Op::CommonNeighborAnalysis ||
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||

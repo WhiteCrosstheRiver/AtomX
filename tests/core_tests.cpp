@@ -209,6 +209,26 @@ int main() {
         }
         require(invalidBondClusterRejected,
                 "bond-based clustering reports malformed topology at its pipeline node");
+        Modifier selectedCutoffCluster{Op::ClusterAnalysis};
+        selectedCutoffCluster.value=.75f;
+        selectedCutoffCluster.clusterOnlySelected=true;
+        Modifier selectedClusterInput{Op::ManualSelection};
+        selectedClusterInput.manualSelection={0,1,4};
+        const auto cutoffSelectedClusters=evaluate(clusterFixture,
+            {selectedClusterInput,selectedCutoffCluster});
+        require(cutoffSelectedClusters.data.scalarProperties.at("Cluster")==
+                    std::vector<double>({1,1,0,0,2}) &&
+                    cutoffSelectedClusters.data.globalAttributes.at("ClusterAnalysis.count")==2,
+                "selected-only cutoff clustering excludes unselected particles and reports ID zero");
+        Modifier selectedBondClusters=bondClusters;
+        selectedBondClusters.clusterOnlySelected=true;
+        selectedClusterInput.manualSelection={0,2,3};
+        const auto bondSelectedClusters=evaluate(bondClusterFixture,
+            {selectedClusterInput,selectedBondClusters});
+        require(bondSelectedClusters.data.scalarProperties.at("Cluster")==
+                    std::vector<double>({1,0,1,2,0}) &&
+                    bondSelectedClusters.data.globalAttributes.at("ClusterAnalysis.count")==2,
+                "selected-only bond clustering ignores links to excluded particles and labels their IDs zero");
         Dataset extremePeriodicIndex;
         extremePeriodicIndex.species={"X"};
         extremePeriodicIndex.atoms={{0,0,0,0},{.25f,0,0,0}};

@@ -673,6 +673,7 @@ struct Modifier {
     bool overlapUseRadii = false;
     bool transformVectorProperties = false;
     bool clusterByBonds = false;
+    bool clusterOnlySelected = false;
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
     int histogramNormalization = 0; // counts, relative frequency, probability density
     bool histogramSelectedOnly = false;
@@ -1271,8 +1272,11 @@ struct NeighborAnalysis {
     bool rdfValid = false;
 };
 inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
-                                  std::atomic<bool> *cancel = nullptr) {
+                                  std::atomic<bool> *cancel = nullptr,
+                                  const std::vector<uint8_t> *clusterSelection=nullptr) {
     validateNeighborAnalysisInput(d);
+    if (clusterSelection && clusterSelection->size()!=d.atoms.size())
+        throw std::runtime_error("Cluster selection length does not match particle count");
     NeighborAnalysis result;
     result.cutoff = cutoff;
     result.coordination.resize(d.atoms.size());
@@ -1289,16 +1293,23 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
         ++result.coordination[i]; ++result.coordination[j]; ++result.bonds;
         const int bin=std::min(127,int(std::sqrt(distanceSquared)/cutoff*128));
         result.pairHistogram[bin]++;
-        const auto ri=root(i), rj=root(j);
-        if (ri!=rj) result.cluster[std::max(ri,rj)]=std::min(ri,rj);
+        if (!clusterSelection || ((*clusterSelection)[i] && (*clusterSelection)[j])) {
+            const auto ri=root(i), rj=root(j);
+            if (ri!=rj) result.cluster[std::max(ri,rj)]=std::min(ri,rj);
+        }
     },cancel);
     std::unordered_map<uint32_t,uint32_t> ids;
     for (uint32_t i=0;i<result.cluster.size();++i) {
+        if (clusterSelection && !(*clusterSelection)[i]) {
+            result.cluster[i]=0;
+            continue;
+        }
         const auto rt=root(i);
         auto [it,inserted]=ids.emplace(rt,uint32_t(ids.size())+1);
         result.cluster[i]=rt;
     }
-    for (auto &id : result.cluster) id=ids.at(id);
+    for (uint32_t i=0;i<result.cluster.size();++i)
+        if (!clusterSelection || (*clusterSelection)[i]) result.cluster[i]=ids.at(result.cluster[i]);
     result.clusters=uint32_t(ids.size());
     result.meanCoordination=d.atoms.empty()?0:2.0*result.bonds/d.atoms.size();
     const double volume=std::abs(cellDeterminant(d.cell));
@@ -1313,13 +1324,16 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
     }
     return result;
 }
-inline NeighborAnalysis clustersFromBonds(const Dataset &data,std::atomic<bool> *cancel=nullptr) {
+inline NeighborAnalysis clustersFromBonds(const Dataset &data,std::atomic<bool> *cancel=nullptr,
+                                           const std::vector<uint8_t> *clusterSelection=nullptr) {
     if (data.sampled())
         throw std::runtime_error("Bond-based cluster analysis requires complete, unsampled particle data");
     if (data.atoms.size()>20'000'000)
         throw std::runtime_error("Bond-based cluster analysis is limited to 20 million particles");
     if (data.bonds.size()>20'000'000)
         throw std::runtime_error("Bond-based cluster analysis is limited to 20 million bonds");
+    if (clusterSelection && clusterSelection->size()!=data.atoms.size())
+        throw std::runtime_error("Cluster selection length does not match particle count");
     NeighborAnalysis result;
     result.cluster.resize(data.atoms.size());
     for (uint32_t i=0;i<result.cluster.size();++i) result.cluster[i]=i;
@@ -1335,6 +1349,8 @@ inline NeighborAnalysis clustersFromBonds(const Dataset &data,std::atomic<bool> 
         const auto &bond=data.bonds[i];
         if (bond.a>=data.atoms.size() || bond.b>=data.atoms.size())
             throw std::runtime_error("Bond endpoint is outside the particle array");
+        if (clusterSelection && (!(*clusterSelection)[bond.a] || !(*clusterSelection)[bond.b]))
+            continue;
         const uint32_t a=root(bond.a), b=root(bond.b);
         if (a!=b) result.cluster[std::max(a,b)]=std::min(a,b);
     }
@@ -1343,13 +1359,18 @@ inline NeighborAnalysis clustersFromBonds(const Dataset &data,std::atomic<bool> 
     std::vector<uint32_t> representatives(result.cluster.size());
     for (uint32_t i=0;i<result.cluster.size();++i) {
         if ((i&65535)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+        if (clusterSelection && !(*clusterSelection)[i]) {
+            result.cluster[i]=0;
+            continue;
+        }
         representatives[i]=root(i);
         if (!ids.contains(representatives[i]))
             ids.emplace(representatives[i],uint32_t(ids.size())+1);
     }
     for (size_t i=0;i<result.cluster.size();++i) {
         if ((i&65535)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
-        result.cluster[i]=ids.at(representatives[i]);
+        if (!clusterSelection || (*clusterSelection)[i])
+            result.cluster[i]=ids.at(representatives[i]);
     }
     result.clusters=uint32_t(ids.size());
     return result;
@@ -1983,8 +2004,11 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 m.op == Op::RadialDistribution) {
                 if (r.data.sampled())
                     throw std::runtime_error("Neighbor analysis requires complete, unsampled particle data");
+                const auto *clusterSelection=m.clusterOnlySelected ? &r.selected : nullptr;
                 const auto analysis = m.op==Op::ClusterAnalysis && m.clusterByBonds
-                    ? clustersFromBonds(r.data,cancel) : neighbors(r.data,m.value,cancel);
+                    ? clustersFromBonds(r.data,cancel,clusterSelection)
+                    : neighbors(r.data,m.value,cancel,
+                                m.op==Op::ClusterAnalysis ? clusterSelection : nullptr);
                 if (m.op == Op::CoordinationAnalysis) {
                     std::vector<double> values(analysis.coordination.begin(), analysis.coordination.end());
                     r.data.scalarProperties["Coordination"] = std::move(values);
