@@ -1044,6 +1044,36 @@ int main() {
         require(activePipelineNode==2 && stagedEvaluation.data.atoms[0].x==2 &&
                     stagedEvaluation.data.atoms[1].x==3.6f,
                 "pipeline reports the active node while preserving modifier order");
+        PipelineResult capturedPrefix;
+        bool prefixCaptured=false;
+        const std::vector<Modifier> resumablePipeline{
+            {Op::Translate,true,1,0}, {Op::Scale,true,2}, {Op::Translate,true,3,1}};
+        const auto fullyEvaluated=evaluate(chain,resumablePipeline);
+        PipelineResult initialPrefix{chain,std::vector<uint8_t>(chain.atoms.size()),
+                                     std::vector<uint8_t>(chain.atoms.size(),1)};
+        const auto resumed=evaluateFrom(std::move(initialPrefix),resumablePipeline,0,nullptr,nullptr,1,
+            [&](size_t node,const PipelineResult &prefix) {
+                require(node==1,"pipeline checkpoint identifies the exact next node");
+                capturedPrefix=prefix;
+                prefixCaptured=true;
+            });
+        require(prefixCaptured && capturedPrefix.data.atoms[0].x==1 &&
+                    resumed.data.atoms.size()==fullyEvaluated.data.atoms.size() &&
+                    resumed.data.atoms[0].x==fullyEvaluated.data.atoms[0].x &&
+                    resumed.data.atoms[2].y==fullyEvaluated.data.atoms[2].y &&
+                    resumed.selected==fullyEvaluated.selected &&
+                    pipelineResultWithinCacheBudget(capturedPrefix),
+                "resuming from a captured prefix preserves complete pipeline result semantics");
+        bool resumedErrorHasAbsoluteNode=false;
+        try {
+            auto failingPipeline=resumablePipeline;
+            failingPipeline[2]=Modifier{Op::Scale,true,-1};
+            (void)evaluateFrom(std::move(capturedPrefix),failingPipeline,1,nullptr,nullptr);
+        } catch (const ModifierExecutionError &failure) {
+            resumedErrorHasAbsoluteNode=failure.nodeIndex==2;
+        }
+        require(resumedErrorHasAbsoluteNode,
+                "resumed pipeline errors retain the failing node index in their executable suffix");
         auto expanded = evaluate(chain, {{Op::SelectIndex,true,0,0,0},
                                          {Op::ExpandSelection,true,0.9f,2,2}});
         require(expanded.selected[0] && expanded.selected[1] && expanded.selected[2] &&

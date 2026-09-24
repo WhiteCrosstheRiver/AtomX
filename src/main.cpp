@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <optional>
+#include <memory>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -193,6 +194,11 @@ struct HistogramPlotView {
     int lastBin = -1;
     float yMaximum = 0; // zero means automatic
 };
+struct PipelineJobResult {
+    PipelineResult result;
+    size_t checkpointNode = SIZE_MAX;
+    std::optional<PipelineResult> checkpoint;
+};
 struct App {
     HWND window;
     desktop::Preferences preferences;
@@ -269,7 +275,7 @@ struct App {
     Camera cameras[4];
     Target targets[4];
     std::future<Loaded> job;
-    std::future<PipelineResult> pipelineJob;
+    std::future<PipelineJobResult> pipelineJob;
     std::future<PipelineResult> inspectorJob;
     std::optional<PipelineResult> inspectorResult;
     std::atomic<bool> pipelineCancel{false};
@@ -286,6 +292,8 @@ struct App {
     int deferredLoadFrame = 0;
     uint64_t pipelineGeneration = 0, pipelineJobGeneration = 0;
     std::vector<std::string> pipelineJobNodeIds;
+    std::shared_ptr<const PipelineResult> pipelineCheckpoint;
+    size_t pipelineCheckpointNode = SIZE_MAX;
     std::atomic<float> progress{0};
     std::atomic<bool> cancel{false};
     bool busy = false, staleResult = false, staleBeforeLoad = false;
@@ -473,7 +481,17 @@ struct App {
             executable.push_back(static_cast<const Modifier &>(node));
             pipelineJobNodeIds.push_back(node.id);
         }
-        Dataset input = source;
+        const size_t checkpointTarget=mods.empty() ? SIZE_MAX :
+            std::min(modifierGraph.selected,mods.size()-1);
+        size_t firstNode=0;
+        std::shared_ptr<const PipelineResult> cachedPrefix;
+        if (pipelineCheckpoint && pipelineCheckpointNode<=checkpointTarget &&
+            pipelineCheckpointNode<=executable.size()) {
+            firstNode=pipelineCheckpointNode;
+            cachedPrefix=pipelineCheckpoint;
+        }
+        Dataset input;
+        if (!cachedPrefix) input=source;
         pipelineJobGeneration = pipelineGeneration;
         pipelineCancel = false;
         pipelineActiveNode = 0;
@@ -482,8 +500,24 @@ struct App {
         status = "Updating pipeline; previous evaluated result remains visible...";
         for (auto &node : mods) node.running = node.enabled;
         pipelineJob = std::async(std::launch::async,
-            [this, input = std::move(input), executable = std::move(executable)]() mutable {
-                return evaluate(std::move(input), executable, &pipelineCancel, &pipelineActiveNode);
+            [this, input = std::move(input), executable = std::move(executable),
+             cachedPrefix = std::move(cachedPrefix), firstNode, checkpointTarget]() mutable {
+                PipelineResult initial;
+                if (cachedPrefix) initial=*cachedPrefix;
+                else {
+                    const size_t count=input.atoms.size();
+                    initial={std::move(input),std::vector<uint8_t>(count),
+                             std::vector<uint8_t>(count,1)};
+                }
+                std::optional<PipelineResult> checkpoint;
+                auto saveCheckpoint=[&](size_t,const PipelineResult &state) {
+                    if (pipelineResultWithinCacheBudget(state)) checkpoint=state;
+                };
+                auto evaluated=evaluateFrom(std::move(initial),executable,firstNode,
+                                             &pipelineCancel,&pipelineActiveNode,
+                                             checkpointTarget,saveCheckpoint);
+                return PipelineJobResult{std::move(evaluated),checkpointTarget,
+                                         std::move(checkpoint)};
             });
     }
     void inspectPipelineNode(int nodeIndex) {
@@ -512,6 +546,10 @@ struct App {
         const size_t first = dirtyFrom == SIZE_MAX
             ? (mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1))
             : dirtyFrom;
+        if (pipelineCheckpoint && first < pipelineCheckpointNode) {
+            pipelineCheckpoint.reset();
+            pipelineCheckpointNode=SIZE_MAX;
+        }
         if (!preserveColorRanges) {
             for (size_t i = first; i < mods.size(); ++i)
                 if (mods[i].op == Op::ColorCoding && mods[i].colorAllFramesRange && i > first)
@@ -618,6 +656,8 @@ struct App {
     void history(bool forward) {
         if (!applyModifierHistory(mods, undo, redo, forward)) return;
         modifierGraph.selected = mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1);
+        pipelineCheckpoint.reset();
+        pipelineCheckpointNode=SIZE_MAX;
         update();
     }
     void load(const std::filesystem::path &p, int frame = 0) {
@@ -635,6 +675,8 @@ struct App {
         }
         deferredLoadPath.clear();
         pipelineDeferredForInspector = false;
+        pipelineCheckpoint.reset();
+        pipelineCheckpointNode=SIZE_MAX;
         inspectorResult.reset();
         inspectorNode = -1;
         inspectorNodeId.clear();
@@ -751,8 +793,12 @@ struct App {
             pipelineBusy = false;
             if (finishedGeneration == pipelineGeneration) {
                 try {
-                    auto next = pipelineJob.get();
-                    publishPipeline(std::move(next));
+                    auto completed = pipelineJob.get();
+                    publishPipeline(std::move(completed.result));
+                    if (completed.checkpoint) {
+                        pipelineCheckpoint=std::make_shared<PipelineResult>(std::move(*completed.checkpoint));
+                        pipelineCheckpointNode=completed.checkpointNode;
+                    }
                     for (auto &node : mods) {
                         node.running = false;
                         node.error.clear();
@@ -1023,6 +1069,8 @@ struct App {
             checkpoint();
             mods.clear();
             modifierGraph.selected = 0;
+            pipelineCheckpoint.reset();
+            pipelineCheckpointNode=SIZE_MAX;
             update();
         }
         if (ImGui::Button("Load demo crystal", {-1, U(30)}) && !busy) {
@@ -1032,6 +1080,8 @@ struct App {
             current = 0;
             mods.clear();
             modifierGraph.selected = 0;
+            pipelineCheckpoint.reset();
+            pipelineCheckpointNode=SIZE_MAX;
             undo.clear();
             redo.clear();
             update();
@@ -1620,7 +1670,7 @@ struct App {
                     if (ImGui::Checkbox("##enabled", &enabled)) {
                         checkpoint();
                         m.enabled = enabled;
-                        update();
+                        update(size_t(i));
                     }
                     ImGui::SameLine();
                     const char *name = m.displayName.empty() ? opName(m.op) : m.displayName.c_str();
@@ -1628,12 +1678,12 @@ struct App {
                         modifierGraph.selected = size_t(i);
                     ImGui::SameLine();
                     if (ImGui::SmallButton("↑") && i > 0) {
-                        checkpoint(); modifierGraph.move(size_t(i), size_t(i - 1)); update();
+                        checkpoint(); modifierGraph.move(size_t(i), size_t(i - 1)); update(size_t(i - 1));
                         ImGui::PopID(); break;
                     }
                     ImGui::SameLine();
                     if (ImGui::SmallButton("↓") && i + 1 < int(mods.size())) {
-                        checkpoint(); modifierGraph.move(size_t(i), size_t(i + 1)); update();
+                        checkpoint(); modifierGraph.move(size_t(i), size_t(i + 1)); update(size_t(i));
                         ImGui::PopID(); break;
                     }
                     ImGui::SameLine();
@@ -1652,7 +1702,7 @@ struct App {
                     if (ImGui::SmallButton("×")) {
                         checkpoint();
                         modifierGraph.erase(size_t(i));
-                        update();
+                        update(size_t(i));
                         ImGui::PopID();
                         break;
                     }

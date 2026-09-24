@@ -1523,19 +1523,59 @@ struct PipelineResult {
     std::vector<uint8_t> selected;
     std::vector<uint8_t> colorSelected;
 };
+inline bool pipelineResultWithinCacheBudget(const PipelineResult &result,
+                                            size_t budgetBytes=64u*1024u*1024u) {
+    size_t used=0;
+    auto add=[&](size_t count,size_t elementSize) {
+        if (elementSize && count>budgetBytes/elementSize) return false;
+        const size_t bytes=count*elementSize;
+        if (bytes>budgetBytes-used) return false;
+        used+=bytes;
+        return true;
+    };
+    const auto &data=result.data;
+    if (!add(data.atoms.size(),sizeof(Atom)) || !add(result.selected.size(),sizeof(uint8_t)) ||
+        !add(result.colorSelected.size(),sizeof(uint8_t)) || !add(data.bonds.size(),sizeof(Bond)) ||
+        !add(data.particleColors.size(),sizeof(Vec3)) || !add(data.species.size(),sizeof(std::string)) ||
+        !add(data.comment.size(),sizeof(char)) ||
+        !add(data.propertyComponents.size(),sizeof(std::pair<std::string,std::string>)))
+        return false;
+    for (const auto &name:data.species) if (!add(name.size(),sizeof(char))) return false;
+    for (const auto &[name,components]:data.propertyComponents)
+        if (!add(name.size(),sizeof(char)) || !add(components.size(),sizeof(char))) return false;
+    for (const auto &[name,values]:data.scalarProperties)
+        if (!add(sizeof(name)+name.size(),1) || !add(values.size(),sizeof(double))) return false;
+    for (const auto &[name,values]:data.vectorProperties)
+        if (!add(sizeof(name)+name.size(),1) || !add(values.size(),sizeof(Vec3))) return false;
+    if (!add(data.globalAttributes.size(),sizeof(std::pair<std::string,double>))) return false;
+    for (const auto &entry:data.globalAttributes)
+        if (!add(entry.first.size(),sizeof(char))) return false;
+    for (const auto &table:data.tables) {
+        if (!add(table.name.size(),sizeof(char)) || !add(table.columns.size(),sizeof(std::string))) return false;
+        for (const auto &column:table.columns) if (!add(column.size(),sizeof(char))) return false;
+        for (const auto &row:table.rows) {
+            if (!add(row.size(),sizeof(std::string))) return false;
+            for (const auto &field:row) if (!add(field.size(),sizeof(char))) return false;
+        }
+    }
+    return true;
+}
 struct ModifierExecutionError : std::runtime_error {
     size_t nodeIndex;
     ModifierExecutionError(size_t node, const std::string &message)
         : std::runtime_error(message), nodeIndex(node) {}
 };
-inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods,
-                               std::atomic<bool> *cancel = nullptr,
-                               std::atomic<size_t> *activeNode = nullptr) {
-    const size_t particleCount=source.atoms.size();
-    PipelineResult r{std::move(source), std::vector<uint8_t>(particleCount),
-                     std::vector<uint8_t>(particleCount, 1)};
-    for (size_t modifierIndex = 0; modifierIndex < mods.size(); ++modifierIndex) {
+inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> &mods,
+                                   size_t firstNode=0,std::atomic<bool> *cancel=nullptr,
+                                   std::atomic<size_t> *activeNode=nullptr,
+                                   size_t checkpointNode=SIZE_MAX,
+                                   const std::function<void(size_t,const PipelineResult&)> &checkpoint={}) {
+    if (firstNode>mods.size())
+        throw std::runtime_error("Pipeline checkpoint starts after the final node");
+    for (size_t modifierIndex = firstNode; modifierIndex < mods.size(); ++modifierIndex) {
         if (activeNode) *activeNode = modifierIndex + 1;
+        if (modifierIndex==checkpointNode && checkpoint)
+            checkpoint(modifierIndex,r);
         const auto &m = mods[modifierIndex];
         if (m.enabled) {
           try {
@@ -2393,6 +2433,14 @@ inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods
     r.data.bounds();
     if (activeNode) *activeNode = mods.size();
     return r;
+}
+inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods,
+                               std::atomic<bool> *cancel = nullptr,
+                               std::atomic<size_t> *activeNode = nullptr) {
+    const size_t particleCount=source.atoms.size();
+    PipelineResult initial{std::move(source),std::vector<uint8_t>(particleCount),
+                           std::vector<uint8_t>(particleCount,1)};
+    return evaluateFrom(std::move(initial),mods,0,cancel,activeNode);
 }
 inline PipelineResult evaluatePrefix(Dataset source, const std::vector<Modifier> &mods,
                                      size_t nodeCount, std::atomic<bool> *cancel = nullptr,
