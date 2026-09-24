@@ -280,3 +280,10 @@
 - Create bonds：Creation mode + cutoff 默认 3.2、Lower cutoff 最小距离过滤（192 键在 lower 2.6 时为 0 的回归）、计数行、New bond type 诚实占位。
 - Color coding：OVITO 顺序 + 32 段渐变条预览 + Adjust range/(all frames)/Reverse range + Rainbow 默认 + 自动范围实时端值；上游属性联动（Centrosymmetry、Displacement Magnitude 出现在可选列表）。
 - 遗留：Flat shading 未实现（着色器无条件法线，未造假）；Reverse range 以反转渐变映射实现（引擎要求端点递增）；线宽度保持像素制。
+
+## 2026-09-25 N3 波次验证（Freeze property / Unwrap trajectories）
+
+- Freeze property：跨帧快照/还原（参考帧前后两个方向）、计数不匹配 OVITO 同文错误、Particle Identifier 哈希匹配回退；面板列出仅上游可冻结属性并在空态给出诚实提示（现场 GUI 验证）。
+- Unwrap trajectories：与 OVITO 一致的无参面板；首帧恒等、跨界折叠（10.5→11.3 折为 +0.8）、跨帧链式累积、跳帧自举；非周期轴不受影响。
+- 遗留：Freeze 默认属性为首个可冻结标量（OVITO 默认 Particle Type，AtomX 中类型非数值属性）；Unwrap 累加器为节点单槽，跳帧后从包裹坐标自举。
+- 构建门禁全绿；GUI 现场验收通过。

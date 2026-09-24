@@ -28,14 +28,14 @@ M03,Modification,Compute property,,docs/parity/ovito/,pass,pass,partial,pass,par
 M04,Modification,Delete selected,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,Bond remapping implemented
 M05,Modification,Edit simulation cell,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P1,,,,Panel order aligned (origin->vectors->PBC); no 2D dimensionality or quick-size fields
 M06,Modification,Edit types,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,Applies to selected particles
-M07,Modification,Freeze property,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,N3,,,,Snapshot property at frame; ID-aligned
+M07,Modification,Freeze property,,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,N3,be37489,Property defaults to first freezable scalar (OVITO defaults Particle Type); panel shows honest empty-state when nothing freezable upstream
 M08,Modification,Load trajectory,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 M09,Modification,Python script,,docs/parity/ovito/,partial,deferred,deferred,deferred,deferred,deferred,,,,Deferred by user decision; must show clear notice
 M10,Modification,Remove property,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,Rejects Position/Particle Type
 M11,Modification,Replicate,,docs/parity/ovito/,partial,partial,pass,pass,pass,partial,P1,,,,Three-axis Na/Nb/Nc + adjust box + bond remap; OVITO labels Number of images/Assign unique IDs not yet mirrored
 M12,Modification,Slice,,docs/parity/ovito/,pass,pass,pass,pass,pass,pass,P1,,,,Counts match live OVITO (64/18); align-view buttons and Miller indices are stubs; results line reflects last slice node only
 M13,Modification,Smooth trajectory,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-M14,Modification,Unwrap trajectories,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,N3,,,,Stable-ID PBC unwrap across frames
+M14,Modification,Unwrap trajectories,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,N3,be37489,Parameterless like OVITO; per-node minimum-image accumulator chains across sequential frames; frame jumps bootstrap from wrapped positions
 M15,Modification,Wrap at periodic boundaries,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Partial PBC axes handled
 S01,Structure identification,Ackland-Jones analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 S02,Structure identification,Centrosymmetry parameter,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,N1,a07407d,Histogram panel simpler than OVITO; under-coordinated fallback documented (even>=4 else 0 + counter)
