@@ -674,6 +674,7 @@ struct Modifier {
     bool transformVectorProperties = false;
     bool clusterByBonds = false;
     bool clusterOnlySelected = false;
+    bool clusterSortBySize = false;
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
     int histogramNormalization = 0; // counts, relative frequency, probability density
     bool histogramSelectedOnly = false;
@@ -2005,7 +2006,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 if (r.data.sampled())
                     throw std::runtime_error("Neighbor analysis requires complete, unsampled particle data");
                 const auto *clusterSelection=m.clusterOnlySelected ? &r.selected : nullptr;
-                const auto analysis = m.op==Op::ClusterAnalysis && m.clusterByBonds
+                auto analysis = m.op==Op::ClusterAnalysis && m.clusterByBonds
                     ? clustersFromBonds(r.data,cancel,clusterSelection)
                     : neighbors(r.data,m.value,cancel,
                                 m.op==Op::ClusterAnalysis ? clusterSelection : nullptr);
@@ -2015,13 +2016,28 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     r.data.globalAttributes["CoordinationAnalysis.mean"] = analysis.meanCoordination;
                     r.data.globalAttributes["CoordinationAnalysis.neighbor_pairs"] = double(analysis.bonds);
                 } else if (m.op == Op::ClusterAnalysis) {
+                    std::vector<uint64_t> counts(size_t(analysis.clusters)+1);
+                    for (auto id:analysis.cluster) if (id && id<counts.size()) ++counts[id];
+                    if (m.clusterSortBySize && analysis.clusters>1) {
+                        std::vector<uint32_t> order(analysis.clusters);
+                        for (uint32_t i=0;i<order.size();++i) order[i]=i+1;
+                        std::stable_sort(order.begin(),order.end(),[&](uint32_t a,uint32_t b) {
+                            return counts[a]>counts[b];
+                        });
+                        std::vector<uint32_t> remap(size_t(analysis.clusters)+1);
+                        for (uint32_t i=0;i<order.size();++i) remap[order[i]]=i+1;
+                        for (auto &id:analysis.cluster) if (id) id=remap[id];
+                        std::vector<uint64_t> sortedCounts(counts.size());
+                        for (uint32_t i=0;i<order.size();++i) sortedCounts[i+1]=counts[order[i]];
+                        counts=std::move(sortedCounts);
+                    }
                     std::vector<double> values(analysis.cluster.begin(), analysis.cluster.end());
                     r.data.scalarProperties["Cluster"] = std::move(values);
                     r.data.globalAttributes["ClusterAnalysis.count"] = analysis.clusters;
+                    r.data.globalAttributes["ClusterAnalysis.largest_size"] =
+                        counts.empty() ? 0.0 : double(*std::max_element(counts.begin(),counts.end()));
                     DataTable table; table.name = "Cluster analysis";
                     table.columns = {"Cluster", "Particle count"};
-                    std::vector<uint64_t> counts(analysis.clusters + 1);
-                    for (auto id : analysis.cluster) if (id < counts.size()) ++counts[id];
                     for (uint32_t id = 1; id < counts.size(); ++id)
                         table.rows.push_back({std::to_string(id), std::to_string(counts[id])});
                     r.data.tables.push_back(std::move(table));

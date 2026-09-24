@@ -1828,6 +1828,11 @@ struct App {
                         if (ImGui::Checkbox("Use only selected particles",&onlySelected)) {
                             checkpoint(); m.clusterOnlySelected=onlySelected; update();
                         }
+                        bool sortBySize=m.clusterSortBySize;
+                        if (ImGui::Checkbox("Sort clusters by size",&sortBySize)) {
+                            checkpoint(); m.clusterSortBySize=sortBySize; update();
+                        }
+                        ImGui::TextDisabled("When enabled, the largest component receives Cluster ID 1.");
                         ImGui::TextDisabled(useBonds
                             ? "Connected components follow the input bond topology; selected-only mode assigns ID 0 to other particles."
                             : "Connected components follow the periodic minimum-image cutoff. Unselected particles get Cluster ID 0 when selected-only is enabled.");

@@ -229,6 +229,19 @@ int main() {
                     std::vector<double>({1,0,1,2,0}) &&
                     bondSelectedClusters.data.globalAttributes.at("ClusterAnalysis.count")==2,
                 "selected-only bond clustering ignores links to excluded particles and labels their IDs zero");
+        Dataset clusterSizeOrder;
+        clusterSizeOrder.species={"X"};
+        clusterSizeOrder.atoms={{0,0,0,0},{5,0,0,0},{5.5f,0,0,0}};
+        Modifier sortClusters{Op::ClusterAnalysis};
+        sortClusters.value=.75f;
+        sortClusters.clusterSortBySize=true;
+        const auto sizeSortedClusters=evaluate(clusterSizeOrder,{sortClusters});
+        require(sizeSortedClusters.data.scalarProperties.at("Cluster")==
+                    std::vector<double>({2,1,1}) &&
+                    sizeSortedClusters.data.globalAttributes.at("ClusterAnalysis.largest_size")==2 &&
+                    sizeSortedClusters.data.tables.back().rows==
+                        std::vector<std::vector<std::string>>({{"1","2"},{"2","1"}}),
+                "size sorting keeps Cluster IDs, largest-size attribute, and table rows consistent");
         Dataset extremePeriodicIndex;
         extremePeriodicIndex.species={"X"};
         extremePeriodicIndex.atoms={{0,0,0,0},{.25f,0,0,0}};
