@@ -610,9 +610,30 @@ struct App {
         error.clear();
         status = "Updating pipeline; previous evaluated result remains visible...";
         for (auto &node : mods) node.running = node.enabled;
+        const int currentFrame = current;
+        const auto inputPath = path;
+        std::vector<Frame> frameSnapshot = frames;
+        const auto readBudget = budget;
         pipelineJob = std::async(std::launch::async,
             [this, input = std::move(input), executable = std::move(executable),
-             cachedPrefix = std::move(cachedPrefix), firstNode, checkpointTarget]() mutable {
+             cachedPrefix = std::move(cachedPrefix), firstNode, checkpointTarget, currentFrame,
+             inputPath, frameSnapshot = std::move(frameSnapshot), readBudget]() mutable {
+                // Displacement vectors nodes read their reference configuration
+                // from the raw data source at the requested frame; the datasets
+                // are loaded lazily, once per node, inside this worker thread.
+                std::map<size_t, Dataset> displacementReferences;
+                std::function<const Dataset &(size_t)> referenceProvider;
+                if (std::any_of(executable.begin(), executable.end(), [](const Modifier &m) {
+                        return m.op == Op::DisplacementVectors;
+                    }))
+                    referenceProvider = [&](size_t node) -> const Dataset & {
+                        const int frame = resolveDisplacementReferenceFrame(
+                            executable.at(node), currentFrame, int(frameSnapshot.size()));
+                        return displacementReferences
+                            .emplace(node, io::read(inputPath, frameSnapshot.at(size_t(frame)),
+                                                    readBudget, nullptr, &pipelineCancel))
+                            .first->second;
+                    };
                 PipelineResult initial;
                 if (cachedPrefix) initial=*cachedPrefix;
                 else {
@@ -626,7 +647,7 @@ struct App {
                 };
                 auto evaluated=evaluateFrom(std::move(initial),executable,firstNode,
                                              &pipelineCancel,&pipelineActiveNode,
-                                             checkpointTarget,saveCheckpoint);
+                                             checkpointTarget,saveCheckpoint,referenceProvider);
                 return PipelineJobResult{std::move(evaluated),checkpointTarget,
                                          std::move(checkpoint)};
             });
@@ -648,9 +669,28 @@ struct App {
         inspectorBusy = true;
         inspectorResult.reset();
         status = "Evaluating selected pipeline node for data inspection...";
+        const int currentFrame = current;
+        const auto inputPath = path;
+        std::vector<Frame> frameSnapshot = frames;
+        const auto readBudget = budget;
         inspectorJob = std::async(std::launch::async,
-            [this, input = std::move(input), executable = std::move(executable)]() mutable {
-                return evaluate(std::move(input), executable, &inspectorCancel, &inspectorActiveNode);
+            [this, input = std::move(input), executable = std::move(executable), currentFrame,
+             inputPath, frameSnapshot = std::move(frameSnapshot), readBudget]() mutable {
+                std::map<size_t, Dataset> displacementReferences;
+                std::function<const Dataset &(size_t)> referenceProvider;
+                if (std::any_of(executable.begin(), executable.end(), [](const Modifier &m) {
+                        return m.op == Op::DisplacementVectors;
+                    }))
+                    referenceProvider = [&](size_t node) -> const Dataset & {
+                        const int frame = resolveDisplacementReferenceFrame(
+                            executable.at(node), currentFrame, int(frameSnapshot.size()));
+                        return displacementReferences
+                            .emplace(node, io::read(inputPath, frameSnapshot.at(size_t(frame)),
+                                                    readBudget, nullptr, &inspectorCancel))
+                            .first->second;
+                    };
+                return evaluate(std::move(input), executable, &inspectorCancel,
+                                &inspectorActiveNode, referenceProvider);
             });
     }
     void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
@@ -701,6 +741,7 @@ struct App {
                                             modifier.op == Op::RadialDistribution || modifier.op == Op::Histogram ||
                                             modifier.op == Op::ReduceProperty || modifier.op == Op::CommonNeighborAnalysis ||
                                             modifier.op == Op::CentrosymmetryParameter ||
+                                            modifier.op == Op::DisplacementVectors ||
                                             modifier.op == Op::BondLengthDistribution || modifier.op == Op::BondAngleDistribution ||
                                             modifier.op == Op::ScatterPlot
                                         ? "Analysis"
@@ -2408,6 +2449,63 @@ struct App {
                             }
                         }
                     }
+                    if (m.op == Op::DisplacementVectors) {
+                        ImGui::SeparatorText("Calculate displacements");
+                        // Reference configuration source (v1: same pipeline only).
+                        int sourceMode = 0;
+                        ImGui::TextDisabled("Reference configuration source");
+                        if (ImGui::RadioButton("Same pipeline", &sourceMode, 0)) {}
+                        ImGui::BeginDisabled();
+                        ImGui::RadioButton("External file", &sourceMode, 1);
+                        ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Not implemented yet");
+                        bool changed = false;
+                        // Reference frame within the loaded trajectory.
+                        ImGui::TextDisabled("Use animation frame ... as reference configuration");
+                        int relativeMode = m.displacementRelative ? 1 : 0;
+                        if (ImGui::RadioButton("Frame number", &relativeMode, 0) |
+                            ImGui::RadioButton("Relative to current frame", &relativeMode, 1))
+                            changed = true;
+                        const bool relative = relativeMode != 0;
+                        if (!relative) {
+                            int frame = m.displacementFrame;
+                            if (ImGui::InputInt("Frame number", &frame)) {
+                                m.displacementFrame = std::max(0, frame);
+                                changed = true;
+                            }
+                        } else {
+                            int offset = m.displacementOffset;
+                            if (ImGui::InputInt("Frame offset", &offset)) {
+                                m.displacementOffset = offset;
+                                changed = true;
+                            }
+                        }
+                        // Mapping of the simulation cell.
+                        ImGui::TextDisabled("Mapping of simulation cell");
+                        int mapping = m.displacementCellMapping;
+                        changed |= ImGui::RadioButton("Off", &mapping, 0);
+                        changed |= ImGui::RadioButton("To reference", &mapping, 1);
+                        changed |= ImGui::RadioButton("To current", &mapping, 2);
+                        bool minimumImage = m.displacementMinimumImage;
+                        changed |= ImGui::Checkbox("Use minimum image convention", &minimumImage);
+                        recordUiTestItem(std::string("pipeline.displacement-relative.") + m.id,
+                                         "Relative to current frame");
+                        recordUiTestItem(std::string("pipeline.displacement-mic.") + m.id,
+                                         "Use minimum image convention");
+                        if (changed) {
+                            checkpoint();
+                            m.displacementRelative = relative;
+                            m.displacementCellMapping = mapping;
+                            m.displacementMinimumImage = minimumImage;
+                            update();
+                        }
+                        ImGui::TextWrapped(
+                            "Compares the current frame with the chosen raw input frame and "
+                            "publishes the Displacement vector and Displacement Magnitude "
+                            "particle properties. Non-periodic axes never use the minimum "
+                            "image convention.");
+                    }
                     if (m.op == Op::SelectOverlapping) {
                         bool useRadii = m.overlapUseRadii;
                         if (ImGui::Checkbox("Use per-particle radii", &useRadii)) {
@@ -3415,7 +3513,7 @@ struct App {
                 operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
                 operation(Op::BondAngleDistribution,"Build a 0–180 degree histogram from pairs of incident bonds, resolving periodic image shifts.");
                 operation(Op::ClusterAnalysis,"Build connected components by a periodic cutoff or existing bond topology; adds per-particle Cluster IDs and a cluster-size table."); planned("Difference between frames");
-                for (auto name : {"Displacement vectors", "Elastic strain calculation", "Find rings", "Grain segmentation"}) planned(name);
+                operation(Op::DisplacementVectors,"Match particles against a reference animation frame and publish the Displacement vector and Displacement Magnitude particle properties.");
                 operation(Op::Histogram,"Build a finite-value histogram data table for a particle scalar or position component.");
                 operation(Op::RadialDistribution,"Compute a periodic 3D radial distribution table from the current pipeline data.");
                 operation(Op::ReduceProperty,"Reduce a scalar particle property to a global minimum, maximum, mean, or sum.");

@@ -2169,6 +2169,179 @@ int main() {
         writeLammpsData(lmp, fcc);
         auto lmpData = readLammpsData(lmp);
         require(lmpData.atoms.size() == fcc.atoms.size(), "LAMMPS data roundtrip");
+        {
+            // A09 Displacement vectors: two-frame FCC fixture with known deltas,
+            // matched by atom index, minimum image convention on.
+            auto frame0 = fccLattice(2);
+            frame0.pbc = {true, true, true};
+            auto frame1 = frame0;
+            const std::array<Vec3, 4> deltas{Vec3{.05f, -.02f, .03f}, Vec3{-.1f, .15f, 0.f},
+                                             Vec3{0.f, 0.f, 0.f}, Vec3{.2f, .1f, -.3f}};
+            for (size_t i = 0; i < deltas.size(); ++i) {
+                frame1.atoms[i].x += deltas[i].x;
+                frame1.atoms[i].y += deltas[i].y;
+                frame1.atoms[i].z += deltas[i].z;
+            }
+            Modifier displacement{Op::DisplacementVectors};
+            auto referenceConfiguration = frame0;
+            auto evaluated = evaluate(frame1, {displacement}, nullptr, nullptr,
+                                      [&](size_t) -> const Dataset & { return referenceConfiguration; });
+            const auto &vectors = evaluated.data.vectorProperties.at("Displacement");
+            const auto &magnitudes = evaluated.data.scalarProperties.at("Displacement Magnitude");
+            require(vectors.size() == frame1.atoms.size() &&
+                        magnitudes.size() == frame1.atoms.size() &&
+                        evaluated.data.propertyComponents.at("Displacement") == "XYZ",
+                    "displacement vectors publish per-particle Displacement and Magnitude properties");
+            bool deltasMatch = true;
+            for (size_t i = 0; i < frame1.atoms.size(); ++i) {
+                const double expected[3]{i < deltas.size() ? deltas[i].x : 0,
+                                         i < deltas.size() ? deltas[i].y : 0,
+                                         i < deltas.size() ? deltas[i].z : 0};
+                if (std::abs(vectors[i].x - expected[0]) > 1e-5 ||
+                    std::abs(vectors[i].y - expected[1]) > 1e-5 ||
+                    std::abs(vectors[i].z - expected[2]) > 1e-5 ||
+                    std::abs(magnitudes[i] - std::hypot(expected[0], expected[1], expected[2])) > 1e-5)
+                    deltasMatch = false;
+            }
+            require(deltasMatch, "displacement equals the applied per-atom delta and magnitude its length");
+            const auto displacementChoices = pipelineInputPropertyChoices(
+                evaluated.data, std::vector<Modifier>{{Op::Histogram}}, 0, true);
+            require(std::find(displacementChoices.begin(), displacementChoices.end(),
+                              "Displacement Magnitude") != displacementChoices.end() &&
+                        std::find(displacementChoices.begin(), displacementChoices.end(),
+                                  "Displacement.X") != displacementChoices.end(),
+                    "Displacement Magnitude and vector components are downstream property choices");
+            const auto displacementOutputs = modifierOutputs(Modifier{Op::DisplacementVectors}, 2);
+            require(displacementOutputs.size() == 2 &&
+                        displacementOutputs[0].name == "Displacement" &&
+                        displacementOutputs[1].name == "Displacement Magnitude" &&
+                        displacementOutputs[0].sourceNode == 2,
+                    "displacement pipeline metadata declares both output properties");
+        }
+        {
+            // Boundary-crossing atom: reference x = 0, current x = 7.1 in a 7.2
+            // cell; MIC folds the raw delta to the short wrapped vector.
+            auto referenceCross = fccLattice(2);
+            referenceCross.pbc = {true, true, true};
+            auto currentCross = referenceCross;
+            currentCross.atoms[0].x = 7.1f;
+            Modifier micOn{Op::DisplacementVectors};
+            auto referenceConfiguration = referenceCross;
+            auto provider = [&](size_t) -> const Dataset & { return referenceConfiguration; };
+            const auto folded = evaluate(currentCross, {micOn}, nullptr, nullptr, provider);
+            require(std::abs(folded.data.vectorProperties.at("Displacement")[0].x + 0.1) < 1e-5,
+                    "minimum image convention folds a boundary-crossing displacement to the short vector");
+            Modifier micOff{Op::DisplacementVectors};
+            micOff.displacementMinimumImage = false;
+            const auto raw = evaluate(currentCross, {micOff}, nullptr, nullptr, provider);
+            require(std::abs(raw.data.vectorProperties.at("Displacement")[0].x - 7.1) < 1e-5,
+                    "disabling the minimum image convention keeps the raw unwrapped difference");
+        }
+        {
+            // Reference frame resolution: absolute frame numbers and offsets
+            // relative to the current frame, clamped into the valid range.
+            Modifier absolute{Op::DisplacementVectors};
+            absolute.displacementFrame = 0;
+            require(resolveDisplacementReferenceFrame(absolute, 2, 3) == 0,
+                    "absolute displacement reference resolves to the requested frame number");
+            Modifier relative{Op::DisplacementVectors};
+            relative.displacementRelative = true;
+            relative.displacementOffset = -1;
+            require(resolveDisplacementReferenceFrame(relative, 2, 3) == 1,
+                    "relative displacement reference resolves to current frame plus offset");
+            require(resolveDisplacementReferenceFrame(relative, 0, 3) == 0,
+                    "relative displacement offsets clamp at the first frame");
+            // End to end: three frames with cumulative deltas; current frame 2
+            // with offset -1 must report the frame-1-to-2 delta.
+            auto base = fccLattice(2);
+            base.pbc = {true, true, true};
+            const Vec3 step{.04f, -.07f, .11f};
+            std::vector<Dataset> frames{base, base, base};
+            for (size_t frame = 1; frame < frames.size(); ++frame)
+                for (size_t i = 0; i < frames[frame].atoms.size(); ++i) {
+                    frames[frame].atoms[i].x += step.x * float(frame);
+                    frames[frame].atoms[i].y += step.y * float(frame);
+                    frames[frame].atoms[i].z += step.z * float(frame);
+                }
+            Modifier relativeDisplacement{Op::DisplacementVectors};
+            relativeDisplacement.displacementRelative = true;
+            relativeDisplacement.displacementOffset = -1;
+            auto evaluated = evaluate(frames[2], {relativeDisplacement}, nullptr, nullptr,
+                                      [&](size_t node) -> const Dataset & {
+                                          const auto reference =
+                                              resolveDisplacementReferenceFrame(
+                                                  relativeDisplacement, 2, int(frames.size()));
+                                          return frames[size_t(reference)];
+                                      });
+            const auto &vector = evaluated.data.vectorProperties.at("Displacement");
+            require(std::abs(vector[0].x - step.x) < 1e-5 && std::abs(vector[0].y - step.y) < 1e-5 &&
+                        std::abs(vector[0].z - step.z) < 1e-5,
+                    "relative offset -1 at frame 2 reports the previous-frame displacement");
+        }
+        {
+            // Count mismatch reports the OVITO error text at the modifier node.
+            auto frame0 = fccLattice(2);
+            frame0.pbc = {true, true, true};
+            auto current = frame0;
+            current.atoms.pop_back();
+            bool rejected = false;
+            auto referenceConfiguration = frame0;
+            try {
+                (void)evaluate(current, {Modifier{Op::DisplacementVectors}}, nullptr, nullptr,
+                               [&](size_t) -> const Dataset & { return referenceConfiguration; });
+            } catch (const ModifierExecutionError &e) {
+                rejected = e.nodeIndex == 0 &&
+                           std::string(e.what()) ==
+                               "Particle counts of the reference and current configuration do not match.";
+            }
+            require(rejected, "particle count mismatch reports the exact OVITO error at the node");
+        }
+        {
+            // Numeric baseline: the 0.12 A sine thermal trajectory of
+            // docs/parity/numeric-baseline.md section E. Mean displacement
+            // magnitude against frame 0 must match the double-precision
+            // analytic formula within 3e-4 A.
+            const double pi = 3.14159265358979323846;
+            auto sineFrame = [&](int frame) {
+                auto displaced = fccLattice(3);
+                displaced.pbc = {true, true, true};
+                for (size_t i = 0; i < displaced.atoms.size(); ++i) {
+                    const double phase = 2 * pi * frame / 30.0;
+                    const double x = displaced.atoms[i].x, y = displaced.atoms[i].y,
+                                 z = displaced.atoms[i].z, index = double(i);
+                    displaced.atoms[i].x += float(0.12 * std::sin(phase + 1.1 * x + 0.7 * index));
+                    displaced.atoms[i].y += float(0.12 * std::sin(phase + 1.3 * y + 1.19 * index));
+                    displaced.atoms[i].z += float(0.12 * std::sin(phase + 0.9 * z + 1.61 * index));
+                }
+                return displaced;
+            };
+            const auto referenceFrame = sineFrame(0);
+            const auto currentFrame = sineFrame(5);
+            double analyticMean = 0;
+            for (size_t i = 0; i < referenceFrame.atoms.size(); ++i) {
+                const double phase = 2 * pi * 5.0 / 30.0;
+                const double x = referenceFrame.atoms[i].x, y = referenceFrame.atoms[i].y,
+                             z = referenceFrame.atoms[i].z, index = double(i);
+                const double dx = 0.12 * (std::sin(phase + 1.1 * x + 0.7 * index) -
+                                          std::sin(1.1 * x + 0.7 * index));
+                const double dy = 0.12 * (std::sin(phase + 1.3 * y + 1.19 * index) -
+                                          std::sin(1.3 * y + 1.19 * index));
+                const double dz = 0.12 * (std::sin(phase + 0.9 * z + 1.61 * index) -
+                                          std::sin(0.9 * z + 1.61 * index));
+                analyticMean += std::hypot(dx, dy, dz);
+            }
+            analyticMean /= double(referenceFrame.atoms.size());
+            Modifier displacement{Op::DisplacementVectors};
+            auto referenceConfiguration = referenceFrame;
+            const auto evaluated = evaluate(currentFrame, {displacement}, nullptr, nullptr,
+                                            [&](size_t) -> const Dataset & { return referenceConfiguration; });
+            double mean = 0;
+            for (double value : evaluated.data.scalarProperties.at("Displacement Magnitude"))
+                mean += value;
+            mean /= double(referenceFrame.atoms.size());
+            require(std::abs(mean - analyticMean) < 3e-4,
+                    "thermal sine trajectory matches the analytic mean displacement magnitude");
+        }
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "
                      "semantics, three-axis replication, stack composition, wrap, "

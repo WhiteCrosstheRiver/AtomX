@@ -647,6 +647,7 @@ enum class Op {
     ,BondAngleDistribution
     ,ScatterPlot
     ,CentrosymmetryParameter
+    ,DisplacementVectors
 };
 struct Modifier {
     Op op;
@@ -706,6 +707,14 @@ struct Modifier {
     int cspNeighbors = 12;
     int cspMode = 0; // 0 = Conventional CSP, 1 = Minimum-weight matching CSP
     bool cspOnlySelected = false;
+    // Calculate displacements: reference frame within the same pipeline
+    // (absolute number or offset relative to the current frame), optional
+    // affine mapping of the simulation cell and the minimum image convention.
+    int displacementFrame = 0;         // absolute reference frame number
+    bool displacementRelative = false; // use offset relative to current frame
+    int displacementOffset = -1;       // relative frame offset (default: previous frame)
+    int displacementCellMapping = 0;   // 0 = off, 1 = to reference, 2 = to current
+    bool displacementMinimumImage = true;
     bool affineReducedCoords = false;
     bool affineOnlySelected = false;
     int expandMode = 0; // 0 cutoff range, 1 N nearest, 2 bonded, 3 same molecule
@@ -757,6 +766,10 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
         case Op::CentrosymmetryParameter:
             scalar.insert("Centrosymmetry");
             break;
+        case Op::DisplacementVectors:
+            scalar.insert("Displacement Magnitude");
+            vector.insert("Displacement");
+            break;
         default:
             break;
         }
@@ -803,6 +816,10 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
     if (modifier.op==Op::CentrosymmetryParameter) {
         add(Kind::Particles,"Centrosymmetry");
         add(Kind::GlobalAttributes,"Centrosymmetry statistics");
+    }
+    if (modifier.op==Op::DisplacementVectors) {
+        add(Kind::Particles,"Displacement");
+        add(Kind::Particles,"Displacement Magnitude");
     }
     if (modifier.op==Op::ClusterAnalysis) {
         add(Kind::Particles,"Cluster IDs");
@@ -1866,6 +1883,7 @@ inline const char *opName(Op op) {
     case Op::BondAngleDistribution: return "Bond angle distribution";
     case Op::ScatterPlot: return "Scatter plot";
     case Op::CentrosymmetryParameter: return "Centrosymmetry parameter";
+    case Op::DisplacementVectors: return "Displacement vectors";
     default:
         return "Color by type";
     }
@@ -1917,11 +1935,117 @@ struct ModifierExecutionError : std::runtime_error {
     ModifierExecutionError(size_t node, const std::string &message)
         : std::runtime_error(message), nodeIndex(node) {}
 };
+// Resolves the reference frame requested by a Calculate displacements node:
+// an absolute animation frame number, or the current frame plus an offset.
+// Both are clamped into the valid frame range.
+inline int resolveDisplacementReferenceFrame(const Modifier &m, int currentFrame,
+                                             int frameCount) {
+    if (frameCount <= 0)
+        throw std::runtime_error("Displacement vectors requires a loaded trajectory for its reference configuration");
+    const int requested = m.displacementRelative ? currentFrame + m.displacementOffset
+                                                 : m.displacementFrame;
+    return std::clamp(requested, 0, frameCount - 1);
+}
+// Calculate displacements core: matches particles between the reference and
+// the current configuration, optionally maps positions into the reference or
+// the current simulation cell, applies the minimum image convention on
+// periodic axes and publishes the Displacement vector plus the Displacement
+// Magnitude scalar particle properties.
+inline void computeDisplacements(Dataset &data, const Dataset &reference,
+                                 const Modifier &m, std::atomic<bool> *cancel = nullptr) {
+    const size_t count = data.atoms.size();
+    const size_t referenceCount = reference.atoms.size();
+    // Per-current-particle index of the matching reference particle. Equal
+    // particle counts pair by atom index; otherwise a Particle Identifier
+    // property on both sides establishes the correspondence, and without one
+    // the OVITO count-mismatch error is raised.
+    std::vector<uint32_t> mapping(count);
+    if (referenceCount == count) {
+        for (size_t i = 0; i < count; ++i) mapping[i] = uint32_t(i);
+    } else {
+        const auto referenceIds = reference.scalarProperties.find("Particle Identifier");
+        const auto currentIds = data.scalarProperties.find("Particle Identifier");
+        if (referenceIds == reference.scalarProperties.end() ||
+            currentIds == data.scalarProperties.end() ||
+            referenceIds->second.size() != referenceCount ||
+            currentIds->second.size() != count)
+            throw std::runtime_error(
+                "Particle counts of the reference and current configuration do not match.");
+        std::unordered_map<double, uint32_t> byIdentifier;
+        byIdentifier.reserve(referenceCount * 2);
+        for (size_t i = 0; i < referenceCount; ++i) {
+            if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+            byIdentifier.emplace(referenceIds->second[i], uint32_t(i));
+        }
+        for (size_t i = 0; i < count; ++i) {
+            if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+            const auto found = byIdentifier.find(currentIds->second[i]);
+            if (found == byIdentifier.end())
+                throw std::runtime_error(
+                    "Particle counts of the reference and current configuration do not match.");
+            mapping[i] = found->second;
+        }
+    }
+    // Cell mapping option: wrap current positions into the reference cell, or
+    // reference positions into the current cell, before differencing.
+    Dataset referenceCellSource;
+    referenceCellSource.cell = reference.cell;
+    referenceCellSource.origin = reference.origin;
+    referenceCellSource.pbc = reference.pbc;
+    const bool anyPeriodic =
+        std::any_of(data.pbc.begin(), data.pbc.end(), [](bool periodic) { return periodic; });
+    std::array<std::array<double, 3>, 3> cellInverseCurrent{};
+    if (m.displacementMinimumImage && anyPeriodic && count)
+        cellInverseCurrent = cellInverse(data.cell);
+    auto &displacement = data.vectorProperties["Displacement"];
+    auto &magnitude = data.scalarProperties["Displacement Magnitude"];
+    displacement.resize(count);
+    magnitude.resize(count);
+    data.propertyComponents["Displacement"] = "XYZ";
+    for (size_t i = 0; i < count; ++i) {
+        if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+        const Atom &referenceAtom = reference.atoms[mapping[i]];
+        double current3[3]{data.atoms[i].x, data.atoms[i].y, data.atoms[i].z};
+        double reference3[3]{referenceAtom.x, referenceAtom.y, referenceAtom.z};
+        if (m.displacementCellMapping == 1) {
+            const Atom wrapped =
+                wrapAtomInCell(referenceCellSource, data.atoms[i]);
+            current3[0] = wrapped.x; current3[1] = wrapped.y; current3[2] = wrapped.z;
+        } else if (m.displacementCellMapping == 2) {
+            const Atom wrapped = wrapAtomInCell(data, referenceAtom);
+            reference3[0] = wrapped.x; reference3[1] = wrapped.y; reference3[2] = wrapped.z;
+        }
+        double delta[3]{current3[0] - reference3[0],
+                        current3[1] - reference3[1],
+                        current3[2] - reference3[2]};
+        if (m.displacementMinimumImage && anyPeriodic) {
+            // Fractional delta against the current cell; only periodic axes
+            // are rounded to the nearest periodic image.
+            double fractional[3];
+            for (int axis = 0; axis < 3; ++axis)
+                fractional[axis] = cellInverseCurrent[axis][0] * delta[0] +
+                                   cellInverseCurrent[axis][1] * delta[1] +
+                                   cellInverseCurrent[axis][2] * delta[2];
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!data.pbc[axis]) continue;
+                const double image = std::round(fractional[axis]);
+                for (int component = 0; component < 3; ++component)
+                    delta[component] -= image * data.cell[axis * 3 + component];
+            }
+        }
+        const double magnitudeValue = std::hypot(delta[0], delta[1], delta[2]);
+        if (!std::isfinite(magnitudeValue))
+            throw std::runtime_error("Displacement computation produced a non-finite value");
+        displacement[i] = {float(delta[0]), float(delta[1]), float(delta[2])};
+        magnitude[i] = magnitudeValue;
+    }
+}
 inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> &mods,
                                    size_t firstNode=0,std::atomic<bool> *cancel=nullptr,
                                    std::atomic<size_t> *activeNode=nullptr,
                                    size_t checkpointNode=SIZE_MAX,
-                                   const std::function<void(size_t,const PipelineResult&)> &checkpoint={}) {
+                                   const std::function<void(size_t,const PipelineResult&)> &checkpoint={},
+                                   const std::function<const Dataset &(size_t)> &referenceProvider={}) {
     if (firstNode>mods.size())
         throw std::runtime_error("Pipeline checkpoint starts after the final node");
     for (size_t modifierIndex = firstNode; modifierIndex < mods.size(); ++modifierIndex) {
@@ -2437,6 +2561,14 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 r.data.globalAttributes["Centrosymmetry.neighbor_count"] = double(m.cspNeighbors);
                 r.data.globalAttributes["Centrosymmetry.undercoordinated_particles"] =
                     double(csp.underCoordinated);
+                continue;
+            }
+            if (m.op == Op::DisplacementVectors) {
+                if (!referenceProvider)
+                    throw std::runtime_error(
+                        "Displacement vectors has no reference configuration provider");
+                const Dataset &reference = referenceProvider(modifierIndex);
+                computeDisplacements(r.data, reference, m, cancel);
                 continue;
             }
             if (m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
@@ -3032,11 +3164,12 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
 }
 inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods,
                                std::atomic<bool> *cancel = nullptr,
-                               std::atomic<size_t> *activeNode = nullptr) {
+                               std::atomic<size_t> *activeNode = nullptr,
+                               const std::function<const Dataset &(size_t)> &referenceProvider = {}) {
     const size_t particleCount=source.atoms.size();
     PipelineResult initial{std::move(source),std::vector<uint8_t>(particleCount),
                            std::vector<uint8_t>(particleCount,1)};
-    return evaluateFrom(std::move(initial),mods,0,cancel,activeNode);
+    return evaluateFrom(std::move(initial),mods,0,cancel,activeNode,SIZE_MAX,{},referenceProvider);
 }
 inline PipelineResult evaluatePrefix(Dataset source, const std::vector<Modifier> &mods,
                                      size_t nodeCount, std::atomic<bool> *cancel = nullptr,
