@@ -383,6 +383,11 @@ struct App {
     int deferredLoadFrame = 0;
     uint64_t pipelineGeneration = 0, pipelineJobGeneration = 0;
     std::vector<std::string> pipelineJobNodeIds;
+    // Unwrap trajectories per-node accumulator: node id -> (frame, unwrapped
+    // output positions of that frame). Persisted across pipeline launches so
+    // frame-by-frame playback chains continuously; cleared when a new file is
+    // loaded. Only touched by the single active pipeline worker thread.
+    std::map<std::string, std::pair<int, std::vector<Vec3>>> unwrapAccumulators;
     std::shared_ptr<const PipelineResult> pipelineCheckpoint;
     size_t pipelineCheckpointNode = SIZE_MAX;
     std::atomic<float> progress{0};
@@ -619,21 +624,69 @@ struct App {
              cachedPrefix = std::move(cachedPrefix), firstNode, checkpointTarget, currentFrame,
              inputPath, frameSnapshot = std::move(frameSnapshot), readBudget]() mutable {
                 // Displacement vectors nodes read their reference configuration
-                // from the raw data source at the requested frame; the datasets
-                // are loaded lazily, once per node, inside this worker thread.
-                std::map<size_t, Dataset> displacementReferences;
+                // from the raw data source at the requested frame; Freeze
+                // property nodes re-evaluate their upstream chain at the
+                // reference frame. Datasets are produced lazily, once per
+                // node, inside this worker thread.
+                std::map<size_t, Dataset> rawFrameReferences;
+                std::map<size_t, Dataset> freezeReferences;
                 std::function<const Dataset &(size_t)> referenceProvider;
-                if (std::any_of(executable.begin(), executable.end(), [](const Modifier &m) {
-                        return m.op == Op::DisplacementVectors;
-                    }))
+                const bool hasDisplacement = std::any_of(executable.begin(), executable.end(),
+                    [](const Modifier &m) { return m.op == Op::DisplacementVectors; });
+                const bool hasFreeze = std::any_of(executable.begin(), executable.end(),
+                    [](const Modifier &m) { return m.op == Op::FreezeProperty; });
+                Dataset freezeSource;
+                if (hasFreeze) freezeSource = source;
+                if (hasDisplacement || hasFreeze)
                     referenceProvider = [&](size_t node) -> const Dataset & {
+                        const Modifier &m = executable.at(node);
+                        if (m.op == Op::FreezeProperty) {
+                            const auto cached = freezeReferences.find(node);
+                            if (cached != freezeReferences.end()) return cached->second;
+                            std::vector<Modifier> prefix(executable.begin(),
+                                                         executable.begin() + node);
+                            const size_t prefixCount = freezeSource.atoms.size();
+                            PipelineResult prefixInput{freezeSource,
+                                                       std::vector<uint8_t>(prefixCount),
+                                                       std::vector<uint8_t>(prefixCount, 1)};
+                            // Nested cross-frame modifiers inside the prefix
+                            // fall back to their default (uncached) behavior.
+                            auto evaluated = evaluateFrom(std::move(prefixInput), prefix, 0,
+                                                          &pipelineCancel);
+                            return freezeReferences
+                                .emplace(node, std::move(evaluated.data))
+                                .first->second;
+                        }
                         const int frame = resolveDisplacementReferenceFrame(
-                            executable.at(node), currentFrame, int(frameSnapshot.size()));
-                        return displacementReferences
+                            m, currentFrame, int(frameSnapshot.size()));
+                        return rawFrameReferences
                             .emplace(node, io::read(inputPath, frameSnapshot.at(size_t(frame)),
                                                     readBudget, nullptr, &pipelineCancel))
                             .first->second;
                     };
+                // Unwrap trajectories nodes chain their per-frame output
+                // through a per-node accumulator owned by the app, keyed by
+                // node id so two unwrap nodes never share state.
+                ModifierFrameState frameState;
+                if (std::any_of(executable.begin(), executable.end(), [](const Modifier &m) {
+                        return m.op == Op::UnwrapTrajectories;
+                    })) {
+                    frameState.previousUnwrapped =
+                        [this, currentFrame](size_t node) -> const std::vector<Vec3> * {
+                            const auto found =
+                                unwrapAccumulators.find(pipelineJobNodeIds.at(node));
+                            if (found == unwrapAccumulators.end() ||
+                                found->second.first != currentFrame - 1)
+                                return nullptr;
+                            return &found->second.second;
+                        };
+                    frameState.storeUnwrapped = [this, currentFrame](
+                                                    size_t node, std::vector<Vec3> positions) {
+                        unwrapAccumulators.insert_or_assign(pipelineJobNodeIds.at(node),
+                                                            std::make_pair(currentFrame,
+                                                                           std::move(positions)));
+                    };
+                }
                 PipelineResult initial;
                 if (cachedPrefix) initial=*cachedPrefix;
                 else {
@@ -647,7 +700,8 @@ struct App {
                 };
                 auto evaluated=evaluateFrom(std::move(initial),executable,firstNode,
                                              &pipelineCancel,&pipelineActiveNode,
-                                             checkpointTarget,saveCheckpoint,referenceProvider);
+                                             checkpointTarget,saveCheckpoint,referenceProvider,
+                                             currentFrame,frameState);
                 return PipelineJobResult{std::move(evaluated),checkpointTarget,
                                          std::move(checkpoint)};
             });
@@ -676,21 +730,42 @@ struct App {
         inspectorJob = std::async(std::launch::async,
             [this, input = std::move(input), executable = std::move(executable), currentFrame,
              inputPath, frameSnapshot = std::move(frameSnapshot), readBudget]() mutable {
-                std::map<size_t, Dataset> displacementReferences;
+                std::map<size_t, Dataset> rawFrameReferences;
+                std::map<size_t, Dataset> freezeReferences;
                 std::function<const Dataset &(size_t)> referenceProvider;
-                if (std::any_of(executable.begin(), executable.end(), [](const Modifier &m) {
-                        return m.op == Op::DisplacementVectors;
-                    }))
+                const bool hasDisplacement = std::any_of(executable.begin(), executable.end(),
+                    [](const Modifier &m) { return m.op == Op::DisplacementVectors; });
+                const bool hasFreeze = std::any_of(executable.begin(), executable.end(),
+                    [](const Modifier &m) { return m.op == Op::FreezeProperty; });
+                Dataset freezeSource;
+                if (hasFreeze) freezeSource = input;
+                if (hasDisplacement || hasFreeze)
                     referenceProvider = [&](size_t node) -> const Dataset & {
+                        const Modifier &m = executable.at(node);
+                        if (m.op == Op::FreezeProperty) {
+                            const auto cached = freezeReferences.find(node);
+                            if (cached != freezeReferences.end()) return cached->second;
+                            std::vector<Modifier> prefix(executable.begin(),
+                                                         executable.begin() + node);
+                            const size_t prefixCount = freezeSource.atoms.size();
+                            PipelineResult prefixInput{freezeSource,
+                                                       std::vector<uint8_t>(prefixCount),
+                                                       std::vector<uint8_t>(prefixCount, 1)};
+                            auto evaluated = evaluateFrom(std::move(prefixInput), prefix, 0,
+                                                          &inspectorCancel);
+                            return freezeReferences
+                                .emplace(node, std::move(evaluated.data))
+                                .first->second;
+                        }
                         const int frame = resolveDisplacementReferenceFrame(
-                            executable.at(node), currentFrame, int(frameSnapshot.size()));
-                        return displacementReferences
+                            m, currentFrame, int(frameSnapshot.size()));
+                        return rawFrameReferences
                             .emplace(node, io::read(inputPath, frameSnapshot.at(size_t(frame)),
                                                     readBudget, nullptr, &inspectorCancel))
                             .first->second;
                     };
                 return evaluate(std::move(input), executable, &inspectorCancel,
-                                &inspectorActiveNode, referenceProvider);
+                                &inspectorActiveNode, referenceProvider, currentFrame);
             });
     }
     void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
@@ -898,6 +973,7 @@ struct App {
         pipelineDeferredForInspector = false;
         pipelineCheckpoint.reset();
         pipelineCheckpointNode=SIZE_MAX;
+        unwrapAccumulators.clear();
         inspectorResult.reset();
         inspectorNode = -1;
         inspectorNodeId.clear();
@@ -2506,6 +2582,56 @@ struct App {
                             "particle properties. Non-periodic axes never use the minimum "
                             "image convention.");
                     }
+                    if (m.op == Op::FreezeProperty) {
+                        heading("Operate on");
+                        ImGui::BeginDisabled();
+                        bool operateParticles = true;
+                        ImGui::Checkbox("Particles", &operateParticles);
+                        ImGui::EndDisabled();
+                        // Property to freeze: upstream scalar and vector
+                        // particle properties. OVITO defaults to Particle
+                        // Type, which is not numeric in AtomX, so v1 lists
+                        // scalar/vector properties and defaults to the first.
+                        const auto choices = pipelineFreezablePropertyChoices(
+                            source, mods, std::min(modifierGraph.selected, mods.size()));
+                        if (choices.empty()) {
+                            ImGui::TextWrapped(
+                                "No freezable particle property is available at this pipeline stage.");
+                        } else {
+                            if (std::find(choices.begin(), choices.end(), m.property) ==
+                                choices.end()) {
+                                checkpoint();
+                                m.property = choices.front();
+                                update();
+                            }
+                            if (ImGui::BeginCombo("Property to freeze", m.property.c_str())) {
+                                for (const auto &name : choices) {
+                                    const bool selected = m.property == name;
+                                    if (ImGui::Selectable(name.c_str(), selected)) {
+                                        checkpoint();
+                                        m.property = name;
+                                        update();
+                                    }
+                                    if (selected) ImGui::SetItemDefaultFocus();
+                                }
+                                ImGui::EndCombo();
+                            }
+                            recordUiTestItem(std::string("pipeline.freeze-property.") + m.id,
+                                             "Property to freeze");
+                        }
+                        int frame = m.freezeFrame;
+                        if (ImGui::InputInt("Reference frame", &frame)) {
+                            checkpoint();
+                            m.freezeFrame = std::max(0, frame);
+                            update();
+                        }
+                        recordUiTestItem(std::string("pipeline.freeze-frame.") + m.id,
+                                         "Reference frame");
+                        ImGui::TextWrapped(
+                            "Snapshots the property at the reference frame and restores those "
+                            "values on every other frame. Particles are matched by index or "
+                            "Particle Identifier.");
+                    }
                     if (m.op == Op::SelectOverlapping) {
                         bool useRadii = m.overlapUseRadii;
                         if (ImGui::Checkbox("Use per-particle radii", &useRadii)) {
@@ -3623,7 +3749,8 @@ struct App {
                 operation(Op::ComputeProperty,"Evaluate a scalar expression for every particle and publish the named property.");
                 operation(Op::Delete,"Remove selected particles.");
                 operation(Op::EditCell,"Edit cell origin, vectors and periodic boundaries. Particle coordinates stay fixed unless fractional-coordinate remapping is explicitly enabled."); operation(Op::EditType,"Edit particle type assignments.");
-                for (auto name : {"Freeze property", "Load trajectory", "Python script (deferred)"}) planned(name);
+                operation(Op::FreezeProperty,"Snapshots a particle property at a reference frame and keeps it constant across the trajectory.");
+                for (auto name : {"Load trajectory", "Python script (deferred)"}) planned(name);
                 operation(Op::RemoveProperty,"Remove a scalar or vector particle property by name.");
                 operation(Op::Replicate,"Duplicate the structure along the three cell vectors and resize the simulation cell.");
                 operation(Op::Rotate,"Rotate positions and cell vectors around an axis (degrees).");
@@ -3631,7 +3758,7 @@ struct App {
                 operation(Op::Slice,"Cut the structure at a plane: keep one side, or a slab of adjustable width.");
                 planned("Smooth trajectory");
                 operation(Op::Translate,"Translate particle positions along an axis.");
-                planned("Unwrap trajectories");
+                operation(Op::UnwrapTrajectories,"Continuously unwraps particle positions across periodic boundaries using per-frame minimum-image steps.");
                 operation(Op::Wrap,"Wrap positions into orthogonal or triclinic periodic cells, including partially periodic cells.");
                 endCard();
                 ImGui::TableNextColumn();

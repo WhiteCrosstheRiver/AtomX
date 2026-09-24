@@ -2238,6 +2238,106 @@ int main() {
                     "disabling the minimum image convention keeps the raw unwrapped difference");
         }
         {
+            // M07 Freeze property: a frame-varying scalar is snapshotted at
+            // the reference frame and restored on every other frame.
+            auto frame0 = fccLattice(1);
+            frame0.pbc = {true, true, true};
+            auto frame1 = frame0;
+            frame0.scalarProperties["Energy"] = {1, 2, 3, 4};
+            frame1.scalarProperties["Energy"] = {9, 9, 9, 9};
+            Modifier freeze{Op::FreezeProperty};
+            freeze.property = "Energy";
+            freeze.freezeFrame = 0;
+            auto referenceConfiguration = frame0;
+            auto provider = [&](size_t) -> const Dataset & { return referenceConfiguration; };
+            const auto restored = evaluate(frame1, {freeze}, nullptr, nullptr, provider, 1);
+            const auto &restoredValues = restored.data.scalarProperties.at("Energy");
+            require(restoredValues.size() == 4 && restoredValues[0] == 1 && restoredValues[3] == 4,
+                    "freeze property restores the reference-frame values on a later frame");
+            const auto atReference = evaluate(frame0, {freeze}, nullptr, nullptr, provider, 0);
+            const auto &referenceValues = atReference.data.scalarProperties.at("Energy");
+            require(referenceValues.size() == 4 && referenceValues[0] == 1 && referenceValues[3] == 4,
+                    "freeze property passes the property through at the reference frame");
+            Modifier freezeLater{Op::FreezeProperty};
+            freezeLater.property = "Energy";
+            freezeLater.freezeFrame = 1;
+            auto laterConfiguration = frame1;
+            auto laterProvider = [&](size_t) -> const Dataset & { return laterConfiguration; };
+            const auto backdated = evaluate(frame0, {freezeLater}, nullptr, nullptr, laterProvider, 0);
+            const auto &backValues = backdated.data.scalarProperties.at("Energy");
+            require(backValues.size() == 4 && backValues[0] == 9 && backValues[3] == 9,
+                    "freeze property restores later-frame values on an earlier frame");
+            // Count mismatch without identifiers is rejected, like displacement.
+            auto mismatch = frame0;
+            mismatch.atoms.pop_back();
+            mismatch.scalarProperties["Energy"] = {5, 5, 5};
+            auto mismatchProvider = [&](size_t) -> const Dataset & { return mismatch; };
+            bool mismatchRejected = false;
+            try {
+                evaluate(frame1, {freeze}, nullptr, nullptr, mismatchProvider, 1);
+            } catch (const std::exception &) {
+                mismatchRejected = true;
+            }
+            require(mismatchRejected,
+                    "freeze property rejects a reference frame with a different particle count and no identifiers");
+            // Identifier fallback matches particles when counts differ.
+            frame0.scalarProperties["Particle Identifier"] = {10, 20, 30, 40};
+            referenceConfiguration = frame0; // provider now carries identifiers
+            auto identified = frame1;
+            identified.atoms.erase(identified.atoms.begin());
+            identified.scalarProperties["Energy"] = {7, 7, 7};
+            identified.scalarProperties["Particle Identifier"] = {20, 30, 40};
+            const auto matched = evaluate(identified, {freeze}, nullptr, nullptr, provider, 1);
+            const auto &matchedValues = matched.data.scalarProperties.at("Energy");
+            require(matchedValues.size() == 3 && matchedValues[0] == 2 && matchedValues[2] == 4,
+                    "freeze property matches particles by Particle Identifier when counts differ");
+            require(std::string(opName(Op::FreezeProperty)) == "Freeze property" &&
+                        std::string(opName(Op::UnwrapTrajectories)) == "Unwrap trajectories",
+                    "freeze and unwrap modifiers report their catalog names");
+        }
+        {
+            // M14 Unwrap trajectories: per-frame minimum-image accumulation in
+            // an orthogonal cell (10.8 wide, periodic x only). The atom starts
+            // at x = 10.5, crosses to the wrapped coordinate 11.3 (= 0.5 plus
+            // one box, a real +0.8 step) and crosses again to 1.3.
+            Dataset frame0;
+            frame0.cell = {10.8, 0, 0, 0, 10.8, 0, 0, 0, 10.8};
+            frame0.pbc = {true, false, false};
+            frame0.atoms = {Atom{10.5f, 2.f, 0.f, 0}};
+            frame0.sourceCount = frame0.atoms.size();
+            Modifier unwrap{Op::UnwrapTrajectories};
+            std::map<size_t, std::vector<Vec3>> accumulator;
+            ModifierFrameState frameState;
+            frameState.previousUnwrapped = [&](size_t node) -> const std::vector<Vec3> * {
+                const auto found = accumulator.find(node);
+                return found == accumulator.end() ? nullptr : &found->second;
+            };
+            frameState.storeUnwrapped = [&](size_t node, std::vector<Vec3> positions) {
+                accumulator[node] = std::move(positions);
+            };
+            const auto base = evaluate(frame0, {unwrap}, nullptr, nullptr, {}, 0, frameState);
+            require(std::abs(base.data.atoms[0].x - 10.5) < 1e-6,
+                    "unwrap trajectories is the identity on the first frame");
+            auto frame1 = frame0;
+            frame1.atoms[0].x = 11.3f; // crossed the +x boundary (raw step 0.8)
+            frame1.atoms[0].y = 11.3f; // non-periodic y passes through unchanged
+            const auto unwrapped1 = evaluate(frame1, {unwrap}, nullptr, nullptr, {}, 1, frameState);
+            require(std::abs(unwrapped1.data.atoms[0].x - 11.3) < 1e-5 &&
+                        std::abs(unwrapped1.data.atoms[0].y - 11.3) < 1e-5,
+                    "unwrap trajectories folds a boundary crossing to a +0.8 step and keeps non-periodic axes");
+            auto frame2 = frame0;
+            frame2.atoms[0].x = 1.3f; // crossed again: 1.3 - 11.3 folds to +0.8
+            const auto unwrapped2 = evaluate(frame2, {unwrap}, nullptr, nullptr, {}, 2, frameState);
+            require(std::abs(unwrapped2.data.atoms[0].x - 12.1) < 1e-5,
+                    "unwrap trajectories chains the accumulated minimum-image steps across frames");
+            // Without a cached predecessor (frame jump) the wrapped positions
+            // bootstrap the accumulator unchanged.
+            ModifierFrameState coldState;
+            const auto jumped = evaluate(frame2, {unwrap}, nullptr, nullptr, {}, 2, coldState);
+            require(std::abs(jumped.data.atoms[0].x - 1.3) < 1e-6,
+                    "unwrap trajectories bootstraps from wrapped positions without a cached predecessor");
+        }
+        {
             // Reference frame resolution: absolute frame numbers and offsets
             // relative to the current frame, clamped into the valid range.
             Modifier absolute{Op::DisplacementVectors};

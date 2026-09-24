@@ -669,6 +669,8 @@ enum class Op {
     ,ScatterPlot
     ,CentrosymmetryParameter
     ,DisplacementVectors
+    ,FreezeProperty
+    ,UnwrapTrajectories
 };
 struct Modifier {
     Op op;
@@ -737,6 +739,11 @@ struct Modifier {
     int displacementOffset = -1;       // relative frame offset (default: previous frame)
     int displacementCellMapping = 0;   // 0 = off, 1 = to reference, 2 = to current
     bool displacementMinimumImage = true;
+    // Freeze property: animation frame whose property values are snapshotted
+    // and restored on every other frame. The property to freeze reuses the
+    // shared m.property field. (OVITO defaults to Particle Type, which is not
+    // a numeric property in AtomX, so v1 offers scalar/vector properties.)
+    int freezeFrame = 0;
     bool affineReducedCoords = false;
     bool affineOnlySelected = false;
     int expandMode = 0; // 0 cutoff range, 1 N nearest, 2 bonded, 3 same molecule
@@ -803,6 +810,29 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
             for (const char *axis : {"X", "Y", "Z"})
                 choices.push_back(name + "." + axis);
     std::sort(choices.begin() + 3, choices.end());
+    return choices;
+}
+// Property choices for the Freeze property panel: upstream scalar properties
+// plus whole vector properties, excluding positions and the Selection
+// property. OVITO defaults the combo to Particle Type, which is not a numeric
+// property in AtomX, so the first choice is the v1 default.
+template<class ModifierRange>
+inline std::vector<std::string> pipelineFreezablePropertyChoices(
+    const Dataset &source, const ModifierRange &modifiers, size_t nodeIndex) {
+    const auto all = pipelineInputPropertyChoices(source, modifiers, nodeIndex, true);
+    std::vector<std::string> choices;
+    for (const auto &name : all) {
+        if (name.rfind("Position.", 0) == 0 || name == "Selection") continue;
+        if (name.size() > 2) {
+            const std::string suffix = name.substr(name.size() - 2);
+            if (suffix == ".X" || suffix == ".Y" || suffix == ".Z") {
+                if (suffix != ".X") continue; // Components collapse into the whole vector property.
+                choices.push_back(name.substr(0, name.size() - 2));
+                continue;
+            }
+        }
+        choices.push_back(name);
+    }
     return choices;
 }
 struct DataObject {
@@ -1906,6 +1936,8 @@ inline const char *opName(Op op) {
     case Op::ScatterPlot: return "Scatter plot";
     case Op::CentrosymmetryParameter: return "Centrosymmetry parameter";
     case Op::DisplacementVectors: return "Displacement vectors";
+    case Op::FreezeProperty: return "Freeze property";
+    case Op::UnwrapTrajectories: return "Unwrap trajectories";
     default:
         return "Color by type";
     }
@@ -2062,12 +2094,139 @@ inline void computeDisplacements(Dataset &data, const Dataset &reference,
         magnitude[i] = magnitudeValue;
     }
 }
+// Freeze property core: restores the named particle property from the
+// reference-frame configuration, overwriting the incoming values. Equal
+// particle counts pair by atom index; otherwise a Particle Identifier
+// property on both sides establishes the correspondence, and without one
+// the OVITO count-mismatch error is raised.
+inline void freezeParticleProperty(Dataset &data, const Dataset &reference,
+                                   const std::string &property,
+                                   std::atomic<bool> *cancel = nullptr) {
+    const size_t count = data.atoms.size();
+    const size_t referenceCount = reference.atoms.size();
+    const auto referenceScalar = reference.scalarProperties.find(property);
+    const auto referenceVector = reference.vectorProperties.find(property);
+    const bool fromScalar = referenceScalar != reference.scalarProperties.end();
+    const bool fromVector = referenceVector != reference.vectorProperties.end();
+    if (!fromScalar && !fromVector)
+        throw std::runtime_error(
+            "The frozen particle property is not present at the reference frame: " + property);
+    // Per-current-particle index of the matching reference particle.
+    std::vector<uint32_t> mapping;
+    const auto buildMapping = [&]() {
+        if (referenceCount == count) {
+            mapping.resize(count);
+            for (size_t i = 0; i < count; ++i) mapping[i] = uint32_t(i);
+            return;
+        }
+        const auto referenceIds = reference.scalarProperties.find("Particle Identifier");
+        const auto currentIds = data.scalarProperties.find("Particle Identifier");
+        if (referenceIds == reference.scalarProperties.end() ||
+            currentIds == data.scalarProperties.end() ||
+            referenceIds->second.size() != referenceCount ||
+            currentIds->second.size() != count)
+            throw std::runtime_error(
+                "Particle counts of the reference and current configuration do not match.");
+        std::unordered_map<double, uint32_t> byIdentifier;
+        byIdentifier.reserve(referenceCount * 2);
+        for (size_t i = 0; i < referenceCount; ++i) {
+            if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+            byIdentifier.emplace(referenceIds->second[i], uint32_t(i));
+        }
+        mapping.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+            const auto found = byIdentifier.find(currentIds->second[i]);
+            if (found == byIdentifier.end())
+                throw std::runtime_error(
+                    "Particle counts of the reference and current configuration do not match.");
+            mapping[i] = found->second;
+        }
+    };
+    if (fromScalar) {
+        auto &values = data.scalarProperties[property];
+        values.resize(count);
+        buildMapping();
+        for (size_t i = 0; i < count; ++i) values[i] = referenceScalar->second[mapping[i]];
+    } else {
+        auto &values = data.vectorProperties[property];
+        values.resize(count);
+        buildMapping();
+        for (size_t i = 0; i < count; ++i) values[i] = referenceVector->second[mapping[i]];
+        const auto components = reference.propertyComponents.find(property);
+        if (components != reference.propertyComponents.end())
+            data.propertyComponents[property] = components->second;
+    }
+}
+// Unwrap trajectories core: accumulates particle positions across frames by
+// adding the per-frame minimum-image step to the previous unwrapped
+// coordinates. Without a cached predecessor (first frame, or a jump to an
+// unrelated frame) the current wrapped positions pass through unchanged and
+// seed the accumulator. Non-periodic axes never use the minimum image
+// convention. Returns the unwrapped positions, which are also written back
+// into the particle coordinates (that is the modifier's output).
+inline std::vector<Vec3> unwrapTrajectoryPositions(Dataset &data,
+                                                   const std::vector<Vec3> *previousUnwrapped,
+                                                   std::atomic<bool> *cancel = nullptr) {
+    const size_t count = data.atoms.size();
+    const bool havePrevious = previousUnwrapped && previousUnwrapped->size() == count;
+    const bool anyPeriodic =
+        std::any_of(data.pbc.begin(), data.pbc.end(), [](bool periodic) { return periodic; });
+    std::array<std::array<double, 3>, 3> cellInverseCurrent{};
+    if (havePrevious && anyPeriodic && count) cellInverseCurrent = cellInverse(data.cell);
+    std::vector<Vec3> unwrapped(count);
+    for (size_t i = 0; i < count; ++i) {
+        if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+        const Atom &atom = data.atoms[i];
+        if (!havePrevious) {
+            unwrapped[i] = {atom.x, atom.y, atom.z};
+            continue;
+        }
+        const Vec3 &previous = (*previousUnwrapped)[i];
+        double delta[3]{atom.x - previous.x, atom.y - previous.y, atom.z - previous.z};
+        if (anyPeriodic) {
+            double fractional[3];
+            for (int axis = 0; axis < 3; ++axis)
+                fractional[axis] = cellInverseCurrent[axis][0] * delta[0] +
+                                   cellInverseCurrent[axis][1] * delta[1] +
+                                   cellInverseCurrent[axis][2] * delta[2];
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!data.pbc[axis]) continue;
+                const double image = std::round(fractional[axis]);
+                for (int component = 0; component < 3; ++component)
+                    delta[component] -= image * data.cell[axis * 3 + component];
+            }
+        }
+        unwrapped[i] = {float(previous.x + delta[0]), float(previous.y + delta[1]),
+                        float(previous.z + delta[2])};
+    }
+    for (size_t i = 0; i < count; ++i) {
+        data.atoms[i].x = unwrapped[i].x;
+        data.atoms[i].y = unwrapped[i].y;
+        data.atoms[i].z = unwrapped[i].z;
+    }
+    return unwrapped;
+}
+// Cross-frame state exchange for trajectory modifiers such as Unwrap
+// trajectories. The pipeline host (or a test) owns the storage; evaluateFrom
+// only asks for the node's unwrapped output of the previous animation frame
+// and stores the freshly computed one. Keeping the storage outside the
+// pipeline keeps nodes isolated: state is keyed per node index by the host.
+struct ModifierFrameState {
+    // This node's stored unwrapped positions from the previous animation
+    // frame, or nullptr when unavailable (first frame or a frame jump).
+    std::function<const std::vector<Vec3> *(size_t node)> previousUnwrapped;
+    // Stores the node's unwrapped output positions for the evaluated frame.
+    std::function<void(size_t node, std::vector<Vec3> positions)> storeUnwrapped;
+};
 inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> &mods,
                                    size_t firstNode=0,std::atomic<bool> *cancel=nullptr,
                                    std::atomic<size_t> *activeNode=nullptr,
                                    size_t checkpointNode=SIZE_MAX,
                                    const std::function<void(size_t,const PipelineResult&)> &checkpoint={},
-                                   const std::function<const Dataset &(size_t)> &referenceProvider={}) {
+                                   const std::function<const Dataset &(size_t)> &referenceProvider={},
+                                   int currentFrame=0,
+                                   const ModifierFrameState &frameState={}) {
     if (firstNode>mods.size())
         throw std::runtime_error("Pipeline checkpoint starts after the final node");
     for (size_t modifierIndex = firstNode; modifierIndex < mods.size(); ++modifierIndex) {
@@ -2591,6 +2750,27 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                         "Displacement vectors has no reference configuration provider");
                 const Dataset &reference = referenceProvider(modifierIndex);
                 computeDisplacements(r.data, reference, m, cancel);
+                continue;
+            }
+            if (m.op == Op::FreezeProperty) {
+                if (m.property.empty())
+                    throw std::runtime_error("Freeze property requires a particle property");
+                if (currentFrame == m.freezeFrame)
+                    continue; // Reference frame: the property passes through and defines the snapshot.
+                if (!referenceProvider)
+                    throw std::runtime_error(
+                        "Freeze property has no reference-frame configuration provider");
+                const Dataset &reference = referenceProvider(modifierIndex);
+                freezeParticleProperty(r.data, reference, m.property, cancel);
+                continue;
+            }
+            if (m.op == Op::UnwrapTrajectories) {
+                const std::vector<Vec3> *previous =
+                    frameState.previousUnwrapped ? frameState.previousUnwrapped(modifierIndex)
+                                                 : nullptr;
+                std::vector<Vec3> unwrapped = unwrapTrajectoryPositions(r.data, previous, cancel);
+                if (frameState.storeUnwrapped)
+                    frameState.storeUnwrapped(modifierIndex, std::move(unwrapped));
                 continue;
             }
             if (m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
@@ -3194,11 +3374,14 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
 inline PipelineResult evaluate(Dataset source, const std::vector<Modifier> &mods,
                                std::atomic<bool> *cancel = nullptr,
                                std::atomic<size_t> *activeNode = nullptr,
-                               const std::function<const Dataset &(size_t)> &referenceProvider = {}) {
+                               const std::function<const Dataset &(size_t)> &referenceProvider = {},
+                               int currentFrame = 0,
+                               const ModifierFrameState &frameState = {}) {
     const size_t particleCount=source.atoms.size();
     PipelineResult initial{std::move(source),std::vector<uint8_t>(particleCount),
                            std::vector<uint8_t>(particleCount,1)};
-    return evaluateFrom(std::move(initial),mods,0,cancel,activeNode,SIZE_MAX,{},referenceProvider);
+    return evaluateFrom(std::move(initial),mods,0,cancel,activeNode,SIZE_MAX,{},
+                        referenceProvider,currentFrame,frameState);
 }
 inline PipelineResult evaluatePrefix(Dataset source, const std::vector<Modifier> &mods,
                                      size_t nodeCount, std::atomic<bool> *cancel = nullptr,
