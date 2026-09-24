@@ -243,3 +243,11 @@
 - `export_workflow` 从 Add modification 菜单添加 Reduce property，检查其上游 RDF 节点仍保留；默认 Mean 结果生成 `ReduceProperty.Position.X.mean`，并与源坐标一致。
 - 通过 ImGui 鼠标和键盘事件将归约类型改为 Sum，等待异步管线重算；验证节点参数、数值结果、旧 Mean 属性移除，以及新 Sum 全局属性在 Global Attributes 检查器中绘制。
 - 属性与归约方式属于该 Pipeline 节点；参数编辑保持稳定节点 ID，并保留上游 RDF 节点。
+
+## 2026-09-25 P1 波次验证（Slice / Replicate / Edit simulation cell）
+
+- 构建门禁：`build.ps1`（env -u CL 包装）退出码 0；core/POSCAR/IO/render_shapes/export_workflow 五组测试 PASS；`--smoke 1 --screenshot` 与 `--catalog --smoke 1 --screenshot` 退出码 0 并写出 PNG。
+- 数值对照（test.xyz 帧 0，法向 (1,0,0)，d=5.4）：AtomX 结果行 `108 input / 44 deleted / 64 remaining` 与本机 OVITO Basic 3.16.1 实测一致（严格半空间语义）；slab d=5.4 w=1.8 双端均为 18 remaining（闭区间），与 OVITO 实测与 brute-force 参考一致。
+- 单元回归：Slice 严格半空间/闭区间/反向/斜法向/零法向错误/选区路径/Operate-on 关闭无操作；Replicate 2×2×2=864、3×1×2=648 与盒子缩放、双轴周期键重映射；修饰器栈组合（顺序相关、上游重算、双节点参数隔离、插入置脏、禁用上游）。
+- GUI 对照：AtomX 与 OVITO 的 Slice 面板逐控件对齐（Cartesian/Miller indices、Distance、Normal x/y/z、Slab width、Reverse orientation、Create selection、Apply to selection only、Visualize plane、Center in simulation cell、计数行、Operate on）；视口半透明切平面渲染验证（见 docs/parity/atomx/v-p1-*.png 与 docs/parity/ovito/v-*.png）。
+- 未验证/遗留：Align view to plane / Align plane to view / Pick three points 未实现；多 Slice 节点时结果行仅显示最后执行节点；Intel GPU 未在本机验证。

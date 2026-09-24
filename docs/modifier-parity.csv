@@ -26,14 +26,14 @@ M01,Modification,Affine transformation,,docs/parity/ovito/,pass,pass,partial,pas
 M02,Modification,Combine datasets,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 M03,Modification,Compute property,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Scalar expressions only; no vector output
 M04,Modification,Delete selected,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,Bond remapping implemented
-M05,Modification,Edit simulation cell,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P1,,,,No quick cell-size fields
+M05,Modification,Edit simulation cell,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P1,,,,Panel order aligned (origin->vectors->PBC); no 2D dimensionality or quick-size fields
 M06,Modification,Edit types,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,Applies to selected particles
 M07,Modification,Freeze property,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,N3,,,,Snapshot property at frame; ID-aligned
 M08,Modification,Load trajectory,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 M09,Modification,Python script,,docs/parity/ovito/,partial,deferred,deferred,deferred,deferred,deferred,,,,Deferred by user decision; must show clear notice
 M10,Modification,Remove property,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,Rejects Position/Particle Type
-M11,Modification,Replicate,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P1,,,,One axis at a time; OVITO has Na/Nb/Nc together
-M12,Modification,Slice,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P1,,,,Axis+value only; no normal/distance/invert/slab width
+M11,Modification,Replicate,,docs/parity/ovito/,partial,partial,pass,pass,pass,partial,P1,,,,Three-axis Na/Nb/Nc + adjust box + bond remap; OVITO labels Number of images/Assign unique IDs not yet mirrored
+M12,Modification,Slice,,docs/parity/ovito/,pass,pass,pass,pass,pass,pass,P1,,,,Counts match live OVITO (64/18); align-view buttons and Miller indices are stubs; results line reflects last slice node only
 M13,Modification,Smooth trajectory,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 M14,Modification,Unwrap trajectories,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,N3,,,,Stable-ID PBC unwrap across frames
 M15,Modification,Wrap at periodic boundaries,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Partial PBC axes handled

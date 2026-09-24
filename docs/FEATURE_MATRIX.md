@@ -98,12 +98,12 @@
 | Combine datasets | 待实现 | 属性对齐、类型合并、晶胞处理 |
 | Compute property | 部分 | 安全原生数值表达式逐粒子计算并发布标量属性，可供下游节点读取；不支持向量表达式、单位系统、任意脚本及优化缓存 |
 | Delete selected | 已实现 | 非破坏性管线过滤 |
-| Edit simulation cell | 部分 | 原生管线节点编辑原点、3 条向量和 PBC；校验有限值与非退化体积；可选保持分数坐标并变换粒子位置；一般各向异性晶胞与表格编辑已实现，晶胞尺寸快捷字段尚未补齐 |
+| Edit simulation cell | 部分 | 原生管线节点编辑原点、3 条向量和 PBC；校验有限值与非退化体积；可选保持分数坐标并变换粒子位置；面板顺序已按 OVITO 对齐（Dimensionality/PBC/向量/原点），2D 维度切换与晶胞尺寸快捷字段尚未补齐 |
 | Freeze property | 待实现 | 按稳定 ID 保存参考属性 |
 | Load trajectory | 部分 | 单个 XYZ 多帧文件；未支持拓扑和轨迹文件合并 |
 | Python script | 待实现 | 尚无嵌入式 Python 或插件 API |
-| Replicate | 部分 | 按晶胞向量复制、选区同步、2000 万原子预算；尚无持久 ID |
-| Slice | 部分 | 轴向半空间切片，保留坐标小于阈值的原子；任意平面与厚度待做 |
+| Replicate | 部分 | Na/Nb/Nc 三方向复制（每轴 1–32）、Adjust box size、跨轴周期键重映射、2000 万原子预算；面板文案与 OVITO 的 Number of images/Assign unique IDs 尚有差异，无持久 ID |
+| Slice | 部分 | 任意法向平面：严格半空间/居中闭区间 slab、Reverse orientation、Create selection (do not delete)、Apply to selection only、Operate-on 元素行、实时 input/deleted/remaining 计数与视口半透明切平面；与 OVITO 实测计数一致（108→64/44、slab 18）；对齐视图类按钮与 Miller indices 为占位 |
 | Smooth trajectory | 待实现 | 时间窗口及周期展开 |
 | Unwrap trajectories | 待实现 | 稳定 ID、跨帧周期跳跃处理 |
 | Wrap at periodic boundaries | 部分 | 正交/三斜晶胞、任意独立周期向量组合、部分周期 slab/wire 和非零原点；周期向量线性相关时明确报错 |
