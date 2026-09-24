@@ -221,6 +221,25 @@ int main() {
                                 selectedNeighborReference.coordination.end(),
                                 [](uint32_t value){return value==0;}),
                 "selected-only RDF counts pairs among selected particles and uses the selected population for normalization");
+        Modifier emptyNeighborSelection{Op::ManualSelection};
+        Modifier emptySelectedCoordination=selectedCoordination;
+        const auto emptySelectedCoordinationResult=evaluate(fcc,
+            {emptyNeighborSelection,emptySelectedCoordination});
+        require(emptySelectedCoordinationResult.data.globalAttributes.at("CoordinationAnalysis.mean")==0 &&
+                    emptySelectedCoordinationResult.data.globalAttributes.at("CoordinationAnalysis.neighbor_pairs")==0 &&
+                    emptySelectedCoordinationResult.data.tables.back().rows.empty() &&
+                    std::all_of(emptySelectedCoordinationResult.data.scalarProperties.at("Coordination").begin(),
+                                emptySelectedCoordinationResult.data.scalarProperties.at("Coordination").end(),
+                                [](double value){return value==0;}),
+                "empty selected-only coordination has finite zero outputs and an empty selected-population table");
+        bool emptySelectedRdfRejected=false;
+        try { (void)evaluate(fcc,{emptyNeighborSelection,selectedRdf}); }
+        catch (const ModifierExecutionError &e) {
+            emptySelectedRdfRejected=e.nodeIndex==1 &&
+                std::string(e.what()).find("RDF requires particles")!=std::string::npos;
+        }
+        require(emptySelectedRdfRejected,
+                "empty selected-only RDF fails clearly at its node instead of publishing non-finite normalization");
         auto clusterPipeline = evaluate(fcc, {{Op::ClusterAnalysis,true,.8f}});
         require(clusterPipeline.data.globalAttributes.at("ClusterAnalysis.count") == 1 &&
                     clusterPipeline.data.scalarProperties.at("Cluster").size() == fcc.atoms.size() &&
