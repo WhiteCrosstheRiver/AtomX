@@ -146,6 +146,7 @@ int main() {
             app.refreshFont=false;
             app.captureUiTestItems=true;
             strcpy_s(app.modifierSearch,"Radial distribution function (RDF)");
+            const ImGuiStyle baseStyle=ImGui::GetStyle();
             auto frame=[&]() {
                 guiIO.DeltaTime=1.f/60.f;
                 app.uiTestItems.clear();
@@ -267,6 +268,37 @@ int main() {
                           "pipeline Delete removes only the selected copied node");
             if (app.pipelineJob.valid()) app.pipelineJob.wait();
             frame();
+            for (const auto &[width,height,scale] : std::vector<std::tuple<float,float,float>>{
+                     {1280.f,900.f,1.f},{1560.f,1000.f,1.f},
+                     {1600.f,1000.f,1.5f},{1920.f,1080.f,2.f}}) {
+                guiIO.DisplaySize={width,height};
+                uiScale=scale;
+                ImGui::GetStyle()=baseStyle;
+                ImGui::GetStyle().ScaleAllSizes(scale);
+                frame();
+                for (const auto &control : {std::string("pipeline.add-modification"),
+                                            "pipeline.node.copy."+originalNodeId,
+                                            "pipeline.node.delete."+originalNodeId}) {
+                    auto found=app.uiTestItems.find(control);
+                    requireExport(found!=app.uiTestItems.end(),
+                                  "responsive workspace keeps Pipeline controls present");
+                    requireExport(found->second.min.x>=0 && found->second.min.y>=0 &&
+                                      found->second.max.x<=width && found->second.max.y<=height,
+                                  ("responsive Pipeline control exceeds viewport bounds: "+control).c_str());
+                }
+                click("pipeline.node.copy."+originalNodeId);
+                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                frame();
+                const auto responsiveCopyId=app.mods[1].id;
+                click("pipeline.node.delete."+responsiveCopyId);
+                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                frame();
+                requireExport(app.mods.size()==1 && app.mods[0].id==originalNodeId,
+                              "Pipeline copy/delete controls remain clickable at tested width and scale");
+            }
+            uiScale=1.f;
+            ImGui::GetStyle()=baseStyle;
+            guiIO.DisplaySize={1560,1000};
         }
         ImGui::DestroyContext();
         for (const auto &e : std::filesystem::directory_iterator(dir))
