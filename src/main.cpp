@@ -1854,6 +1854,13 @@ struct App {
                             checkpoint(); m.rdfBins=std::clamp(bins,1,4096); update();
                         }
                     }
+                    if (m.op==Op::RadialDistribution || m.op==Op::CoordinationAnalysis) {
+                        bool onlySelected=m.neighborOnlySelected;
+                        if (ImGui::Checkbox("Use only selected particles",&onlySelected)) {
+                            checkpoint(); m.neighborOnlySelected=onlySelected; update();
+                        }
+                        ImGui::TextDisabled("Unselected particles are excluded as both analysis centers and neighbors.");
+                    }
                     if (m.op == Op::SelectOverlapping) {
                         bool useRadii = m.overlapUseRadii;
                         if (ImGui::Checkbox("Use per-particle radii", &useRadii)) {

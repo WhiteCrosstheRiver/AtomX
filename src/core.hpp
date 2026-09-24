@@ -678,6 +678,7 @@ struct Modifier {
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
     int histogramNormalization = 0; // counts, relative frequency, probability density
     int rdfBins = 128;
+    bool neighborOnlySelected = false;
     bool histogramSelectedOnly = false;
     bool histogramSelectRange = false;
     double histogramRangeStart = 0, histogramRangeEnd = 1;
@@ -1277,18 +1278,29 @@ struct NeighborAnalysis {
 inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
                                   std::atomic<bool> *cancel = nullptr,
                                   const std::vector<uint8_t> *clusterSelection=nullptr,
-                                  size_t radialBins=128) {
+                                  size_t radialBins=128,
+                                  const std::vector<uint8_t> *analysisSelection=nullptr) {
     validateNeighborAnalysisInput(d);
     if (radialBins==0 || radialBins>4096)
         throw std::runtime_error("Radial distribution bin count must be between 1 and 4096");
     if (clusterSelection && clusterSelection->size()!=d.atoms.size())
         throw std::runtime_error("Cluster selection length does not match particle count");
+    if (analysisSelection && analysisSelection->size()!=d.atoms.size())
+        throw std::runtime_error("Analysis selection length does not match particle count");
     NeighborAnalysis result;
     result.cutoff = cutoff;
     result.pairHistogram.resize(radialBins);
     result.rdf.resize(radialBins);
     result.coordination.resize(d.atoms.size());
     result.cluster.resize(d.atoms.size());
+    size_t analysisParticleCount=d.atoms.size();
+    if (analysisSelection) {
+        analysisParticleCount=0;
+        for (size_t i=0;i<analysisSelection->size();++i) {
+            if ((i&65535)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+            if ((*analysisSelection)[i]) ++analysisParticleCount;
+        }
+    }
     for (uint32_t i=0;i<result.cluster.size();++i) result.cluster[i]=i;
     auto root=[&](uint32_t i) {
         while (i!=result.cluster[i]) {
@@ -1298,6 +1310,7 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
         return i;
     };
     forEachNeighborPair(d,cutoff,[&](uint32_t i,uint32_t j,double distanceSquared) {
+        if (analysisSelection && (!(*analysisSelection)[i] || !(*analysisSelection)[j])) return;
         ++result.coordination[i]; ++result.coordination[j]; ++result.bonds;
         const size_t bin=std::min(radialBins-1,
             size_t(std::sqrt(distanceSquared)/cutoff*radialBins));
@@ -1320,15 +1333,15 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
     for (uint32_t i=0;i<result.cluster.size();++i)
         if (!clusterSelection || (*clusterSelection)[i]) result.cluster[i]=ids.at(result.cluster[i]);
     result.clusters=uint32_t(ids.size());
-    result.meanCoordination=d.atoms.empty()?0:2.0*result.bonds/d.atoms.size();
+    result.meanCoordination=analysisParticleCount==0?0:2.0*result.bonds/analysisParticleCount;
     const double volume=std::abs(cellDeterminant(d.cell));
-    result.rdfValid=d.pbc[0]&&d.pbc[1]&&d.pbc[2]&&volume>0&&!d.atoms.empty();
+    result.rdfValid=d.pbc[0]&&d.pbc[1]&&d.pbc[2]&&volume>0&&analysisParticleCount>0;
     if (result.rdfValid) {
-        const double density=d.atoms.size()/volume;
+        const double density=analysisParticleCount/volume;
         for (size_t bin=0;bin<radialBins;++bin) {
             const double lo=double(cutoff)*bin/radialBins, hi=double(cutoff)*(bin+1)/radialBins;
             const double shell=(4.0/3.0)*3.141592653589793*(hi*hi*hi-lo*lo*lo);
-            result.rdf[bin]=2.0*result.pairHistogram[bin]/(d.atoms.size()*density*shell);
+            result.rdf[bin]=2.0*result.pairHistogram[bin]/(analysisParticleCount*density*shell);
         }
     }
     return result;
@@ -2016,24 +2029,29 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 if (r.data.sampled())
                     throw std::runtime_error("Neighbor analysis requires complete, unsampled particle data");
                 const auto *clusterSelection=m.clusterOnlySelected ? &r.selected : nullptr;
+                const auto *analysisSelection = m.neighborOnlySelected ? &r.selected : nullptr;
                 auto analysis = m.op==Op::ClusterAnalysis && m.clusterByBonds
                     ? clustersFromBonds(r.data,cancel,clusterSelection)
                     : neighbors(r.data,m.value,cancel,
                                 m.op==Op::ClusterAnalysis ? clusterSelection : nullptr,
-                                m.op==Op::RadialDistribution ? size_t(m.rdfBins) : 128);
+                                m.op==Op::RadialDistribution ? size_t(m.rdfBins) : 128,
+                                analysisSelection);
                 if (m.op == Op::CoordinationAnalysis) {
                     std::vector<double> values(analysis.coordination.begin(), analysis.coordination.end());
                     r.data.scalarProperties["Coordination"] = std::move(values);
                     r.data.globalAttributes["CoordinationAnalysis.mean"] = analysis.meanCoordination;
                     r.data.globalAttributes["CoordinationAnalysis.neighbor_pairs"] = double(analysis.bonds);
                     std::map<uint32_t,uint64_t> counts;
+                    size_t population=0;
                     for (size_t i=0;i<analysis.coordination.size();++i) {
                         if ((i&65535)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+                        if (analysisSelection && !(*analysisSelection)[i]) continue;
                         ++counts[analysis.coordination[i]];
+                        ++population;
                     }
                     DataTable table; table.name="Coordination number distribution";
                     table.columns={"Coordination number","Particle count","Fraction"};
-                    const double total=double(analysis.coordination.size());
+                    const double total=double(population);
                     for (const auto &[number,count]:counts)
                         table.rows.push_back({std::to_string(number),std::to_string(count),
                             total>0 ? formatDataNumber(double(count)/total) : "0"});

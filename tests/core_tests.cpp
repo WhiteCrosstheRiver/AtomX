@@ -177,6 +177,39 @@ int main() {
                     coordinationPipeline.data.tables.back().rows==
                         std::vector<std::vector<std::string>>({{"12",std::to_string(fcc.atoms.size()),"1"}}),
                 "coordination modifier publishes per-particle, global, and distribution-table results");
+        Modifier neighborSelection{Op::ManualSelection};
+        neighborSelection.manualSelection={0,1};
+        Modifier selectedCoordination{Op::CoordinationAnalysis};
+        selectedCoordination.value=.8f;
+        selectedCoordination.neighborOnlySelected=true;
+        const auto selectedCoordinationResult=evaluate(fcc,{neighborSelection,selectedCoordination});
+        const auto &selectedCoordinationValues=selectedCoordinationResult.data.scalarProperties.at("Coordination");
+        require(selectedCoordinationValues[0]==1 && selectedCoordinationValues[1]==1 &&
+                    std::all_of(selectedCoordinationValues.begin()+2,selectedCoordinationValues.end(),
+                                [](double value){return value==0;}) &&
+                    selectedCoordinationResult.data.globalAttributes.at("CoordinationAnalysis.mean")==1 &&
+                    selectedCoordinationResult.data.globalAttributes.at("CoordinationAnalysis.neighbor_pairs")==1 &&
+                    selectedCoordinationResult.data.tables.back().rows==
+                        std::vector<std::vector<std::string>>({{"1","2","1"}}),
+                "selected-only coordination excludes unselected centers and neighbors and limits distribution population");
+        Modifier selectedRdf{Op::RadialDistribution};
+        selectedRdf.value=.8f;
+        selectedRdf.rdfBins=16;
+        selectedRdf.neighborOnlySelected=true;
+        const auto selectedRdfResult=evaluate(fcc,{neighborSelection,selectedRdf});
+        const auto selectedNeighborReference=neighbors(fcc,.8f,nullptr,nullptr,16,
+                                                       &selectedRdfResult.selected);
+        uint64_t selectedRdfPairs=0;
+        for (const auto &row : selectedRdfResult.data.tables.back().rows)
+            selectedRdfPairs+=std::stoull(row[1]);
+        require(selectedRdfResult.data.tables.back().rows.size()==16 &&
+                    selectedRdfPairs==1 &&
+                    selectedNeighborReference.rdfValid && selectedNeighborReference.bonds==1 &&
+                    selectedNeighborReference.coordination[0]==1 && selectedNeighborReference.coordination[1]==1 &&
+                    std::all_of(selectedNeighborReference.coordination.begin()+2,
+                                selectedNeighborReference.coordination.end(),
+                                [](uint32_t value){return value==0;}),
+                "selected-only RDF counts pairs among selected particles and uses the selected population for normalization");
         auto clusterPipeline = evaluate(fcc, {{Op::ClusterAnalysis,true,.8f}});
         require(clusterPipeline.data.globalAttributes.at("ClusterAnalysis.count") == 1 &&
                     clusterPipeline.data.scalarProperties.at("Cluster").size() == fcc.atoms.size() &&
