@@ -186,6 +186,29 @@ int main() {
                     disconnectedClusters.data.tables.back().rows ==
                         std::vector<std::vector<std::string>>({{"1","2"},{"2","2"},{"3","1"}}),
                 "cluster pipeline assigns deterministic connected-component labels and exact table sizes");
+        Dataset bondClusterFixture;
+        bondClusterFixture.species={"X"};
+        bondClusterFixture.atoms={{0,0,0,0},{8,0,0,0},{16,0,0,0},{24,0,0,0},{32,0,0,0}};
+        bondClusterFixture.bonds={{0,2,{0,0,0}},{2,1,{1,0,0}},{3,4,{0,0,0}}};
+        Modifier bondClusters{Op::ClusterAnalysis};
+        bondClusters.clusterByBonds=true;
+        const auto byBondConnectivity=evaluate(bondClusterFixture,{bondClusters});
+        require(byBondConnectivity.data.scalarProperties.at("Cluster")==
+                    std::vector<double>({1,1,1,2,2}) &&
+                    byBondConnectivity.data.globalAttributes.at("ClusterAnalysis.count")==2 &&
+                    byBondConnectivity.data.tables.back().rows==
+                        std::vector<std::vector<std::string>>({{"1","3"},{"2","2"}}),
+                "bond-based clustering follows topology rather than distance and labels components deterministically");
+        Dataset invalidBondCluster=bondClusterFixture;
+        invalidBondCluster.bonds[0].b=99;
+        bool invalidBondClusterRejected=false;
+        try { (void)evaluate(invalidBondCluster,{bondClusters}); }
+        catch (const ModifierExecutionError &e) {
+            invalidBondClusterRejected=e.nodeIndex==0 &&
+                std::string(e.what()).find("Bond endpoint")!=std::string::npos;
+        }
+        require(invalidBondClusterRejected,
+                "bond-based clustering reports malformed topology at its pipeline node");
         Dataset extremePeriodicIndex;
         extremePeriodicIndex.species={"X"};
         extremePeriodicIndex.atoms={{0,0,0,0},{.25f,0,0,0}};

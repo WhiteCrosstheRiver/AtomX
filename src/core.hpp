@@ -672,6 +672,7 @@ struct Modifier {
     bool transformCoordinatesWithCell = false;
     bool overlapUseRadii = false;
     bool transformVectorProperties = false;
+    bool clusterByBonds = false;
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
     int histogramNormalization = 0; // counts, relative frequency, probability density
     bool histogramSelectedOnly = false;
@@ -1312,6 +1313,47 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
     }
     return result;
 }
+inline NeighborAnalysis clustersFromBonds(const Dataset &data,std::atomic<bool> *cancel=nullptr) {
+    if (data.sampled())
+        throw std::runtime_error("Bond-based cluster analysis requires complete, unsampled particle data");
+    if (data.atoms.size()>20'000'000)
+        throw std::runtime_error("Bond-based cluster analysis is limited to 20 million particles");
+    if (data.bonds.size()>20'000'000)
+        throw std::runtime_error("Bond-based cluster analysis is limited to 20 million bonds");
+    NeighborAnalysis result;
+    result.cluster.resize(data.atoms.size());
+    for (uint32_t i=0;i<result.cluster.size();++i) result.cluster[i]=i;
+    auto root=[&](uint32_t i) {
+        while (i!=result.cluster[i]) {
+            result.cluster[i]=result.cluster[result.cluster[i]];
+            i=result.cluster[i];
+        }
+        return i;
+    };
+    for (size_t i=0;i<data.bonds.size();++i) {
+        if ((i&4095)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+        const auto &bond=data.bonds[i];
+        if (bond.a>=data.atoms.size() || bond.b>=data.atoms.size())
+            throw std::runtime_error("Bond endpoint is outside the particle array");
+        const uint32_t a=root(bond.a), b=root(bond.b);
+        if (a!=b) result.cluster[std::max(a,b)]=std::min(a,b);
+    }
+    std::unordered_map<uint32_t,uint32_t> ids;
+    ids.reserve(result.cluster.size());
+    std::vector<uint32_t> representatives(result.cluster.size());
+    for (uint32_t i=0;i<result.cluster.size();++i) {
+        if ((i&65535)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+        representatives[i]=root(i);
+        if (!ids.contains(representatives[i]))
+            ids.emplace(representatives[i],uint32_t(ids.size())+1);
+    }
+    for (size_t i=0;i<result.cluster.size();++i) {
+        if ((i&65535)==0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+        result.cluster[i]=ids.at(representatives[i]);
+    }
+    result.clusters=uint32_t(ids.size());
+    return result;
+}
 class ParticleExpression {
     const Dataset &d; size_t atom; std::string_view text; size_t p = 0;
     void ws() { while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p; }
@@ -1629,7 +1671,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             if (m.op == Op::SelectRange && m.upper < m.value)
                 throw std::runtime_error("Upper bound must be at least the lower bound");
             if ((m.op == Op::CommonNeighborAnalysis || (m.op == Op::CreateBonds && !m.bondTypeCutoffsEnabled) ||
-                 m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
+                 m.op == Op::CoordinationAnalysis || (m.op == Op::ClusterAnalysis && !m.clusterByBonds) ||
                  m.op == Op::RadialDistribution) &&
                 (!(m.value > 0) || !std::isfinite(m.value)))
                 throw std::runtime_error("Cutoff must be finite and positive");
@@ -1941,7 +1983,8 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 m.op == Op::RadialDistribution) {
                 if (r.data.sampled())
                     throw std::runtime_error("Neighbor analysis requires complete, unsampled particle data");
-                const auto analysis = neighbors(r.data, m.value, cancel);
+                const auto analysis = m.op==Op::ClusterAnalysis && m.clusterByBonds
+                    ? clustersFromBonds(r.data,cancel) : neighbors(r.data,m.value,cancel);
                 if (m.op == Op::CoordinationAnalysis) {
                     std::vector<double> values(analysis.coordination.begin(), analysis.coordination.end());
                     r.data.scalarProperties["Coordination"] = std::move(values);

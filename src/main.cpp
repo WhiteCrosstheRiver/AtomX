@@ -1819,10 +1819,20 @@ struct App {
                             m.transformVectorProperties = transformVectors; update();
                         }
                     }
+                    if (m.op == Op::ClusterAnalysis) {
+                        bool useBonds=m.clusterByBonds;
+                        if (ImGui::Checkbox("Group by existing bonds",&useBonds)) {
+                            checkpoint(); m.clusterByBonds=useBonds; update();
+                        }
+                        ImGui::TextDisabled(useBonds
+                            ? "Connected components follow the input bond topology."
+                            : "Connected components follow the periodic minimum-image cutoff.");
+                    }
                     if (m.op == Op::CreateBonds || m.op == Op::CommonNeighborAnalysis ||
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
                         m.op == Op::RadialDistribution || m.op == Op::ExpandSelection) {
-                        if (!(m.op==Op::CreateBonds && m.bondTypeCutoffsEnabled)) {
+                        if (!(m.op==Op::CreateBonds && m.bondTypeCutoffsEnabled) &&
+                            !(m.op==Op::ClusterAnalysis && m.clusterByBonds)) {
                             float value = m.value;
                             if (ImGui::DragFloat("Cutoff distance", &value, .01f, .0001f, 100000.f, "%.5g")) {
                                 checkpoint(); m.value = value; update();
@@ -2721,7 +2731,7 @@ struct App {
                 for (auto name : {"Atomic strain", "Bader charge integration", "Bond order"}) planned(name);
                 operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
                 operation(Op::BondAngleDistribution,"Build a 0–180 degree histogram from pairs of incident bonds, resolving periodic image shifts.");
-                operation(Op::ClusterAnalysis,"Connected-component clustering by a periodic minimum-image cutoff; adds per-particle Cluster IDs and a cluster-size table."); planned("Difference between frames");
+                operation(Op::ClusterAnalysis,"Build connected components by a periodic cutoff or existing bond topology; adds per-particle Cluster IDs and a cluster-size table."); planned("Difference between frames");
                 for (auto name : {"Displacement vectors", "Elastic strain calculation", "Find rings", "Grain segmentation"}) planned(name);
                 operation(Op::Histogram,"Build a finite-value histogram data table for a particle scalar or position component.");
                 operation(Op::RadialDistribution,"Compute a periodic 3D radial distribution table from the current pipeline data.");
