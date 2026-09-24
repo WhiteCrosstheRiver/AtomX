@@ -265,6 +265,22 @@ int main() {
         require(rdfPipeline.data.tables.back().rows.size() == 128 &&
                     rdfPipeline.data.tables.back().columns[2] == "g(r)",
                 "RDF modifier publishes tabular radial distribution data");
+        Modifier coarseRdf{Op::RadialDistribution};
+        coarseRdf.value=.8f;
+        coarseRdf.rdfBins=16;
+        const auto coarseRdfResult=evaluate(fcc,{coarseRdf});
+        require(coarseRdfResult.data.tables.back().rows.size()==16 &&
+                    coarseRdfResult.data.tables.back().rows.front()[0]=="0.025000" &&
+                    neighbors(fcc,.8f,nullptr,nullptr,16).pairHistogram.size()==16,
+                "RDF bin count is a per-node parameter shared by its table and neighbor histogram");
+        coarseRdf.rdfBins=0;
+        bool invalidRdfBinsRejected=false;
+        try { (void)evaluate(fcc,{coarseRdf}); }
+        catch (const ModifierExecutionError &e) {
+            invalidRdfBinsRejected=e.nodeIndex==0 &&
+                std::string(e.what()).find("RDF bins")!=std::string::npos;
+        }
+        require(invalidRdfBinsRejected,"RDF rejects an invalid per-node bin count at its modifier");
         Modifier histogram{Op::Histogram}; histogram.type=8; histogram.property="Position.X";
         auto histogramPipeline=evaluate(fcc,{histogram});
         uint64_t histogramPopulation=0;

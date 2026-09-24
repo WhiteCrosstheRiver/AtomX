@@ -677,6 +677,7 @@ struct Modifier {
     bool clusterSortBySize = false;
     std::array<double, 12> affineTransform{1,0,0,0, 0,1,0,0, 0,0,1,0};
     int histogramNormalization = 0; // counts, relative frequency, probability density
+    int rdfBins = 128;
     bool histogramSelectedOnly = false;
     bool histogramSelectRange = false;
     double histogramRangeStart = 0, histogramRangeEnd = 1;
@@ -1268,19 +1269,24 @@ struct NeighborAnalysis {
     uint32_t clusters = 0;
     uint64_t bonds = 0;
     double meanCoordination = 0;
-    std::array<uint64_t, 128> pairHistogram{};
-    std::array<double, 128> rdf{};
+    std::vector<uint64_t> pairHistogram;
+    std::vector<double> rdf;
     float cutoff = 0;
     bool rdfValid = false;
 };
 inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
                                   std::atomic<bool> *cancel = nullptr,
-                                  const std::vector<uint8_t> *clusterSelection=nullptr) {
+                                  const std::vector<uint8_t> *clusterSelection=nullptr,
+                                  size_t radialBins=128) {
     validateNeighborAnalysisInput(d);
+    if (radialBins==0 || radialBins>4096)
+        throw std::runtime_error("Radial distribution bin count must be between 1 and 4096");
     if (clusterSelection && clusterSelection->size()!=d.atoms.size())
         throw std::runtime_error("Cluster selection length does not match particle count");
     NeighborAnalysis result;
     result.cutoff = cutoff;
+    result.pairHistogram.resize(radialBins);
+    result.rdf.resize(radialBins);
     result.coordination.resize(d.atoms.size());
     result.cluster.resize(d.atoms.size());
     for (uint32_t i=0;i<result.cluster.size();++i) result.cluster[i]=i;
@@ -1293,7 +1299,8 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
     };
     forEachNeighborPair(d,cutoff,[&](uint32_t i,uint32_t j,double distanceSquared) {
         ++result.coordination[i]; ++result.coordination[j]; ++result.bonds;
-        const int bin=std::min(127,int(std::sqrt(distanceSquared)/cutoff*128));
+        const size_t bin=std::min(radialBins-1,
+            size_t(std::sqrt(distanceSquared)/cutoff*radialBins));
         result.pairHistogram[bin]++;
         if (!clusterSelection || ((*clusterSelection)[i] && (*clusterSelection)[j])) {
             const auto ri=root(i), rj=root(j);
@@ -1318,8 +1325,8 @@ inline NeighborAnalysis neighbors(const Dataset &d, float cutoff,
     result.rdfValid=d.pbc[0]&&d.pbc[1]&&d.pbc[2]&&volume>0&&!d.atoms.empty();
     if (result.rdfValid) {
         const double density=d.atoms.size()/volume;
-        for (int bin=0;bin<128;++bin) {
-            const double lo=double(cutoff)*bin/128, hi=double(cutoff)*(bin+1)/128;
+        for (size_t bin=0;bin<radialBins;++bin) {
+            const double lo=double(cutoff)*bin/radialBins, hi=double(cutoff)*(bin+1)/radialBins;
             const double shell=(4.0/3.0)*3.141592653589793*(hi*hi*hi-lo*lo*lo);
             result.rdf[bin]=2.0*result.pairHistogram[bin]/(d.atoms.size()*density*shell);
         }
@@ -1695,9 +1702,11 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 throw std::runtime_error("Upper bound must be at least the lower bound");
             if ((m.op == Op::CommonNeighborAnalysis || (m.op == Op::CreateBonds && !m.bondTypeCutoffsEnabled) ||
                  m.op == Op::CoordinationAnalysis || (m.op == Op::ClusterAnalysis && !m.clusterByBonds) ||
-                 m.op == Op::RadialDistribution) &&
+                m.op == Op::RadialDistribution) &&
                 (!(m.value > 0) || !std::isfinite(m.value)))
                 throw std::runtime_error("Cutoff must be finite and positive");
+            if (m.op==Op::RadialDistribution && (m.rdfBins<1 || m.rdfBins>4096))
+                throw std::runtime_error("RDF bins must be between 1 and 4096");
             if (m.op == Op::CreateBonds && m.bondTypeCutoffsEnabled) {
                 const size_t typeCount=r.data.species.size();
                 if (typeCount==0 || typeCount>32 || m.bondTypeCutoffs.size()!=typeCount*typeCount)
@@ -2010,7 +2019,8 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 auto analysis = m.op==Op::ClusterAnalysis && m.clusterByBonds
                     ? clustersFromBonds(r.data,cancel,clusterSelection)
                     : neighbors(r.data,m.value,cancel,
-                                m.op==Op::ClusterAnalysis ? clusterSelection : nullptr);
+                                m.op==Op::ClusterAnalysis ? clusterSelection : nullptr,
+                                m.op==Op::RadialDistribution ? size_t(m.rdfBins) : 128);
                 if (m.op == Op::CoordinationAnalysis) {
                     std::vector<double> values(analysis.coordination.begin(), analysis.coordination.end());
                     r.data.scalarProperties["Coordination"] = std::move(values);
@@ -2060,7 +2070,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                         throw std::runtime_error("RDF requires particles in a valid fully periodic 3D simulation cell");
                     DataTable table; table.name = "Radial distribution function";
                     table.columns = {"r", "Pair count", "g(r)"};
-                    for (int bin = 0; bin < int(analysis.rdf.size()); ++bin) {
+                    for (size_t bin = 0; bin < analysis.rdf.size(); ++bin) {
                         const double radius = (bin + .5) * m.value / analysis.rdf.size();
                         table.rows.push_back({std::to_string(radius),
                             std::to_string(analysis.pairHistogram[bin]), std::to_string(analysis.rdf[bin])});

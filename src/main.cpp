@@ -1848,6 +1848,12 @@ struct App {
                             }
                         }
                     }
+                    if (m.op==Op::RadialDistribution) {
+                        int bins=m.rdfBins;
+                        if (ImGui::InputInt("RDF histogram bins",&bins)) {
+                            checkpoint(); m.rdfBins=std::clamp(bins,1,4096); update();
+                        }
+                    }
                     if (m.op == Op::SelectOverlapping) {
                         bool useRadii = m.overlapUseRadii;
                         if (ImGui::Checkbox("Use per-particle radii", &useRadii)) {
@@ -2361,23 +2367,24 @@ struct App {
                     ImGui::Text("Neighbor pairs: %llu", analysis->bonds);
                     ImGui::Text("Mean coordination: %.4f", analysis->meanCoordination);
                     ImGui::TextDisabled("Neighbor distances (0 to %.3f)", analysis->cutoff);
-                    std::array<float,128> histogram{};
+                    std::vector<float> histogram(analysis->pairHistogram.size());
                     std::transform(analysis->pairHistogram.begin(),analysis->pairHistogram.end(),histogram.begin(),
                                    [](uint64_t value){return float(value);});
-                    ImGui::PlotHistogram("##distances", histogram.data(),128,0,nullptr,0,FLT_MAX,{-1,75});
+                    ImGui::PlotHistogram("##distances", histogram.data(),int(histogram.size()),0,nullptr,0,FLT_MAX,{-1,75});
                     if (analysis->rdfValid) {
-                        std::array<float,128> rdf{};
+                        std::vector<float> rdf(analysis->rdf.size());
                         std::transform(analysis->rdf.begin(),analysis->rdf.end(),rdf.begin(),
                                        [](double value){return float(value);});
                         ImGui::TextUnformatted("Radial distribution g(r)");
-                        ImGui::PlotLines("##rdf",rdf.data(),128,0,nullptr,0,FLT_MAX,{-1,75});
+                        ImGui::PlotLines("##rdf",rdf.data(),int(rdf.size()),0,nullptr,0,FLT_MAX,{-1,75});
                     } else ImGui::TextWrapped("Bulk RDF requires a valid fully periodic 3D cell.");
                     if (ImGui::Button("Export distributions CSV", {-1, U(30)})) {
                         auto p = dialog(window, true, L"CSV file\0*.csv\0", L"csv");
                         if (!p.empty()) {
                             std::ofstream out(p); out << "r_min,r_max,pair_count,g_r\n";
-                            for (int i=0;i<128;++i) {
-                                out << analysis->cutoff*i/128 << ',' << analysis->cutoff*(i+1)/128
+                            for (size_t i=0;i<analysis->pairHistogram.size();++i) {
+                                out << analysis->cutoff*i/analysis->pairHistogram.size() << ','
+                                    << analysis->cutoff*(i+1)/analysis->pairHistogram.size()
                                     << ',' << analysis->pairHistogram[i] << ',';
                                 if (analysis->rdfValid) out << analysis->rdf[i];
                                 out << '\n';
