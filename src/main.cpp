@@ -309,6 +309,9 @@ struct App {
     std::atomic<bool> exportCancel{false};
     std::atomic<float> exportProgress{0};
     std::string filter;
+    struct UiTestItem { ImGuiID id=0; ImVec2 min{}, max{}; bool hovered=false, clicked=false; };
+    bool captureUiTestItems = false;
+    std::unordered_map<std::string,UiTestItem> uiTestItems;
     Statistics cachedStats[3];
     size_t selectedCount = 0;
     float cutoff = .8f;
@@ -945,6 +948,12 @@ struct App {
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                          ImGuiWindowFlags_NoSavedSettings | ((std::string(name) == "Title" || std::string(name) == "Status") ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
+    }
+    void recordUiTestItem(const std::string &name,const char *explicitLabel=nullptr) {
+        if (!captureUiTestItems) return;
+        const ImGuiID id=explicitLabel ? ImGui::GetID(explicitLabel) : ImGui::GetItemID();
+        uiTestItems[name]={id,ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),
+                           ImGui::IsItemHovered(),ImGui::IsItemClicked()};
     }
     void control(const char *id, int kind, const char *tip) {
         ImGui::PushStyleColor(ImGuiCol_Button, {0,0,0,0});
@@ -1655,6 +1664,7 @@ struct App {
                 heading("Pipeline editor");
                 if (ImGui::Button("Add modification...", {-1, U(32)}))
                     showCatalog = true;
+                recordUiTestItem("pipeline.add-modification");
                 {
                     auto p = ImGui::GetItemRectMax();
                     ImGui::GetWindowDrawList()->AddTriangleFilled({p.x-U(18),p.y-U(18)},{p.x-U(10),p.y-U(18)},{p.x-U(14),p.y-U(13)},ImGui::GetColorU32(ImGuiCol_Text));
@@ -1853,6 +1863,7 @@ struct App {
                         if (ImGui::InputInt("RDF histogram bins",&bins)) {
                             checkpoint(); m.rdfBins=std::clamp(bins,1,4096); update();
                         }
+                        recordUiTestItem("pipeline.rdf-bins","RDF histogram bins");
                     }
                     if (m.op==Op::RadialDistribution || m.op==Op::CoordinationAnalysis) {
                         bool onlySelected=m.neighborOnlySelected;
@@ -2732,6 +2743,7 @@ struct App {
             auto operation = [&](Op op, const char *hint) {
                 if (!matches(opName(op))) return;
                 if (ImGui::Selectable(opName(op))) { add(op); ImGui::CloseCurrentPopup(); }
+                recordUiTestItem(std::string("catalog.")+opName(op));
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",hint);
             };
             auto planned = [&](const char *name) {

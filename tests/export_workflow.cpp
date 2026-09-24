@@ -20,6 +20,12 @@ int main() {
         Renderer testRenderer;
         testRenderer.init(window);
         ImGui::CreateContext();
+        auto &guiIO=ImGui::GetIO();
+        guiIO.DisplaySize={1560,1000};
+        guiIO.DeltaTime=1.f/60.f;
+        guiIO.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
+        guiIO.Fonts->AddFontDefault();
+        guiIO.Fonts->Build();
         {
             App app(window, testRenderer);
             // Appearance follows element identity across reordered/missing trajectory types.
@@ -119,6 +125,80 @@ int main() {
             requireExport(frames.size() == 2, "failed export preserves old destination");
             for (const auto &e : std::filesystem::directory_iterator(dir))
                 requireExport(e.path().extension() != ".tmp", "staging files removed");
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            app.poll();
+            app.pipelineCheckpoint.reset();
+            app.pipelineCheckpointNode=SIZE_MAX;
+            app.mods.clear();
+            app.modifierGraph.selected=0;
+            app.frames.clear();
+            app.path.clear();
+            app.source.species={"Cu"};
+            app.source.cell={4,0,0,0,4,0,0,0,4};
+            app.source.origin={};
+            app.source.pbc={true,true,true};
+            app.source.atoms={{1,1,1,0}};
+            app.source.sourceCount=1;
+            app.result=evaluate(app.source,std::vector<Modifier>{});
+            app.error.clear();
+            app.status="Ready";
+            app.selectPipeline=true;
+            app.refreshFont=false;
+            app.captureUiTestItems=true;
+            strcpy_s(app.modifierSearch,"Radial distribution function (RDF)");
+            auto frame=[&]() {
+                guiIO.DeltaTime=1.f/60.f;
+                app.uiTestItems.clear();
+                ImGui::NewFrame();
+                app.ui();
+                ImGui::Render();
+            };
+            auto click=[&](const std::string &name) {
+                auto found=app.uiTestItems.find(name);
+                requireExport(found!=app.uiTestItems.end(),"required interactive UI control was not recorded");
+                const auto item=found->second;
+                requireExport(item.id!=0,"interactive control must expose a stable nonzero ImGui ID");
+                requireExport(item.max.x>item.min.x && item.max.y>item.min.y,
+                              "interactive UI control has an empty rectangle");
+                const ImVec2 point{(item.min.x+item.max.x)*.5f,(item.min.y+item.max.y)*.5f};
+                guiIO.AddMousePosEvent(point.x,point.y);
+                guiIO.AddMouseButtonEvent(0,true); frame();
+                auto down=app.uiTestItems.find(name);
+                requireExport(down!=app.uiTestItems.end() && down->second.hovered && down->second.clicked,
+                              "simulated pointer must hit and activate the recorded control");
+                guiIO.AddMouseButtonEvent(0,false); frame();
+            };
+            frame();
+            click("pipeline.add-modification");
+            frame(); // Allow the newly opened popup to settle before using its recorded item rectangles.
+            requireExport(app.uiTestItems.contains("catalog.Radial distribution function (RDF)"),
+                          "catalog operation is reachable by its stable label");
+            const auto catalogId=app.uiTestItems.at("catalog.Radial distribution function (RDF)").id;
+            frame();
+            requireExport(app.uiTestItems.contains("catalog.Radial distribution function (RDF)") &&
+                              app.uiTestItems.at("catalog.Radial distribution function (RDF)").id==catalogId,
+                          "catalog widget IDs stay stable while its popup remains open");
+            click("catalog.Radial distribution function (RDF)");
+            requireExport(app.mods.size()==1 && app.mods[0].op==Op::RadialDistribution,
+                          "mouse interaction inserts the selected real modifier");
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            app.selectPipeline=true;
+            frame();
+            requireExport(app.uiTestItems.contains("pipeline.rdf-bins"),
+                          "selected modifier exposes its RDF parameter control");
+            click("pipeline.rdf-bins");
+            guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,true);
+            guiIO.AddKeyEvent(ImGuiKey_A,true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_A,false);
+            guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,false);
+            guiIO.AddInputCharactersUTF8("16"); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Enter,true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Enter,false); frame();
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame();
+            requireExport(app.mods[0].rdfBins==16 && app.result.data.tables.back().rows.size()==16 &&
+                              app.error.empty(),
+                          "keyboard editing changes the actual RDF modifier and its computed table");
         }
         ImGui::DestroyContext();
         for (const auto &e : std::filesystem::directory_iterator(dir))
@@ -126,8 +206,8 @@ int main() {
         std::filesystem::remove(dir);
         DestroyWindow(window);
         CoUninitialize();
-        std::cout << "PASS: application export range, stride, pipeline, sequences, source "
-                     "protection, atomic failure cleanup\n";
+        std::cout << "PASS: application export, real ImGui pointer/keyboard events, "
+                     "modifier creation and parameter recomputation\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << "; fixtures: " << dir << '\n';
