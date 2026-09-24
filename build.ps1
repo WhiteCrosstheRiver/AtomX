@@ -34,6 +34,6 @@ if errorlevel 1 exit /b 1
 build\export_workflow.exe
 if errorlevel 1 exit /b 1
 "@
-Set-Content -LiteralPath build/compile.cmd -Value $batch -Encoding utf8
+Set-Content -LiteralPath build/compile.cmd -Value $batch -Encoding ascii
 & cmd.exe /d /c build\compile.cmd
 if ($LASTEXITCODE -ne 0) { throw "Build or tests failed: $LASTEXITCODE" }

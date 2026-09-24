@@ -5,3 +5,4 @@ third_party/imgui.zip
 *.pdb
 atomx-error.txt
 smoke-report.txt
+__pycache__/
