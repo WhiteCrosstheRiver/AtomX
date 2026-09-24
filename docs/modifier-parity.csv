@@ -7,7 +7,7 @@ A05,Analysis,Bond order,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A06,Analysis,Cluster analysis,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Cutoff or bond mode; 2M/20M atom caps
 A07,Analysis,Difference between frames,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A08,Analysis,Dislocation analysis (DXA),,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Only approximate coordination prepass exists outside pipeline
-A09,Analysis,Displacement vectors,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,N2,,,,Reference frame + periodic unwrap + arrow object
+A09,Analysis,Displacement vectors,,docs/parity/ovito/,pass,pass,partial,pass,pass,partial,N2,12262a9,Absolute/relative reference frames + MIC + cell mapping; external-file source and arrow visual element are documented stubs; reference is raw frame not upstream-modified
 A10,Analysis,Elastic strain calculation,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A11,Analysis,Find rings,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A12,Analysis,Grain segmentation,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,

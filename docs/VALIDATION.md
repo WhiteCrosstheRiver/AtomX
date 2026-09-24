@@ -266,3 +266,10 @@
 - Expand selection：cutoff / N nearest / bonded / same molecule 四模式 + Number of iterations + 空选区时 OVITO 同文错误；现场验证错误弹窗与 STALE RESULT 保留旧行为。
 - Select type：Name|Id 复选框多选表（Cu=27、Ni=81、全选=108 回归）。
 - 遗留：空选区时 AtomX 以模态弹窗+控件灰显表达，OVITO 为面板内红字错误；Expand 的 mode 语义（bonded/molecule）依赖 Create bonds 先行。
+
+## 2026-09-25 N2 波次验证（Displacement vectors）
+
+- 数值对照：3×3×3 FCC 热振动（0.12 Å 正弦公式）帧 5 vs 帧 0 的平均位移模长与解析参考一致（±3e-4）；边界跨越原子 MIC 开=−0.1 / 关=+7.1；计数不匹配抛 OVITO 同文节点错误。
+- 面板与 OVITO 实测同构：Same pipeline（External file 灰显注明未实现）/ Frame number 0 / Relative to current frame offset −1 / Mapping off-To reference-To current / Minimum image convention。
+- 遗留：参考构型取原始数据源帧（OVITO 取该帧的上游修饰后结果）；External file 未实现；Displacements 箭头可视元素未渲染（属性已发布供 Histogram/Color coding 消费）。
+- 构建门禁全绿；GUI 面板现场验收通过。
