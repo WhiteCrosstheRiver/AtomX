@@ -73,7 +73,7 @@
 | Find rings | 待实现 | 键图最短环分析 |
 | Grain segmentation | 待实现 | 局部晶体取向及晶粒聚类 |
 | Histogram | 部分 | 可选择位置分量、标量属性或向量属性分量，配置 1–4096 bins 和绝对计数/相对频率/概率密度归一化，可限制为输入选区；可选闭区间值范围选择会发布粒子 selection，能与下游 Delete selected 组合；发布含样本数的 Data Table 和柱形预览，首末 bin 与 Y 轴上限可独立缩放且不触发管线重算；极端有限值范围使用缩放分箱避免跨度溢出；忽略非有限样本，拒绝缺失/错位属性和空有效样本，扫描和分箱可取消；直接读上游属性而不复制整列 |
-| Reduce property | 部分 | 位置分量、标量属性或向量属性分量的 min/max/mean/sum，发布全局属性；均值缩放累加，超出 double 有限范围的求和报告节点错误；扫描可取消并直接读上游属性而不复制整列 |
+| Reduce property | 部分 | 位置分量、标量属性或向量属性分量的 min/max/mean/sum，发布全局属性；均值缩放累加，超出 double 有限范围的求和报告节点错误；扫描可取消并直接读上游属性而不复制整列。新增真实 ImGui 验收：从目录添加节点、Mean 改为 Sum、异步重算并在 Global Attributes 检查器确认结果；数据对象类型/选区聚合仍待扩展 |
 | Scatter plot | 部分 | X/Y 可分别选择上游 Position 分量、标量或向量分量；可仅绘制输入选区，跳过非有限数值对；结果含粒子索引并进入 Data Tables 的散点预览，可导出 CSV；精确计数写入全局属性；最多输出 250,000 个点，超量时以均匀确定性抽样表明“deterministic preview”，不伪装成全量结果；尚无回归拟合、对数坐标和手动轴范围 |
 | Spatial binning | 待实现 | 空间网格统计与场数据 |
 | Spatial correlation function | 待实现 | 相关函数、周期性和误差控制 |

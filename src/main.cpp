@@ -223,6 +223,7 @@ struct App {
     bool playing = false, quad = true, particles = true, cell = true, showTable = false,
          showCatalog = false;
     bool histogramPreviewTab = false;
+    bool globalAttributesTab = false;
     std::map<std::string, HistogramPlotView> histogramPlotViews;
     float radius = .32f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
@@ -1539,14 +1540,20 @@ struct App {
                                 inspected->data.pbc[1] ? "Y" : "-", inspected->data.pbc[2] ? "Z" : "-");
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Global attributes")) {
+                const bool globalAttributesOpen=ImGui::BeginTabItem("Global attributes",nullptr,
+                    globalAttributesTab ? ImGuiTabItemFlags_SetSelected : 0);
+                recordUiTestItem("inspector.global-attributes-tab","Global attributes");
+                if (globalAttributesOpen) {
+                    globalAttributesTab=false;
                     ImGui::TextWrapped("%s", inspected->data.comment.c_str());
                     std::vector<std::string> names;
                     names.reserve(inspected->data.globalAttributes.size());
                     for (const auto &[name, value] : inspected->data.globalAttributes) names.push_back(name);
                     std::sort(names.begin(), names.end());
-                    for (const auto &name : names)
+                    for (const auto &name : names) {
                         ImGui::Text("%s: %.8g", name.c_str(), inspected->data.globalAttributes.at(name));
+                        recordUiTestItem(std::string("inspector.global-attribute.")+name);
+                    }
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Bonds")) {
@@ -2026,6 +2033,7 @@ struct App {
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
                         auto edited = m;
                         bool changed = colorPropertyCombo("Input property", edited.property, true);
+                        recordUiTestItem(std::string("pipeline.analysis-property.")+m.id,"Input property");
                         if (m.op == Op::Histogram) {
                             int bins = edited.type;
                             if (ImGui::InputInt("Bins", &bins)) { edited.type = std::clamp(bins, 1, 4096); changed = true; }
@@ -2052,6 +2060,7 @@ struct App {
                             if (ImGui::Combo("Reduction", &reduction, "Minimum\0Maximum\0Mean\0Sum\0")) {
                                 edited.reduceOperation = reduction; changed = true;
                             }
+                            recordUiTestItem(std::string("pipeline.reduce-operation.")+m.id,"Reduction");
                         }
                         if (changed) {
                             checkpoint();

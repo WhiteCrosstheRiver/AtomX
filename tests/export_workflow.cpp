@@ -154,6 +154,13 @@ int main() {
                 app.ui();
                 ImGui::Render();
             };
+            auto settlePipeline=[&]() {
+                for (int attempt=0; attempt<8 && app.pipelineBusy; ++attempt) {
+                    if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                    frame();
+                }
+                requireExport(!app.pipelineBusy,"asynchronous pipeline did not settle after repeated cancellation/relaunch");
+            };
             auto click=[&](const std::string &name,float xFraction=.5f) {
                 auto found=app.uiTestItems.find(name);
                 requireExport(found!=app.uiTestItems.end(),"required interactive UI control was not recorded");
@@ -300,6 +307,43 @@ int main() {
             ImGui::GetStyle()=baseStyle;
             guiIO.DisplaySize={1560,1000};
             frame();
+
+            strcpy_s(app.modifierSearch,"Reduce property");
+            click("pipeline.add-modification");
+            frame();
+            requireExport(app.uiTestItems.contains("catalog.Reduce property"),
+                          "Reduce property is available in the Analysis catalog");
+            click("catalog.Reduce property");
+            settlePipeline();
+            const auto reduceNodeId=app.mods.back().id;
+            const auto meanKey=std::string("ReduceProperty.Position.X.mean");
+            requireExport(app.mods.back().op==Op::ReduceProperty &&
+                              app.result.data.globalAttributes.contains(meanKey) &&
+                              std::abs(app.result.data.globalAttributes.at(meanKey)-1.0)<1e-12 &&
+                              app.uiTestItems.contains("pipeline.analysis-property."+reduceNodeId) &&
+                              app.uiTestItems.contains("pipeline.reduce-operation."+reduceNodeId),
+                          "Reduce property computes the default mean and exposes the node controls");
+            click("pipeline.reduce-operation."+reduceNodeId);
+            guiIO.AddKeyEvent(ImGuiKey_DownArrow,true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_DownArrow,false); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Enter,true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Enter,false); frame();
+            settlePipeline();
+            const auto sumKey=std::string("ReduceProperty.Position.X.sum");
+            requireExport(app.mods.back().reduceOperation==3 &&
+                              app.result.data.globalAttributes.contains(sumKey) &&
+                              !app.result.data.globalAttributes.contains(meanKey) &&
+                              std::abs(app.result.data.globalAttributes.at(sumKey)-1.0)<1e-12,
+                          "editing the Reduction control recomputes and replaces the correct global attribute");
+            app.showTable=true;
+            app.globalAttributesTab=true;
+            frame();
+            frame();
+            requireExport(app.uiTestItems.contains("inspector.global-attribute."+sumKey),
+                          "Global Attributes inspector displays the Reduce property pipeline result");
+            requireExport(app.mods.size()==2 && app.mods.back().id==reduceNodeId &&
+                              app.mods.front().op==Op::RadialDistribution,
+                          "analysis parameter edits retain the stable pipeline node identity");
 
             strcpy_s(app.modifierSearch,"Scatter plot");
             click("pipeline.add-modification");

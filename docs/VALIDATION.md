@@ -237,3 +237,9 @@
 - `core_tests` 使用 `Position.X` 对 `Velocity.Z` 验证输入选区筛选、稳定的粒子索引列、选区不被修改、样本数/绘制数统计、上游属性缺失、空选区、NaN 过滤及取消响应。
 - 250,001 对有限输入验证 Data Table 明确标注确定性预览，输出固定 250,000 行，同时保留精确总样本数。Pipeline 输出元数据声明 Data Table 和统计对象。
 - `export_workflow` 通过 Add modification 下拉真实添加 Scatter plot，等待实际后台重算，检查生成表格及 X/Y/selected 参数控件，再打开 Data Tables 页面并确认散点图控件已绘制。CSV 使用同一张结果表；超限时导出的是明确标注的预览样本，不是所有输入点。
+
+### Reduce property Pipeline 交互验证
+
+- `export_workflow` 从 Add modification 菜单添加 Reduce property，检查其上游 RDF 节点仍保留；默认 Mean 结果生成 `ReduceProperty.Position.X.mean`，并与源坐标一致。
+- 通过 ImGui 鼠标和键盘事件将归约类型改为 Sum，等待异步管线重算；验证节点参数、数值结果、旧 Mean 属性移除，以及新 Sum 全局属性在 Global Attributes 检查器中绘制。
+- 属性与归约方式属于该 Pipeline 节点；参数编辑保持稳定节点 ID，并保留上游 RDF 节点。
