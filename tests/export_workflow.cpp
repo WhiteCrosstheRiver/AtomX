@@ -299,6 +299,32 @@ int main() {
             uiScale=1.f;
             ImGui::GetStyle()=baseStyle;
             guiIO.DisplaySize={1560,1000};
+
+            const size_t previouslyPublishedAtoms=app.result.data.atoms.size();
+            const size_t previouslyPublishedTableRows=app.result.data.tables.back().rows.size();
+            Modifier invalidScale{Op::Scale};
+            invalidScale.value=0;
+            const size_t failingNodeIndex=app.mods.size();
+            app.modifierGraph.insert(app.makeNode(invalidScale));
+            const auto failingNodeId=app.mods.back().id;
+            Modifier downstreamReduction{Op::ReduceProperty};
+            downstreamReduction.property="Missing downstream field";
+            app.modifierGraph.insert(app.makeNode(downstreamReduction));
+            const auto downstreamNodeId=app.mods.back().id;
+            app.staleResult=false;
+            app.update(failingNodeIndex);
+            requireExport(app.staleResult,"a pipeline edit marks the previously published frame stale immediately");
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            frame(); // Poll and publish the asynchronous node failure.
+            requireExport(app.error=="Scale must be positive" &&
+                              app.mods[failingNodeIndex].id==failingNodeId &&
+                              app.mods[failingNodeIndex].error==app.error &&
+                              app.mods[failingNodeIndex+1].id==downstreamNodeId &&
+                              app.mods[failingNodeIndex+1].error.empty(),
+                          "asynchronous failure is assigned to its node and stops before the invalid downstream node");
+            requireExport(app.staleResult && app.result.data.atoms.size()==previouslyPublishedAtoms &&
+                              app.result.data.tables.back().rows.size()==previouslyPublishedTableRows,
+                          "failed evaluation retains the prior result and keeps its stale marker");
         }
         ImGui::DestroyContext();
         for (const auto &e : std::filesystem::directory_iterator(dir))
