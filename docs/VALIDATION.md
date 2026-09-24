@@ -258,3 +258,11 @@
 - 回归发现与修复：GUI 验收发现少数原子 CSP 达 134（真值 max 1.91）。根因是 XYZ 读取器把缺省 `pbc` 属性默认为非周期（OVITO 默认周期），已修复——该修复同时惠及 CNA/RDF/配位数等全部邻域分析。引擎侧同时加入自适应截断增长重试与欠配位回退（even≥4 用现邻计算，否则 0 并计入 Centrosymmetry.undercoordinated_particles）。
 - GUI 复验：test.xyz 上 CSP 直方图范围 0.134–1.77（修复前 0.17–134.3），与暴力参考同量级；面板控件（邻居数/两模式/仅选中/橙色直方图）与 OVITO 实测一致。
 - 构建门禁全绿；遗留：面板直方图样式较 OVITO 简化；欠配位回退行为为自定文档选择（OVITO 文档未定义）。
+
+## 2026-09-25 P2 波次验证（Affine transformation / Expand selection / Select type）
+
+- 构建门禁全绿（五组测试 + smoke/catalog 无头截图）；GUI 三面板逐一现场验证。
+- Affine：Enter rotation 模态（轴/角度/中心，T(c)·R·T(−c) 双精度预乘）、reduced cell coordinates、only-selected、只读晶胞联动显示与 OVITO 实测面板同序同构。
+- Expand selection：cutoff / N nearest / bonded / same molecule 四模式 + Number of iterations + 空选区时 OVITO 同文错误；现场验证错误弹窗与 STALE RESULT 保留旧行为。
+- Select type：Name|Id 复选框多选表（Cu=27、Ni=81、全选=108 回归）。
+- 遗留：空选区时 AtomX 以模态弹窗+控件灰显表达，OVITO 为面板内红字错误；Expand 的 mode 语义（bonded/molecule）依赖 Create bonds 先行。

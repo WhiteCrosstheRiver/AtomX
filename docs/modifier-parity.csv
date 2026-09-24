@@ -22,7 +22,7 @@ A20,Analysis,Time averaging,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo
 A21,Analysis,Time series,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A22,Analysis,Voronoi analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A23,Analysis,Wigner-Seitz defect analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-M01,Modification,Affine transformation,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P2,,,,Raw 3x4 matrix only; no rotation presets or adjust-to-cell
+M01,Modification,Affine transformation,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,P2,,,,Enter rotation modal + reduced coords + only-selected + live cell readout; normals not inverse-transformed
 M02,Modification,Combine datasets,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 M03,Modification,Compute property,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Scalar expressions only; no vector output
 M04,Modification,Delete selected,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,Bond remapping implemented
@@ -45,12 +45,12 @@ S05,Structure identification,Identify diamond structure,,docs/parity/ovito/,part
 S06,Structure identification,Polyhedral template matching,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 S07,Structure identification,VoroTop analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 Q01,Selection,Clear selection,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,
-Q02,Selection,Expand selection,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P2,,,,Cutoff shells only; no bonded-neighbor mode
+Q02,Selection,Expand selection,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,P2,,,,4 OVITO modes + iterations; panel grays instead of inline red error on empty selection
 Q03,Selection,Expression selection,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P2,,,,No selection modes (set/add/remove); scalar only
 Q04,Selection,Find overlapping particles,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Radius needs explicit property
 Q05,Selection,Invert selection,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,
 Q06,Selection,Manual selection,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Table-row clicking only; no viewport picking
-Q07,Selection,Select type,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P2,,,,Single type index; OVITO supports multi-type
+Q07,Selection,Select type,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,P2,,,,Multi-type checkbox table (Name|Id); union replaces selection
 V01,Visualization,Add text labels,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 V02,Visualization,Construct surface mesh,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 V03,Visualization,Create bonds,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,P3,,,,Global cutoff + pairwise matrix; panel layout to align
