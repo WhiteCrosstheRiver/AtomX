@@ -33,8 +33,9 @@ static int droppedExtra = 0; // Additional files in a multi-file drop (first win
 // backend maps ImGui::GetMouseCursor() onto the stock shapes during
 // WM_SETCURSOR, so Pan (hand) and Orbit (4-way) ride that existing path via
 // ImGui::SetMouseCursor. Windows has no stock magnifier cursor, so one is
-// generated once at startup as a 32x32 monochrome icon (AND/XOR masks fed to
-// CreateIconIndirect) and applied through a frame-local override that wndProc
+// generated once at startup as a 32x32 32-bit ARGB color icon (semi-transparent
+// white glass, black outline and handle, fed to CreateIconIndirect) and applied
+// through a frame-local override that wndProc
 // checks BEFORE the ImGui backend handler (which would otherwise overwrite it
 // with the last ImGui cursor on every WM_SETCURSOR).
 static HCURSOR g_cursorOverride = nullptr; // Valid for the current frame only.
@@ -50,38 +51,82 @@ static ViewportCursor cursorForViewportTool(int tool) {
     }
 }
 static HCURSOR createMagnifierCursor() {
-    constexpr int cx = 32, cy = 32, stride = cx / 8; // 4 bytes per monochrome row
-    BYTE andMask[cy * stride] = {}, xorMask[cy * stride] = {};
-    auto dot = [&](int x, int y) {
-        if (x < 0 || x >= cx || y < 0 || y >= cy) return;
-        andMask[y * stride + x / 8] &= static_cast<BYTE>(~(0x80u >> (x % 8))); // 0 = paint
-        xorMask[y * stride + x / 8] |= BYTE(0x80u >> (x % 8));   // 1 = invert
+    // 32-bit ARGB color cursor: semi-transparent white glass, black outline
+    // and handle. The AND mask stays all zero so the color bitmap's alpha
+    // channel alone drives transparency.
+    constexpr int cx = 32, cy = 32;
+    BITMAPV5HEADER header{};
+    header.bV5Size = sizeof(header);
+    header.bV5Width = cx;
+    header.bV5Height = cy;
+    header.bV5Planes = 1;
+    header.bV5BitCount = 32;
+    header.bV5Compression = BI_BITFIELDS;
+    header.bV5RedMask = 0x00FF0000;
+    header.bV5GreenMask = 0x0000FF00;
+    header.bV5BlueMask = 0x000000FF;
+    header.bV5AlphaMask = 0xFF000000;
+    void *bits = nullptr;
+    HDC screen = GetDC(nullptr);
+    HBITMAP color = CreateDIBSection(screen, reinterpret_cast<const BITMAPINFO *>(&header), DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, screen);
+    HBITMAP mask = CreateBitmap(cx, cy, 1, 1, nullptr); // zeroed: alpha rules
+    if (!color || !mask || !bits) {
+        if (color) DeleteObject(color);
+        if (mask) DeleteObject(mask);
+        return nullptr; // caller falls back to IDC_SIZEALL
+    }
+    auto circleDistance = [](double x, double y) {
+        return std::sqrt((x - 12.0) * (x - 12.0) + (y - 12.0) * (y - 12.0));
     };
-    // Magnifier glass: circle outline, center (12,12), radius ~8, ~2 px thick.
-    for (int y = 0; y < cy; ++y)
+    auto handleDistance = [](double x, double y) {
+        // Distance to the segment (18,18)-(27,27); the projection parameter
+        // clamps to the segment ends, giving the rounded handle tip.
+        constexpr double ax = 18, ay = 18, bx = 27, by = 27;
+        const double dx = bx - ax, dy = by - ay;
+        const double t = std::clamp(((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy), 0.0, 1.0);
+        return std::sqrt((x - (ax + t * dx)) * (x - (ax + t * dx)) +
+                         (y - (ay + t * dy)) * (y - (ay + t * dy)));
+    };
+    auto smoothstep = [](double edge0, double edge1, double x) {
+        const double t = std::clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+        return t * t * (3 - 2 * t);
+    };
+    auto *pixels = static_cast<DWORD *>(bits);
+    for (int y = 0; y < cy; ++y) {
+        // DIB sections are bottom-up: row cy-1-y of the buffer is screen row y.
+        DWORD *row = pixels + size_t(cy - 1 - y) * cx;
         for (int x = 0; x < cx; ++x) {
-            const double d = std::sqrt((x - 12.0) * (x - 12.0) + (y - 12.0) * (y - 12.0));
-            if (d >= 7.0 && d < 9.0) dot(x, y);
+            const double d = circleDistance(x + 0.5, y + 0.5);
+            double alpha = 0, red = 0, green = 0, blue = 0;
+            if (d < 9.5) {
+                if (d < 7.5) { // interior: semi-transparent white glass
+                    red = green = blue = 255;
+                    alpha = 150;
+                }
+                // 2 px black outline with smoothstep anti-aliasing over the rim.
+                const double outline = 1.0 - smoothstep(7.5, 9.5, d);
+                alpha = std::max(alpha, 255.0 * outline);
+                red *= 1.0 - outline;
+                green *= 1.0 - outline;
+                blue *= 1.0 - outline;
+            }
+            if (handleDistance(x + 0.5, y + 0.5) < 1.8) { // opaque black handle wins
+                alpha = 255;
+                red = green = blue = 0;
+            }
+            const DWORD a8 = DWORD(alpha + 0.5) & 0xFF;
+            row[x] = (a8 << 24) | (DWORD(red + 0.5) << 16) | (DWORD(green + 0.5) << 8) | DWORD(blue + 0.5);
         }
-    // 3 px handle from the glass rim toward (27,27).
-    for (int t = 0; t <= 8; ++t)
-        for (int o = 0; o < 3; ++o) {
-            dot(19 + t + o, 18 + t);
-            dot(18 + t, 19 + t + o);
-        }
-    // Monochrome icon: one double-height mask bitmap, upper half AND, lower
-    // half XOR (hbmColor stays null), hotspot at the glass center.
-    std::vector<BYTE> bits(size_t(cy) * 2 * stride, 0);
-    std::memcpy(bits.data(), andMask, size_t(cy) * stride);
-    std::memcpy(bits.data() + size_t(cy) * stride, xorMask, size_t(cy) * stride);
-    HBITMAP mask = CreateBitmap(cx, cy * 2, 1, 1, bits.data());
-    if (!mask) return nullptr;
+    }
     ICONINFO info{};
     info.fIcon = FALSE;
     info.xHotspot = 12;
     info.yHotspot = 12;
     info.hbmMask = mask;
+    info.hbmColor = color;
     const HCURSOR cursor = CreateIconIndirect(&info);
+    DeleteObject(color);
     DeleteObject(mask);
     return cursor;
 }

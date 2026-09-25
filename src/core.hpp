@@ -11,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <set>
 #include <stdexcept>
@@ -202,13 +203,17 @@ struct BondSegment { Vec3 p1{}, p2{}; };
 inline double bondSegmentLength(const BondSegment &s) {
     return std::hypot(double(s.p2.x)-s.p1.x,double(s.p2.y)-s.p1.y,double(s.p2.z)-s.p1.z);
 }
+inline std::array<std::array<double, 3>, 3> cellInverse(const std::array<double, 9> &c); // defined below
 // Expands a bond into the line segments the renderer draws. The first segment
 // is the physical bond from a to the periodic image of b nearest a,
 // b + image*cell. A periodic-image bond would visually enter one box face and
 // exit the opposite one, so a second segment -- the same bond translated by
-// -image*cell -- is added: both boundary faces show a short attached stub and
-// no drawn segment is longer than the physical bond. Bonds without an image
-// shift expand to exactly one segment.
+// -image*cell -- is added: both boundary faces show a short attached stub.
+// Every produced segment is clipped to the simulation cell on the axes the
+// bond's image shifts (those axes are periodic by construction), so nothing is
+// drawn outside the box -- boundary bonds appear only as the short stubs
+// attached at the faces. Bonds without an image shift expand to exactly one
+// unclipped segment.
 inline std::vector<BondSegment> bondSegments(const std::array<double,9> &cell,
                                              const Vec3 &a, const Vec3 &b,
                                              const std::array<int32_t,3> &image) {
@@ -224,9 +229,46 @@ inline std::vector<BondSegment> bondSegments(const std::array<double,9> &cell,
         shiftedA.z-=float(shift*cell[axis*3+2]);
         periodic=periodic||image[axis]!=0;
     }
+    // Clip one candidate segment to the unit cell in fractional coordinates:
+    // standard slab clipping per shifted axis, dropping the segment when the
+    // parametric interval against [0,1] becomes empty.
+    auto clipped=[&](const Vec3 &p1,const Vec3 &p2) -> std::optional<BondSegment> {
+        if (!periodic) return BondSegment{p1,p2};
+        try {
+            const auto inverse=cellInverse(cell);
+            std::array<double,3> f1{},f2{};
+            for (int k=0;k<3;++k) {
+                f1[k]=inverse[k][0]*double(p1.x)+inverse[k][1]*double(p1.y)+inverse[k][2]*double(p1.z);
+                f2[k]=inverse[k][0]*double(p2.x)+inverse[k][1]*double(p2.y)+inverse[k][2]*double(p2.z);
+            }
+            double t0=0,t1=1;
+            for (int k=0;k<3;++k) {
+                if (image[k]==0) continue;
+                const double delta=f2[k]-f1[k];
+                constexpr double eps=1e-12;
+                if (std::abs(delta)<eps) {
+                    if (f1[k]<-1e-9 || f1[k]>1+1e-9) return std::nullopt;
+                    continue;
+                }
+                const double ta=(0-f1[k])/delta, tb=(1-f1[k])/delta;
+                t0=std::max(t0,std::min(ta,tb));
+                t1=std::min(t1,std::max(ta,tb));
+                if (t0>t1) return std::nullopt;
+            }
+            const auto lerp=[&](const Vec3 &p,double t) {
+                return Vec3{float(double(p.x)+t*(double(p2.x)-double(p1.x))),
+                            float(double(p.y)+t*(double(p2.y)-double(p1.y))),
+                            float(double(p.z)+t*(double(p2.z)-double(p1.z)))};
+            };
+            return BondSegment{lerp(p1,t0),lerp(p1,t1)};
+        } catch (const std::exception &) {
+            return BondSegment{p1,p2}; // degenerate cell: draw unclipped
+        }
+    };
     std::vector<BondSegment> segments;
-    segments.push_back({a,shiftedB});
-    if (periodic) segments.push_back({shiftedA,b});
+    if (auto first=clipped(a,shiftedB)) segments.push_back(*first);
+    if (periodic)
+        if (auto twin=clipped(shiftedA,b)) segments.push_back(*twin);
     return segments;
 }
 

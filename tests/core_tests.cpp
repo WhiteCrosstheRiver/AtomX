@@ -1853,29 +1853,37 @@ int main() {
                                 halfBoxBonds.data.bonds[0].image.end(),
                                 [](int32_t v){ return std::abs(v)<=1; }),
                 "half-box boundary bond keeps the physical length and a nearest image");
-        // Renderer expansion: a periodic bond renders as TWO segments (one per
-        // box face), each no longer than the physical bond; a plain bond
+        // Renderer expansion: a periodic bond renders as TWO clipped stubs,
+        // each attached at a box face and fully inside the cell; a plain bond
         // renders as a single segment.
         const auto boundarySegments=bondSegments(boundaryBonds.data.cell,{.2f,0,0},{.8f,0,0},
                                                  boundaryBonds.data.bonds[0].image);
         require(boundarySegments.size()==2,
-                "periodic bonds expand into two half segments");
-        double boundaryMaxSegment=0;
-        for (const auto &segment : boundarySegments)
-            boundaryMaxSegment=std::max(boundaryMaxSegment,bondSegmentLength(segment));
-        require(std::abs(boundaryMaxSegment-.4)<1e-5,
-                "no rendered periodic bond segment exceeds the physical bond length");
+                "periodic bonds expand into two face stubs");
         {
-            const auto &image=boundaryBonds.data.bonds[0].image;
-            const auto &cell=boundaryBonds.data.cell;
-            auto translatedByImage=[&](const Vec3 &p0,const Vec3 &p1) {
-                return std::abs((p0.x-p1.x)-float(image[0]*cell[0]+image[1]*cell[3]+image[2]*cell[6]))<1e-4 &&
-                       std::abs((p0.y-p1.y)-float(image[0]*cell[1]+image[1]*cell[4]+image[2]*cell[7]))<1e-4 &&
-                       std::abs((p0.z-p1.z)-float(image[0]*cell[2]+image[1]*cell[5]+image[2]*cell[8]))<1e-4;
+            auto flat=[&](const BondSegment &s) {
+                return std::abs(s.p1.y)<1e-6 && std::abs(s.p1.z)<1e-6 &&
+                       std::abs(s.p2.y)<1e-6 && std::abs(s.p2.z)<1e-6;
             };
-            require(translatedByImage(boundarySegments[0].p1,boundarySegments[1].p1) &&
-                        translatedByImage(boundarySegments[0].p2,boundarySegments[1].p2),
-                    "periodic bond halves are exact cell translations of each other");
+            auto spans=[&](const BondSegment &s,double lo,double hi) {
+                const double x1=std::min(double(s.p1.x),double(s.p2.x));
+                const double x2=std::max(double(s.p1.x),double(s.p2.x));
+                return flat(s) && std::abs(x1-lo)<1e-6 && std::abs(x2-hi)<1e-6;
+            };
+            require((spans(boundarySegments[0],0,.2) && spans(boundarySegments[1],.8,1)) ||
+                        (spans(boundarySegments[0],.8,1) && spans(boundarySegments[1],0,.2)),
+                    "boundary stubs span exactly [0,0.2] and [0.8,1.0] inside the cell");
+            double boundaryCoverage=0;
+            for (const auto &segment : boundarySegments) {
+                for (const Vec3 *vertex : {&segment.p1,&segment.p2})
+                    require(vertex->x>=-1e-6f && vertex->x<=1.f+1e-6f &&
+                                vertex->y>=-1e-6f && vertex->y<=1.f+1e-6f &&
+                                vertex->z>=-1e-6f && vertex->z<=1.f+1e-6f,
+                            "no boundary bond stub leaves the simulation cell");
+                boundaryCoverage+=bondSegmentLength(segment);
+            }
+            require(std::abs(boundaryCoverage-.4)<1e-6,
+                    "the two face stubs together cover the full physical bond length");
         }
         const auto plainSegments=bondSegments(boundaryBonds.data.cell,{0,0,0},{.3f,0,0},{0,0,0});
         require(plainSegments.size()==1 &&
@@ -1910,6 +1918,7 @@ int main() {
         auto fccBonds=evaluate(fccBondCell,{{Op::CreateBonds,true,3.2f}});
         require(fccBonds.data.bonds.size()==648,
                 "3x3x3 FCC produces twelve bonds per atom");
+        double fccRenderedLength=0;
         for (const auto &bond : fccBonds.data.bonds) {
             const auto vector=bondVector(fccBonds.data,bond);
             require(std::abs(std::hypot(vector[0],vector[1],vector[2])-2.5455841227885)<0.2,
@@ -1918,9 +1927,41 @@ int main() {
                     "FCC bonds use only nearest periodic images");
             const auto &a=fccBonds.data.atoms[bond.a];
             const auto &b=fccBonds.data.atoms[bond.b];
-            for (const auto &segment : bondSegments(fccBonds.data.cell,{a.x,a.y,a.z},{b.x,b.y,b.z},bond.image))
+            for (const auto &segment : bondSegments(fccBonds.data.cell,{a.x,a.y,a.z},{b.x,b.y,b.z},bond.image)) {
                 require(bondSegmentLength(segment)<=2*3.2,
                         "renderer expansion never spans more than the cutoff scale");
+                fccRenderedLength+=bondSegmentLength(segment);
+            }
+        }
+        {
+            // Every rendered endpoint stays inside the cell (fractional in
+            // [0,1]) and clipping is conservative per bond: a bond is either
+            // rendered at its full physical length (inside the box) or, when
+            // it lives entirely in a diagonal neighbor image, contributes
+            // nothing at all -- the outside parts are never drawn.
+            const auto inverse=cellInverse(fccBonds.data.cell);
+            double fccPhysicalTotal=0;
+            for (const auto &bond : fccBonds.data.bonds) {
+                const auto &a=fccBonds.data.atoms[bond.a];
+                const auto &b=fccBonds.data.atoms[bond.b];
+                const auto segments=bondSegments(fccBonds.data.cell,{a.x,a.y,a.z},{b.x,b.y,b.z},bond.image);
+                double kept=0;
+                for (const auto &segment : segments) {
+                    kept+=bondSegmentLength(segment);
+                    for (const Vec3 *vertex : {&segment.p1,&segment.p2})
+                        for (int k=0;k<3;++k) {
+                            const double fractional=inverse[k][0]*double(vertex->x)+inverse[k][1]*double(vertex->y)+inverse[k][2]*double(vertex->z);
+                            require(fractional>=-1e-4 && fractional<=1+1e-4,
+                                    "every rendered bond endpoint lies within the simulation cell");
+                        }
+                }
+                const auto physicalVector=bondVector(fccBonds.data,bond);
+                const double physical=std::hypot(physicalVector[0],physicalVector[1],physicalVector[2]);
+                fccPhysicalTotal+=physical;                require(std::abs(kept-physical)<1e-5 || kept<1e-5,
+                        "clipping keeps a bond's inside length whole or drops it entirely");
+            }
+            require(fccRenderedLength>0.98*fccPhysicalTotal,
+                    "the overwhelming majority of FCC bond length survives clipping");
         }
         Dataset deleteTopology;
         deleteTopology.species = {"X"};
