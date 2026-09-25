@@ -545,10 +545,12 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         for (const auto &bond : d.bonds) {
             if (bond.a >= d.atoms.size() || bond.b >= d.atoms.size()) continue;
             const auto &a=d.atoms[bond.a], &b=d.atoms[bond.b];
-            bondVertices.push_back({{a.x,a.y,a.z}});
-            bondVertices.push_back({{b.x+float(bond.image[0]*d.cell[0]+bond.image[1]*d.cell[3]+bond.image[2]*d.cell[6]),
-                                     b.y+float(bond.image[0]*d.cell[1]+bond.image[1]*d.cell[4]+bond.image[2]*d.cell[7]),
-                                     b.z+float(bond.image[0]*d.cell[2]+bond.image[1]*d.cell[5]+bond.image[2]*d.cell[8])}});
+            // Periodic-image bonds expand into both cell-translated halves so
+            // each box face shows a short attached stub; see bondSegments.
+            for (const auto &segment : atomx::bondSegments(d.cell,{a.x,a.y,a.z},{b.x,b.y,b.z},bond.image)) {
+                bondVertices.push_back({{segment.p1.x,segment.p1.y,segment.p1.z}});
+                bondVertices.push_back({{segment.p2.x,segment.p2.y,segment.p2.z}});
+            }
         }
         bondBuffer.Reset(); bondVertexCount=UINT(bondVertices.size());
         if (!bondVertices.empty()) {

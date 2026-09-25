@@ -1794,21 +1794,133 @@ int main() {
         auto periodicSource = topology;
         periodicSource.bonds.clear();
         auto periodicBonds = evaluate(periodicSource, {{Op::CreateBonds,true,.3f}});
+        // Bond.image is the translation applied to b: the periodic image of
+        // atom 1 nearest atom 0 (x=0.1) sits at x=-0.1, i.e. image {-1,0,0}.
         require(periodicBonds.data.bonds.size() == 1 &&
                     periodicBonds.data.bonds[0].a == 0 && periodicBonds.data.bonds[0].b == 1 &&
-                    periodicBonds.data.bonds[0].image == std::array<int32_t,3>{1,0,0},
-                "created bonds preserve periodic image shift");
+                    periodicBonds.data.bonds[0].image == std::array<int32_t,3>{-1,0,0},
+                "created bonds store the image of b nearest a");
         Modifier replicateBondedCell{Op::Replicate};
         replicateBondedCell.replicateN[0] = 2;
         auto periodicReplicate = evaluate(periodicBonds.data, {replicateBondedCell});
         require(periodicReplicate.data.bonds.size() == 2 &&
                     periodicReplicate.data.bonds[0].a == 0 &&
                     periodicReplicate.data.bonds[0].b == 4 &&
-                    periodicReplicate.data.bonds[0].image[0] == 0 &&
+                    periodicReplicate.data.bonds[0].image[0] == -1 &&
                     periodicReplicate.data.bonds[1].a == 3 &&
                     periodicReplicate.data.bonds[1].b == 1 &&
-                    periodicReplicate.data.bonds[1].image[0] == 1,
+                    periodicReplicate.data.bonds[1].image[0] == 0,
                 "replication remaps periodic bonds and retains supercell boundary shift");
+        // P7 regression: a bond across a periodic boundary must keep the SHORT
+        // physical vector (image = translation of b to the image nearest a),
+        // and the renderer expansion must draw both periodic halves so no
+        // segment spans multiple box lengths.
+        Dataset boundaryPair; boundaryPair.species={"X"};
+        boundaryPair.atoms={{.2f,0,0,0},{.8f,0,0,0}};
+        boundaryPair.cell={1,0,0,0,1,0,0,0,1}; boundaryPair.pbc={true,false,false};
+        boundaryPair.bounds();
+        auto boundaryBonds=evaluate(boundaryPair,{{Op::CreateBonds,true,.5f}});
+        require(boundaryBonds.data.bonds.size()==1 &&
+                    boundaryBonds.data.bonds[0].a==0 && boundaryBonds.data.bonds[0].b==1 &&
+                    boundaryBonds.data.bonds[0].image==std::array<int32_t,3>{-1,0,0},
+                "boundary-crossing bond stores the image of b translated to nearest a");
+        const auto boundaryVector=bondVector(boundaryBonds.data,boundaryBonds.data.bonds[0]);
+        require(std::abs(std::hypot(boundaryVector[0],boundaryVector[1],boundaryVector[2])-.4)<1e-6,
+                "boundary-crossing bond keeps the physical bond length");
+        // Mirror geometry pins the sign in the other direction.
+        Dataset mirroredPair; mirroredPair.species={"X"};
+        mirroredPair.atoms={{.8f,0,0,0},{.2f,0,0,0}};
+        mirroredPair.cell={1,0,0,0,1,0,0,0,1}; mirroredPair.pbc={true,false,false};
+        mirroredPair.bounds();
+        auto mirroredBonds=evaluate(mirroredPair,{{Op::CreateBonds,true,.5f}});
+        require(mirroredBonds.data.bonds.size()==1 &&
+                    mirroredBonds.data.bonds[0].image==std::array<int32_t,3>{1,0,0},
+                "boundary-crossing bond image follows the translation of b in both directions");
+        // Degenerate half-box separation: still exactly one bond of physical
+        // length 0.5 whose image never leaves the nearest periodic cell.
+        Dataset halfBoxPair; halfBoxPair.species={"X"};
+        halfBoxPair.atoms={{.2f,0,0,0},{.7f,0,0,0}};
+        halfBoxPair.cell={1,0,0,0,1,0,0,0,1}; halfBoxPair.pbc={true,false,false};
+        halfBoxPair.bounds();
+        auto halfBoxBonds=evaluate(halfBoxPair,{{Op::CreateBonds,true,.5f}});
+        require(halfBoxBonds.data.bonds.size()==1 &&
+                    halfBoxBonds.data.bonds[0].a==0 && halfBoxBonds.data.bonds[0].b==1,
+                "half-box boundary pair produces exactly one bond");
+        const auto halfBoxVector=bondVector(halfBoxBonds.data,halfBoxBonds.data.bonds[0]);
+        require(std::abs(std::hypot(halfBoxVector[0],halfBoxVector[1],halfBoxVector[2])-.5)<1e-5 &&
+                    std::all_of(halfBoxBonds.data.bonds[0].image.begin(),
+                                halfBoxBonds.data.bonds[0].image.end(),
+                                [](int32_t v){ return std::abs(v)<=1; }),
+                "half-box boundary bond keeps the physical length and a nearest image");
+        // Renderer expansion: a periodic bond renders as TWO segments (one per
+        // box face), each no longer than the physical bond; a plain bond
+        // renders as a single segment.
+        const auto boundarySegments=bondSegments(boundaryBonds.data.cell,{.2f,0,0},{.8f,0,0},
+                                                 boundaryBonds.data.bonds[0].image);
+        require(boundarySegments.size()==2,
+                "periodic bonds expand into two half segments");
+        double boundaryMaxSegment=0;
+        for (const auto &segment : boundarySegments)
+            boundaryMaxSegment=std::max(boundaryMaxSegment,bondSegmentLength(segment));
+        require(std::abs(boundaryMaxSegment-.4)<1e-5,
+                "no rendered periodic bond segment exceeds the physical bond length");
+        {
+            const auto &image=boundaryBonds.data.bonds[0].image;
+            const auto &cell=boundaryBonds.data.cell;
+            auto translatedByImage=[&](const Vec3 &p0,const Vec3 &p1) {
+                return std::abs((p0.x-p1.x)-float(image[0]*cell[0]+image[1]*cell[3]+image[2]*cell[6]))<1e-4 &&
+                       std::abs((p0.y-p1.y)-float(image[0]*cell[1]+image[1]*cell[4]+image[2]*cell[7]))<1e-4 &&
+                       std::abs((p0.z-p1.z)-float(image[0]*cell[2]+image[1]*cell[5]+image[2]*cell[8]))<1e-4;
+            };
+            require(translatedByImage(boundarySegments[0].p1,boundarySegments[1].p1) &&
+                        translatedByImage(boundarySegments[0].p2,boundarySegments[1].p2),
+                    "periodic bond halves are exact cell translations of each other");
+        }
+        const auto plainSegments=bondSegments(boundaryBonds.data.cell,{0,0,0},{.3f,0,0},{0,0,0});
+        require(plainSegments.size()==1 &&
+                    std::abs(bondSegmentLength(plainSegments[0])-.3)<1e-6,
+                "bonds without a periodic image expand into a single segment");
+        // Downstream consumers measure the SHORT image of boundary-crossing
+        // bonds created by Create bonds.
+        Modifier boundaryLengths{Op::BondLengthDistribution}; boundaryLengths.type=3;
+        const auto boundaryLengthResult=evaluate(boundaryBonds.data,{boundaryLengths});
+        require(boundaryLengthResult.data.globalAttributes.at("BondLengthDistribution.count")==1 &&
+                    std::abs(boundaryLengthResult.data.globalAttributes.at("BondLengthDistribution.minimum")-.4)<1e-5 &&
+                    std::abs(boundaryLengthResult.data.globalAttributes.at("BondLengthDistribution.maximum")-.4)<1e-5,
+                "bond-length distribution measures the short image of boundary-crossing bonds");
+        Dataset boundaryAngle; boundaryAngle.species={"X"};
+        boundaryAngle.atoms={{.2f,0,0,0},{1.8f,0,0,0},{2.6f,0,0,0}};
+        boundaryAngle.cell={2,0,0,0,2,0,0,0,2}; boundaryAngle.pbc={true,false,false};
+        boundaryAngle.bounds();
+        auto boundaryAngleBonds=evaluate(boundaryAngle,{{Op::CreateBonds,true,.5f}});
+        require(boundaryAngleBonds.data.bonds.size()==2,
+                "boundary angle fixture produces the two expected bonds");
+        Modifier boundaryAngles{Op::BondAngleDistribution}; boundaryAngles.type=18;
+        const auto boundaryAngleResult=evaluate(boundaryAngleBonds.data,{boundaryAngles});
+        require(boundaryAngleResult.data.globalAttributes.at("BondAngleDistribution.count")==1 &&
+                    std::abs(boundaryAngleResult.data.globalAttributes.at("BondAngleDistribution.minimum")-180)<1e-6 &&
+                    std::abs(boundaryAngleResult.data.globalAttributes.at("BondAngleDistribution.maximum")-180)<1e-6,
+                "bond-angle distribution uses the short periodic images at the boundary");
+        // 3x3x3 FCC acceptance case: 648 bonds, every shifted length at the
+        // nearest-neighbor distance 3.6/sqrt(2) ~ 2.55, only nearest images,
+        // and no renderer expansion longer than twice the cutoff.
+        auto fccBondCell=fccLattice(3);
+        fccBondCell.pbc={true,true,true};
+        auto fccBonds=evaluate(fccBondCell,{{Op::CreateBonds,true,3.2f}});
+        require(fccBonds.data.bonds.size()==648,
+                "3x3x3 FCC produces twelve bonds per atom");
+        for (const auto &bond : fccBonds.data.bonds) {
+            const auto vector=bondVector(fccBonds.data,bond);
+            require(std::abs(std::hypot(vector[0],vector[1],vector[2])-2.5455841227885)<0.2,
+                    "FCC periodic bonds measure the nearest-neighbor distance");
+            require(std::abs(bond.image[0])<2 && std::abs(bond.image[1])<2 && std::abs(bond.image[2])<2,
+                    "FCC bonds use only nearest periodic images");
+            const auto &a=fccBonds.data.atoms[bond.a];
+            const auto &b=fccBonds.data.atoms[bond.b];
+            for (const auto &segment : bondSegments(fccBonds.data.cell,{a.x,a.y,a.z},{b.x,b.y,b.z},bond.image))
+                require(bondSegmentLength(segment)<=2*3.2,
+                        "renderer expansion never spans more than the cutoff scale");
+        }
         Dataset deleteTopology;
         deleteTopology.species = {"X"};
         deleteTopology.atoms = {{0,0,0,0},{1,0,0,0},{2,0,0,0}};
@@ -1899,14 +2011,14 @@ int main() {
         tilted.pbc={true,true,true}; tilted.atoms={{.15f,.1f,.1f,0},{1.95f,.1f,.1f,0}};
         tilted.bounds();
         auto tiltedBond=evaluate(tilted,{{Op::CreateBonds,true,.3f}});
-        require(tiltedBond.data.bonds.size()==1 && tiltedBond.data.bonds[0].image==std::array<int32_t,3>{1,0,0},
+        require(tiltedBond.data.bonds.size()==1 && tiltedBond.data.bonds[0].image==std::array<int32_t,3>{-1,0,0},
                 "triclinic periodic neighbor search keeps the correct image shift");
         Dataset slab;
         slab.species={"X"}; slab.cell={2,0,0, 1,2,0, 0,0,0}; slab.pbc={true,true,false};
         slab.atoms={{.15f,.1f,0,0},{1.95f,.1f,0,0},{.15f,.1f,1,0}}; slab.bounds();
         auto slabBonds=evaluate(slab,{{Op::CreateBonds,true,.3f}});
         require(slabBonds.data.bonds.size()==1 && slabBonds.data.bonds[0].a==0 &&
-                    slabBonds.data.bonds[0].b==1 && slabBonds.data.bonds[0].image==std::array<int32_t,3>{1,0,0},
+                    slabBonds.data.bonds[0].b==1 && slabBonds.data.bonds[0].image==std::array<int32_t,3>{-1,0,0},
                 "partially periodic triclinic slab works with a degenerate non-periodic cell vector");
         auto slabExpanded=evaluate(slab,{{Op::SelectIndex,true,0,0,0},
                                          {Op::ExpandSelection,true,.3f,2,1}});

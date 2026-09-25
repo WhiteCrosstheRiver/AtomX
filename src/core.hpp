@@ -47,8 +47,10 @@ struct Frame {
 };
 struct Bond {
     uint32_t a = 0, b = 0;
-    // Integer translation of particle b by the simulation cell vectors.
-    // For a non-periodic bond this is {0,0,0}.
+    // Integer lattice translation applied to particle b: the periodic image of
+    // b nearest a sits at b + image*cell, so the physical bond vector is
+    // b + image*cell - a (see bondVector). For a non-periodic bond this is
+    // {0,0,0}.
     std::array<int32_t, 3> image{};
     bool operator==(const Bond &) const = default;
 };
@@ -193,6 +195,39 @@ inline std::array<double,3> bondVector(const Dataset &data, const Bond &bond) {
     if (!(std::hypot(vector[0],vector[1],vector[2])>0))
         throw std::runtime_error("Bond has zero-length geometry");
     return vector;
+}
+
+// One world-space line segment of the bond rendering.
+struct BondSegment { Vec3 p1{}, p2{}; };
+inline double bondSegmentLength(const BondSegment &s) {
+    return std::hypot(double(s.p2.x)-s.p1.x,double(s.p2.y)-s.p1.y,double(s.p2.z)-s.p1.z);
+}
+// Expands a bond into the line segments the renderer draws. The first segment
+// is the physical bond from a to the periodic image of b nearest a,
+// b + image*cell. A periodic-image bond would visually enter one box face and
+// exit the opposite one, so a second segment -- the same bond translated by
+// -image*cell -- is added: both boundary faces show a short attached stub and
+// no drawn segment is longer than the physical bond. Bonds without an image
+// shift expand to exactly one segment.
+inline std::vector<BondSegment> bondSegments(const std::array<double,9> &cell,
+                                             const Vec3 &a, const Vec3 &b,
+                                             const std::array<int32_t,3> &image) {
+    Vec3 shiftedB=b, shiftedA=a;
+    bool periodic=false;
+    for (int axis=0;axis<3;++axis) {
+        const double shift=double(image[axis]);
+        shiftedB.x+=float(shift*cell[axis*3+0]);
+        shiftedB.y+=float(shift*cell[axis*3+1]);
+        shiftedB.z+=float(shift*cell[axis*3+2]);
+        shiftedA.x-=float(shift*cell[axis*3+0]);
+        shiftedA.y-=float(shift*cell[axis*3+1]);
+        shiftedA.z-=float(shift*cell[axis*3+2]);
+        periodic=periodic||image[axis]!=0;
+    }
+    std::vector<BondSegment> segments;
+    segments.push_back({a,shiftedB});
+    if (periodic) segments.push_back({shiftedA,b});
+    return segments;
 }
 
 inline std::vector<double> particlePropertyValues(const Dataset &data,
@@ -1255,7 +1290,11 @@ inline void forEachTriclinicNeighborPair(const Dataset &d, double cutoff, Callba
                     for (int axis=0;axis<3;++axis) {
                         if (shift[axis] < -INT32_MAX || shift[axis] > INT32_MAX)
                             throw std::runtime_error("Periodic image index exceeds supported range");
-                        bestImage[axis]=int32_t(-shift[axis]);
+                        // shift places particle j's nearest image at
+                        // j + shift*cell (the minimized vector is
+                        // pos_i - shift*cell - pos_j), which is exactly the
+                        // Bond.image convention: the translation of b.
+                        bestImage[axis]=int32_t(shift[axis]);
                     }
                     if constexpr (std::is_invocable_v<Callback,uint32_t,uint32_t,double,
                                                       std::array<int32_t,3>>)
@@ -1356,9 +1395,13 @@ inline void forEachNeighborPair(const Dataset &d, double cutoff, Callback &&call
                         for (int axis = 0; axis < 3; ++axis) {
                             double delta = double(coordinate(d.atoms[i], axis)) - coordinate(d.atoms[j], axis);
                             if (d.pbc[axis]) {
+                                // crossings places particle j's nearest image
+                                // at j + crossings*cell (the reduced delta is
+                                // pos_i - crossings*cell - pos_j), matching the
+                                // Bond.image convention: the translation of b.
                                 const double crossings = std::round(delta / d.cell[axis * 4]);
                                 delta -= crossings * d.cell[axis * 4];
-                                image[axis] = int32_t(-crossings);
+                                image[axis] = int32_t(crossings);
                             }
                             distance2 += delta * delta;
                         }
@@ -1875,8 +1918,10 @@ inline CentrosymmetryResult centrosymmetry(const Dataset &d, int neighborCount, 
             const auto &entry = list[k];
             std::array<double,3> vector{};
             for (int axis = 0; axis < 3; ++axis) {
-                const double f = fractional[entry.index][axis] - fractional[i][axis] -
-                                 double(entry.image[axis]);
+                // entry.image is the translation of the neighbor (see Bond):
+                // the neighbor sits at pos_j + image*cell.
+                const double f = fractional[entry.index][axis] + double(entry.image[axis]) -
+                                 fractional[i][axis];
                 for (int xyz = 0; xyz < 3; ++xyz) vector[xyz] += f * searchCell[axis * 3 + xyz];
             }
             vectors.push_back(vector);
