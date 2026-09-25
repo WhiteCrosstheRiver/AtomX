@@ -18,11 +18,22 @@ inline std::filesystem::path settingsPath() {
 }
 struct Preferences {
     int theme = 1, font = 0, size = 18;
+    // Most recently opened files, persisted across launches and shown by the
+    // File > Recent Files submenu. Newest entry first, at most 8 kept.
+    static constexpr int maxRecentFiles = 8;
+    std::vector<std::wstring> recentFiles;
     void load() {
         auto p = settingsPath().wstring();
         theme = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Theme", 1, p.c_str())), 0, 2);
         font = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Font", 0, p.c_str())), 0, 2);
         size = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Size", 18, p.c_str())), 14, 20);
+        recentFiles.clear();
+        for (int i = 0; i < maxRecentFiles; ++i) {
+            wchar_t buffer[32768]{};
+            const auto key = L"File" + std::to_wstring(i);
+            GetPrivateProfileStringW(L"Recent", key.c_str(), L"", buffer, 32768, p.c_str());
+            if (buffer[0]) recentFiles.push_back(buffer);
+        }
     }
     void save() const {
         auto p = settingsPath().wstring();
@@ -30,6 +41,13 @@ struct Preferences {
             if (!WritePrivateProfileStringW(L"Appearance", entry.first,
                                             std::to_wstring(entry.second).c_str(), p.c_str()))
                 throw std::runtime_error("Unable to save appearance settings");
+        // Writing an empty value removes the key, so a shorter list shrinks.
+        for (int i = 0; i < maxRecentFiles; ++i) {
+            const auto key = L"File" + std::to_wstring(i);
+            const auto text = i < int(recentFiles.size()) ? recentFiles[size_t(i)] : std::wstring();
+            if (!WritePrivateProfileStringW(L"Recent", key.c_str(), text.c_str(), p.c_str()))
+                throw std::runtime_error("Unable to save recent files");
+        }
     }
 };
 inline void restore(HWND window) {

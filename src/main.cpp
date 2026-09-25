@@ -4,6 +4,7 @@
 #include "desktop.hpp"
 #include "imgui.h"
 #include "imgui_guard.hpp"
+#include "imgui_internal.h" // GetCurrentWindow / ImGuiLayoutType for the title-strip menu row
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
 #include <commdlg.h>
@@ -440,12 +441,101 @@ static std::vector<DirectX::XMFLOAT3> slicePlaneTriangles(const float normalIn[3
     }
     return triangles;
 }
+// Catalog category of a modifier operation; shared by the pipeline node
+// coloring and the Quick command search registry so the two listings can
+// never drift apart.
+static const char *opCategory(Op op) {
+    return op == Op::ColorCoding || op == Op::ColorType || op == Op::AssignColor
+               ? "Coloring"
+               : op == Op::SelectType || op == Op::SelectIndex ||
+                         op == Op::SelectRange || op == Op::Invert ||
+                         op == Op::Clear || op == Op::ExpandSelection ||
+                         op == Op::SelectOverlapping || op == Op::ExpressionSelect ||
+                         op == Op::ManualSelection
+                     ? "Selection"
+                     : op == Op::CoordinationAnalysis || op == Op::ClusterAnalysis ||
+                               op == Op::RadialDistribution || op == Op::Histogram ||
+                               op == Op::ReduceProperty || op == Op::CommonNeighborAnalysis ||
+                               op == Op::CentrosymmetryParameter ||
+                               op == Op::DisplacementVectors ||
+                               op == Op::BondLengthDistribution || op == Op::BondAngleDistribution ||
+                               op == Op::ScatterPlot
+                         ? "Analysis"
+                         : "Modification";
+}
+
+// One executable entry of the Quick command search (Ctrl+P). The single
+// static table feeds the palette; actions map onto the same code paths the
+// toolbar buttons and the modifier catalog use.
+enum class CommandAction {
+    Modifier, OpenFile, ExportFile, SaveSessionState, Snapshot, Render, Settings,
+    ToggleQuad, FitAll, ToolZoom, ToolPan, ToolOrbit, ToolFov,
+    ViewTop, ViewBottom, ViewFront, ViewBack, ViewLeft, ViewRight, ViewOrtho, ViewPerspective
+};
+struct Command {
+    CommandAction action;
+    const char *category;
+    const char *label;
+    Op op = Op::Translate;
+};
+static const std::vector<Command> &commandRegistry() {
+    static const std::vector<Command> commands = [] {
+        std::vector<Command> list;
+        for (Op op : {Op::Slice, Op::Translate, Op::Scale, Op::Rotate, Op::Replicate,
+                      Op::AffineTransform, Op::Wrap, Op::UnwrapTrajectories, Op::ComputeProperty,
+                      Op::RemoveProperty, Op::FreezeProperty, Op::Delete, Op::EditCell,
+                      Op::EditType, Op::CreateBonds, Op::CommonNeighborAnalysis,
+                      Op::CentrosymmetryParameter, Op::CoordinationAnalysis, Op::ClusterAnalysis,
+                      Op::RadialDistribution, Op::Histogram, Op::ReduceProperty, Op::ScatterPlot,
+                      Op::BondLengthDistribution, Op::BondAngleDistribution, Op::DisplacementVectors,
+                      Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
+                      Op::ColorCoding, Op::ColorType, Op::AssignColor})
+            list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
+        list.push_back({CommandAction::OpenFile, "File", "Open File"});
+        list.push_back({CommandAction::ExportFile, "File", "Export File"});
+        list.push_back({CommandAction::SaveSessionState, "File", "Save Session State"});
+        list.push_back({CommandAction::Snapshot, "Tools", "Snapshot"});
+        list.push_back({CommandAction::Render, "Tools", "Render"});
+        list.push_back({CommandAction::Settings, "Tools", "Application Settings"});
+        list.push_back({CommandAction::ToggleQuad, "Tools", "Toggle single / four views"});
+        list.push_back({CommandAction::FitAll, "Tools", "Fit all viewports"});
+        list.push_back({CommandAction::ToolZoom, "Tools", "Zoom tool"});
+        list.push_back({CommandAction::ToolPan, "Tools", "Pan tool"});
+        list.push_back({CommandAction::ToolOrbit, "Tools", "Orbit tool"});
+        list.push_back({CommandAction::ToolFov, "Tools", "FOV tool"});
+        list.push_back({CommandAction::ViewTop, "View", "Top view"});
+        list.push_back({CommandAction::ViewBottom, "View", "Bottom view"});
+        list.push_back({CommandAction::ViewFront, "View", "Front view"});
+        list.push_back({CommandAction::ViewBack, "View", "Back view"});
+        list.push_back({CommandAction::ViewLeft, "View", "Left view"});
+        list.push_back({CommandAction::ViewRight, "View", "Right view"});
+        list.push_back({CommandAction::ViewOrtho, "View", "Orthographic view"});
+        list.push_back({CommandAction::ViewPerspective, "View", "Perspective view"});
+        return list;
+    }();
+    return commands;
+}
+// Application version surfaced by Help > About and System Information.
+static const char *atomxVersion = "0.1.0";
 struct App {
     HWND window;
     desktop::Preferences preferences;
     ComPtr<ID3D11ShaderResourceView> logo;
     HICON icon = nullptr;
     bool showSettings = false, refreshFont = false, selectAnalysis = false, selectPipeline = false;
+    // Help menu dialogs (deferred-open pattern shared with showSettings).
+    bool showAbout = false, showSystemInfo = false;
+    // Quick command search (Ctrl+P): paletteRequested arms keyboard focus on
+    // the toolbar search field for the next frame; paletteActive keeps the
+    // dropdown open while the field or an entry owns the interaction.
+    char commandSearch[128]{};
+    bool paletteRequested = false, paletteActive = false;
+    int paletteIndex = 0;
+    ImVec2 paletteAnchor{};
+    // Smoke flags: open the File menu / the palette with a pre-filled query
+    // for the automated screenshot runs.
+    bool smokeMenuFile = false;
     ImVec2 catalogAnchor{};
     char modifierSearch[128]{};
     bool showWorkspace = false, indexing = false;
@@ -981,23 +1071,7 @@ struct App {
         ModifierNode node(modifier);
         node.id = std::to_string(nextModifierId++);
         node.displayName = opName(modifier.op);
-        node.category = modifier.op == Op::ColorCoding || modifier.op == Op::ColorType || modifier.op == Op::AssignColor
-                            ? "Coloring"
-                            : modifier.op == Op::SelectType || modifier.op == Op::SelectIndex ||
-                                      modifier.op == Op::SelectRange || modifier.op == Op::Invert ||
-                                      modifier.op == Op::Clear || modifier.op == Op::ExpandSelection ||
-                                      modifier.op == Op::SelectOverlapping || modifier.op == Op::ExpressionSelect ||
-                                      modifier.op == Op::ManualSelection
-                                  ? "Selection"
-                                  : modifier.op == Op::CoordinationAnalysis || modifier.op == Op::ClusterAnalysis ||
-                                            modifier.op == Op::RadialDistribution || modifier.op == Op::Histogram ||
-                                            modifier.op == Op::ReduceProperty || modifier.op == Op::CommonNeighborAnalysis ||
-                                            modifier.op == Op::CentrosymmetryParameter ||
-                                            modifier.op == Op::DisplacementVectors ||
-                                            modifier.op == Op::BondLengthDistribution || modifier.op == Op::BondAngleDistribution ||
-                                            modifier.op == Op::ScatterPlot
-                                        ? "Analysis"
-                                        : "Modification";
+        node.category = opCategory(modifier.op);
         return node;
     }
     void checkpoint() {
@@ -1364,6 +1438,7 @@ struct App {
                 frames = std::move(l.frames);
                 path = l.path;
                 current = l.frame;
+                pushRecent(l.path);
                 if (changed) {
                     appearanceType = 0;
                     exportOptions.scalarProperties.clear();
@@ -1409,6 +1484,41 @@ struct App {
                     L"structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*."
                     L"data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro\0All files\0*.*\0",
                     L"xyz"));
+    }
+    // Remember a successfully opened file for File > Recent Files (newest
+    // first, deduplicated, persisted immediately). Persistence failures are
+    // non-fatal: the session keeps working with an in-memory list.
+    void pushRecent(const std::filesystem::path &p) {
+        if (p.empty()) return;
+        auto wide = p.wstring();
+        auto &list = preferences.recentFiles;
+        list.erase(std::remove(list.begin(), list.end(), wide), list.end());
+        list.insert(list.begin(), wide);
+        if (list.size() > size_t(desktop::Preferences::maxRecentFiles))
+            list.resize(size_t(desktop::Preferences::maxRecentFiles));
+        try {
+            preferences.save();
+        } catch (const std::exception &) {
+        }
+    }
+    // Quick-save / Save As for the session data. The quick path derives a
+    // sibling "-session.xyz" destination from the input; without a loaded
+    // file (or with Save As) the standard export dialog opens instead.
+    void saveSessionState(bool askLocation) {
+        if (askLocation || path.empty()) {
+            showDataExport = true;
+            return;
+        }
+        try {
+            exportFormat = 0; // Extended XYZ quick save
+            startDataExport(path.parent_path() / (path.stem().wstring() + L"-session.xyz"));
+            status = "Saving session state...";
+        } catch (const std::exception &e) {
+            error = e.what();
+        }
+    }
+    void openUrl(const char *url) {
+        ShellExecuteA(window, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
     }
     void exportImage() {
         auto p = dialog(window, true, L"PNG image\0*.png\0", L"png");
@@ -1586,6 +1696,103 @@ struct App {
         ImGui::SameLine(); ImGui::SetCursorPosY(U(9));
         ImGui::TextUnformatted("AtomX");
         ImGui::SameLine(); ImGui::TextDisabled(" / Atomic visualization");
+        // OVITO parity: File / Edit / Help drop-downs live in the title strip
+        // next to the logo. Plain BeginMenu calls give the standard behavior
+        // (click to open, hover to switch while open, click-away/Esc to
+        // close) without BeginMainMenuBar, which cannot coexist with the
+        // custom title bar. Disabled entries are honest about being planned.
+        {
+            ImGui::SameLine(); ImGui::SetCursorPosY(U(10));
+            auto enabledItem = [&](const char *label, const char *record,
+                                   const char *shortcut = nullptr) {
+                const bool pressed = ImGui::MenuItem(label, shortcut);
+                recordUiTestItem(record, label);
+                return pressed;
+            };
+            auto disabledItem = [&](const char *label, const char *record,
+                                    const char *shortcut, const char *tip) {
+                ImGui::BeginDisabled();
+                ImGui::MenuItem(label, shortcut);
+                ImGui::EndDisabled();
+                recordUiTestItem(record, label);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", tip);
+            };
+        // BeginMenu returns whether the popup is open (not "pressed"),
+        // so the label records before the open branch. The three menus lay
+        // out horizontally like a real menu bar: a plain window defaults to
+        // the vertical menu layout (one full-width row per menu), so the
+        // layout type is switched across just this group, exactly what
+        // BeginMenuBar does for its own row.
+        auto *titleWindow = ImGui::GetCurrentWindow();
+        const ImGuiLayoutType savedLayout = titleWindow->DC.LayoutType;
+        titleWindow->DC.LayoutType = ImGuiLayoutType_Horizontal;
+            if (smokeMenuFile) ImGui::OpenPopup("File");
+            const bool fileOpen = ImGui::BeginMenu("File");
+            recordUiTestItem("menu.file", "File");
+            if (fileOpen) {
+                if (enabledItem("Load File...", "menu.file.load-file", "Ctrl+I")) open();
+                disabledItem("Load Remote File", "menu.file.load-remote", "Ctrl+Shift+I",
+                             "Not available");
+                if (enabledItem("Export File...", "menu.file.export", "Ctrl+E"))
+                    showDataExport = true;
+                if (ImGui::BeginMenu("Recent Files")) {
+                    if (preferences.recentFiles.empty()) {
+                        ImGui::BeginDisabled();
+                        ImGui::MenuItem("(no recent files)");
+                        ImGui::EndDisabled();
+                    } else {
+                        int index = 0;
+                        for (const auto &file : preferences.recentFiles) {
+                            const auto record = "menu.file.recent." + std::to_string(index++);
+                            if (enabledItem(utf8(file).c_str(), record.c_str())) load(file);
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+                if (enabledItem("Load Session State...", "menu.file.load-session", "Ctrl+O"))
+                    open();
+                if (enabledItem("Save Session State", "menu.file.save-session", "Ctrl+S"))
+                    saveSessionState(false);
+                if (enabledItem("Save Session State As...", "menu.file.save-session-as",
+                                "Ctrl+Shift+S"))
+                    saveSessionState(true);
+                ImGui::Separator();
+                disabledItem("Run Python Script...", "menu.file.run-python", nullptr,
+                             "Python script deferred");
+                disabledItem("Generate Python Script...", "menu.file.generate-python", nullptr,
+                             "Python script deferred");
+                ImGui::Separator();
+                disabledItem("New Program Window", "menu.file.new-window", "Ctrl+N",
+                             "Single instance");
+                if (enabledItem("Quit", "menu.file.quit")) PostQuitMessage(0);
+                ImGui::EndMenu();
+            }
+            const bool editOpen = ImGui::BeginMenu("Edit");
+            recordUiTestItem("menu.edit", "Edit");
+            if (editOpen) {
+                if (enabledItem("Undo", "menu.edit.undo", "Ctrl+Z")) history(false);
+                if (enabledItem("Redo", "menu.edit.redo", "Ctrl+Y")) history(true);
+                ImGui::Separator();
+                if (enabledItem("Application Settings...", "menu.edit.settings"))
+                    showSettings = true;
+                ImGui::EndMenu();
+            }
+            const bool helpOpen = ImGui::BeginMenu("Help");
+            recordUiTestItem("menu.help", "Help");
+            if (helpOpen) {
+                if (enabledItem("User Manual", "menu.help.user-manual", "F1"))
+                    openUrl("https://github.com/WhiteCrosstheRiver/AtomX#readme");
+                disabledItem("Scripting Reference", "menu.help.scripting", nullptr, "Deferred");
+                if (enabledItem("Request a Feature", "menu.help.request-feature"))
+                    openUrl("https://github.com/WhiteCrosstheRiver/AtomX/issues/new");
+                if (enabledItem("System Information...", "menu.help.system-info"))
+                    showSystemInfo = true;
+                if (enabledItem("About AtomX", "menu.help.about")) showAbout = true;
+                ImGui::EndMenu();
+            }
+            titleWindow->DC.LayoutType = savedLayout;
+        }
         // OVITO parity: the "Pipelines: <source>" selector lives in the
         // window's top strip, right-aligned before the min/max/close cluster
         // (which occupies the right ~U(215) of the row).
@@ -1680,6 +1887,30 @@ struct App {
         if (iconButton("toolbar.workspace", 0xE91B, "Workspace",
                        "Toggle the workspace side panel"))
             showWorkspace = !showWorkspace;
+        // Quick command search (Ctrl+P) pinned to the right edge of the row;
+        // the matching entry list renders in a floating window drawn after
+        // every other window so nothing can cover it.
+        {
+            const float searchWidth = U(260);
+            const float avail = ImGui::GetContentRegionAvail().x;
+            if (avail > searchWidth) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - searchWidth);
+            ImGui::SetCursorPosY(U(3));
+            if (paletteRequested) {
+                paletteRequested = false;
+                paletteActive = true;
+                ImGui::SetKeyboardFocusHere();
+            }
+            ImGui::InputTextWithHint(
+                "##command-search", "Quick command search (Ctrl+P)", commandSearch,
+                sizeof(commandSearch));
+            recordUiTestItem("palette.search");
+            // Anchor always tracks the field so the dropdown appears beneath
+            // it even while focus is still being acquired.
+            paletteAnchor = ImGui::GetItemRectMin();
+            // Typing directly in the field also opens the dropdown; the
+            // empty field after an executed command keeps it closed.
+            if (ImGui::IsItemActive() && commandSearch[0]) paletteActive = true;
+        }
         ImGui::PopStyleVar(2);
         ImGui::End();
     }
@@ -4453,6 +4684,105 @@ struct App {
             ImGui::EndPopup();
         }
     }
+    // Case-insensitive substring filter over the command registry, shared
+    // implementation with the modifier catalog search.
+    std::vector<const Command *> paletteMatches() const {
+        std::vector<const Command *> matches;
+        for (const auto &command : commandRegistry()) {
+            std::string text = std::string(command.category) + ": " + command.label;
+            std::string a = text, b = commandSearch;
+            for (auto &c : a) c = char(std::tolower((unsigned char)c));
+            for (auto &c : b) c = char(std::tolower((unsigned char)c));
+            if (b.empty() || a.find(b) != std::string::npos) matches.push_back(&command);
+        }
+        return matches;
+    }
+    void closePalette() {
+        paletteActive = false;
+        paletteIndex = 0;
+        commandSearch[0] = 0;
+    }
+    void executePaletteEntry() {
+        auto matches = paletteMatches();
+        if (paletteIndex < 0 || size_t(paletteIndex) >= matches.size()) return;
+        const Command &command = *matches[size_t(paletteIndex)];
+        switch (command.action) {
+        case CommandAction::Modifier: add(command.op); break;
+        case CommandAction::OpenFile: open(); break;
+        case CommandAction::ExportFile: showDataExport = true; break;
+        case CommandAction::SaveSessionState: saveSessionState(false); break;
+        case CommandAction::Snapshot:
+        case CommandAction::Render: exportImage(); break;
+        case CommandAction::Settings: showSettings = true; break;
+        case CommandAction::ToggleQuad: quad = !quad; break;
+        case CommandAction::FitAll:
+            for (int i = 0; i < 4; ++i) fitCamera(i, false);
+            break;
+        case CommandAction::ToolZoom: viewportTool = 0; break;
+        case CommandAction::ToolPan: viewportTool = 1; break;
+        case CommandAction::ToolOrbit: viewportTool = 2; break;
+        case CommandAction::ToolFov: viewportTool = 3; break;
+        case CommandAction::ViewTop:
+        case CommandAction::ViewBottom:
+        case CommandAction::ViewFront:
+        case CommandAction::ViewBack:
+        case CommandAction::ViewLeft:
+        case CommandAction::ViewRight:
+        case CommandAction::ViewOrtho:
+        case CommandAction::ViewPerspective:
+            cameras[active].mode = int(command.action) - int(CommandAction::ViewTop);
+            break;
+        }
+        closePalette();
+    }
+    // Floating command list under the toolbar search field. Drawn at the end
+    // of the frame so later windows cannot cover it; keeps the search field
+    // focused so typing continues to filter while the dropdown is open.
+    void commandPalette() {
+        if (!paletteActive) return;
+        const auto matches = paletteMatches();
+        if (paletteIndex >= int(matches.size())) paletteIndex = int(matches.size()) - 1;
+        if (paletteIndex < 0) paletteIndex = 0;
+        ImGui::SetNextWindowPos({paletteAnchor.x, paletteAnchor.y + U(30)});
+        ImGui::SetNextWindowSize({U(430), 0});
+        if (!ImGui::Begin("##command-palette", nullptr,
+                          ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                              ImGuiWindowFlags_NoFocusOnAppearing |
+                              ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::End();
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && paletteIndex > 0) --paletteIndex;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && paletteIndex + 1 < int(matches.size()))
+            ++paletteIndex;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) closePalette();
+        ImGui::BeginChild("##palette-list", {0, std::min(U(320), U(28.f) * float(std::max(matches.size(), size_t(1))))});
+        if (matches.empty())
+            ImGui::TextDisabled("No matching command");
+        int index = 0;
+        for (const Command *command : matches) {
+            const std::string label =
+                std::string(command->category) + ": " + command->label;
+            if (ImGui::Selectable(label.c_str(), index == paletteIndex)) executePaletteEntry();
+            recordUiTestItem("palette.item." + label, label.c_str());
+            ++index;
+        }
+        ImGui::EndChild();
+        // Enter runs the highlighted entry; Up/Down move the highlight. The
+        // search field keeps keyboard focus while the dropdown is open (no
+        // SetItemDefaultFocus here: moving nav focus would deactivate the
+        // text input and swallow typing).
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter) && paletteIndex < int(matches.size()))
+            executePaletteEntry();
+        // Clicking anywhere outside the search field and this list closes
+        // the palette, matching the menus' click-away behavior.
+        if (ImGui::IsMouseClicked(0) && !ImGui::IsWindowHovered() &&
+            !ImGui::IsMouseHoveringRect(paletteAnchor,
+                                        {paletteAnchor.x + U(260), paletteAnchor.y + U(28)}))
+            closePalette();
+        ImGui::End();
+    }
     void ui() {
         poll();
         editCheckpoint.beginFrame(ImGui::IsMouseDown(ImGuiMouseButton_Left));
@@ -4468,8 +4798,17 @@ struct App {
             overlayStatusAt = ImGui::GetTime();
         }
         auto &io = ImGui::GetIO();
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O))
-            open();
+        // Menu accelerators. Ctrl+O loads per OVITO; Ctrl+Z/Y stay on undo /
+        // redo; Ctrl+P focuses the Quick command search.
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) open();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) open();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E)) showDataExport = true;
+        if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S))
+            saveSessionState(true);
+        else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) saveSessionState(false);
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) paletteRequested = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_F1))
+            openUrl("https://github.com/WhiteCrosstheRiver/AtomX#readme");
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z))
             history(false);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
@@ -4485,7 +4824,46 @@ struct App {
         center(w, h);
         catalog();
         settings();
+        commandPalette();
         dataExportDialog();
+        // Help > System Information: the same adapter facts the System tab
+        // shows, in a small modal.
+        if (showSystemInfo) {
+            ImGui::OpenPopup("System Information");
+            showSystemInfo = false;
+        }
+        if (ImGui::BeginPopupModal("System Information", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("AtomX %s", atomxVersion);
+            ImGui::Separator();
+            ImGui::Text("GPU adapter: %s", utf8(gpu.adapterName).c_str());
+            ImGui::Text("DXGI adapters visible: %zu", gpu.adapters.size());
+            ImGui::Text("GPU memory in use: %s", number(uint64_t(gpu.gpuBytes)).c_str());
+            ImGui::Text("Icon font: %s", iconFontName);
+            if (ImGui::Button("Close", {U(110), 0})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (showAbout) {
+            ImGui::OpenPopup("About AtomX");
+            showAbout = false;
+        }
+        if (ImGui::BeginPopupModal("About AtomX", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (logo.Get()) {
+                ImGui::Image((ImTextureID)(intptr_t)logo.Get(), {U(48), U(48)});
+                ImGui::SameLine();
+            }
+            ImGui::BeginGroup();
+            ImGui::Text("AtomX %s", atomxVersion);
+            ImGui::TextDisabled("Atomic visualization workspace");
+            ImGui::EndGroup();
+            ImGui::Separator();
+            ImGui::TextWrapped(
+                "A Direct3D 11 accelerated structure viewer and modifier pipeline, "
+                "modeled on the OVITO workflow.");
+            if (ImGui::Button("Close", {U(110), 0})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
         if (animationSettings) {
             ImGui::OpenPopup("Animation settings");
             animationSettings = false;
@@ -4531,7 +4909,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         int adapter = -1, smoke = 0;
         bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
              smokeColorLegend = false, smokeBondPairs = false, smokeInspectorNode = false,
-             smokeHistogram = false, smokeTypesPanel = false;
+             smokeHistogram = false, smokeTypesPanel = false, smokePalette = false,
+             smokeMenu = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
@@ -4544,6 +4923,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (a == L"--smoke-inspector-node") smokeInspectorNode = true;
             else if (a == L"--smoke-histogram") smokeHistogram = true;
             else if (a == L"--smoke-types-panel") smokeTypesPanel = true;
+            else if (a == L"--palette") smokePalette = true;
+            else if (a == L"--menu") smokeMenu = true;
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -4595,6 +4976,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             app.showCatalog = smokeCatalog;
             app.showSettings = smokeSettings;
             app.showDataExport = smokeExport;
+            if (smokeMenu) app.smokeMenuFile = true;
+            if (smokePalette) {
+                app.paletteRequested = true;
+                strcpy_s(app.commandSearch, "slice");
+            }
             if (smokeInspectorNode) {
                 app.showTable = true;
                 app.add(Op::Translate);

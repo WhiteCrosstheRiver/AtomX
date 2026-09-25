@@ -449,6 +449,65 @@ int main() {
                            std::to_string(guiIO.DisplaySize.x)+"x"+
                            std::to_string(guiIO.DisplaySize.y)).c_str());
 
+            // P10 menu bar: the three OVITO menus live in the title strip and
+            // each opens with its entries; disabled entries still record.
+            frame();
+            requireExport(app.uiTestItems.contains("menu.file") &&
+                              app.uiTestItems.contains("menu.edit") &&
+                              app.uiTestItems.contains("menu.help"),
+                          "menu bar exposes File, Edit and Help");
+            click("menu.file");
+            frame();
+            requireExport(app.uiTestItems.contains("menu.file.load-file") &&
+                              app.uiTestItems.contains("menu.file.load-remote") &&
+                              app.uiTestItems.contains("menu.file.export") &&
+                              app.uiTestItems.contains("menu.file.recent.0") ==
+                                  !app.preferences.recentFiles.empty() &&
+                              app.uiTestItems.contains("menu.file.load-session") &&
+                              app.uiTestItems.contains("menu.file.save-session") &&
+                              app.uiTestItems.contains("menu.file.save-session-as") &&
+                              app.uiTestItems.contains("menu.file.run-python") &&
+                              app.uiTestItems.contains("menu.file.quit"),
+                          "File menu lists its real and honestly-disabled entries");
+            guiIO.AddKeyEvent(ImGuiKey_Escape, true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Escape, false); frame();
+            click("menu.edit");
+            frame();
+            requireExport(app.uiTestItems.contains("menu.edit.undo") &&
+                              app.uiTestItems.contains("menu.edit.redo") &&
+                              app.uiTestItems.contains("menu.edit.settings"),
+                          "Edit menu lists undo, redo and settings");
+            guiIO.AddKeyEvent(ImGuiKey_Escape, true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Escape, false); frame();
+            click("menu.help");
+            frame();
+            requireExport(app.uiTestItems.contains("menu.help.user-manual") &&
+                              app.uiTestItems.contains("menu.help.scripting") &&
+                              app.uiTestItems.contains("menu.help.request-feature") &&
+                              app.uiTestItems.contains("menu.help.system-info") &&
+                              app.uiTestItems.contains("menu.help.about"),
+                          "Help menu lists its entries");
+            guiIO.AddKeyEvent(ImGuiKey_Escape, true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Escape, false); frame();
+            // P10 Quick command search: focus, substring filter, Enter runs
+            // the highlighted entry through the real add(Op) path.
+            app.paletteRequested = true;
+            frame();
+            frame();
+            requireExport(app.uiTestItems.contains("palette.search"),
+                          "command palette exposes the toolbar search field");
+            guiIO.AddInputCharactersUTF8("slice"); frame();
+            requireExport(app.uiTestItems.contains("palette.item.Modification: Slice"),
+                          "palette filters to the Slice modifier entry");
+            guiIO.AddKeyEvent(ImGuiKey_Enter, true); frame();
+            guiIO.AddKeyEvent(ImGuiKey_Enter, false); frame();
+            settlePipeline();
+            requireExport(std::any_of(app.mods.begin(), app.mods.end(),
+                                      [](const ModifierNode &n) { return n.op == Op::Slice; }),
+                          "executing the palette entry adds a real Slice modifier");
+            requireExport(app.commandSearch[0] == 0 && !app.paletteActive,
+                          "executing a palette command clears and closes the palette");
+
             const size_t previouslyPublishedAtoms=app.result.data.atoms.size();
             const size_t previouslyPublishedTableRows=app.result.data.tables.back().rows.size();
             Modifier invalidScale{Op::Scale};
