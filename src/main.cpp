@@ -230,7 +230,7 @@ static void theme(int choice = 1) {
     ImGui::GetStyle() = ImGuiStyle{};
     if (choice == 1) ImGui::StyleColorsLight(); else ImGui::StyleColorsDark();
     auto &s = ImGui::GetStyle();
-    s.WindowPadding = {10,8}; s.FramePadding = {6,3}; s.ItemSpacing = {6,4};
+    s.WindowPadding = {10,8}; s.FramePadding = {8,5}; s.ItemSpacing = {8,7};
     s.WindowRounding = 0; s.ChildRounding = 3; s.FrameRounding = 3; s.PopupRounding = 5;
     s.ScrollbarSize = 13; s.WindowBorderSize = 0; s.ChildBorderSize = 1;
     s.FrameBorderSize = 1; s.PopupBorderSize = 1; s.GrabRounding = 2;
@@ -2287,14 +2287,6 @@ struct App {
     }
     void right(float w, float h) {
         fixed("Properties", w - rightWidth(), topInset(), rightWidth(), h - topInset());
-        // OVITO-proportioned controls: tighter frame padding than the global
-        // style so checkboxes, combos and sliders hug their labels. The guard
-        // pops on every exit path of this function.
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(5), U(2)});
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(4), U(3)});
-        struct PanelStyleGuard {
-            ~PanelStyleGuard() { ImGui::PopStyleVar(2); }
-        } panelStyleGuard;
         // OVITO layout: the compact icon row IS the section switcher; the
         // former Pipeline/Render/Analysis/System text tab bar is gone. The
         // actions of the old icon buttons here are covered elsewhere (open and

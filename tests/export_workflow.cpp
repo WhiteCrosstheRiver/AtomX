@@ -9,7 +9,6 @@ void requireExport(bool ok, const char *message) {
         throw std::runtime_error(message);
 }
 int main() {
-    setvbuf(stdout, nullptr, _IONBF, 0);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     HWND window = CreateWindowExW(0, L"STATIC", L"Export validation", WS_OVERLAPPEDWINDOW, 0, 0,
                                   256, 256, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
