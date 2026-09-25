@@ -309,3 +309,11 @@
 - 视口光标随工具切换：pan=手型（ImGui Hand）、orbit=四向（ResizeAll）、zoom=程序生成 32×32 单色放大镜（WM_SETCURSOR 客户区拦截，失败回退 IDC_SIZEALL），无工具/离开视口恢复箭头；映射函数有单元断言，放大镜生成经真实 smoke 验证（cursor_zoom=procedural-magnifier）。
 - 砍除数据集名条与全宽状态栏：视口与时间轴无留白铺满；状态消息改为激活视口内 ~4 秒渐隐浮层；管线失败以节点红叹号 + 列表顶部一行红字提示；GPU/适配器信息保留在 System 页。
 - 遗留：光标悬停手感需真人复核（无头无法截取光标像素）；错误仍用既有模态弹窗。
+
+## 2026-09-25 P6 波次验证（Jmol/CPK 元素配色 + Cordero 共价半径默认）
+
+- 数据表：src/elements.hpp 64 元素（Z=1..56 + W/Pt/Au/Hg/Pb/Bi/U/Pu），Jmol CPK RGB + Cordero 2008 共价半径 + Bondi 1964 VDW（表外元素记 0 并有注释）；查找规则剥尾部数字/电荷后须整名等于元素符号（Ni2+→Ni，O_wat 不匹配）。
+- 数值钉死：H #FFFFFF/0.31/1.20、O #FF0D0D/0.66/1.52、C #909090/0.76/1.70、N #3050F8、Cu #C88033/1.32/1.96、Ni #50D050/1.24/1.63；全表半径为正、符号唯一、Z=1..36 全覆盖。
+- 集成：类型创建应用元素默认（CPK 色 + 共价半径），未知类型保留调色板 + 0.32；用户会话内改色/改径仍优先（appearanceMemory 机制，按文件路径清除）。
+- 实测 test.xyz：Cu #C88033 @1.32、Ni #50D050 @1.24，Cu 球略大；类型面板显示 "Default radius: 1.32 A (Cordero 2008 covalent radius of Copper)"。截图 docs/parity/atomx/p6-*.png。
+- 构建门禁零警告全绿；遗留：Bondi 表外元素 vdW=0 为约定；配色方案暂无切换设置（默认即 CPK）。
