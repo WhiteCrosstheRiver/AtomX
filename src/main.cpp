@@ -199,7 +199,7 @@ static const ImWchar iconGlyphRanges[] = {
     0xE71D,0xE71D, 0xE722,0xE722, 0xE768,0xE768, 0xE769,0xE769,
     0xE76B,0xE76B, 0xE76C,0xE76C, 0xE792,0xE792, 0xE7A6,0xE7A7,
     0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE7C9,0xE7C9, 0xE81E,0xE81E,
-    0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893, 0xE8A3,0xE8A3,
+    0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893, 0xE721,0xE721, 0xE8A3,0xE8A3,
     0xE8A7,0xE8A7, 0xE8A9,0xE8A9, 0xE8AA,0xE8AA, 0xE8B5,0xE8B5,
     0xE8C8,0xE8C8, 0xE8E5,0xE8E5, 0xE8F1,0xE8F1, 0xE91B,0xE91B,
     0xE72C,0xE72C, 0xE74D,0xE74D, 0xE7F4,0xE7F4, 0xE192,0xE192,
@@ -1381,7 +1381,9 @@ struct App {
     // glyph when the icon font loaded and carries the specific glyph; falls
     // back to the historical text label (never a blank button) otherwise. The
     // stable UI-test name, the tooltip and the action are identical in both
-    // modes. highlight renders the accent background for toggled tools.
+    // modes. highlight renders the light-blue selected background used by
+    // OVITO's light theme: a pale tint with a dark glyph, so a toggled tool
+    // reads as selected rather than pressed.
     bool iconButton(const char *name, unsigned glyph, const char *fallbackText,
                     const char *tip, bool highlight = false, float square = 0,
                     const char *recordName = nullptr) {
@@ -1392,10 +1394,15 @@ struct App {
         else
             snprintf(label, sizeof(label), "%s", fallbackText);
         ImGui::PushID(name);
-        if (highlight) ImGui::PushStyleColor(ImGuiCol_Button, accent);
+        if (highlight) {
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.82f, 0.90f, 0.98f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.74f, 0.85f, 0.96f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.66f, 0.80f, 0.94f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_Text, {0.05f, 0.25f, 0.45f, 1.f});
+        }
         const ImVec2 size = square > 0 ? ImVec2{square, square} : ImVec2{0, 0};
         const bool pressed = ImGui::Button(label, size);
-        if (highlight) ImGui::PopStyleColor();
+        if (highlight) ImGui::PopStyleColor(4);
         ImGui::PopID();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
         recordUiTestItem(recordName ? recordName : name);
@@ -1850,7 +1857,7 @@ struct App {
             if (iconButton(name, glyph, fallback, tip, viewportTool == tool, square))
                 viewportTool = tool;
         };
-        toolButton("timeline.zoom", 0xE8A3, "Zoom", 0, "Zoom active viewport (drag or wheel)");
+        toolButton("timeline.zoom", 0xE721, "Zoom", 0, "Zoom active viewport (drag or wheel)");
         ImGui::SameLine();
         toolButton("timeline.pan", 0xE7C9, "Pan", 1, "Pan active viewport");
         ImGui::SameLine();
