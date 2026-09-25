@@ -13,6 +13,10 @@ rc /nologo /fo build\atomx.res src\atomx.rc
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /I third_party\imgui src\main.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\backends\imgui_impl_win32.cpp third_party\imgui\backends\imgui_impl_dx11.cpp /Fo:build\ /Fe:build\AtomX.exe /link build\atomx.res /SUBSYSTEM:WINDOWS
 if errorlevel 1 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /I third_party\imgui /I src tests\style_stack_test.cpp build\imgui.obj build\imgui_draw.obj build\imgui_tables.obj build\imgui_widgets.obj build\imgui_impl_dx11.obj build\imgui_impl_win32.obj /Fo:build\ /Fe:build\style_stack_test.exe
+if errorlevel 1 exit /b 1
+build\style_stack_test.exe
+if errorlevel 1 exit /b 1
 cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\core_tests.cpp /Fo:build\ /Fe:build\core_tests.exe
 if errorlevel 1 exit /b 1
 build\core_tests.exe

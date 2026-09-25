@@ -3,6 +3,7 @@
 #include "structure_io.hpp"
 #include "desktop.hpp"
 #include "imgui.h"
+#include "imgui_guard.hpp"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
 #include <commdlg.h>
@@ -230,7 +231,7 @@ static void theme(int choice = 1) {
     ImGui::GetStyle() = ImGuiStyle{};
     if (choice == 1) ImGui::StyleColorsLight(); else ImGui::StyleColorsDark();
     auto &s = ImGui::GetStyle();
-    s.WindowPadding = {10,8}; s.FramePadding = {8,5}; s.ItemSpacing = {8,7};
+    s.WindowPadding = {10,8}; s.FramePadding = {6,3}; s.ItemSpacing = {6,4};
     s.WindowRounding = 0; s.ChildRounding = 3; s.FrameRounding = 3; s.PopupRounding = 5;
     s.ScrollbarSize = 13; s.WindowBorderSize = 0; s.ChildBorderSize = 1;
     s.FrameBorderSize = 1; s.PopupBorderSize = 1; s.GrabRounding = 2;
@@ -2287,6 +2288,12 @@ struct App {
     }
     void right(float w, float h) {
         fixed("Properties", w - rightWidth(), topInset(), rightWidth(), h - topInset());
+        // Tighter than the global theme so checkboxes, combos and sliders hug
+        // their labels. release() runs before End(): End() asserts
+        // "Missing PopStyleVar()" (and blocks startup) if these are still pushed.
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(5), U(2)});
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(4), U(3)});
+        ImGuiStyleVarGuard panelStyle(2);
         // OVITO layout: the compact icon row IS the section switcher; the
         // former Pipeline/Render/Analysis/System text tab bar is gone. The
         // actions of the old icon buttons here are covered elsewhere (open and
@@ -3786,6 +3793,7 @@ struct App {
                     "Hundreds of millions of full-resolution atoms and advanced OVITO analysis are "
                     "development targets, not validated capabilities.");
             }
+        panelStyle.release();
         ImGui::End();
     }
     void rebuildFont() {
