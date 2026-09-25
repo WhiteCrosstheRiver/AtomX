@@ -4,6 +4,11 @@
 
 C++20 原生 Windows 原子可视化工作区，使用 Direct3D 11。界面参考 `vendor/zed` 的 One Dark 色彩、紧凑标签与面板布局。界面采用用户提供的 AtomX Logo、紧凑工具栏、三列分类修改器下拉菜单和纯黑原子视窗。当前版本是可运行的开发版，**尚未全面对齐 OVITO，也未实现几亿原子的全量高效渲染**。
 
+## 创作者
+
+- [WhiteCrosstheRiver](https://github.com/WhiteCrosstheRiver)
+- [linkedlist771](https://github.com/linkedlist771)
+
 ## 启动
 
 双击根目录 `Run AtomX.cmd`，或执行 `build\AtomX.exe`。启动后显示 FCC Cu/Ni 晶体，无需准备输入文件。
