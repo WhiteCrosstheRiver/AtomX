@@ -9,6 +9,7 @@
 #include <shellapi.h>
 #include <future>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <iomanip>
 #include <optional>
@@ -27,6 +28,62 @@ static Renderer *renderer = nullptr;
 static bool resized = false;
 static std::filesystem::path dropped;
 static int droppedExtra = 0; // Additional files in a multi-file drop (first wins).
+// Viewport tool cursors. ImGui never draws the OS cursor itself; its win32
+// backend maps ImGui::GetMouseCursor() onto the stock shapes during
+// WM_SETCURSOR, so Pan (hand) and Orbit (4-way) ride that existing path via
+// ImGui::SetMouseCursor. Windows has no stock magnifier cursor, so one is
+// generated once at startup as a 32x32 monochrome icon (AND/XOR masks fed to
+// CreateIconIndirect) and applied through a frame-local override that wndProc
+// checks BEFORE the ImGui backend handler (which would otherwise overwrite it
+// with the last ImGui cursor on every WM_SETCURSOR).
+static HCURSOR g_cursorOverride = nullptr; // Valid for the current frame only.
+static HCURSOR g_magnifierCursor = nullptr;
+enum class ViewportCursor { Arrow, Hand, ResizeAll, Magnifier };
+// Headless-testable mapping from the timeline viewport tool to the cursor.
+static ViewportCursor cursorForViewportTool(int tool) {
+    switch (tool) {
+    case 0: return ViewportCursor::Magnifier; // zoom
+    case 1: return ViewportCursor::Hand;      // pan
+    case 2: return ViewportCursor::ResizeAll; // orbit
+    default: return ViewportCursor::Arrow;    // FOV / select / no tool
+    }
+}
+static HCURSOR createMagnifierCursor() {
+    constexpr int cx = 32, cy = 32, stride = cx / 8; // 4 bytes per monochrome row
+    BYTE andMask[cy * stride] = {}, xorMask[cy * stride] = {};
+    auto dot = [&](int x, int y) {
+        if (x < 0 || x >= cx || y < 0 || y >= cy) return;
+        andMask[y * stride + x / 8] &= static_cast<BYTE>(~(0x80u >> (x % 8))); // 0 = paint
+        xorMask[y * stride + x / 8] |= BYTE(0x80u >> (x % 8));   // 1 = invert
+    };
+    // Magnifier glass: circle outline, center (12,12), radius ~8, ~2 px thick.
+    for (int y = 0; y < cy; ++y)
+        for (int x = 0; x < cx; ++x) {
+            const double d = std::sqrt((x - 12.0) * (x - 12.0) + (y - 12.0) * (y - 12.0));
+            if (d >= 7.0 && d < 9.0) dot(x, y);
+        }
+    // 3 px handle from the glass rim toward (27,27).
+    for (int t = 0; t <= 8; ++t)
+        for (int o = 0; o < 3; ++o) {
+            dot(19 + t + o, 18 + t);
+            dot(18 + t, 19 + t + o);
+        }
+    // Monochrome icon: one double-height mask bitmap, upper half AND, lower
+    // half XOR (hbmColor stays null), hotspot at the glass center.
+    std::vector<BYTE> bits(size_t(cy) * 2 * stride, 0);
+    std::memcpy(bits.data(), andMask, size_t(cy) * stride);
+    std::memcpy(bits.data() + size_t(cy) * stride, xorMask, size_t(cy) * stride);
+    HBITMAP mask = CreateBitmap(cx, cy * 2, 1, 1, bits.data());
+    if (!mask) return nullptr;
+    ICONINFO info{};
+    info.fIcon = FALSE;
+    info.xHotspot = 12;
+    info.yHotspot = 12;
+    info.hbmMask = mask;
+    const HCURSOR cursor = CreateIconIndirect(&info);
+    DeleteObject(mask);
+    return cursor;
+}
 static std::string utf8(const std::wstring &s) {
     if (s.empty())
         return {};
@@ -36,6 +93,12 @@ static std::string utf8(const std::wstring &s) {
     return r;
 }
 static LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    // Magnifier override for the zoom tool: applied before the ImGui backend
+    // handler, which would otherwise answer WM_SETCURSOR with its own cursor.
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT && g_cursorOverride) {
+        SetCursor(g_cursorOverride);
+        return TRUE;
+    }
     if (ImGui_ImplWin32_WndProcHandler(h, msg, wp, lp))
         return 1;
     if (msg == desktop::taskbarCreated && desktop::inTray) {
@@ -133,13 +196,14 @@ static ImVec4 accent{.10f,.34f,.62f,1};
 // for the case where the system font is unavailable or a glyph is missing.
 static const ImWchar iconGlyphRanges[] = {
     0xE70D,0xE70D, 0xE70E,0xE70E, 0xE713,0xE713, 0xE714,0xE714,
-    0xE722,0xE722, 0xE768,0xE768, 0xE769,0xE769, 0xE76B,0xE76B,
-    0xE76C,0xE76C, 0xE792,0xE792, 0xE799,0xE799, 0xE7A6,0xE7A7,
+    0xE71D,0xE71D, 0xE722,0xE722, 0xE768,0xE768, 0xE769,0xE769,
+    0xE76B,0xE76B, 0xE76C,0xE76C, 0xE792,0xE792, 0xE7A6,0xE7A7,
     0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE7C9,0xE7C9, 0xE81E,0xE81E,
     0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893, 0xE8A3,0xE8A3,
     0xE8A7,0xE8A7, 0xE8A9,0xE8A9, 0xE8AA,0xE8AA, 0xE8B5,0xE8B5,
     0xE8C8,0xE8C8, 0xE8E5,0xE8E5, 0xE8F1,0xE8F1, 0xE91B,0xE91B,
     0xE72C,0xE72C, 0xE74D,0xE74D, 0xE7F4,0xE7F4, 0xE192,0xE192,
+    0xE9D9,0xE9D9,
     0};
 // Encodes a Unicode codepoint as UTF-8 (NUL terminated), returns the length.
 static int glyphUtf8(unsigned codepoint, char out[8]) {
@@ -403,6 +467,13 @@ struct App {
     std::string colorRangeProperty = "Position.X";
     int active = 3, propertyAxis = 2, tab = 0;
     int viewportTool = 2; // 0 zoom, 1 pan, 2 orbit, 3 perspective
+    // Right panel section switcher (icon row that replaced the text tabs):
+    // 0 pipeline, 1 render, 2 analysis, 3 system.
+    int rightTab = 0;
+    // Latest status message shown as a fading overlay in the active viewport
+    // (replaces the removed full-width status bar).
+    std::string overlayStatus;
+    double overlayStatusAt = -1e9;
     bool animationSettings = false, autoKey = false;
     Camera cameras[4];
     Target targets[4];
@@ -1293,7 +1364,7 @@ struct App {
         ImGui::Begin(name, nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                         ImGuiWindowFlags_NoSavedSettings | ((std::string(name) == "Title" || std::string(name) == "Status") ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
+                         ImGuiWindowFlags_NoSavedSettings | (std::string(name) == "Title" ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
     }
     void recordUiTestItem(const std::string &name,const char *explicitLabel=nullptr) {
         if (!captureUiTestItems) return;
@@ -1453,7 +1524,7 @@ struct App {
         ImGui::End();
     }
     void left(float h) {
-        fixed("Workspace", 0, topInset(), leftWidth(), h - topInset() - U(30));
+        fixed("Workspace", 0, topInset(), leftWidth(), h - topInset());
         heading("WORKSPACE");
         ImGui::TextColored(accent, "ATOMIC STRUCTURES");
         ImGui::Spacing();
@@ -1637,8 +1708,46 @@ struct App {
             draw->AddText({p.x + U(12), p.y + avail.y - U(25)}, IM_COL32(190, 202, 215, 255),
                           (std::string("Tool: ") + toolHint + "   Wheel zoom").c_str());
         }
-        if (i == active)
+        // 3D-tool cursor: while the pointer is over any viewport area, the
+        // cursor reflects the active tool. Pan/orbit ride the ImGui cursor
+        // (mapped to the stock IDC_HAND / IDC_SIZEALL by the win32 backend);
+        // the zoom magnifier has no stock shape and goes through the Win32
+        // WM_SETCURSOR override. The ui() frame start resets both, so leaving
+        // the viewport (or no tool) restores the normal arrow.
+        if (ImGui::IsWindowHovered()) {
+            switch (cursorForViewportTool(viewportTool)) {
+            case ViewportCursor::Hand: ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); break;
+            case ViewportCursor::ResizeAll: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll); break;
+            case ViewportCursor::Magnifier:
+                g_cursorOverride = g_magnifierCursor ? g_magnifierCursor
+                                                     : LoadCursor(nullptr, IDC_SIZEALL);
+                break;
+            case ViewportCursor::Arrow: break;
+            }
+        }
+        if (i == active) {
             draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(95, 180, 255, 255));
+            // Fading status overlay at the viewport's bottom-left (replaces the
+            // removed status bar); hides after ~4 s or on the next message.
+            if (!overlayStatus.empty()) {
+                const double age = ImGui::GetTime() - overlayStatusAt;
+                if (age >= 0 && age < 4.0) {
+                    const float fade = float(std::min(4.0 - age, 1.0));
+                    char line[256];
+                    snprintf(line, sizeof(line), "%s", overlayStatus.c_str());
+                    const ImVec2 size = ImGui::CalcTextSize(line);
+                    const ImVec2 min{p.x + U(12), p.y + avail.y - U(60)};
+                    const ImVec2 max{std::min(p.x + avail.x - U(12), min.x + size.x + U(18)),
+                                     min.y + size.y + U(10)};
+                    draw->AddRectFilled(min, max, IM_COL32(12, 16, 22, int(212 * fade)), U(5));
+                    draw->AddRect(min, max, IM_COL32(118, 134, 156, int(120 * fade)), U(5));
+                    draw->PushClipRect(p, {p.x + avail.x, p.y + avail.y}, true);
+                    draw->AddText({min.x + U(9), min.y + U(5)},
+                                  IM_COL32(226, 233, 241, int(235 * fade)), line);
+                    draw->PopClipRect();
+                }
+            }
+        }
         ImGui::EndChild();
         ImGui::PopStyleColor(); ImGui::PopStyleVar();
         ImGui::PopID();
@@ -1798,15 +1907,14 @@ struct App {
     }
     void center(float w, float h) {
         fixed("Viewport workspace", leftWidth(), topInset(), w - leftWidth() - rightWidth(),
-              h - topInset() - U(30));
-        ImGui::Text("%s", path.empty() ? "Cu-Ni specimen"
-                                                         : utf8(path.filename().wstring()).c_str());
-        ImGui::Separator();
+              h - topInset());
         auto avail = ImGui::GetContentRegionAvail();
         float dataH = showTable ? U(280) : 0;
         float gap = ImGui::GetStyle().ItemSpacing.y;
-        const float sceneChrome = U(showTable ? 278.f : 128.f);
-        float sceneH = std::max(U(150), avail.y - dataH - sceneChrome - ImGui::GetFrameHeight() - gap*(showTable ? 4 : 3));
+        // Exact stack: viewports, button row, optional inspector, timeline.
+        float sceneH = std::max(U(150),
+                                avail.y - dataH - U(128) - ImGui::GetFrameHeight() -
+                                    gap * (showTable ? 3 : 2));
         if (quad) {
             float vw = (avail.x - ImGui::GetStyle().ItemSpacing.x) * .5f, vh = (sceneH - gap) * .5f;
             viewport(0, vw, vh);
@@ -2166,58 +2274,78 @@ struct App {
         ImGui::End();
     }
     void right(float w, float h) {
-        fixed("Properties", w - rightWidth(), topInset(), rightWidth(), h - topInset() - U(30));
-        if (ImGui::BeginTabBar("Settings")) {
-            if (ImGui::BeginTabItem("Pipeline", nullptr, selectPipeline ? ImGuiTabItemFlags_SetSelected : 0)) {
-                selectPipeline = false;
-                heading("Pipeline editor");
-                // OVITO-style data-source header: bold "Pipelines:" label and a
-                // selector combo showing the live data source; the single entry
-                // reflects real state and selecting it is a no-op.
-                ImGui::AlignTextToFramePadding();
-                if (headingFont) ImGui::PushFont(headingFont);
-                ImGui::TextUnformatted("Pipelines:");
-                if (headingFont) ImGui::PopFont();
-                ImGui::SameLine();
-                const std::string sourceLabel = path.empty()
-                    ? readerName
-                    : utf8(path.filename().wstring()) + "  [" + readerName + "]";
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::BeginCombo("##pipeline-source", sourceLabel.c_str())) {
-                    ImGui::Selectable(sourceLabel.c_str(), true);
-                    ImGui::EndCombo();
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Data source feeding the pipeline");
-                // Row of four compact actions wired to the existing commands.
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(6), U(4)});
-                if (iconButton("pipeline.open", 0xE8E5, "Open",
-                               "Open a structure file (Ctrl+O)"))
-                    open();
-                ImGui::SameLine();
-                if (iconButton("pipeline.snapshot", 0xE722, "Snapshot",
-                               "Save a snapshot image"))
-                    exportImage();
-                ImGui::SameLine();
-                if (iconButton("pipeline.visibility", 0xE7B3, "Visible",
-                               particles ? "Hide particles" : "Show particles", particles))
-                    particles = !particles;
-                ImGui::SameLine();
-                if (iconButton("pipeline.settings", 0xE713, "Settings",
-                               "Open the settings dialog"))
-                    showSettings = true;
-                ImGui::PopStyleVar();
-                if (ImGui::Button("Add modification...", {-1, U(28)}))
-                    showCatalog = true;
-                recordUiTestItem("pipeline.add-modification");
-                {
-                    auto p = ImGui::GetItemRectMax();
-                    const float cy = p.y - U(14);
-                    ImGui::GetWindowDrawList()->AddTriangleFilled({p.x-U(18),cy-U(4)},{p.x-U(10),cy-U(4)},{p.x-U(14),cy+U(1)},ImGui::GetColorU32(ImGuiCol_Text));
-                }
-                catalogAnchor = {ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + 2};
+        fixed("Properties", w - rightWidth(), topInset(), rightWidth(), h - topInset());
+        // OVITO layout: the compact icon row IS the section switcher; the
+        // former Pipeline/Render/Analysis/System text tab bar is gone. The
+        // actions of the old icon buttons here are covered elsewhere (open and
+        // snapshot live in the toolbar, particle visibility in Scene
+        // visibility), so nothing is lost by retiring them.
+        if (selectPipeline) {
+            rightTab = 0;
+            selectPipeline = false;
+        }
+        if (selectAnalysis) {
+            rightTab = 2;
+            selectAnalysis = false;
+        }
+        rightTab = std::clamp(rightTab, 0, 3);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(6), U(4)});
+        if (iconButton("panel.tab.pipeline", 0xE71D, "Pipeline",
+                       "Pipeline", rightTab == 0))
+            rightTab = 0;
+        ImGui::SameLine();
+        if (iconButton("panel.tab.render", 0xE722, "Render",
+                       "Render", rightTab == 1))
+            rightTab = 1;
+        ImGui::SameLine();
+        if (iconButton("panel.tab.analysis", 0xE9D9, "Analysis",
+                       "Analysis", rightTab == 2))
+            rightTab = 2;
+        ImGui::SameLine();
+        if (iconButton("panel.tab.system", 0xE713, "System",
+                       "System", rightTab == 3))
+            rightTab = 3;
+        ImGui::PopStyleVar();
+        // Data-source caption and selector sit above every section (OVITO
+        // panel order); the single entry reflects real state and selecting it
+        // is a no-op.
+        ImGui::AlignTextToFramePadding();
+        if (headingFont) ImGui::PushFont(headingFont);
+        ImGui::TextUnformatted("Pipelines:");
+        if (headingFont) ImGui::PopFont();
+        ImGui::SameLine();
+        const std::string sourceLabel = path.empty()
+            ? readerName
+            : utf8(path.filename().wstring()) + "  [" + readerName + "]";
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##pipeline-source", sourceLabel.c_str())) {
+            ImGui::Selectable(sourceLabel.c_str(), true);
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Data source feeding the pipeline");
+        if (ImGui::Button("Add modification...", {-1, U(28)}))
+            showCatalog = true;
+        recordUiTestItem("pipeline.add-modification");
+        {
+            auto p = ImGui::GetItemRectMax();
+            const float cy = p.y - U(14);
+            ImGui::GetWindowDrawList()->AddTriangleFilled({p.x-U(18),cy-U(4)},{p.x-U(10),cy-U(4)},{p.x-U(14),cy+U(1)},ImGui::GetColorU32(ImGuiCol_Text));
+        }
+        catalogAnchor = {ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + 2};
+        if (rightTab == 0) {
                 ImGui::BeginChild("Stack", {-1, U(205)}, ImGuiChildFlags_Borders);
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(4), U(2)});
+                // Panel-side failure indicator (replaces the removed status
+                // bar): the failing node carries the red "!" below and this
+                // one-line hint repeats the message inside the panel.
+                for (const auto &failed : mods)
+                    if (!failed.error.empty()) {
+                        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(4), U(2)});
+                        ImGui::TextColored({1, .32f, .28f, 1}, "! %s", failed.error.c_str());
+                        ImGui::PopStyleVar();
+                        break;
+                    }
                 if (mods.empty())
                     ImGui::TextWrapped("Add a modification to start processing.");
                 bool stackMutated = false;
@@ -3498,9 +3626,8 @@ struct App {
                 ImGui::Text("Mean %.3f", s.mean);
                 if (source.sampled())
                     ImGui::TextColored({.9f, .73f, .42f, 1}, "Statistics describe preview only.");
-                ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Render")) {
+            if (rightTab == 1) {
                 heading("GPU RENDERER");
                 ImGui::TextWrapped("%s", utf8(gpu.adapterName).c_str());
                 ImGui::Combo("Renderer", &renderMode, "Standard GPU\0Wireframe GPU\0Flat particle preview\0Cinematic GPU preview\0");
@@ -3536,10 +3663,8 @@ struct App {
                     if (ImGui::Button("Cancel export"))
                         exportCancel = true;
                 }
-                ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Analysis", nullptr, selectAnalysis ? ImGuiTabItemFlags_SetSelected : 0)) {
-                selectAnalysis = false;
+            if (rightTab == 2) {
                 heading("DISLOCATION ANALYSIS (DXA)");
                 ImGui::TextWrapped("Runs a coordination-based DXA prepass and reports candidate defect-core atoms. Full Burgers circuit tracing and a dislocation mesh are planned for the next DXA stage.");
                 ImGui::InputFloat("DXA cutoff", &dxaCutoff, .05f, .1f, "%.3f");
@@ -3615,9 +3740,8 @@ struct App {
                 }
                 ImGui::TextWrapped("Requires unsampled data. Periodic neighbor search supports orthogonal and triclinic cells. "
                                    "Current analysis limit: 2 million atoms.");
-                ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("System")) {
+            if (rightTab == 3) {
                 heading("AVAILABLE ADAPTERS");
                 for (auto a : gpu.adapters) {
                     if (a.duplicate) continue;
@@ -3644,10 +3768,7 @@ struct App {
                 ImGui::TextWrapped(
                     "Hundreds of millions of full-resolution atoms and advanced OVITO analysis are "
                     "development targets, not validated capabilities.");
-                ImGui::EndTabItem();
             }
-            ImGui::EndTabBar();
-        }
         ImGui::End();
     }
     void rebuildFont() {
@@ -4047,6 +4168,17 @@ struct App {
     void ui() {
         poll();
         editCheckpoint.beginFrame(ImGui::IsMouseDown(ImGuiMouseButton_Left));
+        // Frame-fresh cursor state: viewport children re-assert the tool
+        // cursor while hovered; everywhere else (and for no active tool) the
+        // normal arrow applies. g_cursorOverride is per-frame by contract.
+        g_cursorOverride = nullptr;
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
+        // The removed status bar lives on as a fading overlay in the active
+        // viewport; track the newest message here so center() can draw it.
+        if (status != overlayStatus) {
+            overlayStatus = status;
+            overlayStatusAt = ImGui::GetTime();
+        }
         auto &io = ImGui::GetIO();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O))
             open();
@@ -4063,23 +4195,6 @@ struct App {
         if (showWorkspace) left(h);
         right(w, h);
         center(w, h);
-        fixed("Status", 0, h - U(30), w, U(30));
-        ImGui::SetCursorPosY(U(5));
-        ImGui::TextColored(accent, "GPU");
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s  |  %.1f FPS  |  %s drawn", utf8(gpu.adapterName).c_str(),
-                            io.Framerate, number(result.data.atoms.size()).c_str());
-        ImGui::SameLine();
-        if (pipelineBusy) {
-            ImGui::TextDisabled("Pipeline stage %zu / %zu", pipelineActiveNode.load(), pipelineJobNodeIds.size());
-            ImGui::SameLine();
-        }
-        if (staleResult) {
-            ImGui::TextColored({1.f,.62f,.18f,1.f}, "STALE RESULT");
-            ImGui::SameLine();
-        }
-        ImGui::TextDisabled("  %s", status.c_str());
-        ImGui::End();
         catalog();
         settings();
         dataExportDialog();
@@ -4167,6 +4282,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         int initialH = std::min(int(U(1000)), int(workArea.rcWork.bottom-workArea.rcWork.top-40));
         SetWindowPos(window,nullptr,workArea.rcWork.left+20,workArea.rcWork.top+20,
                      initialW,initialH,SWP_NOZORDER | SWP_FRAMECHANGED);
+        // Generate the zoom-tool magnifier cursor once; if that fails the
+        // viewport falls back to the stock 4-way cursor at use time.
+        g_magnifierCursor = createMagnifierCursor();
         Renderer gpu;
         renderer = &gpu;
         gpu.init(window, adapter);
@@ -4307,7 +4425,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                            << "\ntrajectory_frames=" << std::max<size_t>(app.frames.size(), 1)
                            << "\ngpu_bytes=" << gpu.gpuBytes << "\nframes=" << ticks
                            << "\nfps=" << io.Framerate
-                           << "\nicon_font=" << iconFontName << "\n";
+                           << "\nicon_font=" << iconFontName
+                           << "\ncursor_zoom="
+                           << (g_magnifierCursor ? "procedural-magnifier" : "sizeall-fallback")
+                           << "\n";
                     done = true;
                 }
                 check(gpu.swap->Present(1, 0), "Present");

@@ -193,6 +193,36 @@ int main() {
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
             frame();
+            // The compact icon row replaced the Pipeline/Render/Analysis/
+            // System text tab bar; each icon switches the panel section.
+            requireExport(app.uiTestItems.contains("panel.tab.pipeline") &&
+                              app.uiTestItems.contains("panel.tab.render") &&
+                              app.uiTestItems.contains("panel.tab.analysis") &&
+                              app.uiTestItems.contains("panel.tab.system"),
+                          "icon section switcher replaces the text tab bar");
+            click("panel.tab.render");
+            requireExport(app.rightTab == 1, "Render icon switches the panel section");
+            click("panel.tab.system");
+            requireExport(app.rightTab == 3, "System icon switches the panel section");
+            click("panel.tab.analysis");
+            requireExport(app.rightTab == 2, "Analysis icon switches the panel section");
+            click("panel.tab.pipeline");
+            requireExport(app.rightTab == 0 &&
+                              app.uiTestItems.contains("pipeline.add-modification"),
+                          "Pipeline icon restores the pipeline section with its controls");
+            // Viewport tool cursor mapping; the OS-level application of the
+            // cursor is exercised by the real smoke run (WM_SETCURSOR path).
+            requireExport(cursorForViewportTool(0) == ViewportCursor::Magnifier &&
+                              cursorForViewportTool(1) == ViewportCursor::Hand &&
+                              cursorForViewportTool(2) == ViewportCursor::ResizeAll &&
+                              cursorForViewportTool(3) == ViewportCursor::Arrow,
+                          "viewport tool cursor mapping");
+            // The removed full-width status bar lives on as a fading overlay
+            // inside the active viewport.
+            app.status = "Opened test.xyz: 108 atoms";
+            frame();
+            requireExport(app.overlayStatus == "Opened test.xyz: 108 atoms",
+                          "status messages surface through the viewport overlay");
             click("pipeline.add-modification");
             frame(); // Allow the newly opened popup to settle before using its recorded item rectangles.
             requireExport(app.uiTestItems.contains("catalog.Radial distribution function (RDF)"),
@@ -378,11 +408,17 @@ int main() {
             requireExport(app.uiTestItems.contains("inspector.scatter-chart"),
                           "Data Tables inspector draws the actual scatter chart for the pipeline result");
             const auto scatterChartRect=app.uiTestItems.at("inspector.scatter-chart");
+            // P5 reclaimed the dataset strip and status bar, so viewports and
+            // the timeline stretch taller and the Data inspector child sits
+            // lower. The chart is laid out inside that child's scroll content
+            // (clipped by the child until scrolled into view), so the bounds
+            // contract is: non-degenerate, horizontally inside the display,
+            // and its top edge on-screen.
             const bool scatterChartFits=scatterChartRect.max.x>scatterChartRect.min.x &&
                               scatterChartRect.max.y>scatterChartRect.min.y &&
                               scatterChartRect.min.x>=0 && scatterChartRect.min.y>=0 &&
-                              scatterChartRect.max.x<=guiIO.DisplaySize.x &&
-                              scatterChartRect.max.y<=guiIO.DisplaySize.y;
+                              scatterChartRect.min.y<=guiIO.DisplaySize.y &&
+                              scatterChartRect.max.x<=guiIO.DisplaySize.x;
             requireExport(scatterChartFits,
                           ("scatter chart rectangle "+std::to_string(scatterChartRect.min.x)+","+
                            std::to_string(scatterChartRect.min.y)+"-"+
