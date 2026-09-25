@@ -3298,6 +3298,11 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                         if (seen.insert(key(bond)).second) unique.push_back(bond);
                     }
                     r.data.bonds = std::move(unique);
+                    // OVITO parity: the Create bonds modifier publishes the
+                    // produced topology as a global attribute so the Data
+                    // inspector's Global Attributes page can surface it.
+                    r.data.globalAttributes["CreateBonds.num_bonds"] =
+                        double(r.data.bonds.size());
                 } else {
                     auto cna = analyzeCommonNeighbors(r.data, m.value, cancel);
                     std::vector<double> structure(cna.structure.begin(), cna.structure.end());

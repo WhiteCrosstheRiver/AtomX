@@ -379,6 +379,28 @@ int main() {
             frame();
             requireExport(app.uiTestItems.contains("inspector.global-attribute."+sumKey),
                           "Global Attributes inspector displays the Reduce property pipeline result");
+            requireExport(app.uiTestItems.contains("inspector.filter.global-attribute-filter") &&
+                              app.uiTestItems.contains("inspector.count.attributes"),
+                          "Global Attributes inspector exposes the filter field and count label");
+            requireExport(app.uiTestItems.contains("inspector.global-attribute.SourceFrame") &&
+                              app.uiTestItems.contains("inspector.global-attribute.Time") &&
+                              app.uiTestItems.contains("inspector.global-attribute.SourceFile") ==
+                                  !app.path.empty(),
+                          "Global Attributes inspector standard entries are published");
+            // P9 Bonds-page click-through: selecting the Bonds inspector tab
+            // exposes the filter field and a count label for the published
+            // bonds (two synthetic rows; the label is driven by the row count
+            // the table renders).
+            app.result.data.bonds = {{0, 0, {0, 0, 0}}, {0, 0, {0, 1, 0}}};
+            app.bondsTab = true;
+            frame(); // SetSelected queues tab focus at the end of the ImGui frame.
+            frame();
+            requireExport(!app.bondsTab,
+                          "ImGui SetSelected opens the Bonds inspector tab");
+            requireExport(app.uiTestItems.contains("inspector.filter.bond-filter"),
+                          "Bonds inspector exposes the filter field");
+            requireExport(app.uiTestItems.contains("inspector.count.bonds"),
+                          "Bonds inspector exposes the bonds count label");
             requireExport(app.mods.size()==2 && app.mods.back().id==reduceNodeId &&
                               app.mods.front().op==Op::RadialDistribution,
                           "analysis parameter edits retain the stable pipeline node identity");

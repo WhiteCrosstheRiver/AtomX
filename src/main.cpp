@@ -465,6 +465,19 @@ struct App {
          showCatalog = false;
     bool histogramPreviewTab = false;
     bool globalAttributesTab = false;
+    bool bondsTab = false;
+    // Data inspector table state: per-page filter text plus cached filtered
+    // row-index lists so scrolling tables with 100k+ rows never re-filters
+    // unless the text or the row count actually changed. cellViewMode
+    // switches the Simulation Cell page between the vector and parameter
+    // readouts.
+    char particleFilter[128] = "", bondFilter[128] = "", globalAttributeFilter[128] = "";
+    std::string particleFilterCache = "\x01", bondFilterCache = "\x01",
+                globalAttributeFilterCache = "\x01";
+    size_t particleFilterRows = size_t(-1), bondFilterRows = size_t(-1),
+           globalAttributeFilterRows = size_t(-1);
+    std::vector<uint32_t> filteredParticles, filteredBonds, filteredAttributes;
+    int cellViewMode = 0;
     std::map<std::string, HistogramPlotView> histogramPlotViews;
     float radius = .32f, bg[4] = {0, 0, 0, 1}, fps = 12;
     int particleShape = 0;
@@ -1454,6 +1467,70 @@ struct App {
         recordUiTestItem(recordName ? recordName : name);
         return pressed;
     }
+    // Case-insensitive substring match used by the Data inspector filters:
+    // a row shows whenever its rendered text contains the filter text.
+    static bool inspectorFilterMatch(const std::string &text, const char *needleText) {
+        auto lower = [](char c) { return char(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c); };
+        const std::string needle = needleText;
+        if (needle.empty()) return true;
+        if (needle.size() > text.size()) return false;
+        for (size_t i = 0; i + needle.size() <= text.size(); ++i) {
+            size_t j = 0;
+            while (j < needle.size() && lower(text[i + j]) == lower(needle[j])) ++j;
+            if (j == needle.size()) return true;
+        }
+        return false;
+    }
+    // Rebuilds a filtered row-index list only when the filter text or the row
+    // count changed; `render` appends the row's rendered text for matching.
+    template <typename Render>
+    void refreshInspectorFilter(const char *text, size_t rowCount, std::string &cachedText,
+                                size_t &cachedRows, std::vector<uint32_t> &matches,
+                                Render render) {
+        if (cachedText == text && cachedRows == rowCount) return;
+        cachedText = text;
+        cachedRows = rowCount;
+        matches.clear();
+        if (!text[0]) return;
+        matches.reserve(rowCount);
+        std::string rowText;
+        for (size_t i = 0; i < rowCount; ++i) {
+            rowText.clear();
+            render(i, rowText);
+            if (inspectorFilterMatch(rowText, text)) matches.push_back(uint32_t(i));
+        }
+    }
+    // The OVITO-style inspector tool row shared by the table pages: a filter
+    // field on the left and the row count on the right edge of the same line.
+    void inspectorToolRow(const char *id, char *filterText, size_t shown, size_t total,
+                          const char *noun, const char *suffix = "") {
+        (void)total;
+        char count[160];
+        snprintf(count, sizeof(count), "%s %s%s", number(shown).c_str(), noun, suffix);
+        ImGui::SetNextItemWidth(U(220));
+        ImGui::InputTextWithHint(id, "Filter...", filterText, 128);
+        recordUiTestItem(std::string("inspector.filter.") + (id + 2));
+        ImGui::SameLine();
+        const float textWidth = ImGui::CalcTextSize(count).x;
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (avail > textWidth) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - textWidth);
+        ImGui::TextUnformatted(count);
+        recordUiTestItem(std::string("inspector.count.") + noun);
+    }
+    // Small filled color square rendered before type/bond-type text cells.
+    void colorSwatch(const std::array<float, 4> &color) {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float size = ImGui::GetTextLineHeight();
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            p, {p.x + size, p.y + size},
+            ImGui::GetColorU32({color[0], color[1], color[2], color[3]}));
+        ImGui::Dummy({size + U(6), size});
+    }
+    std::array<float, 4> typeColor(size_t type) const {
+        if (type < gpu.styles.size()) return gpu.styles[type].color;
+        return {.76f, .57f, .38f, 1.f};
+    }
+
     // Subtle vertical separator drawn between toolbar button groups.
     void toolbarSeparator(float rowHeight) {
         ImGui::SameLine();
@@ -1509,6 +1586,31 @@ struct App {
         ImGui::SameLine(); ImGui::SetCursorPosY(U(9));
         ImGui::TextUnformatted("AtomX");
         ImGui::SameLine(); ImGui::TextDisabled(" / Atomic visualization");
+        // OVITO parity: the "Pipelines: <source>" selector lives in the
+        // window's top strip, right-aligned before the min/max/close cluster
+        // (which occupies the right ~U(215) of the row).
+        const std::string sourceLabel = path.empty()
+            ? readerName
+            : utf8(path.filename().wstring()) + "  [" + readerName + "]";
+        {
+            const float comboWidth = U(280);
+            ImGui::AlignTextToFramePadding();
+            const float labelWidth = ImGui::CalcTextSize("Pipelines:").x;
+            const float rowRight = w - U(215);
+            const float blockWidth = labelWidth + U(8) + comboWidth;
+            ImGui::SetCursorPosY(U(9));
+            ImGui::SetCursorPosX(std::max(U(220), rowRight - blockWidth));
+            ImGui::TextUnformatted("Pipelines:");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(comboWidth);
+            if (ImGui::BeginCombo("##pipeline-source", sourceLabel.c_str())) {
+                ImGui::Selectable(sourceLabel.c_str(), true);
+                ImGui::EndCombo();
+            }
+            recordUiTestItem("pipeline.source-selector");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Data source feeding the pipeline");
+        }
         ImGui::SameLine(w-U(210)); ImGui::SetCursorPosY(U(5));
         control("##minimize",0,"Minimize to taskbar"); ImGui::SameLine();
         control("##maximize",1,"Maximize / restore"); ImGui::SameLine();
@@ -2045,44 +2147,42 @@ struct App {
             }
             if (inspected && (!inspectorBusy || inspectorNode < 0) && ImGui::BeginTabBar("Data")) {
                 if (ImGui::BeginTabItem("Particles")) {
+                    const size_t atomCount = inspected->data.atoms.size();
                     const size_t inspectedSelected = std::count(inspected->selected.begin(),
                                                                  inspected->selected.end(), uint8_t(1));
-                    ImGui::TextDisabled("%s rows  |  %zu selected%s",
-                                        number(inspected->data.atoms.size()).c_str(), inspectedSelected,
-                                        inspected->data.sampled() ? "  |  sampled preview" : "");
-                    struct PropertyColumn { std::string name; int component; bool vector; bool assignedColor=false; };
-                    std::vector<PropertyColumn> properties;
-                    std::vector<std::string> scalarNames, vectorNames;
-                    for (const auto &[name, values] : inspected->data.scalarProperties)
-                        if (values.size() == inspected->data.atoms.size()) scalarNames.push_back(name);
-                    for (const auto &[name, values] : inspected->data.vectorProperties)
-                        if (values.size() == inspected->data.atoms.size()) vectorNames.push_back(name);
-                    std::sort(scalarNames.begin(), scalarNames.end());
-                    std::sort(vectorNames.begin(), vectorNames.end());
-                    for (const auto &name : scalarNames) properties.push_back({name, -1, false});
-                    for (const auto &name : vectorNames)
-                        for (int component = 0; component < 3; ++component)
-                            properties.push_back({name, component, true});
-                    if (inspected->data.particleColors.size()==inspected->data.atoms.size())
-                        for (int component=0;component<3;++component)
-                            properties.push_back({"Color",component,true,true});
-                    if (ImGui::BeginTable("Atoms", int(5 + properties.size()),
+                    refreshInspectorFilter(particleFilter, atomCount, particleFilterCache,
+                                           particleFilterRows, filteredParticles,
+                                           [&](size_t i, std::string &text) {
+                                               const auto &a = inspected->data.atoms[i];
+                                               if (a.type < inspected->data.species.size())
+                                                   text += inspected->data.species[a.type];
+                                               char value[96];
+                                               snprintf(value, sizeof(value), " %.4f %.4f %.4f",
+                                                        a.x, a.y, a.z);
+                                               text += value;
+                                           });
+                    const bool filtering = particleFilter[0];
+                    const std::string particleSuffix = inspectedSelected
+                        ? "  |  " + std::to_string(inspectedSelected) + " selected"
+                            + (inspected->data.sampled() ? "  |  sampled preview" : "")
+                        : inspected->data.sampled() ? "  |  sampled preview" : "";
+                    inspectorToolRow("##particle-filter", particleFilter,
+                                     filtering ? filteredParticles.size() : atomCount,
+                                     atomCount, "particles", particleSuffix.c_str());
+                    if (ImGui::BeginTable("Atoms", 3,
                                           ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                               ImGuiTableFlags_BordersInnerV,
                                           {-1, 0})) {
-                        for (auto name : {"Index", "Type", "Position X", "Position Y", "Position Z"})
-                            ImGui::TableSetupColumn(name, ImGuiTableColumnFlags_WidthFixed, U(74));
-                        constexpr const char *components[] = {"X", "Y", "Z"};
-                        for (const auto &column : properties) {
-                            std::string label = column.name;
-                            if (column.vector) label += "." + std::string(components[column.component]);
-                            ImGui::TableSetupColumn(label.c_str(), ImGuiTableColumnFlags_WidthFixed, U(105));
-                        }
+                        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, U(74));
+                        ImGui::TableSetupColumn("Particle Type", ImGuiTableColumnFlags_WidthFixed, U(150));
+                        ImGui::TableSetupColumn("Position [X Y Z]");
                         ImGui::TableHeadersRow();
                         ImGuiListClipper clip;
-                        clip.Begin(int(inspected->data.atoms.size()));
+                        clip.Begin(int(filtering ? filteredParticles.size() : atomCount));
                         while (clip.Step())
-                            for (int j = clip.DisplayStart; j < clip.DisplayEnd; ++j) {
+                            for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
+                                const int j = filtering ? int(filteredParticles[size_t(row)])
+                                                        : row;
                                 auto a = inspected->data.atoms[j];
                                 ImGui::TableNextRow();
                                 ImGui::TableNextColumn();
@@ -2112,76 +2212,210 @@ struct App {
                                     update(nodeIndex);
                                 } else if (inspectorNode >= 0) ImGui::Text("%d", j);
                                 ImGui::TableNextColumn();
-                                ImGui::TextUnformatted(inspected->data.species[a.type].c_str());
+                                colorSwatch(typeColor(a.type));
+                                ImGui::SameLine();
+                                ImGui::Text("%u (%s)", a.type,
+                                            a.type < inspected->data.species.size()
+                                                ? inspected->data.species[a.type].c_str() : "?");
                                 ImGui::TableNextColumn();
-                                ImGui::Text("%.5f", a.x);
-                                ImGui::TableNextColumn();
-                                ImGui::Text("%.5f", a.y);
-                                ImGui::TableNextColumn();
-                                ImGui::Text("%.5f", a.z);
-                                for (const auto &column : properties) {
-                                    ImGui::TableNextColumn();
-                                    if (column.assignedColor) {
-                                        const auto &color=inspected->data.particleColors[size_t(j)];
-                                        const float component=column.component==0?color.x:column.component==1?color.y:color.z;
-                                        if (component<0) ImGui::TextDisabled("type"); else ImGui::Text("%.4f",component);
-                                    } else if (!column.vector) {
-                                        const auto &values = inspected->data.scalarProperties.at(column.name);
-                                        ImGui::Text("%.6g", values[j]);
-                                    } else {
-                                        const auto &v = inspected->data.vectorProperties.at(column.name)[j];
-                                        ImGui::Text("%.6g", column.component == 0 ? v.x : column.component == 1 ? v.y : v.z);
-                                    }
-                                }
+                                ImGui::Text("%.4f %.4f %.4f", a.x, a.y, a.z);
                             }
                         ImGui::EndTable();
                     }
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Simulation cell")) {
-                    ImGui::TextDisabled("Cell vectors (a, b, c)");
-                    for (int row = 0; row < 3; row++)
-                        ImGui::Text("%c  %12.4f   %12.4f   %12.4f", 'a' + row,
-                                    inspected->data.cell[row * 3],
-                                    inspected->data.cell[row * 3 + 1], inspected->data.cell[row * 3 + 2]);
-                    ImGui::Separator();
-                    ImGui::Text("Origin: %.6g   %.6g   %.6g", inspected->data.origin.x,
-                                inspected->data.origin.y, inspected->data.origin.z);
-                    ImGui::Text("PBC: %s / %s / %s", inspected->data.pbc[0] ? "X" : "-",
-                                inspected->data.pbc[1] ? "Y" : "-", inspected->data.pbc[2] ? "Z" : "-");
-                    ImGui::EndTabItem();
-                }
-                const bool globalAttributesOpen=ImGui::BeginTabItem("Global attributes",nullptr,
-                    globalAttributesTab ? ImGuiTabItemFlags_SetSelected : 0);
-                recordUiTestItem("inspector.global-attributes-tab","Global attributes");
-                if (globalAttributesOpen) {
-                    globalAttributesTab=false;
-                    ImGui::TextWrapped("%s", inspected->data.comment.c_str());
-                    std::vector<std::string> names;
-                    names.reserve(inspected->data.globalAttributes.size());
-                    for (const auto &[name, value] : inspected->data.globalAttributes) names.push_back(name);
-                    std::sort(names.begin(), names.end());
-                    for (const auto &name : names) {
-                        ImGui::Text("%s: %.8g", name.c_str(), inspected->data.globalAttributes.at(name));
-                        recordUiTestItem(std::string("inspector.global-attribute.")+name);
+                const bool bondsOpen = ImGui::BeginTabItem("Bonds", nullptr,
+                    bondsTab ? ImGuiTabItemFlags_SetSelected : 0);
+                // Recorded outside the selected-tab branch so the harness can
+                // reach the tab even while another page is shown.
+                recordUiTestItem("inspector.bonds-tab");
+                if (bondsOpen) {
+                    bondsTab = false;
+                    const size_t bondCount = inspected->data.bonds.size();
+                    refreshInspectorFilter(bondFilter, bondCount, bondFilterCache,
+                                           bondFilterRows, filteredBonds,
+                                           [&](size_t i, std::string &text) {
+                                               const auto &bond = inspected->data.bonds[i];
+                                               char value[96];
+                                               snprintf(value, sizeof(value), "%u %u %d %d %d 1",
+                                                        bond.a, bond.b, bond.image[0],
+                                                        bond.image[1], bond.image[2]);
+                                               text += value;
+                                           });
+                    const bool filtering = bondFilter[0];
+                    const size_t shown = filtering ? filteredBonds.size() : bondCount;
+                    inspectorToolRow("##bond-filter", bondFilter, shown, bondCount, "bonds");
+                    if (!bondCount) {
+                        ImGui::TextDisabled("No bonds have been created at this output.");
+                    } else if (ImGui::BeginTable("Bond rows", 4,
+                                                 ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                                                     ImGuiTableFlags_BordersInnerV)) {
+                        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, U(74));
+                        ImGui::TableSetupColumn("Topology [A B]", ImGuiTableColumnFlags_WidthFixed, U(140));
+                        ImGui::TableSetupColumn("Periodic Image [X Y Z]", ImGuiTableColumnFlags_WidthFixed, U(170));
+                        ImGui::TableSetupColumn("Bond Type");
+                        ImGui::TableHeadersRow();
+                        ImGuiListClipper clip;
+                        clip.Begin(int(shown));
+                        while (clip.Step())
+                            for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
+                                const int j = filtering ? int(filteredBonds[size_t(row)]) : row;
+                                const auto &bond = inspected->data.bonds[size_t(j)];
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::Text("%d", j);
+                                ImGui::TableNextColumn();
+                                ImGui::Text("%u %u", bond.a, bond.b);
+                                ImGui::TableNextColumn();
+                                ImGui::Text("%d %d %d", bond.image[0], bond.image[1], bond.image[2]);
+                                ImGui::TableNextColumn();
+                                colorSwatch(inspected->data.bondStyle.color);
+                                ImGui::SameLine();
+                                ImGui::TextUnformatted("1");
+                            }
+                        ImGui::EndTable();
                     }
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Bonds")) {
-                    ImGui::Text("%zu bonds", inspected->data.bonds.size());
-                    if (ImGui::BeginTable("Bond rows", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV)) {
-                        for (const char *name : {"Particle A", "Particle B", "Image X", "Image Y", "Image Z"}) ImGui::TableSetupColumn(name);
+                if (ImGui::BeginTabItem("Types")) {
+                    std::vector<size_t> counts(inspected->data.species.size(), 0);
+                    for (const auto &a : inspected->data.atoms)
+                        if (a.type < counts.size()) ++counts[a.type];
+                    if (ImGui::BeginTable("Type rows", 3,
+                                          ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                                              ImGuiTableFlags_BordersInnerV)) {
+                        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, U(150));
+                        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, U(160));
+                        ImGui::TableSetupColumn("Particles");
                         ImGui::TableHeadersRow();
-                        ImGuiListClipper clip; clip.Begin(int(inspected->data.bonds.size()));
-                        while (clip.Step()) for (int j = clip.DisplayStart; j < clip.DisplayEnd; ++j) {
-                            const auto &bond = inspected->data.bonds[size_t(j)];
+                        for (size_t t = 0; t < inspected->data.species.size(); ++t) {
                             ImGui::TableNextRow();
-                            for (int column = 0; column < 5; ++column) {
-                                ImGui::TableNextColumn();
-                                int value = column == 0 ? int(bond.a) : column == 1 ? int(bond.b) : bond.image[column - 2];
-                                ImGui::Text("%d", value);
-                            }
+                            ImGui::TableNextColumn();
+                            colorSwatch(typeColor(t));
+                            ImGui::SameLine();
+                            ImGui::Text("%zu", t);
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(inspected->data.species[t].c_str());
+                            ImGui::TableNextColumn();
+                            ImGui::Text("%zu", counts[t]);
                         }
+                        ImGui::EndTable();
+                    }
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Simulation Cell")) {
+                    const auto &cellVectors = inspected->data.cell;
+                    const auto &origin = inspected->data.origin;
+                    const auto length = [&cellVectors](int row) {
+                        return std::hypot(cellVectors[row * 3], cellVectors[row * 3 + 1],
+                                          cellVectors[row * 3 + 2]);
+                    };
+                    ImGui::SeparatorText("Geometry");
+                    ImGui::RadioButton("Cell vectors", &cellViewMode, 0);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("Cell parameters", &cellViewMode, 1);
+                    if (cellViewMode == 1) {
+                        // Read-only reduced form: the vector lengths a/b/c and
+                        // the inter-vector angles alpha (b^c), beta (a^c),
+                        // gamma (a^b) in degrees.
+                        const auto angle = [&](int r1, int r2) {
+                            const double d = cellVectors[r1*3]*cellVectors[r2*3] +
+                                             cellVectors[r1*3+1]*cellVectors[r2*3+1] +
+                                             cellVectors[r1*3+2]*cellVectors[r2*3+2];
+                            const double denominator = length(r1) * length(r2);
+                            return denominator > 0
+                                ? std::acos(std::clamp(d / denominator, -1., 1.)) * 180. / 3.141592653589793
+                                : 0.;
+                        };
+                        ImGui::Text("a = %12.4f   b = %12.4f   c = %12.4f",
+                                    length(0), length(1), length(2));
+                        ImGui::Text("alpha = %9.4f   beta = %9.4f   gamma = %9.4f",
+                                    angle(1, 2), angle(0, 2), angle(0, 1));
+                    } else {
+                        for (int row = 0; row < 3; row++)
+                            ImGui::Text("%c  %12.4f   %12.4f   %12.4f", 'a' + row,
+                                        cellVectors[row * 3], cellVectors[row * 3 + 1],
+                                        cellVectors[row * 3 + 2]);
+                    }
+                    ImGui::Text("Cell origin  o  %12.4f   %12.4f   %12.4f",
+                                origin.x, origin.y, origin.z);
+                    ImGui::SeparatorText("Bounding box");
+                    ImGui::Text("Width (X)   %12.4f", length(0));
+                    ImGui::Text("Length (Y)  %12.4f", length(1));
+                    ImGui::Text("Height (Z)  %12.4f", length(2));
+                    ImGui::SeparatorText("Periodic boundary conditions");
+                    for (int axis = 0; axis < 3; ++axis) {
+                        if (axis) ImGui::SameLine();
+                        const ImVec4 color = inspected->data.pbc[axis]
+                            ? ImVec4{.16f, .62f, .26f, 1.f} : ImVec4{.55f, .55f, .55f, 1.f};
+                        ImGui::TextColored(color, "%c: %s", 'X' + axis,
+                                           inspected->data.pbc[axis] ? "yes" : "no");
+                    }
+                    ImGui::SeparatorText("Dimensionality");
+                    const bool flat = length(2) == 0;
+                    ImGui::TextUnformatted(flat ? "2D" : "3D");
+                    if (ImGui::Button("Edit in pipeline...")) {
+                        size_t found = mods.size();
+                        for (size_t i = 0; i < mods.size(); ++i)
+                            if (mods[i].op == Op::EditCell) { found = i; break; }
+                        if (found == mods.size())
+                            add(Op::EditCell);
+                        else {
+                            checkpoint();
+                            modifierGraph.selected = int(found);
+                            update();
+                        }
+                    }
+                    ImGui::EndTabItem();
+                }
+                const bool globalAttributesOpen=ImGui::BeginTabItem("Global Attributes",nullptr,
+                    globalAttributesTab ? ImGuiTabItemFlags_SetSelected : 0);
+                recordUiTestItem("inspector.global-attributes-tab","Global Attributes");
+                if (globalAttributesOpen) {
+                    globalAttributesTab=false;
+                    ImGui::TextWrapped("%s", inspected->data.comment.c_str());
+                    std::vector<std::pair<std::string, std::string>> entries;
+                    for (const auto &[name, value] : inspected->data.globalAttributes) {
+                        char formatted[64];
+                        snprintf(formatted, sizeof(formatted), "%.8g", value);
+                        entries.push_back({name, formatted});
+                    }
+                    if (!path.empty()) entries.push_back({"SourceFile", utf8(path.wstring())});
+                    entries.push_back({"SourceFrame", std::to_string(current)});
+                    entries.push_back({"Time", std::to_string(current)});
+                    std::sort(entries.begin(), entries.end());
+                    refreshInspectorFilter(globalAttributeFilter, entries.size(),
+                                           globalAttributeFilterCache,
+                                           globalAttributeFilterRows, filteredAttributes,
+                                           [&](size_t i, std::string &text) {
+                                               text += entries[i].first;
+                                               text += ' ';
+                                               text += entries[i].second;
+                                           });
+                    const bool filtering = globalAttributeFilter[0];
+                    const size_t shown = filtering ? filteredAttributes.size() : entries.size();
+                    inspectorToolRow("##global-attribute-filter", globalAttributeFilter,
+                                     shown, entries.size(), "attributes");
+                    if (ImGui::BeginTable("Global attribute rows", 2,
+                                          ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                                              ImGuiTableFlags_BordersInnerV)) {
+                        ImGui::TableSetupColumn("Attribute", ImGuiTableColumnFlags_WidthFixed, U(220));
+                        ImGui::TableSetupColumn("Value");
+                        ImGui::TableHeadersRow();
+                        ImGuiListClipper clip;
+                        clip.Begin(int(shown));
+                        while (clip.Step())
+                            for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
+                                const size_t i = filtering
+                                    ? filteredAttributes[size_t(row)] : size_t(row);
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextUnformatted(entries[i].first.c_str());
+                                recordUiTestItem(std::string("inspector.global-attribute.") +
+                                                 entries[i].first);
+                                ImGui::TableNextColumn();
+                                ImGui::TextUnformatted(entries[i].second.c_str());
+                            }
                         ImGui::EndTable();
                     }
                     ImGui::EndTabItem();
@@ -2370,24 +2604,8 @@ struct App {
                        "System", rightTab == 3))
             rightTab = 3;
         ImGui::PopStyleVar();
-        // Data-source caption and selector sit above every section (OVITO
-        // panel order); the single entry reflects real state and selecting it
-        // is a no-op.
-        ImGui::AlignTextToFramePadding();
-        if (headingFont) ImGui::PushFont(headingFont);
-        ImGui::TextUnformatted("Pipelines:");
-        if (headingFont) ImGui::PopFont();
-        ImGui::SameLine();
-        const std::string sourceLabel = path.empty()
-            ? readerName
-            : utf8(path.filename().wstring()) + "  [" + readerName + "]";
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::BeginCombo("##pipeline-source", sourceLabel.c_str())) {
-            ImGui::Selectable(sourceLabel.c_str(), true);
-            ImGui::EndCombo();
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Data source feeding the pipeline");
+        // The Pipelines data-source selector moved into the title-bar strip
+        // (OVITO layout); the panel starts directly with Add modification.
         if (ImGui::Button("Add modification...", {-1, U(28)}))
             showCatalog = true;
         recordUiTestItem("pipeline.add-modification");
@@ -4388,14 +4606,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
             if (smokeColorLegend) app.add(Op::ColorCoding);
             if (smokeTypesPanel) app.focusParticleAppearance = true;
-            if (smokeBondPairs) {
-                app.add(Op::CreateBonds);
-                auto &bondNode=app.mods.back();
-                const size_t typeCount=app.source.species.size();
-                bondNode.bondTypeCutoffsEnabled=true;
-                bondNode.bondTypeCutoffs.assign(typeCount*typeCount,bondNode.value);
-                app.update(app.mods.size()-1);
-            }
             if (desktopTest) {
                 auto requireWindow = [](bool ok, const char *message) {
                     if (!ok) throw std::runtime_error(message);
@@ -4436,6 +4646,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             bool done = false;
             int ticks = 0;
             bool inspectorSmokeStarted = false;
+            bool bondSmokeStarted = false;
             while (!done) {
                 MSG msg;
                 while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -4468,6 +4679,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     !app.indexing && !app.pipelineBusy) {
                     app.inspectPipelineNode(0);
                     inspectorSmokeStarted = true;
+                }
+                // Deferred so the data source is loaded first (an eager add
+                // would be wiped by load()); the Bonds inspector page shows in
+                // the smoke screenshot once the bond topology is published.
+                if (smokeBondPairs && !bondSmokeStarted && !app.busy &&
+                    !app.pipelineBusy && app.result.data.atoms.size()) {
+                    app.showTable = true;
+                    app.bondsTab = true;
+                    app.add(Op::CreateBonds);
+                    auto &bondNode = app.mods.back();
+                    const size_t typeCount = app.source.species.size();
+                    bondNode.bondTypeCutoffsEnabled = true;
+                    bondNode.bondTypeCutoffs.assign(typeCount * typeCount, bondNode.value);
+                    app.update(app.mods.size() - 1);
+                    bondSmokeStarted = true;
                 }
                 ImGui::Render();
                 float clear[4] = {.15f, .17f, .2f, 1};

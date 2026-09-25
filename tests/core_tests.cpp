@@ -1962,6 +1962,37 @@ int main() {
             }
             require(fccRenderedLength>0.98*fccPhysicalTotal,
                     "the overwhelming majority of FCC bond length survives clipping");
+            // The Data inspector's Bonds page and Global Attributes page feed
+            // directly on this data: the count global must match the published
+            // topology size.
+            require(fccBonds.data.globalAttributes.contains("CreateBonds.num_bonds") &&
+                        fccBonds.data.globalAttributes.at("CreateBonds.num_bonds") == 648,
+                    "Create bonds publishes its bond count as a global attribute");
+        }
+        {
+            // Bonds-page fixture: the per-row values the inspector renders
+            // (topology indices, integer periodic image, physical length from
+            // the image shift) come straight out of the stored Bond fields.
+            Dataset bondFixture;
+            bondFixture.species = {"Cu"};
+            bondFixture.cell = {10.8, 0, 0, 0, 10.8, 0, 0, 0, 10.8};
+            bondFixture.pbc = {true, true, true};
+            bondFixture.atoms = {{1, 1, 1, 0}, {3.2f, 1, 1, 0}};
+            bondFixture.sourceCount = 2;
+            bondFixture.bonds = {{0, 1, {0, 0, 0}}, {0, 1, {-1, 0, 0}}};
+            const auto &first = bondFixture.bonds[0];
+            const auto &second = bondFixture.bonds[1];
+            require(first.a == 0 && first.b == 1 &&
+                        first.image[0] == 0 && first.image[1] == 0 && first.image[2] == 0,
+                    "the non-periodic bond row reports topology 0 1 and image 0 0 0");
+            require(second.image[0] == -1 && second.image[1] == 0 && second.image[2] == 0,
+                    "the periodic bond row reports image -1 0 0");
+            const auto firstVector = bondVector(bondFixture, first);
+            const auto secondVector = bondVector(bondFixture, second);
+            require(std::abs(std::hypot(firstVector[0], firstVector[1], firstVector[2]) - 2.2) < 1e-6,
+                    "the non-periodic bond row measures the raw end-point distance");
+            require(std::abs(std::hypot(secondVector[0], secondVector[1], secondVector[2]) - (10.8 - 2.2)) < 1e-6,
+                    "the periodic-image bond row measures the shifted end-point distance");
         }
         Dataset deleteTopology;
         deleteTopology.species = {"X"};
