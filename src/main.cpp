@@ -234,6 +234,24 @@ static std::string number(uint64_t n) {
 }
 static float uiScale = 1;
 static float U(float value) { return value * uiScale; }
+// P11: pure 1/2/5-decade label-step selection for the timeline ruler. Picks
+// the smallest step in the {1,2,5}*10^n series that keeps the major-label
+// count at 12 or fewer and, when the track is wide enough, a minimum pixel
+// pitch of 40px so labels never collide at any frame count or window width.
+// 30 frames on a normal track -> 5 (labels 0,5,10,15,20,25); a million
+// frames -> at least 100000.
+static int64_t timelineLabelStep(int64_t lastFrame, float trackWidthPx) {
+    if (lastFrame <= 0) return 1;
+    double desired = std::max(double(lastFrame) / 11.0,
+                              trackWidthPx > 0 ? double(lastFrame) * 40.0 / double(trackWidthPx) : 0.0);
+    desired = std::max(desired, 1.0);
+    const double decade = std::pow(10.0, std::floor(std::log10(desired)));
+    for (int mantissa : {1, 2, 5, 10}) {
+        const int64_t step = int64_t(double(mantissa) * decade);
+        if (double(step) >= desired) return step;
+    }
+    return int64_t(decade * 10.0);
+}
 static ImFont *headingFont = nullptr;
 static ImFont *iconFont = nullptr;
 static const char *iconFontName = "text fallback"; // Reported by the smoke run.
@@ -2204,9 +2222,11 @@ struct App {
         const float labelEnd = ImGui::GetItemRectMax().x;
         const float windowRight = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - style.WindowPadding.x;
         const float clusterStart = std::max(labelEnd + U(10), windowRight - cluster);
-        const char *hintText = frames.size() > 1 ? "  Drag ruler to scrub" : "  Single frame";
-        const float hintWidth = ImGui::CalcTextSize(hintText).x + gap;
-        if (labelEnd + U(6) + hintWidth <= clusterStart) {
+        // P11: the scrub hint was redundant with the obvious ruler; keep only
+        // the single-frame note when there is nothing to scrub.
+        const char *hintText = frames.size() > 1 ? nullptr : "Single frame";
+        const float hintWidth = hintText ? ImGui::CalcTextSize(hintText).x + gap : 0;
+        if (hintText && labelEnd + U(6) + hintWidth <= clusterStart) {
             ImGui::SameLine();
             ImGui::TextDisabled("%s", hintText);
         }
@@ -2256,37 +2276,54 @@ struct App {
         float width = ImGui::GetContentRegionAvail().x, height = U(65);
         ImGui::InvisibleButton("##frame ruler", {width,height}, ImGuiButtonFlags_EnableNav);
         bool hovered = ImGui::IsItemHovered(), focused = ImGui::IsItemFocused();
+        recordUiTestItem("timeline.ruler");
         auto *d = ImGui::GetWindowDrawList();
-        float left = p.x+U(15), right = p.x+width-U(18), baseline = p.y+U(29);
-        auto text = ImGui::GetColorU32(ImGuiCol_Text);
-        auto tick = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        auto marker = ImGui::GetColorU32(accent);
-        d->AddRectFilled({left,p.y+U(21)},{right,p.y+U(38)},IM_COL32(35,42,54,180),U(4));
-        d->AddLine({left,baseline},{right,baseline},tick, U(1));
-        // Choose 1/2/5 decade steps so labels remain separated at every frame count.
-        int64_t major = 1;
-        double desired = std::max(1.0, double(last)*U(72)/std::max(1.f,right-left));
-        double decade = std::pow(10.,std::floor(std::log10(desired)));
-        for (int step : {1,2,5,10}) if (step*decade >= desired) { major=int64_t(step*decade); break; }
+        // P11 OVITO-style ruler: a rounded track bar with the played portion
+        // accent-tinted, short minor/major ticks and frame labels beneath it,
+        // and a single circular knob on the track for the current frame. All
+        // colors derive from the theme (text/accent), never hardcoded.
+        const float left = p.x+U(15), right = p.x+width-U(18);
+        const float trackTop = p.y+U(14), trackBottom = trackTop+U(9);
+        const float trackWidth = std::max(1.f, right-left);
+        const auto text = ImGui::GetColorU32(ImGuiCol_Text);
+        const auto tick = ImGui::GetColorU32(ImGuiCol_Text, .45f);
+        const auto trackRest = ImGui::GetColorU32(ImGuiCol_Text, .14f);
+        ImVec4 playedTint = accent; playedTint.w *= .55f;
+        const auto trackPlayed = ImGui::GetColorU32(playedTint);
+        const int64_t major = timelineLabelStep(last, trackWidth);
         int64_t minor = major >= 5 ? major/5 : 1;
-        auto xFor = [&](int frame) { return left+(right-left)*(last ? float(frame)/last : 0.f); };
+        while (last > 0 && minor < last && trackWidth*float(minor)/float(last) < U(3))
+            minor *= 2;
+        auto xFor = [&](int frame) { return left+trackWidth*(last ? float(frame)/last : 0.f); };
+        d->AddRectFilled({left,trackTop},{right,trackBottom},trackRest,U(4));
+        const float knobX = xFor(selected);
+        if (knobX > left+1.f)
+            d->AddRectFilled({left,trackTop},{knobX,trackBottom},trackPlayed,U(4),
+                             ImDrawFlags_RoundCornersLeft);
         for (int64_t frame=0;frame<=last;frame+=minor) {
-            float x=xFor(int(frame)); bool labeled=frame%major==0;
-            d->AddLine({x,baseline},{x,baseline+U(labeled?12.f:6.f)},tick,U(1));
-            if (labeled) {
-                auto label=std::to_string(frame+1); auto size=ImGui::CalcTextSize(label.c_str());
-                d->AddText({x-size.x*.5f,p.y+U(3)},text,label.c_str());
+            const float x=xFor(int(frame));
+            const bool isMajor = frame%major==0;
+            d->AddLine({x,trackBottom},{x,trackBottom+U(isMajor?8.f:4.f)},tick,U(1));
+            if (isMajor) {
+                const auto label=std::to_string(frame); // 0-based, matching the spinner's "/ total".
+                const auto size=ImGui::CalcTextSize(label.c_str());
+                d->AddText({std::clamp(x-size.x*.5f,p.x+2.f,p.x+width-size.x-2.f),
+                            trackBottom+U(10)},text,label.c_str());
             }
         }
-        float x=xFor(selected);
-        d->AddRectFilled({left,p.y+U(21)},{x,p.y+U(38)},IM_COL32(92,145,205,90),U(4));
-        d->AddLine({x,p.y},{x,baseline+U(14)},marker,U(2));
-        d->AddTriangleFilled({x-U(5),baseline-U(5)},{x+U(5),baseline-U(5)},{x,baseline+U(1)},marker);
-        if (last>0 && ImGui::IsItemActive() && ImGui::IsMouseDown(0))
-            seekFrame(int(std::lround(std::clamp((ImGui::GetIO().MousePos.x-left)/(right-left),0.f,1.f)*last)));
-        if (hovered && last>0) {
-            int frame=int(std::lround(std::clamp((ImGui::GetIO().MousePos.x-left)/(right-left),0.f,1.f)*last));
-            ImGui::SetTooltip("Frame %d / %d",frame+1,last+1);
+        d->AddCircleFilled({knobX,(trackTop+trackBottom)*.5f},U(5),ImGui::GetColorU32(accent));
+        d->AddCircle({knobX,(trackTop+trackBottom)*.5f},U(5),
+                     ImGui::GetColorU32(ImGuiCol_Text,.6f),0,U(1.5f));
+        const bool scrubbing = ImGui::IsItemActive() && ImGui::IsMouseDown(0);
+        if (scrubbing && last>0)
+            seekFrame(int(std::lround(std::clamp((ImGui::GetIO().MousePos.x-left)/trackWidth,0.f,1.f)*last)));
+        // Floating frame hint follows the mouse only while hovering the
+        // ruler or scrubbing; it is hidden the rest of the time.
+        if ((hovered || scrubbing) && last>0) {
+            const int frame=int(std::lround(std::clamp((ImGui::GetIO().MousePos.x-left)/trackWidth,0.f,1.f)*last));
+            const std::string name = path.filename().string();
+            ImGui::SetTooltip("%s (Frame %d)",
+                              name.empty() ? "Trajectory" : name.c_str(), frame);
         }
         if (focused && last>0) {
             if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) seekFrame(selected-1);

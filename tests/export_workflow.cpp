@@ -181,7 +181,12 @@ int main() {
                               ("interactive UI control exceeds application bounds: "+name).c_str());
                 const ImVec2 point{item.min.x+(item.max.x-item.min.x)*xFraction,
                                    (item.min.y+item.max.y)*.5f};
+                // Move first, press in a later frame: coalescing a jump with
+                // the button press into one frame leaves the hover test one
+                // frame behind, and a press hovering nothing parks ImGui's
+                // click-ownership on no window (all subsequent hover clears).
                 guiIO.AddMousePosEvent(point.x,point.y);
+                frame();
                 guiIO.AddMouseButtonEvent(0,true); frame();
                 auto down=app.uiTestItems.find(name);
                 if (down==app.uiTestItems.end() || !down->second.hovered || !down->second.clicked)
@@ -458,6 +463,12 @@ int main() {
                           "menu bar exposes File, Edit and Help");
             click("menu.file");
             frame();
+            // Recent Files entries live behind a submenu that this test does
+            // not open, and the persisted preference list may be non-empty on
+            // a developer machine; clear it so the honest-disabled-entries
+            // contract is deterministic in the harness.
+            app.preferences.recentFiles.clear();
+            frame();
             requireExport(app.uiTestItems.contains("menu.file.load-file") &&
                               app.uiTestItems.contains("menu.file.load-remote") &&
                               app.uiTestItems.contains("menu.file.export") &&
@@ -507,6 +518,74 @@ int main() {
                           "executing the palette entry adds a real Slice modifier");
             requireExport(app.commandSearch[0] == 0 && !app.paletteActive,
                           "executing a palette command clears and closes the palette");
+
+            // P11 timeline ruler: the pure 1/2/5-decade label-step helper and
+            // seek-by-click on the redesigned track. The frame number spinner
+            // in the transport cluster stays the canonical frame display.
+            // This runs before the failing-node section below: the "Operation
+            // failed" modal that test leaves open clears ImGui hover for every
+            // other window and would swallow the pointer interaction here.
+            requireExport(timelineLabelStep(0, 1400) == 1 &&
+                              timelineLabelStep(2, 1400) == 1 &&
+                              timelineLabelStep(29, 1400) == 5 &&
+                              timelineLabelStep(999999, 1400) >= 100,
+                          "timeline label step follows the 1/2/5 series and grows with frame count");
+            {
+                std::vector<int64_t> labels;
+                for (int64_t f = 0; f <= 29; f += timelineLabelStep(29, 1400))
+                    labels.push_back(f);
+                requireExport(labels == std::vector<int64_t>{0, 5, 10, 15, 20, 25},
+                              "a 30-frame ruler labels exactly 0,5,10,15,20,25");
+            }
+            app.path = input;
+            app.frames = io::index(input);
+            frame();
+            requireExport(app.uiTestItems.contains("timeline.ruler"),
+                          "the redesigned timeline ruler records its stable UI-test control");
+            if (app.job.valid()) app.job.wait();
+            app.poll();
+            click("timeline.ruler", .99f);
+            if (app.job.valid()) app.job.wait();
+            app.poll();
+            if (app.busy) { app.job.wait(); app.poll(); }
+            requireExport(app.current == 2 && app.pendingFrame < 0,
+                          "clicking the right end of the ruler track seeks to the last frame");
+            click("timeline.ruler", .02f);
+            if (app.job.valid()) app.job.wait();
+            app.poll();
+            if (app.busy) { app.job.wait(); app.poll(); }
+            requireExport(app.current == 0,
+                          "clicking the left end of the ruler track seeks to frame 0");
+            for (int attempt=0; attempt<16 && app.pipelineBusy; ++attempt) {
+                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                frame();
+            }
+            requireExport(!app.pipelineBusy,
+                          "ruler seek pipeline settles before subsequent pipeline edits");
+            // The settled re-evaluation may legitimately have flagged the RDF
+            // node for this synthetic fixture; drop it so the failing-node
+            // section below observes only its own published failure.
+            app.error.clear();
+            // Restore the synthetic source the ruler clicks replaced via the
+            // real load path (XYZ round-trip drops the cell, which the RDF
+            // node rejects), so later sections see the expected pipeline.
+            app.source.species={"Cu"};
+            app.source.cell={4,0,0,0,4,0,0,0,4};
+            app.source.origin={};
+            app.source.pbc={true,true,true};
+            app.source.atoms={{1,1,1,0}};
+            app.source.sourceCount=1;
+            app.result=evaluate(app.source, std::vector<Modifier>{});
+            app.update(0);
+            for (int attempt=0; attempt<16 && app.pipelineBusy; ++attempt) {
+                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                frame();
+            }
+            requireExport(!app.pipelineBusy && app.error.empty(),
+                          "pipeline settles cleanly after the ruler seek fixture restore");
+            app.frames.clear();
+            app.path.clear();
+            frame();
 
             const size_t previouslyPublishedAtoms=app.result.data.atoms.size();
             const size_t previouslyPublishedTableRows=app.result.data.tables.back().rows.size();
