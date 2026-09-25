@@ -294,3 +294,11 @@
 - 图标字体：运行时合并 Segoe MDL2 Assets（segmdl2.ttf，含备选），逐字形 FindGlyphNoFallback 校验，缺失时回退文字按钮（回退契约有测试钉住）；smoke-report 记录 icon_font=Segoe MDL2 Assets。
 - 拖拽打开：伪造 HDROP 注入真实 WM_DROPFILES（与资源管理器拖放同代码路径）端到端验证——test.xyz 加载 108 粒子/30 帧，标题与数据源面板同步。注意 DROPFILES 结构体 pFiles 位于偏移 0（首次注入字段序写反导致静默失败，已修正注入脚本并留档 docs/parity/scripts/drop.ps1）。多文件拖入提示 "M more dropped file(s) ignored"；解析失败走现有失败弹窗。
 - 构建门禁全绿（零警告）；既有交互回归按节点 id 键全部通过。
+
+## 2026-09-25 P7 波次验证（Create bonds 周期键渲染修复——用户验收发现的严重 bug）
+
+- 用户实测：test.xyz + Create bonds(cutoff 3.2) 出现横穿/飞出视口的长直线（键数 648 正确，渲染错误）。
+- 根因：Bond.image 语义为“施加于粒子 b 的晶格平移”，但正交与三斜两个邻居内核都存了取负值，渲染 b+image*cell 指向远端镜像（约 2 倍盒长）。CSP 消费方与旧符号恰好相互抵消，同步翻转后数值不变（暴力参考全部仍过）。
+- 修复：两内核符号改正；渲染端 bondSegments() 把跨界键展开为物理段 + 周期平移段（两侧盒面各出现短键帽，任何段 ≤ 物理键长）。
+- 回归：符号双向钉死、长度保持、段不变式、FCC 648 键扫描（2.5456 Å，|image|<2）、键长/键角分布消费方短镜像一致性；构建零警告全绿，GPU 渲染测试含键线/圆柱通过。
+- 附带发现：fccLattice 测试夹具未设 pbc（默认非周期），非限定 FCC 键计数为 450 而非 648——新测试显式开启 pbc。
