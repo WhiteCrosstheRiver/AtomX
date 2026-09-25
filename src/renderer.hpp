@@ -735,7 +735,12 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                                               std::abs(projected.y) / tanHalfY));
                 fittedDistance = std::max(fittedDistance, dist + requiredDepth - depth);
             }
-            dist = std::max(fittedDistance, minDepth);
+            // cam.zoom must survive the auto-fit: the fitted distance alone
+            // cancels the zoom term (dist appears on both sides), which made
+            // zoom drag / wheel a no-op in every perspective view. Scale the
+            // fitted distance so zoom>1 pulls back and zoom<1 moves in —
+            // matching the orthographic path's `width * cam.zoom` semantics.
+            dist = std::max(fittedDistance, minDepth) * cam.zoom;
             baseView = XMMatrixLookAtRH(center + dir * dist, center, up);
         }
         auto v = baseView * XMMatrixTranslation(cam.panX * span, cam.panY * span, 0);

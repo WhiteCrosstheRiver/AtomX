@@ -51,11 +51,22 @@ static ViewportCursor cursorForViewportTool(int tool) {
     default: return ViewportCursor::Arrow;    // FOV / select / no tool
     }
 }
-static HCURSOR createMagnifierCursor() {
-    // 32-bit ARGB color cursor: semi-transparent white glass, black outline
-    // and handle. The AND mask stays all zero so the color bitmap's alpha
-    // channel alone drives transparency.
-    constexpr int cx = 32, cy = 32;
+static HCURSOR createMagnifierCursor(float scale = 1.f) {
+    // 32-bit ARGB color cursor. Large and high-contrast: the viewport is
+    // near-black, so a thin black outline alone disappears. The lens gets a
+    // bright white halo outside a black ring, a light glass interior, and a
+    // black handle edged in white, so it reads on both dark and light
+    // content. The AND mask stays all zero; the color bitmap's alpha channel
+    // alone drives transparency.
+    constexpr float base = 56.f; // logical pixels at scale 1
+    const int cx = int(base * scale + .5f), cy = cx;
+    const float c = base * .5f * scale;          // lens center / hotspot
+    const float lensR = base * .30f * scale;     // inner glass radius
+    const float ringW = std::max(2.5f, base * .07f * scale);
+    const float haloW = std::max(2.5f, base * .08f * scale);
+    const float handleStart = lensR + ringW;
+    const float handleEnd = base * .92f * scale;
+    const float handleW = std::max(3.5f, base * .09f * scale);
     BITMAPV5HEADER header{};
     header.bV5Size = sizeof(header);
     header.bV5Width = cx;
@@ -77,13 +88,14 @@ static HCURSOR createMagnifierCursor() {
         if (mask) DeleteObject(mask);
         return nullptr; // caller falls back to IDC_SIZEALL
     }
-    auto circleDistance = [](double x, double y) {
-        return std::sqrt((x - 12.0) * (x - 12.0) + (y - 12.0) * (y - 12.0));
+    auto circleDistance = [&](double x, double y) {
+        return std::sqrt((x - c) * (x - c) + (y - c) * (y - c));
     };
-    auto handleDistance = [](double x, double y) {
-        // Distance to the segment (18,18)-(27,27); the projection parameter
-        // clamps to the segment ends, giving the rounded handle tip.
-        constexpr double ax = 18, ay = 18, bx = 27, by = 27;
+    auto handleDistance = [&](double x, double y) {
+        // Distance to the diagonal handle segment; the projection parameter
+        // clamps to the segment ends, giving a rounded handle tip.
+        const double ax = c + handleStart * 0.7071, ay = ax;
+        const double bx = c + handleEnd * 0.7071, by = bx;
         const double dx = bx - ax, dy = by - ay;
         const double t = std::clamp(((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy), 0.0, 1.0);
         return std::sqrt((x - (ax + t * dx)) * (x - (ax + t * dx)) +
@@ -98,23 +110,35 @@ static HCURSOR createMagnifierCursor() {
         // DIB sections are bottom-up: row cy-1-y of the buffer is screen row y.
         DWORD *row = pixels + size_t(cy - 1 - y) * cx;
         for (int x = 0; x < cx; ++x) {
-            const double d = circleDistance(x + 0.5, y + 0.5);
-            double alpha = 0, red = 0, green = 0, blue = 0;
-            if (d < 9.5) {
-                if (d < 7.5) { // interior: semi-transparent white glass
-                    red = green = blue = 255;
-                    alpha = 150;
-                }
-                // 2 px black outline with smoothstep anti-aliasing over the rim.
-                const double outline = 1.0 - smoothstep(7.5, 9.5, d);
-                alpha = std::max(alpha, 255.0 * outline);
-                red *= 1.0 - outline;
-                green *= 1.0 - outline;
-                blue *= 1.0 - outline;
+            const double px = x + 0.5, py = y + 0.5;
+            const double d = circleDistance(px, py);
+            double alpha = 0, red = 255, green = 255, blue = 255;
+            const double ringOuter = lensR + ringW, haloOuter = ringOuter + haloW;
+            if (d < lensR) {
+                // interior: light glass tint, keeps the scene visible
+                alpha = 90;
+            } else if (d < ringOuter) {
+                // opaque black ring with smoothstep anti-aliasing
+                const double ring = 1.0 - smoothstep(ringOuter - 1.5, ringOuter, d) +
+                                    smoothstep(lensR, lensR + 1.5, d);
+                alpha = 255.0 * std::clamp(ring, 0.0, 1.0);
+                red = green = blue = 0;
+            } else if (d < haloOuter) {
+                // bright white halo: visible on the dark viewport
+                const double halo = 1.0 - smoothstep(haloOuter - 1.5, haloOuter, d);
+                alpha = 255.0 * std::clamp(halo, 0.0, 1.0);
             }
-            if (handleDistance(x + 0.5, y + 0.5) < 1.8) { // opaque black handle wins
+            const double hd = handleDistance(px, py);
+            if (hd < handleW) { // opaque black handle wins over everything inside
                 alpha = 255;
                 red = green = blue = 0;
+            } else if (hd < handleW + haloW) { // white edging so the handle reads on black
+                const double edge = 1.0 - smoothstep(handleW + haloW - 1.5, handleW + haloW, hd);
+                const double a = 255.0 * std::clamp(edge, 0.0, 1.0);
+                if (a > alpha) {
+                    alpha = a;
+                    red = green = blue = 255;
+                }
             }
             const DWORD a8 = DWORD(alpha + 0.5) & 0xFF;
             row[x] = (a8 << 24) | (DWORD(red + 0.5) << 16) | (DWORD(green + 0.5) << 8) | DWORD(blue + 0.5);
@@ -122,8 +146,8 @@ static HCURSOR createMagnifierCursor() {
     }
     ICONINFO info{};
     info.fIcon = FALSE;
-    info.xHotspot = 12;
-    info.yHotspot = 12;
+    info.xHotspot = DWORD(c + .5f);
+    info.yHotspot = DWORD(c + .5f);
     info.hbmMask = mask;
     info.hbmColor = color;
     const HCURSOR cursor = CreateIconIndirect(&info);
@@ -2038,8 +2062,10 @@ struct App {
                 cam.panX += ImGui::GetIO().MouseDelta.x / std::max(avail.x, 1.f) * cam.zoom;
                 cam.panY -= ImGui::GetIO().MouseDelta.y / std::max(avail.y, 1.f) * cam.zoom;
             }
+            // Dragging up (negative delta) zooms in, matching the wheel
+            // (wheel up -> zoom in) and OVITO's zoom tool.
             if (viewportTool == 0 && ImGui::GetIO().MouseWheel == 0 && ImGui::IsMouseDragging(0))
-                cam.zoom = std::clamp(cam.zoom * powf(.985f, ImGui::GetIO().MouseDelta.y), .01f, 50.f);
+                cam.zoom = std::clamp(cam.zoom * powf(.985f, -ImGui::GetIO().MouseDelta.y), .01f, 50.f);
             cam.zoom = std::clamp(cam.zoom * powf(.85f, ImGui::GetIO().MouseWheel), .01f, 50.f);
         }
         auto *draw = ImGui::GetWindowDrawList();
@@ -4926,10 +4952,22 @@ struct App {
         }
         if (!error.empty())
             ImGui::OpenPopup("Operation failed");
+        // TextWrapped inside an AlwaysAutoResize window collapses to the
+        // minimum width when it is the only wide item, turning the dialog
+        // into a sliver a user can easily miss — while the modal blocks every
+        // other interaction. Pin a readable width range instead.
+        ImGui::SetNextWindowSizeConstraints({U(430), U(110)}, {U(720), FLT_MAX});
         if (ImGui::BeginPopupModal("Operation failed", nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::PushTextWrapPos(U(660));
             ImGui::TextWrapped("%s", error.c_str());
-            if (ImGui::Button("OK")) {
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+            ImGui::Separator();
+            const float okWidth = U(120);
+            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
+                                          ImGui::GetContentRegionAvail().x - okWidth + ImGui::GetStyle().ItemSpacing.x));
+            if (ImGui::Button("OK", {okWidth, 0})) {
                 error.clear();
                 ImGui::CloseCurrentPopup();
             }
@@ -4991,7 +5029,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                      initialW,initialH,SWP_NOZORDER | SWP_FRAMECHANGED);
         // Generate the zoom-tool magnifier cursor once; if that fails the
         // viewport falls back to the stock 4-way cursor at use time.
-        g_magnifierCursor = createMagnifierCursor();
+        g_magnifierCursor = createMagnifierCursor(uiScale);
         Renderer gpu;
         renderer = &gpu;
         gpu.init(window, adapter);
@@ -5125,9 +5163,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
                 if (smoke && !app.busy && !app.pipelineBusy && !app.inspectorBusy &&
                     (!smokeInspectorNode || inspectorSmokeStarted) && ++ticks >= smoke) {
-                    if (!app.error.empty())
-                        throw std::runtime_error(app.error);
                     if (!shot.empty()) {
+                        // Capture before the error abort below so a failing
+                        // run still documents the dialog it died on.
                         Target t;
                         ComPtr<ID3D11Resource> res;
                         gpu.back->GetResource(&res);
@@ -5138,6 +5176,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                         t.h = d.Height;
                         gpu.png(t, shot);
                     }
+                    if (!app.error.empty())
+                        throw std::runtime_error(app.error);
                     std::ofstream report("smoke-report.txt");
                     report << "adapter=" << utf8(gpu.adapterName)
                            << "\natoms=" << app.result.data.atoms.size()
