@@ -10,6 +10,7 @@
 #include <wincodec.h>
 #include "core.hpp"
 #include "color_maps.hpp"
+#include "elements.hpp"
 #include "particle_mesh.hpp"
 using Microsoft::WRL::ComPtr;
 inline void check(HRESULT hr, const char *message) {
@@ -43,7 +44,10 @@ inline bool sameAdapterIdentity(LUID a, LUID b) {
 }
 struct ParticleStyle {
     std::array<float, 4> color{.76f, .57f, .38f, 1};
-    // radius=0 and shape=-1 inherit the particle visual defaults.
+    // radius=0 inherits the per-type element default radius (visual[3], the
+    // Cordero 2008 covalent radius, 0 = no element match) or the global
+    // particle radius; shape=-1 inherits the default shape; visual[2] toggles
+    // type visibility.
     std::array<float, 4> visual{0, -1, 1, 0};
     std::array<float, 4> axes{1, 1, 1, 0};
     bool operator==(const ParticleStyle &) const = default;
@@ -203,7 +207,7 @@ class Renderer {
         meshView = std::move(srv);
         meshTriangleCount = triangles.size();
     }
-    void resetStyles(size_t count) {
+    void resetStyles(size_t count, const std::vector<std::string> *names = nullptr) {
         const std::array<float, 4> palette[] = {{.76f, .57f, .38f, 1}, {.35f, .68f, .78f, 1},
                                                 {.62f, .76f, .46f, 1}, {.78f, .44f, .52f, 1},
                                                 {.69f, .52f, .81f, 1}, {.88f, .76f, .43f, 1},
@@ -211,10 +215,15 @@ class Renderer {
         styles.assign(std::max<size_t>(count, 1), {});
         for (size_t i = 0; i < styles.size(); ++i)
             styles[i].color = palette[i % 8];
+        // Element types start from literature defaults: Jmol/CPK color and the
+        // Cordero 2008 covalent radius as the per-type default (visual[3]).
+        // Unknown types keep the palette color and the global radius default.
+        if (names)
+            atomx::elements::applyTypeDefaults(*names, styles);
     }
-    void uploadStyles(size_t count) {
+    void uploadStyles(size_t count, const std::vector<std::string> *names = nullptr) {
         if (styles.size() != std::max<size_t>(count, 1))
-            resetStyles(count);
+            resetStyles(count, names);
         if (styles == cachedStyles && styleView)
             return;
         D3D11_BUFFER_DESC bd{};
@@ -337,7 +346,7 @@ V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
  Atom a=atoms[instance];Style s=styles[a.type&0x3fffffff];V o;
  o.overrideColor=colors[1].w>.5?particleColors[instance]:float3(-1,-1,-1);
  o.center=mul(float4(a.pos,1),view).xyz;o.world=a.pos;o.uv=q[id];o.type=a.type;
- float rad=s.visual.x>0?s.visual.x:radius;float kind=s.visual.y<0?shape:s.visual.y;
+ float rad=s.visual.x>0?s.visual.x:s.visual.w>0?s.visual.w:radius;float kind=s.visual.y<0?shape:s.visual.y;
  float3 dims=max(s.axes.xyz,float3(.05,.05,.05))*rad;
  float bound=(kind<.5||kind>5.5)?max(dims.x,max(dims.y,dims.z)):kind>2.5&&kind<3.5?length(float2(rad,dims.z)):kind>3.5&&kind<4.5?rad+dims.z:length(dims);
  // Expand the projected bounding sphere for perspective views close to the camera.
@@ -663,7 +672,9 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         float particleExtent = 0;
         for (const auto &style : styles) {
             if (style.visual[2] <= .5f) continue;
-            const float particleRadius = style.visual[0] > 0 ? style.visual[0] : defaultRadius;
+            const float particleRadius = style.visual[0] > 0  ? style.visual[0]
+                                         : style.visual[3] > 0 ? style.visual[3]
+                                                               : defaultRadius;
             const float ax = std::max(style.axes[0], .05f);
             const float ay = std::max(style.axes[1], .05f);
             const float az = std::max(style.axes[2], .05f);
@@ -761,7 +772,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
     void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, int shape, int renderMode, int colorAxis, int colorGradient, float colorMin, float colorMax, bool colorCoding, bool discrete, bool selectedOnly, const float *bg,
               bool visible = true, bool includeCellInFit = true) {
         using namespace DirectX;
-        uploadStyles(d.species.size());
+        uploadStyles(d.species.size(), &d.species);
         context->VSSetShaderResources(1, 1, styleView.GetAddressOf());
         context->PSSetShaderResources(2, 1, meshView.GetAddressOf());
         context->OMSetRenderTargets(1, t.rtv.GetAddressOf(), t.dsv.Get());

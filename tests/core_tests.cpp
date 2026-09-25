@@ -1,4 +1,5 @@
 #include "../src/analysis.hpp"
+#include "../src/elements.hpp"
 #include <iostream>
 using namespace atomx;
 void require(bool b, const char *s) {
@@ -2608,6 +2609,101 @@ int main() {
                         std::find(choices.begin(), choices.end(), "Displacement Magnitude") !=
                             choices.end(),
                     "color coding property choices list upstream modifier outputs");
+        }
+        // P6: literature-based element defaults for particle types. Type names
+        // resolving to a chemical element start from the Jmol/CPK color and the
+        // Cordero 2008 covalent radius; the Bondi 1964 van der Waals radius is
+        // tabulated alongside. Non-element names keep the palette path.
+        {
+            const auto approx = [](float a, float b) { return std::abs(a - b) < 1e-4f; };
+            const struct {
+                const char *type;
+                unsigned rgb;
+            } cpk[] = {{"H", 0xFFFFFF}, {"O", 0xFF0D0D}, {"C", 0x909090}, {"N", 0x3050F8}};
+            for (const auto &c : cpk) {
+                const auto *e = atomx::elements::find(c.type);
+                require(e && e->rgb == c.rgb,
+                        "element table stores the exact Jmol/CPK color per element");
+                const auto rgba = atomx::elements::color(*e);
+                require(approx(rgba[0], float((c.rgb >> 16) & 255) / 255.f) &&
+                            approx(rgba[1], float((c.rgb >> 8) & 255) / 255.f) &&
+                            approx(rgba[2], float(c.rgb & 255) / 255.f) && approx(rgba[3], 1.f),
+                        "Jmol/CPK colors normalize to RGBA with alpha 1");
+            }
+            const auto checkRadii = [](const char *type, float cov, float vdw, const char *msg) {
+                const auto *e = atomx::elements::find(type);
+                require(e && std::abs(e->covalent - cov) < 1e-4f &&
+                            (vdw == 0 ? e->vdw == 0 : std::abs(e->vdw - vdw) < 1e-4f),
+                        msg);
+            };
+            checkRadii("H", 0.31f, 1.20f, "H carries Cordero covalent 0.31 and Bondi vdW 1.20");
+            checkRadii("C", 0.76f, 1.70f, "C carries Cordero covalent 0.76 and Bondi vdW 1.70");
+            checkRadii("O", 0.66f, 1.52f, "O carries the Cordero covalent radius 0.66");
+            checkRadii("Cu", 1.32f, 1.96f, "Cu carries Cordero covalent 1.32 and Bondi vdW 1.96");
+            checkRadii("Ni", 1.24f, 1.63f, "Ni carries the Cordero covalent radius 1.24");
+            checkRadii("Be", 0.96f, 0.f, "Bondi-undefined elements store vdW radius 0");
+            constexpr size_t elementCount =
+                sizeof(atomx::elements::table) / sizeof(atomx::elements::table[0]);
+            static_assert(elementCount == 64,
+                          "Z=1..56 plus W, Pt, Au, Hg, Pb, Bi, U, Pu");
+            for (const auto &e : atomx::elements::table)
+                require(e.covalent > 0 && e.vdw >= 0 && e.z >= 1 && e.symbol && e.name,
+                        "every element entry carries a positive covalent radius and identity");
+            for (size_t i = 0; i < elementCount; ++i)
+                for (size_t j = i + 1; j < elementCount; ++j)
+                    require(std::string_view(atomx::elements::table[i].symbol) !=
+                                std::string_view(atomx::elements::table[j].symbol),
+                            "element symbols are unique across the table");
+            for (int z = 1; z <= 36; ++z) {
+                bool covered = false;
+                for (const auto &e : atomx::elements::table) covered |= e.z == z;
+                require(covered, "element table covers every element Z=1..36");
+            }
+            require(atomx::elements::find("Ni") && atomx::elements::find("ni") &&
+                        atomx::elements::find("Ni") == atomx::elements::find("ni"),
+                    "element lookup matches symbols case-insensitively");
+            const auto *nickel = atomx::elements::find("Ni2+");
+            require(nickel && nickel->z == 28 && std::abs(nickel->covalent - 1.24f) < 1e-4f,
+                    "trailing charge/digit characters are stripped: Ni2+ resolves to nickel");
+            require(atomx::elements::find("O_wat") == nullptr,
+                    "O_wat does not partially match oxygen");
+            require(atomx::elements::find("Xx") == nullptr, "Xx resolves to no element");
+            require(atomx::elements::find("") == nullptr &&
+                        atomx::elements::find("2+") == nullptr,
+                    "charge-only type names resolve to no element");
+            // Integration: a 2-type Cu/Ni dataset receives CPK colors and
+            // covalent radii at type creation, mirroring resetStyles.
+            Dataset cuNiTypes = fccLattice(2);
+            cuNiTypes.species = {"Cu", "Ni"};
+            for (size_t i = 0; i < cuNiTypes.atoms.size(); ++i)
+                cuNiTypes.atoms[i].type = i % 4 == 0 ? 0u : 1u;
+            struct CreationStyle {
+                std::array<float, 4> color{.76f, .57f, .38f, 1}; // palette entry 0
+                std::array<float, 4> visual{0, -1, 1, 0};
+            };
+            std::vector<CreationStyle> created(2);
+            atomx::elements::applyTypeDefaults(cuNiTypes.species, created);
+            require(approx(created[0].color[0], 200.f / 255.f) &&
+                        approx(created[0].color[1], 128.f / 255.f) &&
+                        approx(created[0].color[2], 51.f / 255.f),
+                    "Cu type creation applies the Jmol/CPK copper color #C88033");
+            require(approx(created[1].color[0], 80.f / 255.f) &&
+                        approx(created[1].color[1], 208.f / 255.f) &&
+                        approx(created[1].color[2], 80.f / 255.f),
+                    "Ni type creation applies the Jmol/CPK nickel color #50D050");
+            require(std::abs(created[0].visual[3] - 1.32f) < 1e-4f &&
+                        std::abs(created[1].visual[3] - 1.24f) < 1e-4f,
+                    "Cu/Ni type creation carries the Cordero covalent radii 1.32/1.24 A");
+            require(created[0].visual[0] == 0 && created[1].visual[0] == 0 &&
+                        created[0].visual[1] == -1 && created[0].visual[2] == 1,
+                    "element defaults keep the use-default-radius mechanic and visibility");
+            const std::vector<std::string> unknownNames = {"O_wat", "Xx"};
+            std::vector<CreationStyle> unknown(2);
+            atomx::elements::applyTypeDefaults(unknownNames, unknown);
+            require(unknown[0].color[0] == .76f && unknown[0].color[1] == .57f &&
+                        unknown[0].color[2] == .38f && unknown[0].visual[3] == 0 &&
+                        unknown[1].visual[3] == 0,
+                    "non-element type names keep the palette color and global radius default");
         }
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "

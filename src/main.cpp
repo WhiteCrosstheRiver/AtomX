@@ -434,7 +434,7 @@ struct App {
         for (size_t i = 0; i < appearanceNames.size() && i < gpu.styles.size(); ++i)
             appearanceMemory[appearanceNames[i]] = gpu.styles[i];
         if (names != appearanceNames || gpu.styles.size() != std::max<size_t>(names.size(), 1)) {
-            gpu.resetStyles(names.size());
+            gpu.resetStyles(names.size(), &names);
             for (size_t i = 0; i < names.size(); ++i) {
                 auto found = appearanceMemory.find(names[i]);
                 if (found != appearanceMemory.end()) gpu.styles[i] = found->second;
@@ -450,6 +450,11 @@ struct App {
             style.visual[0] = 0;
         } else {
             auto found = customRadiusMemory.find(name);
+            if (found == customRadiusMemory.end())
+                // First edit of an element type starts from its covalent
+                // radius so the slider continues from the displayed default.
+                if (const auto *element = atomx::elements::find(name))
+                    found = customRadiusMemory.emplace(name, element->covalent).first;
             style.visual[0] = found == customRadiusMemory.end() ? radius : found->second;
         }
     }
@@ -3556,6 +3561,11 @@ struct App {
                         setDefaultRadius(result.data.species[appearanceType], style, inheritRadius);
                     if (!inheritRadius)
                         ImGui::SliderFloat("Type radius", &style.visual[0], .02f, 5.f, "%.3f");
+                    else if (const auto *element =
+                                 atomx::elements::find(result.data.species[appearanceType]))
+                        ImGui::TextWrapped(
+                            "Default radius: %.2f A (Cordero 2008 covalent radius of %s)",
+                            style.visual[3], element->name);
                     int typeShape = int(style.visual[1]) + 1;
                     if (ImGui::Combo(
                             "Type shape", &typeShape,
@@ -4243,7 +4253,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         int adapter = -1, smoke = 0;
         bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
              smokeColorLegend = false, smokeBondPairs = false, smokeInspectorNode = false,
-             smokeHistogram = false;
+             smokeHistogram = false, smokeTypesPanel = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
@@ -4255,6 +4265,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (a == L"--smoke-bond-pairs") smokeBondPairs = true;
             else if (a == L"--smoke-inspector-node") smokeInspectorNode = true;
             else if (a == L"--smoke-histogram") smokeHistogram = true;
+            else if (a == L"--smoke-types-panel") smokeTypesPanel = true;
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -4316,6 +4327,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 app.add(Op::Histogram);
             }
             if (smokeColorLegend) app.add(Op::ColorCoding);
+            if (smokeTypesPanel) app.focusParticleAppearance = true;
             if (smokeBondPairs) {
                 app.add(Op::CreateBonds);
                 auto &bondNode=app.mods.back();
