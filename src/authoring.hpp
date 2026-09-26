@@ -52,21 +52,21 @@ inline LatticeParameters latticeOf(const Dataset &data) {
     p.beta = angleDegrees(cell.a, cell.c);
     p.gamma = angleDegrees(cell.a, cell.b);
     p.volume = std::abs(dot(cell.a, cross(cell.b, cell.c)));
-    auto near = [](double v, double target) { return std::abs(v - target) < 0.8; };
-    bool right = near(p.alpha, 90) && near(p.beta, 90) && near(p.gamma, 90);
+    auto nearEq = [](double v, double target) { return std::abs(v - target) < 0.8; };
+    bool right = nearEq(p.alpha, 90) && nearEq(p.beta, 90) && nearEq(p.gamma, 90);
     bool edges = std::abs(p.a - p.b) < 0.05 * std::max(p.a, 1.0) &&
                  std::abs(p.a - p.c) < 0.05 * std::max(p.a, 1.0);
     bool ab = std::abs(p.a - p.b) < 0.05 * std::max(p.a, 1.0);
     if (right && edges) p.system = "Cubic";
     else if (right && ab) p.system = "Tetragonal";
     else if (right) p.system = "Orthorhombic";
-    else if (ab && near(p.alpha, 90) && near(p.beta, 90) && near(p.gamma, 120))
+    else if (ab && nearEq(p.alpha, 90) && nearEq(p.beta, 90) && near(p.gamma, 120))
         p.system = "Hexagonal";
     else if (std::abs(p.a - p.b) < 0.05 * std::max(p.a, 1.0) &&
              std::abs(p.a - p.c) < 0.05 * std::max(p.a, 1.0) &&
              std::abs(p.alpha - p.beta) < 0.8 && std::abs(p.alpha - p.gamma) < 0.8)
         p.system = "Rhombohedral";
-    else if (ab && near(p.alpha, 90) && near(p.gamma, 90)) p.system = "Monoclinic";
+    else if (ab && nearEq(p.alpha, 90) && nearEq(p.gamma, 90)) p.system = "Monoclinic";
     else p.system = "Triclinic";
     return p;
 }
