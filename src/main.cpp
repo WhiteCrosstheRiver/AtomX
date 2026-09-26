@@ -11,6 +11,7 @@
 #include <shellapi.h>
 #include <future>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <iomanip>
@@ -34,11 +35,11 @@ static int droppedExtra = 0; // Additional files in a multi-file drop (first win
 // backend maps ImGui::GetMouseCursor() onto the stock shapes during
 // WM_SETCURSOR, so Pan (hand) and Orbit (4-way) ride that existing path via
 // ImGui::SetMouseCursor. Windows has no stock magnifier cursor, so one is
-// generated once at startup as a 32x32 32-bit ARGB color icon (semi-transparent
-// white glass, black outline and handle, fed to CreateIconIndirect) and applied
-// through a frame-local override that wndProc
-// checks BEFORE the ImGui backend handler (which would otherwise overwrite it
-// with the last ImGui cursor on every WM_SETCURSOR).
+// generated once at startup as a DPI-scaled ARGB icon (thin black ring, 1px
+// white edge, diagonal handle, the same magnifier as the zoom button) and
+// applied through a frame-local override that wndProc checks BEFORE the ImGui
+// backend handler (which would otherwise overwrite it with the last ImGui
+// cursor on every WM_SETCURSOR).
 static HCURSOR g_cursorOverride = nullptr; // Valid for the current frame only.
 static HCURSOR g_magnifierCursor = nullptr;
 enum class ViewportCursor { Arrow, Hand, ResizeAll, Magnifier };
@@ -52,21 +53,21 @@ static ViewportCursor cursorForViewportTool(int tool) {
     }
 }
 static HCURSOR createMagnifierCursor(float scale = 1.f) {
-    // 32-bit ARGB color cursor. Large and high-contrast: the viewport is
-    // near-black, so a thin black outline alone disappears. The lens gets a
-    // bright white halo outside a black ring, a light glass interior, and a
-    // black handle edged in white, so it reads on both dark and light
-    // content. The AND mask stays all zero; the color bitmap's alpha channel
-    // alone drives transparency.
-    constexpr float base = 56.f; // logical pixels at scale 1
-    const int cx = int(base * scale + .5f), cy = cx;
-    const float c = base * .5f * scale;          // lens center / hotspot
-    const float lensR = base * .30f * scale;     // inner glass radius
-    const float ringW = std::max(2.5f, base * .07f * scale);
-    const float haloW = std::max(2.5f, base * .08f * scale);
-    const float handleStart = lensR + ringW;
-    const float handleEnd = base * .92f * scale;
-    const float handleW = std::max(3.5f, base * .09f * scale);
+    // 32-bit ARGB color cursor drawn as a thin magnifier, matching the zoom
+    // button. A 1px white edge sits outside the black ring and handle so the
+    // shape stays readable on the near-black viewport without turning into a
+    // thick halo. The lens is biased up-left so the diagonal handle fits; the
+    // hotspot is the lens center. The AND mask stays all zero; the color
+    // bitmap's alpha channel alone drives transparency.
+    constexpr float base = 40.f; // logical pixels at scale 1
+    const int cx = std::max(16, int(base * scale + .5f)), cy = cx;
+    const float c = base * .38f * scale;         // lens center / hotspot
+    const float lensR = base * .22f * scale;     // inner glass radius
+    const float ringW = std::max(1.35f, 1.55f * scale);
+    const float haloW = std::max(1.f, 1.15f * scale);
+    const float handleStart = lensR + ringW * .2f; // tuck the handle into the ring
+    const float handleEnd = base * .72f * scale;
+    const float handleW = ringW;
     BITMAPV5HEADER header{};
     header.bV5Size = sizeof(header);
     header.bV5Width = cx;
@@ -114,18 +115,17 @@ static HCURSOR createMagnifierCursor(float scale = 1.f) {
             const double d = circleDistance(px, py);
             double alpha = 0, red = 255, green = 255, blue = 255;
             const double ringOuter = lensR + ringW, haloOuter = ringOuter + haloW;
+            const double aa = 0.8; // keep a solid core inside the thin stroke
             if (d < lensR) {
-                // interior: light glass tint, keeps the scene visible
-                alpha = 90;
+                // interior: faint glass, the scene stays visible
+                alpha = 40;
             } else if (d < ringOuter) {
-                // opaque black ring with smoothstep anti-aliasing
-                const double ring = 1.0 - smoothstep(ringOuter - 1.5, ringOuter, d) +
-                                    smoothstep(lensR, lensR + 1.5, d);
+                const double ring = 1.0 - smoothstep(ringOuter - aa, ringOuter, d) +
+                                    smoothstep(lensR, lensR + aa, d);
                 alpha = 255.0 * std::clamp(ring, 0.0, 1.0);
                 red = green = blue = 0;
             } else if (d < haloOuter) {
-                // bright white halo: visible on the dark viewport
-                const double halo = 1.0 - smoothstep(haloOuter - 1.5, haloOuter, d);
+                const double halo = 1.0 - smoothstep(haloOuter - aa, haloOuter, d);
                 alpha = 255.0 * std::clamp(halo, 0.0, 1.0);
             }
             const double hd = handleDistance(px, py);
@@ -133,7 +133,7 @@ static HCURSOR createMagnifierCursor(float scale = 1.f) {
                 alpha = 255;
                 red = green = blue = 0;
             } else if (hd < handleW + haloW) { // white edging so the handle reads on black
-                const double edge = 1.0 - smoothstep(handleW + haloW - 1.5, handleW + haloW, hd);
+                const double edge = 1.0 - smoothstep(handleW + haloW - aa, handleW + haloW, hd);
                 const double a = 255.0 * std::clamp(edge, 0.0, 1.0);
                 if (a > alpha) {
                     alpha = a;
@@ -284,11 +284,11 @@ static ImVec4 accent{.10f,.34f,.62f,1};
 // table feeds the merged icon font; every button also carries a text fallback
 // for the case where the system font is unavailable or a glyph is missing.
 static const ImWchar iconGlyphRanges[] = {
-    0xE70D,0xE70D, 0xE70E,0xE70E, 0xE713,0xE713, 0xE714,0xE714,
+    0xE70D,0xE70D, 0xE70E,0xE70E, 0xE713,0xE713,
     0xE71D,0xE71D, 0xE722,0xE722, 0xE768,0xE768, 0xE769,0xE769,
     0xE76B,0xE76B, 0xE76C,0xE76C, 0xE792,0xE792, 0xE7A6,0xE7A7,
-    0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE7C9,0xE7C9, 0xE81E,0xE81E,
-    0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893, 0xE721,0xE721, 0xE8A3,0xE8A3,
+    0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE81E,0xE81E,
+    0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893,
     0xE8A7,0xE8A7, 0xE8A9,0xE8A9, 0xE8AA,0xE8AA, 0xE8B5,0xE8B5,
     0xE8C8,0xE8C8, 0xE8E5,0xE8E5, 0xE8F1,0xE8F1, 0xE91B,0xE91B,
     0xE72C,0xE72C, 0xE74D,0xE74D, 0xE7F4,0xE7F4, 0xE192,0xE192,
@@ -1588,6 +1588,143 @@ struct App {
         uiTestItems[name]={id,ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),
                            ImGui::IsItemHovered(),ImGui::IsItemClicked()};
     }
+    // Stroke icon for the viewport navigation cluster (zoom / pan / orbit /
+    // field of view). Drawn on a 16-unit grid centered in the button so the
+    // four tools share one stroke weight. Segoe MDL2's magnifier and its
+    // neighbors turn muddy at this size; these paths stay a single hairline.
+    void drawViewportNavIcon(ImDrawList *dl, ImVec2 min, ImVec2 max, int tool, ImU32 color) const {
+        const float side = std::min(max.x - min.x, max.y - min.y);
+        const float iconPx = side * (16.4f / 26.f);
+        const float ox = (min.x + max.x - iconPx) * .5f;
+        const float oy = (min.y + max.y - iconPx) * .5f;
+        const float u = iconPx / 16.f;
+        const float stroke = std::max(1.15f, side * (1.65f / 26.f));
+        auto P = [&](float x, float y) { return ImVec2{ox + x * u, oy + y * u}; };
+        auto line = [&](float x0, float y0, float x1, float y1, float width) {
+            const ImVec2 a = P(x0, y0), b = P(x1, y1);
+            dl->AddLine(a, b, color, width);
+            dl->AddCircleFilled(a, width * .5f, color, 12);
+            dl->AddCircleFilled(b, width * .5f, color, 12);
+        };
+        if (tool == 0) {
+            const float cx = 6.05f, cy = 6.05f, r = 3.95f;
+            dl->AddCircle(P(cx, cy), r * u, color, 32, stroke);
+            const float a = 0.78539816339f;
+            const float start = r + (stroke / u) * .45f;
+            line(cx + std::cos(a) * start, cy + std::sin(a) * start, 14.15f, 14.15f, stroke);
+        } else if (tool == 1) {
+            auto arrow = [&](float tx, float ty, float dx, float dy) {
+                const float shaft = 2.15f, head = 2.7f, wing = 1.85f;
+                line(8.f + dx * shaft, 8.f + dy * shaft, tx - dx * head, ty - dy * head, stroke);
+                const float nx = -dy, ny = dx;
+                line(tx, ty, tx - dx * head + nx * wing, ty - dy * head + ny * wing, stroke);
+                line(tx, ty, tx - dx * head - nx * wing, ty - dy * head - ny * wing, stroke);
+            };
+            arrow(14.7f, 8.f, 1.f, 0.f);
+            arrow(1.3f, 8.f, -1.f, 0.f);
+            arrow(8.f, 1.3f, 0.f, -1.f);
+            arrow(8.f, 14.7f, 0.f, 1.f);
+        } else if (tool == 2) {
+            const float cx = 8.f, cy = 8.05f, r = 4.85f;
+            const float a0 = 0.85f, a1 = 5.35f;
+            dl->PathClear();
+            dl->PathArcTo(P(cx, cy), r * u, a0, a1 - .42f, 28);
+            dl->PathStroke(color, 0, stroke);
+            dl->AddCircleFilled(P(cx + std::cos(a0) * r, cy + std::sin(a0) * r), stroke * .48f, color, 12);
+            const float tx = -std::sin(a1), ty = std::cos(a1);
+            const float ex = cx + std::cos(a1) * r, ey = cy + std::sin(a1) * r;
+            const float head = 2.7f, wing = 1.75f, nx = -ty, ny = tx;
+            line(ex, ey, ex - tx * head + nx * wing, ey - ty * head + ny * wing, stroke);
+            line(ex, ey, ex - tx * head - nx * wing, ey - ty * head - ny * wing, stroke);
+            dl->AddCircleFilled(P(cx, cy), .95f * u, color, 12);
+        } else {
+            const float nearX = 3.15f, farX = 13.7f;
+            line(nearX, 5.35f, nearX, 10.65f, stroke);
+            line(farX, 2.15f, farX, 13.85f, stroke);
+            line(nearX, 5.35f, farX, 2.15f, stroke);
+            line(nearX, 10.65f, farX, 13.85f, stroke);
+        }
+    }
+    // Shared chrome for the four viewport tools: one rounded tray, hairline
+    // dividers, and a pale fill on the active tool. `hits` is filled by the
+    // invisible buttons so hover/active are known before anything is painted.
+    struct NavHit {
+        ImVec2 min{}, max{};
+        bool pressed = false, hovered = false, held = false;
+    };
+    NavHit navToolHit(const char *name, const char *tip, float square) {
+        ImGui::PushID(name);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
+        NavHit hit;
+        hit.pressed = ImGui::Button("##nav", {square, square});
+        hit.hovered = ImGui::IsItemHovered();
+        hit.held = ImGui::IsItemActive();
+        hit.min = ImGui::GetItemRectMin();
+        hit.max = ImGui::GetItemRectMax();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
+        ImGui::PopID();
+        if (hit.hovered) ImGui::SetTooltip("%s", tip);
+        recordUiTestItem(name);
+        return hit;
+    }
+    void paintViewportNav(const NavHit hits[4]) const {
+        const bool light = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg).x > .5f;
+        const ImU32 border = light ? IM_COL32(176, 186, 198, 255) : IM_COL32(86, 94, 106, 255);
+        const ImU32 tray = light ? IM_COL32(255, 255, 255, 255) : IM_COL32(32, 36, 42, 255);
+        const ImU32 divider = light ? IM_COL32(210, 216, 224, 255) : IM_COL32(70, 78, 90, 255);
+        const ImU32 ink = light ? IM_COL32(42, 50, 62, 255) : IM_COL32(230, 234, 240, 255);
+        const ImU32 sink = light ? IM_COL32(10, 70, 132, 255) : IM_COL32(176, 214, 255, 255);
+        const float rad = U(6.f);
+        const float edge = std::max(1.f, U(1.f));
+        const ImVec2 origin = hits[0].min;
+        const ImVec2 outerMax = hits[3].max;
+        auto *dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(origin, outerMax, border, rad);
+        dl->AddRectFilled({origin.x + edge, origin.y + edge}, {outerMax.x - edge, outerMax.y - edge},
+                          tray, std::max(0.f, rad - edge));
+        auto shadeOf = [&](bool selected, bool hovered, bool held) {
+            if (light) {
+                if (selected && held) return IM_COL32(186, 214, 240, 255);
+                if (selected && hovered) return IM_COL32(196, 220, 242, 255);
+                if (selected) return IM_COL32(206, 226, 246, 255);
+                if (held) return IM_COL32(220, 232, 244, 255);
+                return IM_COL32(232, 241, 250, 255);
+            }
+            if (selected && held) return IM_COL32(28, 70, 118, 255);
+            if (selected) return IM_COL32(38, 84, 132, 255);
+            return IM_COL32(48, 58, 72, 255);
+        };
+        for (int i = 1; i < 4; ++i) {
+            const bool leftHot = (viewportTool == i - 1) || hits[i - 1].hovered;
+            const bool rightHot = (viewportTool == i) || hits[i].hovered;
+            if (leftHot || rightHot) continue;
+            const float x = hits[i].min.x;
+            dl->AddRectFilled({x - edge * .5f, origin.y + U(6.f)},
+                              {x + edge * .5f, outerMax.y - U(6.f)}, divider);
+        }
+        for (int i = 0; i < 4; ++i) {
+            const bool selected = viewportTool == i;
+            if (!selected && !hits[i].hovered) continue;
+            ImVec2 a = hits[i].min, b = hits[i].max;
+            a.y += edge;
+            b.y -= edge;
+            if (i == 0) a.x += edge;
+            if (i == 3) b.x -= edge;
+            const ImDrawFlags corners = i == 0   ? ImDrawFlags_RoundCornersLeft
+                                        : i == 3 ? ImDrawFlags_RoundCornersRight
+                                                 : ImDrawFlags_RoundCornersNone;
+            dl->AddRectFilled(a, b, shadeOf(selected, hits[i].hovered, hits[i].held),
+                              std::max(0.f, rad - edge), corners);
+        }
+        for (int i = 0; i < 4; ++i)
+            drawViewportNavIcon(dl, hits[i].min, hits[i].max, i,
+                                viewportTool == i ? sink : ink);
+    }
     // Compact flat icon button in the OVITO style. Renders the Segoe MDL2
     // glyph when the icon font loaded and carries the specific glyph; falls
     // back to the historical text label (never a blank button) otherwise. The
@@ -2242,7 +2379,7 @@ struct App {
         // Exact width of the right-aligned transport/tool cluster.
         const float cluster =
             5*square + 4*gap + separatorWidth + frameField + totalWidth + square + gap +
-            separatorWidth + 4*square + 3*gap + separatorWidth + 2*square + gap;
+            separatorWidth + 4*square + separatorWidth + 2*square + gap;
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(accent, "TRAJECTORY");
         const float labelEnd = ImGui::GetItemRectMax().x;
@@ -2277,18 +2414,22 @@ struct App {
         ImGui::EndDisabled();
         toolbarSeparator(ImGui::GetFrameHeight());
         ImGui::SameLine();
-        auto toolButton = [&](const char* name, unsigned glyph, const char* fallback,
-                              int tool, const char* tip) {
-            if (iconButton(name, glyph, fallback, tip, viewportTool == tool, square))
-                viewportTool = tool;
-        };
-        toolButton("timeline.zoom", 0xE721, "Zoom", 0, "Zoom active viewport (drag or wheel)");
-        ImGui::SameLine();
-        toolButton("timeline.pan", 0xE7C9, "Pan", 1, "Pan active viewport");
-        ImGui::SameLine();
-        toolButton("timeline.orbit", 0xE7B8, "Orbit", 2, "Orbit active viewport");
-        ImGui::SameLine();
-        toolButton("timeline.fov", 0xE714, "FOV", 3, "Adjust perspective field of view");
+        // Zoom / pan / orbit / field-of-view as one segmented control. The
+        // buttons touch (no ItemSpacing) so the tray width stays 4*square,
+        // which is what the cluster measurement above accounts for.
+        const char *navNames[4] = {"timeline.zoom", "timeline.pan", "timeline.orbit", "timeline.fov"};
+        const char *navTips[4] = {
+            "Zoom active viewport (drag or wheel)",
+            "Pan active viewport",
+            "Orbit active viewport",
+            "Adjust perspective field of view"};
+        NavHit navHits[4];
+        for (int tool = 0; tool < 4; ++tool) {
+            if (tool) ImGui::SameLine(0, 0);
+            navHits[tool] = navToolHit(navNames[tool], navTips[tool], square);
+            if (navHits[tool].pressed) viewportTool = tool;
+        }
+        paintViewportNav(navHits);
         toolbarSeparator(ImGui::GetFrameHeight());
         ImGui::SameLine();
         if (iconButton("timeline.views", quad ? 0xE8A7 : 0xE8A9, quad ? "Max" : "Views",
