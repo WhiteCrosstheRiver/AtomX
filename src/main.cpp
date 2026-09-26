@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include "analysis.hpp"
+#include "authoring.hpp"
 #include "structure_io.hpp"
 #include "desktop.hpp"
 #include "imgui.h"
@@ -11,6 +12,7 @@
 #include <shellapi.h>
 #include <future>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <iomanip>
@@ -34,11 +36,11 @@ static int droppedExtra = 0; // Additional files in a multi-file drop (first win
 // backend maps ImGui::GetMouseCursor() onto the stock shapes during
 // WM_SETCURSOR, so Pan (hand) and Orbit (4-way) ride that existing path via
 // ImGui::SetMouseCursor. Windows has no stock magnifier cursor, so one is
-// generated once at startup as a 32x32 32-bit ARGB color icon (semi-transparent
-// white glass, black outline and handle, fed to CreateIconIndirect) and applied
-// through a frame-local override that wndProc
-// checks BEFORE the ImGui backend handler (which would otherwise overwrite it
-// with the last ImGui cursor on every WM_SETCURSOR).
+// generated once at startup as a DPI-scaled ARGB icon (thin black ring, 1px
+// white edge, diagonal handle, the same magnifier as the zoom button) and
+// applied through a frame-local override that wndProc checks BEFORE the ImGui
+// backend handler (which would otherwise overwrite it with the last ImGui
+// cursor on every WM_SETCURSOR).
 static HCURSOR g_cursorOverride = nullptr; // Valid for the current frame only.
 static HCURSOR g_magnifierCursor = nullptr;
 enum class ViewportCursor { Arrow, Hand, ResizeAll, Magnifier };
@@ -52,21 +54,21 @@ static ViewportCursor cursorForViewportTool(int tool) {
     }
 }
 static HCURSOR createMagnifierCursor(float scale = 1.f) {
-    // 32-bit ARGB color cursor. Large and high-contrast: the viewport is
-    // near-black, so a thin black outline alone disappears. The lens gets a
-    // bright white halo outside a black ring, a light glass interior, and a
-    // black handle edged in white, so it reads on both dark and light
-    // content. The AND mask stays all zero; the color bitmap's alpha channel
-    // alone drives transparency.
-    constexpr float base = 56.f; // logical pixels at scale 1
-    const int cx = int(base * scale + .5f), cy = cx;
-    const float c = base * .5f * scale;          // lens center / hotspot
-    const float lensR = base * .30f * scale;     // inner glass radius
-    const float ringW = std::max(2.5f, base * .07f * scale);
-    const float haloW = std::max(2.5f, base * .08f * scale);
-    const float handleStart = lensR + ringW;
-    const float handleEnd = base * .92f * scale;
-    const float handleW = std::max(3.5f, base * .09f * scale);
+    // 32-bit ARGB color cursor drawn as a thin magnifier, matching the zoom
+    // button. A 1px white edge sits outside the black ring and handle so the
+    // shape stays readable on the near-black viewport without turning into a
+    // thick halo. The lens is biased up-left so the diagonal handle fits; the
+    // hotspot is the lens center. The AND mask stays all zero; the color
+    // bitmap's alpha channel alone drives transparency.
+    constexpr float base = 40.f; // logical pixels at scale 1
+    const int cx = std::max(16, int(base * scale + .5f)), cy = cx;
+    const float c = base * .38f * scale;         // lens center / hotspot
+    const float lensR = base * .22f * scale;     // inner glass radius
+    const float ringW = std::max(1.35f, 1.55f * scale);
+    const float haloW = std::max(1.f, 1.15f * scale);
+    const float handleStart = lensR + ringW * .2f; // tuck the handle into the ring
+    const float handleEnd = base * .72f * scale;
+    const float handleW = ringW;
     BITMAPV5HEADER header{};
     header.bV5Size = sizeof(header);
     header.bV5Width = cx;
@@ -114,18 +116,17 @@ static HCURSOR createMagnifierCursor(float scale = 1.f) {
             const double d = circleDistance(px, py);
             double alpha = 0, red = 255, green = 255, blue = 255;
             const double ringOuter = lensR + ringW, haloOuter = ringOuter + haloW;
+            const double aa = 0.8; // keep a solid core inside the thin stroke
             if (d < lensR) {
-                // interior: light glass tint, keeps the scene visible
-                alpha = 90;
+                // interior: faint glass, the scene stays visible
+                alpha = 40;
             } else if (d < ringOuter) {
-                // opaque black ring with smoothstep anti-aliasing
-                const double ring = 1.0 - smoothstep(ringOuter - 1.5, ringOuter, d) +
-                                    smoothstep(lensR, lensR + 1.5, d);
+                const double ring = 1.0 - smoothstep(ringOuter - aa, ringOuter, d) +
+                                    smoothstep(lensR, lensR + aa, d);
                 alpha = 255.0 * std::clamp(ring, 0.0, 1.0);
                 red = green = blue = 0;
             } else if (d < haloOuter) {
-                // bright white halo: visible on the dark viewport
-                const double halo = 1.0 - smoothstep(haloOuter - 1.5, haloOuter, d);
+                const double halo = 1.0 - smoothstep(haloOuter - aa, haloOuter, d);
                 alpha = 255.0 * std::clamp(halo, 0.0, 1.0);
             }
             const double hd = handleDistance(px, py);
@@ -133,7 +134,7 @@ static HCURSOR createMagnifierCursor(float scale = 1.f) {
                 alpha = 255;
                 red = green = blue = 0;
             } else if (hd < handleW + haloW) { // white edging so the handle reads on black
-                const double edge = 1.0 - smoothstep(handleW + haloW - 1.5, handleW + haloW, hd);
+                const double edge = 1.0 - smoothstep(handleW + haloW - aa, handleW + haloW, hd);
                 const double a = 255.0 * std::clamp(edge, 0.0, 1.0);
                 if (a > alpha) {
                     alpha = a;
@@ -284,11 +285,11 @@ static ImVec4 accent{.10f,.34f,.62f,1};
 // table feeds the merged icon font; every button also carries a text fallback
 // for the case where the system font is unavailable or a glyph is missing.
 static const ImWchar iconGlyphRanges[] = {
-    0xE70D,0xE70D, 0xE70E,0xE70E, 0xE713,0xE713, 0xE714,0xE714,
+    0xE70D,0xE70D, 0xE70E,0xE70E, 0xE713,0xE713,
     0xE71D,0xE71D, 0xE722,0xE722, 0xE768,0xE768, 0xE769,0xE769,
     0xE76B,0xE76B, 0xE76C,0xE76C, 0xE792,0xE792, 0xE7A6,0xE7A7,
-    0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE7C9,0xE7C9, 0xE81E,0xE81E,
-    0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893, 0xE721,0xE721, 0xE8A3,0xE8A3,
+    0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE81E,0xE81E,
+    0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893,
     0xE8A7,0xE8A7, 0xE8A9,0xE8A9, 0xE8AA,0xE8AA, 0xE8B5,0xE8B5,
     0xE8C8,0xE8C8, 0xE8E5,0xE8E5, 0xE8F1,0xE8F1, 0xE91B,0xE91B,
     0xE72C,0xE72C, 0xE74D,0xE74D, 0xE7F4,0xE7F4, 0xE192,0xE192,
@@ -559,7 +560,7 @@ static const std::vector<Command> &commandRegistry() {
     return commands;
 }
 // Application version surfaced by Help > About and System Information.
-static const char *atomxVersion = "0.2.0";
+static const char *atomxVersion = "1.0.0";
 struct App {
     HWND window;
     desktop::Preferences preferences;
@@ -735,6 +736,40 @@ struct App {
     uint64_t colorRangePipelineGeneration = 0;
     std::string colorRangeNodeId;
     std::filesystem::path colorRangePath;
+    // One structure per browser-style tab. The live document stays in the
+    // fields above; a tab is only a snapshot taken when leaving it.
+    struct StructureTab {
+        std::string title = "Structure";
+        Dataset source;
+        PipelineGraph graph;
+        std::vector<std::vector<ModifierNode>> undo, redo;
+        std::filesystem::path path;
+        std::vector<Frame> frames;
+        int current = 0;
+        std::string readerName = "Generated crystal";
+        Camera cameras[4]{};
+        bool creationMode = false;
+        int picked = -1;
+        int measure = -1;
+        int angleAtom = -1;
+        int dihedralAtom = -1;
+        std::vector<Dataset> authorUndo, authorRedo;
+        char element[16] = "O";
+    };
+    std::vector<StructureTab> tabs;
+    int activeTab = 0;
+    bool creationMode = false;
+    int creationPick = -1;
+    int creationMeasure = -1;
+    int creationAngle = -1;
+    int creationDihedral = -1;
+    std::vector<Dataset> authorUndo, authorRedo;
+    char creationElement[16] = "O";
+    bool showLatticePanel = false;
+    bool openNewCell = false;
+    bool openTriclinicCell = false;
+    float newCellA = 5.f, newCellB = 5.f, newCellC = 5.f;
+    float newAlpha = 90.f, newBeta = 90.f, newGamma = 90.f;
     App(HWND w, Renderer &r) : window(w), gpu(r) {
         preferences.load();
         theme(preferences.theme);
@@ -747,6 +782,8 @@ struct App {
         cameras[1].mode = 2;
         cameras[2].mode = 4;
         update();
+        tabs.push_back(captureTab());
+        activeTab = 0;
     }
     ~App() {
         Shell_NotifyIconW(NIM_DELETE, &desktop::tray);
@@ -1125,6 +1162,7 @@ struct App {
         redo.clear();
     }
     void add(Op op) {
+        structureEditIsLatest = false;
         checkpoint();
         Modifier m{op};
         if (op == Op::Slice) {
@@ -1242,11 +1280,270 @@ struct App {
         }
         return changed;
     }
+    bool structureEditIsLatest = false;
+    std::string tabTitle() const {
+        if (!path.empty()) return utf8(path.filename().wstring());
+        if (!source.comment.empty()) {
+            std::string text = source.comment;
+            if (text.size() > 28) text.resize(28);
+            return text;
+        }
+        return "Untitled structure";
+    }
+    StructureTab captureTab() const {
+        StructureTab tab;
+        tab.title = tabTitle();
+        tab.source = source;
+        tab.graph = modifierGraph;
+        tab.undo = undo;
+        tab.redo = redo;
+        tab.path = path;
+        tab.frames = frames;
+        tab.current = current;
+        tab.readerName = readerName;
+        for (int i = 0; i < 4; ++i) tab.cameras[i] = cameras[i];
+        tab.creationMode = creationMode;
+        tab.picked = creationPick;
+        tab.measure = creationMeasure;
+        tab.angleAtom = creationAngle;
+        tab.dihedralAtom = creationDihedral;
+        tab.authorUndo = authorUndo;
+        tab.authorRedo = authorRedo;
+        snprintf(tab.element, sizeof(tab.element), "%s", creationElement);
+        return tab;
+    }
+    void restoreTab(const StructureTab &tab) {
+        source = tab.source;
+        modifierGraph = tab.graph;
+        undo = tab.undo;
+        redo = tab.redo;
+        path = tab.path;
+        frames = tab.frames;
+        current = tab.current;
+        readerName = tab.readerName;
+        for (int i = 0; i < 4; ++i) cameras[i] = tab.cameras[i];
+        creationMode = tab.creationMode;
+        creationPick = tab.picked;
+        creationMeasure = tab.measure;
+        creationAngle = tab.angleAtom;
+        creationDihedral = tab.dihedralAtom;
+        authorUndo = tab.authorUndo;
+        authorRedo = tab.authorRedo;
+        snprintf(creationElement, sizeof(creationElement), "%s", tab.element);
+        pipelineCheckpoint.reset();
+        pipelineCheckpointNode = SIZE_MAX;
+        unwrapAccumulators.clear();
+        structureEditIsLatest = !authorUndo.empty();
+        syncAppearance(source.species);
+        update();
+    }
+    bool documentsBusy() const { return busy || pipelineBusy || indexing; }
+    void switchTab(int index) {
+        if (index < 0 || index >= int(tabs.size()) || index == activeTab) return;
+        if (documentsBusy()) {
+            status = "Wait for the current load or pipeline to finish before switching tabs";
+            return;
+        }
+        tabs[activeTab] = captureTab();
+        activeTab = index;
+        restoreTab(tabs[activeTab]);
+        status = "Switched to " + tabs[activeTab].title;
+    }
+    void newStructureTab(Dataset data, const std::string &title) {
+        if (documentsBusy()) {
+            status = "Wait for the current load or pipeline to finish before opening a tab";
+            return;
+        }
+        if (!tabs.empty()) tabs[activeTab] = captureTab();
+        StructureTab tab;
+        tab.source = std::move(data);
+        tab.title = title;
+        tab.readerName = "Authored structure";
+        tab.graph = {};
+        snprintf(tab.element, sizeof(tab.element), "C");
+        tabs.push_back(std::move(tab));
+        activeTab = int(tabs.size()) - 1;
+        restoreTab(tabs[activeTab]);
+        status = "New tab: " + title;
+    }
+    void closeTab(int index) {
+        if (index < 0 || index >= int(tabs.size())) return;
+        if (documentsBusy()) {
+            status = "Wait for the current load or pipeline to finish before closing a tab";
+            return;
+        }
+        if (tabs.size() == 1) {
+            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+            tabs.erase(tabs.begin());
+            activeTab = 0;
+            return;
+        }
+        if (index == activeTab) {
+            tabs[activeTab] = captureTab();
+            int next = index + 1 < int(tabs.size()) ? index + 1 : index - 1;
+            StructureTab keep = tabs[next];
+            tabs.erase(tabs.begin() + index);
+            activeTab = next > index ? next - 1 : next;
+            restoreTab(tabs[activeTab]);
+            (void)keep;
+        } else {
+            tabs.erase(tabs.begin() + index);
+            if (index < activeTab) --activeTab;
+        }
+        status = "Closed structure tab";
+    }
+    bool sameAtomCount() const { return source.atoms.size() == result.data.atoms.size(); }
+    void rememberStructure() {
+        if (authorUndo.size() >= 64) authorUndo.erase(authorUndo.begin());
+        authorUndo.push_back(source);
+        authorRedo.clear();
+        structureEditIsLatest = true;
+    }
+    void adoptStructure(Dataset data, const std::string &message) {
+        rememberStructure();
+        source = std::move(data);
+        frames.clear();
+        current = 0;
+        pendingFrame = -1;
+        mods.clear();
+        modifierGraph.selected = 0;
+        creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+        syncAppearance(source.species);
+        update();
+        status = message;
+    }
+    void editStructure(const std::string &message, const std::function<void(Dataset &)> &edit) {
+        if (!sameAtomCount() && !mods.empty()) {
+            status = "Clear modifiers first: the pipeline changed the atom count";
+            return;
+        }
+        rememberStructure();
+        edit(source);
+        source.sourceCount = source.atoms.size();
+        source.bounds();
+        if (!mods.empty()) {
+            mods.clear();
+            modifierGraph.selected = 0;
+        }
+        syncAppearance(source.species);
+        update();
+        status = message;
+    }
+    void deletePickedAtom() {
+        if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
+            status = "Pick an atom in Creation Mode first";
+            return;
+        }
+        int index = creationPick;
+        editStructure("Deleted atom " + std::to_string(index + 1), [&](Dataset &data) {
+            data.atoms.erase(data.atoms.begin() + index);
+            data.bonds.clear();
+        });
+        creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+    }
+    void replacePickedElement() {
+        if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
+            status = "Pick an atom in Creation Mode first";
+            return;
+        }
+        std::string symbol = creationElement[0] ? creationElement : "C";
+        int index = creationPick;
+        editStructure("Replaced atom " + std::to_string(index + 1) + " with " + symbol, [&](Dataset &data) {
+            data.atoms[index].type = authoring::speciesIndex(data, symbol);
+        });
+    }
+    void addAtomAt(Vec3 position) {
+        std::string symbol = creationElement[0] ? creationElement : "C";
+        editStructure("Added " + symbol, [&](Dataset &data) {
+            uint32_t type = authoring::speciesIndex(data, symbol);
+            data.atoms.push_back({position.x, position.y, position.z, type});
+            creationPick = int(data.atoms.size() - 1);
+        });
+    }
+    void nudgePicked(int axis, float delta) {
+        if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
+            status = "Pick an atom in Creation Mode first";
+            return;
+        }
+        int index = creationPick;
+        editStructure("Moved atom " + std::to_string(index + 1), [&](Dataset &data) {
+            float &coord = axis == 0 ? data.atoms[index].x : axis == 1 ? data.atoms[index].y
+                                                                        : data.atoms[index].z;
+            coord += delta;
+        });
+        creationPick = index;
+    }
+    void resetView() {
+        for (auto &camera : cameras) {
+            camera.yaw = .65f;
+            camera.pitch = .48f;
+            camera.zoom = 1.f;
+            camera.panX = camera.panY = 0;
+        }
+        cameras[0].mode = 0;
+        cameras[1].mode = 2;
+        cameras[2].mode = 4;
+        cameras[3].mode = 7;
+        for (int i = 0; i < 4; ++i) fitCamera(i, false);
+        status = "Reset the camera on every viewport";
+    }
+    void addHydrogensCommand() {
+        if (source.atoms.size() > 2500) {
+            status = "Add Hydrogens is limited to 2500 atoms";
+            return;
+        }
+        int added = 0;
+        editStructure("Added hydrogens", [&](Dataset &data) { added = authoring::addHydrogens(data); });
+        if (added >= 0) status = "Added " + std::to_string(added) + " hydrogen atoms";
+    }
+    void cleanGeometryCommand() {
+        if (source.atoms.size() > 2500) {
+            status = "Clean Geometry is limited to 2500 atoms";
+            return;
+        }
+        editStructure("Cleaned bond lengths toward covalent radii",
+                      [](Dataset &data) { authoring::cleanGeometry(data); });
+    }
+    void setDisplayStyle(int style) {
+        particleShape = 0;
+        if (style == 1) radius = 1.15f;
+        else if (style == 2) radius = 0.12f;
+        else if (style == 3) radius = 0.05f;
+        else radius = 0.32f;
+        status = style == 1 ? "Display style: Space filling"
+                 : style == 2 ? "Display style: Stick"
+                 : style == 3 ? "Display style: Line"
+                              : "Display style: Ball and stick";
+    }
     void history(bool forward) {
+        if (structureEditIsLatest) {
+            if (!forward && !authorUndo.empty()) {
+                authorRedo.push_back(source);
+                source = authorUndo.back();
+                authorUndo.pop_back();
+                if (authorUndo.empty()) structureEditIsLatest = false;
+                creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+                syncAppearance(source.species);
+                update();
+                status = "Undid structure edit";
+                return;
+            }
+            if (forward && !authorRedo.empty()) {
+                authorUndo.push_back(source);
+                source = authorRedo.back();
+                authorRedo.pop_back();
+                creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+                syncAppearance(source.species);
+                update();
+                status = "Redid structure edit";
+                return;
+            }
+        }
         if (!applyModifierHistory(mods, undo, redo, forward)) return;
         modifierGraph.selected = mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1);
         pipelineCheckpoint.reset();
         pipelineCheckpointNode=SIZE_MAX;
+        structureEditIsLatest = false;
         update();
     }
     void load(const std::filesystem::path &p, int frame = 0) {
@@ -1588,6 +1885,143 @@ struct App {
         uiTestItems[name]={id,ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),
                            ImGui::IsItemHovered(),ImGui::IsItemClicked()};
     }
+    // Stroke icon for the viewport navigation cluster (zoom / pan / orbit /
+    // field of view). Drawn on a 16-unit grid centered in the button so the
+    // four tools share one stroke weight. Segoe MDL2's magnifier and its
+    // neighbors turn muddy at this size; these paths stay a single hairline.
+    void drawViewportNavIcon(ImDrawList *dl, ImVec2 min, ImVec2 max, int tool, ImU32 color) const {
+        const float side = std::min(max.x - min.x, max.y - min.y);
+        const float iconPx = side * (16.4f / 26.f);
+        const float ox = (min.x + max.x - iconPx) * .5f;
+        const float oy = (min.y + max.y - iconPx) * .5f;
+        const float u = iconPx / 16.f;
+        const float stroke = std::max(1.15f, side * (1.65f / 26.f));
+        auto P = [&](float x, float y) { return ImVec2{ox + x * u, oy + y * u}; };
+        auto line = [&](float x0, float y0, float x1, float y1, float width) {
+            const ImVec2 a = P(x0, y0), b = P(x1, y1);
+            dl->AddLine(a, b, color, width);
+            dl->AddCircleFilled(a, width * .5f, color, 12);
+            dl->AddCircleFilled(b, width * .5f, color, 12);
+        };
+        if (tool == 0) {
+            const float cx = 6.05f, cy = 6.05f, r = 3.95f;
+            dl->AddCircle(P(cx, cy), r * u, color, 32, stroke);
+            const float a = 0.78539816339f;
+            const float start = r + (stroke / u) * .45f;
+            line(cx + std::cos(a) * start, cy + std::sin(a) * start, 14.15f, 14.15f, stroke);
+        } else if (tool == 1) {
+            auto arrow = [&](float tx, float ty, float dx, float dy) {
+                const float shaft = 2.15f, head = 2.7f, wing = 1.85f;
+                line(8.f + dx * shaft, 8.f + dy * shaft, tx - dx * head, ty - dy * head, stroke);
+                const float nx = -dy, ny = dx;
+                line(tx, ty, tx - dx * head + nx * wing, ty - dy * head + ny * wing, stroke);
+                line(tx, ty, tx - dx * head - nx * wing, ty - dy * head - ny * wing, stroke);
+            };
+            arrow(14.7f, 8.f, 1.f, 0.f);
+            arrow(1.3f, 8.f, -1.f, 0.f);
+            arrow(8.f, 1.3f, 0.f, -1.f);
+            arrow(8.f, 14.7f, 0.f, 1.f);
+        } else if (tool == 2) {
+            const float cx = 8.f, cy = 8.05f, r = 4.85f;
+            const float a0 = 0.85f, a1 = 5.35f;
+            dl->PathClear();
+            dl->PathArcTo(P(cx, cy), r * u, a0, a1 - .42f, 28);
+            dl->PathStroke(color, 0, stroke);
+            dl->AddCircleFilled(P(cx + std::cos(a0) * r, cy + std::sin(a0) * r), stroke * .48f, color, 12);
+            const float tx = -std::sin(a1), ty = std::cos(a1);
+            const float ex = cx + std::cos(a1) * r, ey = cy + std::sin(a1) * r;
+            const float head = 2.7f, wing = 1.75f, nx = -ty, ny = tx;
+            line(ex, ey, ex - tx * head + nx * wing, ey - ty * head + ny * wing, stroke);
+            line(ex, ey, ex - tx * head - nx * wing, ey - ty * head - ny * wing, stroke);
+            dl->AddCircleFilled(P(cx, cy), .95f * u, color, 12);
+        } else {
+            const float nearX = 3.15f, farX = 13.7f;
+            line(nearX, 5.35f, nearX, 10.65f, stroke);
+            line(farX, 2.15f, farX, 13.85f, stroke);
+            line(nearX, 5.35f, farX, 2.15f, stroke);
+            line(nearX, 10.65f, farX, 13.85f, stroke);
+        }
+    }
+    // Shared chrome for the four viewport tools: one rounded tray, hairline
+    // dividers, and a pale fill on the active tool. `hits` is filled by the
+    // invisible buttons so hover/active are known before anything is painted.
+    struct NavHit {
+        ImVec2 min{}, max{};
+        bool pressed = false, hovered = false, held = false;
+    };
+    NavHit navToolHit(const char *name, const char *tip, float square) {
+        ImGui::PushID(name);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
+        NavHit hit;
+        hit.pressed = ImGui::Button("##nav", {square, square});
+        hit.hovered = ImGui::IsItemHovered();
+        hit.held = ImGui::IsItemActive();
+        hit.min = ImGui::GetItemRectMin();
+        hit.max = ImGui::GetItemRectMax();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
+        ImGui::PopID();
+        if (hit.hovered) ImGui::SetTooltip("%s", tip);
+        recordUiTestItem(name);
+        return hit;
+    }
+    void paintViewportNav(const NavHit hits[4]) const {
+        const bool light = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg).x > .5f;
+        const ImU32 border = light ? IM_COL32(176, 186, 198, 255) : IM_COL32(86, 94, 106, 255);
+        const ImU32 tray = light ? IM_COL32(255, 255, 255, 255) : IM_COL32(32, 36, 42, 255);
+        const ImU32 divider = light ? IM_COL32(210, 216, 224, 255) : IM_COL32(70, 78, 90, 255);
+        const ImU32 ink = light ? IM_COL32(42, 50, 62, 255) : IM_COL32(230, 234, 240, 255);
+        const ImU32 sink = light ? IM_COL32(10, 70, 132, 255) : IM_COL32(176, 214, 255, 255);
+        const float rad = U(6.f);
+        const float edge = std::max(1.f, U(1.f));
+        const ImVec2 origin = hits[0].min;
+        const ImVec2 outerMax = hits[3].max;
+        auto *dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(origin, outerMax, border, rad);
+        dl->AddRectFilled({origin.x + edge, origin.y + edge}, {outerMax.x - edge, outerMax.y - edge},
+                          tray, std::max(0.f, rad - edge));
+        auto shadeOf = [&](bool selected, bool hovered, bool held) {
+            if (light) {
+                if (selected && held) return IM_COL32(186, 214, 240, 255);
+                if (selected && hovered) return IM_COL32(196, 220, 242, 255);
+                if (selected) return IM_COL32(206, 226, 246, 255);
+                if (held) return IM_COL32(220, 232, 244, 255);
+                return IM_COL32(232, 241, 250, 255);
+            }
+            if (selected && held) return IM_COL32(28, 70, 118, 255);
+            if (selected) return IM_COL32(38, 84, 132, 255);
+            return IM_COL32(48, 58, 72, 255);
+        };
+        for (int i = 1; i < 4; ++i) {
+            const bool leftHot = (viewportTool == i - 1) || hits[i - 1].hovered;
+            const bool rightHot = (viewportTool == i) || hits[i].hovered;
+            if (leftHot || rightHot) continue;
+            const float x = hits[i].min.x;
+            dl->AddRectFilled({x - edge * .5f, origin.y + U(6.f)},
+                              {x + edge * .5f, outerMax.y - U(6.f)}, divider);
+        }
+        for (int i = 0; i < 4; ++i) {
+            const bool selected = viewportTool == i;
+            if (!selected && !hits[i].hovered) continue;
+            ImVec2 a = hits[i].min, b = hits[i].max;
+            a.y += edge;
+            b.y -= edge;
+            if (i == 0) a.x += edge;
+            if (i == 3) b.x -= edge;
+            const ImDrawFlags corners = i == 0   ? ImDrawFlags_RoundCornersLeft
+                                        : i == 3 ? ImDrawFlags_RoundCornersRight
+                                                 : ImDrawFlags_RoundCornersNone;
+            dl->AddRectFilled(a, b, shadeOf(selected, hits[i].hovered, hits[i].held),
+                              std::max(0.f, rad - edge), corners);
+        }
+        for (int i = 0; i < 4; ++i)
+            drawViewportNavIcon(dl, hits[i].min, hits[i].max, i,
+                                viewportTool == i ? sink : ink);
+    }
     // Compact flat icon button in the OVITO style. Renders the Segoe MDL2
     // glyph when the icon font loaded and carries the specific glyph; falls
     // back to the historical text label (never a blank button) otherwise. The
@@ -1773,7 +2207,13 @@ struct App {
             const bool fileOpen = ImGui::BeginMenu("File");
             recordUiTestItem("menu.file", "File");
             if (fileOpen) {
+                if (enabledItem("New Tab", "menu.file.new-tab", "Ctrl+T"))
+                    newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
                 if (enabledItem("Load File...", "menu.file.load-file", "Ctrl+I")) open();
+                if (enabledItem("Load File in New Tab...", "menu.file.load-new-tab")) {
+                    newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+                    open();
+                }
                 disabledItem("Load Remote File", "menu.file.load-remote", "Ctrl+Shift+I",
                              "Not available");
                 if (enabledItem("Export File...", "menu.file.export", "Ctrl+E"))
@@ -1831,6 +2271,89 @@ struct App {
                 if (enabledItem("System Information...", "menu.help.system-info"))
                     showSystemInfo = true;
                 if (enabledItem("About AtomX", "menu.help.about")) showAbout = true;
+                ImGui::EndMenu();
+            }
+            const bool viewOpen = ImGui::BeginMenu("View");
+            recordUiTestItem("menu.view", "View");
+            if (viewOpen) {
+                if (enabledItem("Reset Camera", "menu.view.reset-camera")) resetView();
+                if (enabledItem("Fit Structure in View", "menu.view.fit")) {
+                    for (int i = 0; i < 4; ++i) fitCamera(i, false);
+                }
+                if (enabledItem(showWorkspace ? "Hide Project Panel" : "Show Project Panel",
+                                "menu.view.project"))
+                    showWorkspace = !showWorkspace;
+                if (enabledItem(showLatticePanel ? "Hide Lattice Properties" : "Show Lattice Properties",
+                                "menu.view.lattice"))
+                    showLatticePanel = !showLatticePanel;
+                if (enabledItem(cell ? "Hide Unit Cell" : "Show Unit Cell", "menu.view.cell"))
+                    cell = !cell;
+                if (enabledItem("Ball and Stick", "menu.view.ball-and-stick")) setDisplayStyle(0);
+                if (enabledItem("Space Filling", "menu.view.space-filling")) setDisplayStyle(1);
+                if (enabledItem("Stick", "menu.view.stick")) setDisplayStyle(2);
+                if (enabledItem("Line", "menu.view.line")) setDisplayStyle(3);
+                ImGui::EndMenu();
+            }
+            const bool modifyOpen = ImGui::BeginMenu("Modify");
+            recordUiTestItem("menu.modify", "Modify");
+            if (modifyOpen) {
+                if (enabledItem(creationMode ? "Exit Creation Mode" : "Enter Creation Mode",
+                                "menu.modify.creation-mode"))
+                    creationMode = !creationMode;
+                if (enabledItem("Delete Picked Atom", "menu.modify.delete-atom")) deletePickedAtom();
+                if (enabledItem("Create Vacancy at Picked Atom", "menu.modify.vacancy")) deletePickedAtom();
+                if (enabledItem("Replace Picked Atom", "menu.modify.replace-atom")) replacePickedElement();
+                if (enabledItem("Dope Picked Atom with Element", "menu.modify.dope")) replacePickedElement();
+                if (enabledItem("Add Hydrogens", "menu.modify.add-hydrogens")) addHydrogensCommand();
+                if (enabledItem("Clean Geometry", "menu.modify.clean")) cleanGeometryCommand();
+                ImGui::EndMenu();
+            }
+            const bool buildOpen = ImGui::BeginMenu("Build");
+            recordUiTestItem("menu.build", "Build");
+            if (buildOpen) {
+                if (enabledItem("New Orthogonal Cell...", "menu.build.orthogonal-cell")) openNewCell = true;
+                if (enabledItem("New Triclinic Cell...", "menu.build.triclinic-cell")) openTriclinicCell = true;
+                if (enabledItem("Supercell 2 x 2 x 1", "menu.build.supercell-221"))
+                    adoptStructure(authoring::replicate(source, 2, 2, 1), "Built a 2 x 2 x 1 supercell");
+                if (enabledItem("Supercell 2 x 2 x 2", "menu.build.supercell-222"))
+                    adoptStructure(authoring::replicate(source, 2, 2, 2), "Built a 2 x 2 x 2 supercell");
+                if (enabledItem("Cleave Along C and Add Vacuum", "menu.build.cleave"))
+                    adoptStructure(authoring::cleaveAndVacuum(source, 2, 0.5, 15),
+                                   "Cleaved the cell along c and added 15 A of vacuum");
+                if (enabledItem("Add 15 A Vacuum Along C", "menu.build.vacuum"))
+                    adoptStructure(authoring::addVacuum(source, 2, 15), "Added 15 A of vacuum along c");
+                if (enabledItem("Stack a Second Layer", "menu.build.layer"))
+                    adoptStructure(authoring::stackLayers(source, 15),
+                                   "Stacked a second layer with a 15 A gap");
+                if (enabledItem("Graphene Sheet", "menu.build.graphene"))
+                    newStructureTab(authoring::grapheneSheet(6, 4), "Graphene sheet");
+                if (enabledItem("Zigzag Nanotube (8,0)", "menu.build.nanotube"))
+                    newStructureTab(authoring::zigzagNanotube(8, 6), "Zigzag nanotube (8,0)");
+                if (enabledItem("FCC Nanoparticle", "menu.build.nanoparticle"))
+                    newStructureTab(authoring::fccNanoparticle("Cu", 8), "FCC nanoparticle");
+                if (enabledItem("Place Water Above Structure", "menu.build.water"))
+                    adoptStructure(authoring::placeWater(source, 3), "Placed a water molecule 3 A above the structure");
+                ImGui::EndMenu();
+            }
+            const bool toolsOpen = ImGui::BeginMenu("Tools");
+            recordUiTestItem("menu.tools", "Tools");
+            if (toolsOpen) {
+                if (enabledItem("Show Lattice Parameters", "menu.tools.lattice")) showLatticePanel = true;
+                if (enabledItem("Measure Distance Between Two Atoms", "menu.tools.measure")) {
+                    if (creationPick >= 0 && creationMeasure >= 0)
+                        status = "Distance " + std::to_string(authoring::distance(source, creationPick, creationMeasure)) + " angstrom";
+                    else status = "Click the first atom, then Shift-click the second atom";
+                }
+                if (enabledItem("Measure Bond Angle of Three Atoms", "menu.tools.angle")) {
+                    if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0)
+                        status = "Bond angle " + std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)) + " degrees (vertex is the second atom)";
+                    else status = "Click, Shift-click the vertex, then Ctrl-click the third atom";
+                }
+                if (enabledItem("Measure Dihedral Angle of Four Atoms", "menu.tools.dihedral")) {
+                    if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0)
+                        status = "Dihedral " + std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)) + " degrees";
+                    else status = "Click, Shift-click, Ctrl-click, then Alt-click the fourth atom";
+                }
                 ImGui::EndMenu();
             }
             titleWindow->DC.LayoutType = savedLayout;
@@ -2051,6 +2574,40 @@ struct App {
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
                 active = i;
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                ImGui::OpenPopup("viewport-structure-menu");
+            if (creationMode && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                std::abs(ImGui::GetMouseDragDelta(0).x) < 4.f &&
+                std::abs(ImGui::GetMouseDragDelta(0).y) < 4.f) {
+                int hit = -1;
+                float best = U(16) * U(16);
+                auto mvp = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
+                const auto &atoms = result.data.atoms;
+                const size_t step = atoms.size() > 60000 ? atoms.size() / 60000 : 1;
+                for (size_t index = 0; index < atoms.size(); index += step) {
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(
+                        &q, DirectX::XMVector4Transform(
+                                DirectX::XMVectorSet(atoms[index].x, atoms[index].y, atoms[index].z, 1), mvp));
+                    if (q.w <= 0 || q.z <= 0) continue;
+                    float sx = p.x + (q.x / q.w + 1) * avail.x * .5f;
+                    float sy = p.y + (1 - q.y / q.w) * avail.y * .5f;
+                    float dx = sx - ImGui::GetIO().MousePos.x, dy = sy - ImGui::GetIO().MousePos.y;
+                    float dist = dx * dx + dy * dy;
+                    if (dist < best) {
+                        best = dist;
+                        hit = int(index);
+                    }
+                }
+                if (hit >= 0 && ImGui::GetIO().KeyAlt) creationDihedral = hit;
+                else if (hit >= 0 && ImGui::GetIO().KeyCtrl) creationAngle = hit;
+                else if (hit >= 0 && ImGui::GetIO().KeyShift) creationMeasure = hit;
+                else if (hit >= 0) {
+                    creationPick = hit;
+                    creationMeasure = creationAngle = creationDihedral = -1;
+                }
+                if (hit >= 0) active = i;
+            }
             if (ImGui::IsMouseDragging(0) && viewportTool == 2) {
                 cam.yaw -= ImGui::GetIO().MouseDelta.x * .008f;
                 cam.pitch =
@@ -2160,6 +2717,27 @@ struct App {
             case ViewportCursor::Arrow: break;
             }
         }
+        if (creationPick >= 0 && size_t(creationPick) < result.data.atoms.size()) {
+            const auto &atom = result.data.atoms[creationPick];
+            auto mvp = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
+            DirectX::XMFLOAT4 q;
+            DirectX::XMStoreFloat4(
+                &q, DirectX::XMVector4Transform(DirectX::XMVectorSet(atom.x, atom.y, atom.z, 1), mvp));
+            if (q.w > 0 && q.z > 0) {
+                ImVec2 at{p.x + (q.x / q.w + 1) * avail.x * .5f, p.y + (1 - q.y / q.w) * avail.y * .5f};
+                draw->AddCircle(at, U(10), IM_COL32(255, 196, 64, 255), 20, U(2));
+            }
+        }
+        if (ImGui::BeginPopup("viewport-structure-menu")) {
+            if (ImGui::MenuItem(creationMode ? "Exit Creation Mode" : "Enter Creation Mode"))
+                creationMode = !creationMode;
+            if (ImGui::MenuItem("Add Atom at Cell Center"))
+                addAtomAt(authoring::cartesian(source, 0.5, 0.5, 0.5));
+            if (ImGui::MenuItem("Delete Picked Atom", nullptr, false, creationPick >= 0)) deletePickedAtom();
+            if (ImGui::MenuItem("Replace Picked Atom", nullptr, false, creationPick >= 0)) replacePickedElement();
+            if (ImGui::MenuItem("Add Hydrogens")) addHydrogensCommand();
+            ImGui::EndPopup();
+        }
         if (i == active) {
             draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(95, 180, 255, 255));
             // Fading status overlay at the viewport's bottom-left (replaces the
@@ -2242,7 +2820,7 @@ struct App {
         // Exact width of the right-aligned transport/tool cluster.
         const float cluster =
             5*square + 4*gap + separatorWidth + frameField + totalWidth + square + gap +
-            separatorWidth + 4*square + 3*gap + separatorWidth + 2*square + gap;
+            separatorWidth + 4*square + separatorWidth + 2*square + gap;
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(accent, "TRAJECTORY");
         const float labelEnd = ImGui::GetItemRectMax().x;
@@ -2277,18 +2855,22 @@ struct App {
         ImGui::EndDisabled();
         toolbarSeparator(ImGui::GetFrameHeight());
         ImGui::SameLine();
-        auto toolButton = [&](const char* name, unsigned glyph, const char* fallback,
-                              int tool, const char* tip) {
-            if (iconButton(name, glyph, fallback, tip, viewportTool == tool, square))
-                viewportTool = tool;
-        };
-        toolButton("timeline.zoom", 0xE721, "Zoom", 0, "Zoom active viewport (drag or wheel)");
-        ImGui::SameLine();
-        toolButton("timeline.pan", 0xE7C9, "Pan", 1, "Pan active viewport");
-        ImGui::SameLine();
-        toolButton("timeline.orbit", 0xE7B8, "Orbit", 2, "Orbit active viewport");
-        ImGui::SameLine();
-        toolButton("timeline.fov", 0xE714, "FOV", 3, "Adjust perspective field of view");
+        // Zoom / pan / orbit / field-of-view as one segmented control. The
+        // buttons touch (no ItemSpacing) so the tray width stays 4*square,
+        // which is what the cluster measurement above accounts for.
+        const char *navNames[4] = {"timeline.zoom", "timeline.pan", "timeline.orbit", "timeline.fov"};
+        const char *navTips[4] = {
+            "Zoom active viewport (drag or wheel)",
+            "Pan active viewport",
+            "Orbit active viewport",
+            "Adjust perspective field of view"};
+        NavHit navHits[4];
+        for (int tool = 0; tool < 4; ++tool) {
+            if (tool) ImGui::SameLine(0, 0);
+            navHits[tool] = navToolHit(navNames[tool], navTips[tool], square);
+            if (navHits[tool].pressed) viewportTool = tool;
+        }
+        paintViewportNav(navHits);
         toolbarSeparator(ImGui::GetFrameHeight());
         ImGui::SameLine();
         if (iconButton("timeline.views", quad ? 0xE8A7 : 0xE8A9, quad ? "Max" : "Views",
@@ -2359,14 +2941,140 @@ struct App {
         }
         ImGui::EndChild();
     }
+    void documentTabBar() {
+        if (tabs.empty()) tabs.push_back(captureTab());
+        if (activeTab >= 0 && activeTab < int(tabs.size())) tabs[activeTab].title = tabTitle();
+        ImGui::BeginChild("##document-tabs", {-1, U(30)}, ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoScrollbar);
+        int closing = -1;
+        for (int i = 0; i < int(tabs.size()); ++i) {
+            ImGui::PushID(i);
+            std::string label = tabs[i].title.empty() ? "Untitled structure" : tabs[i].title;
+            if (i == activeTab && creationMode) label += "  [Creation]";
+            if (ImGui::Selectable(label.c_str(), i == activeTab, 0, {U(168), U(22)})) switchTab(i);
+            recordUiTestItem("document.tab." + std::to_string(i), label.c_str());
+            ImGui::SameLine(0, U(2));
+            if (ImGui::SmallButton("x")) closing = i;
+            recordUiTestItem("document.tab.close." + std::to_string(i));
+            ImGui::PopID();
+            ImGui::SameLine();
+        }
+        if (ImGui::SmallButton("New Tab"))
+            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+        recordUiTestItem("document.tab.new", "New Tab");
+        ImGui::EndChild();
+        if (closing >= 0) closeTab(closing);
+    }
+    void modelingToolbar() {
+        ImGui::BeginChild("##modeling-toolbar", {-1, U(128)}, ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoScrollbar);
+        auto action = [&](const char *name, const char *label, const char *tip, auto &&fn) {
+            const float width = ImGui::CalcTextSize(label).x + U(28);
+            if (ImGui::GetCursorPosX() > U(12) && ImGui::GetContentRegionAvail().x < width)
+                ImGui::NewLine();
+            if (ImGui::Button(label)) fn();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            recordUiTestItem(name, label);
+            ImGui::SameLine();
+        };
+        action("model.creation-mode", creationMode ? "Exit Creation Mode" : "Enter Creation Mode",
+               "Turn atom editing on or off for this structure", [&] { creationMode = !creationMode; });
+        action("model.add-atom", "Add Atom", "Add the typed element at the center of the cell", [&] {
+            Vec3 p = authoring::cartesian(source, 0.5, 0.5, 0.5);
+            addAtomAt(p);
+        });
+        action("model.delete-atom", "Delete Atom", "Delete the picked atom", [&] { deletePickedAtom(); });
+        ImGui::SetNextItemWidth(U(48));
+        ImGui::InputText("##creation-element", creationElement, sizeof(creationElement));
+        recordUiTestItem("model.element", "Element");
+        ImGui::SameLine();
+        action("model.replace-element", "Replace Element",
+               "Change the picked atom to the element symbol in the box", [&] { replacePickedElement(); });
+        action("model.add-hydrogens", "Add Hydrogens",
+               "Attach hydrogens to under-coordinated C, N, O, and similar atoms", [&] { addHydrogensCommand(); });
+        action("model.clean", "Clean Geometry",
+               "Nudge close pairs toward the sum of their covalent radii", [&] { cleanGeometryCommand(); });
+        action("model.ball-and-stick", "Ball and Stick", "Normal sphere radius", [&] { setDisplayStyle(0); });
+        action("model.space-filling", "Space Filling", "Large van-der-Waals-like spheres", [&] { setDisplayStyle(1); });
+        action("model.stick", "Stick", "Thin bonds-style spheres", [&] { setDisplayStyle(2); });
+        action("model.line", "Line", "Very small spheres", [&] { setDisplayStyle(3); });
+        action("model.fit", "Fit Structure", "Frame the structure in every viewport", [&] {
+            for (int i = 0; i < 4; ++i) fitCamera(i, false);
+        });
+        action("model.reset-view", "Reset View", "Restore the default cameras and fit the structure",
+               [&] { resetView(); });
+        action("model.measure-distance", "Measure Distance",
+               "Report the distance between the clicked atom and the Shift-clicked atom", [&] {
+                   if (creationPick >= 0 && creationMeasure >= 0)
+                       status = "Distance " + std::to_string(authoring::distance(source, creationPick, creationMeasure)) + " angstrom";
+                   else status = "Click the first atom, then Shift-click the second atom";
+               });
+        action("model.measure-angle", "Measure Bond Angle",
+               "Report the angle at the Shift-clicked atom", [&] {
+                   if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0)
+                       status = "Bond angle " + std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)) + " degrees";
+                   else status = "Click, Shift-click the vertex, then Ctrl-click the third atom";
+               });
+        action("model.measure-dihedral", "Measure Dihedral Angle",
+               "Report the dihedral of four picked atoms", [&] {
+                   if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0)
+                       status = "Dihedral " + std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)) + " degrees";
+                   else status = "Click, Shift-click, Ctrl-click, then Alt-click the fourth atom";
+               });
+        action("model.vacancy", "Create Vacancy", "Remove the picked atom and leave a vacancy", [&] { deletePickedAtom(); });
+        if (creationMode) {
+            action("model.nudge-x", "Move Plus X", "Move the picked atom by 0.2 angstrom along +X", [&] { nudgePicked(0, 0.2f); });
+            action("model.nudge-y", "Move Plus Y", "Move the picked atom by 0.2 angstrom along +Y", [&] { nudgePicked(1, 0.2f); });
+            action("model.nudge-z", "Move Plus Z", "Move the picked atom by 0.2 angstrom along +Z", [&] { nudgePicked(2, 0.2f); });
+            action("model.nudge-x-neg", "Move Minus X", "Move the picked atom by 0.2 angstrom along -X", [&] { nudgePicked(0, -0.2f); });
+            action("model.nudge-y-neg", "Move Minus Y", "Move the picked atom by 0.2 angstrom along -Y", [&] { nudgePicked(1, -0.2f); });
+            action("model.nudge-z-neg", "Move Minus Z", "Move the picked atom by 0.2 angstrom along -Z", [&] { nudgePicked(2, -0.2f); });
+        }
+        ImGui::NewLine();
+        if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0) {
+            ImGui::Text("Distance %.3f A | Bond angle %.2f deg | Dihedral %.2f deg",
+                        authoring::distance(source, creationPick, creationMeasure),
+                        authoring::bondAngle(source, creationPick, creationMeasure, creationAngle),
+                        authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral));
+        } else if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0) {
+            ImGui::Text("Distance %.3f A | Bond angle %.2f deg",
+                        authoring::distance(source, creationPick, creationMeasure),
+                        authoring::bondAngle(source, creationPick, creationMeasure, creationAngle));
+        } else if (creationPick >= 0 && creationMeasure >= 0) {
+            ImGui::Text("Distance: %.3f A", authoring::distance(source, creationPick, creationMeasure));
+        } else if (creationMode) {
+            ImGui::TextDisabled("Creation Mode: click an atom. Shift-click measures distance. Ctrl-click sets the bond angle. Alt-click sets the dihedral.");
+        } else {
+            ImGui::TextDisabled("Right-click the structure and choose Enter Creation Mode to add, move, replace, or delete atoms.");
+        }
+        ImGui::EndChild();
+    }
+    void latticePanel() {
+        const auto lattice = authoring::latticeOf(result.data.cell[0] != 0 || result.data.cell[4] != 0 ||
+                                                           result.data.cell[8] != 0
+                                                       ? result.data
+                                                       : source);
+        ImGui::BeginChild("Lattice properties", {-1, U(78)}, ImGuiChildFlags_Borders);
+        ImGui::Text("Lattice  %s", lattice.system);
+        ImGui::SameLine();
+        ImGui::Text("a %.3f A   b %.3f A   c %.3f A", lattice.a, lattice.b, lattice.c);
+        ImGui::Text("alpha %.2f deg   beta %.2f deg   gamma %.2f deg   volume %.2f A^3",
+                    lattice.alpha, lattice.beta, lattice.gamma, lattice.volume);
+        ImGui::TextDisabled("1 A = 0.1 nm. Group and space-group labels are not assigned yet.");
+        recordUiTestItem("lattice.properties");
+        ImGui::EndChild();
+    }
     void center(float w, float h) {
         fixed("Viewport workspace", leftWidth(), topInset(), w - leftWidth() - rightWidth(),
               h - topInset());
+        documentTabBar();
+        modelingToolbar();
+        if (showLatticePanel) latticePanel();
         auto avail = ImGui::GetContentRegionAvail();
         float dataH = showTable ? U(280) : 0;
         float gap = ImGui::GetStyle().ItemSpacing.y;
         // Exact stack: viewports, button row, optional inspector, timeline.
-        float sceneH = std::max(U(150),
+        float sceneH = std::max(U(120),
                                 avail.y - dataH - U(128) - ImGui::GetFrameHeight() -
                                     gap * (showTable ? 3 : 2));
         if (quad) {
@@ -4863,6 +5571,8 @@ struct App {
         auto &io = ImGui::GetIO();
         // Menu accelerators. Ctrl+O loads per OVITO; Ctrl+Z/Y stay on undo /
         // redo; Ctrl+P focuses the Quick command search.
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T))
+            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E)) showDataExport = true;
@@ -4876,6 +5586,59 @@ struct App {
             history(false);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
             history(true);
+        if (creationMode && ImGui::IsKeyPressed(ImGuiKey_Delete) && !io.WantTextInput)
+            deletePickedAtom();
+        if (openNewCell) {
+            ImGui::OpenPopup("New Orthogonal Cell");
+            openNewCell = false;
+        }
+        if (openTriclinicCell) {
+            ImGui::OpenPopup("New Triclinic Cell");
+            openTriclinicCell = false;
+        }
+        if (ImGui::BeginPopupModal("New Orthogonal Cell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("Create an empty orthogonal cell with one atom at the center.");
+            ImGui::InputFloat("Length a (A)", &newCellA);
+            ImGui::InputFloat("Length b (A)", &newCellB);
+            ImGui::InputFloat("Length c (A)", &newCellC);
+            ImGui::InputText("Element symbol", creationElement, sizeof(creationElement));
+            if (ImGui::Button("Create Cell", {U(140), 0})) {
+                newCellA = std::clamp(newCellA, 1.f, 200.f);
+                newCellB = std::clamp(newCellB, 1.f, 200.f);
+                newCellC = std::clamp(newCellC, 1.f, 200.f);
+                newStructureTab(authoring::orthogonalCell(newCellA, newCellB, newCellC, creationElement),
+                                "Orthogonal cell");
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", {U(110), 0})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (ImGui::BeginPopupModal("New Triclinic Cell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("Create a cell from lengths a, b, c and angles alpha, beta, gamma.");
+            ImGui::InputFloat("Length a (angstrom)", &newCellA);
+            ImGui::InputFloat("Length b (angstrom)", &newCellB);
+            ImGui::InputFloat("Length c (angstrom)", &newCellC);
+            ImGui::InputFloat("Angle alpha (degrees)", &newAlpha);
+            ImGui::InputFloat("Angle beta (degrees)", &newBeta);
+            ImGui::InputFloat("Angle gamma (degrees)", &newGamma);
+            ImGui::InputText("Element symbol", creationElement, sizeof(creationElement));
+            if (ImGui::Button("Create Triclinic Cell", {U(180), 0})) {
+                newCellA = std::clamp(newCellA, 1.f, 200.f);
+                newCellB = std::clamp(newCellB, 1.f, 200.f);
+                newCellC = std::clamp(newCellC, 1.f, 200.f);
+                newAlpha = std::clamp(newAlpha, 20.f, 160.f);
+                newBeta = std::clamp(newBeta, 20.f, 160.f);
+                newGamma = std::clamp(newGamma, 20.f, 160.f);
+                newStructureTab(authoring::triclinicCell(newCellA, newCellB, newCellC, newAlpha, newBeta, newGamma,
+                                                        creationElement),
+                                "Triclinic cell");
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", {U(110), 0})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
         if (playing && !busy && frames.size() > 1 && ImGui::GetTime() - lastFrame > 1 / fps) {
             lastFrame = ImGui::GetTime();
             load(path, (current + 1) % int(frames.size()));
@@ -4922,8 +5685,10 @@ struct App {
             ImGui::EndGroup();
             ImGui::Separator();
             ImGui::TextWrapped(
-                "A Direct3D 11 accelerated structure viewer and modifier pipeline, "
-                "modeled on the OVITO workflow.");
+                "AtomX 1.0 is a Direct3D 11 structure viewer with a modifier pipeline, "
+                "browser-style structure tabs, and Creation Mode for adding, moving, "
+                "replacing, and deleting atoms. Build tools cover cells, supercells, "
+                "vacuum, layers, sheets, nanotubes, and nanoparticles.");
             if (ImGui::Button("Close", {U(110), 0})) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
