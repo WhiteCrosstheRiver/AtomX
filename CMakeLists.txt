@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AtomX VERSION 0.1.0 LANGUAGES CXX)
+project(AtomX VERSION 1.0.0 LANGUAGES CXX)
 if(NOT WIN32)
  message(FATAL_ERROR "The current AtomX UI renderer requires Windows and Direct3D 11")
 endif()

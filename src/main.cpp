@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include "analysis.hpp"
+#include "authoring.hpp"
 #include "structure_io.hpp"
 #include "desktop.hpp"
 #include "imgui.h"
@@ -559,7 +560,7 @@ static const std::vector<Command> &commandRegistry() {
     return commands;
 }
 // Application version surfaced by Help > About and System Information.
-static const char *atomxVersion = "0.1.0";
+static const char *atomxVersion = "1.0.0";
 struct App {
     HWND window;
     desktop::Preferences preferences;
@@ -735,6 +736,40 @@ struct App {
     uint64_t colorRangePipelineGeneration = 0;
     std::string colorRangeNodeId;
     std::filesystem::path colorRangePath;
+    // One structure per browser-style tab. The live document stays in the
+    // fields above; a tab is only a snapshot taken when leaving it.
+    struct StructureTab {
+        std::string title = "Structure";
+        Dataset source;
+        PipelineGraph graph;
+        std::vector<std::vector<ModifierNode>> undo, redo;
+        std::filesystem::path path;
+        std::vector<Frame> frames;
+        int current = 0;
+        std::string readerName = "Generated crystal";
+        Camera cameras[4]{};
+        bool creationMode = false;
+        int picked = -1;
+        int measure = -1;
+        int angleAtom = -1;
+        int dihedralAtom = -1;
+        std::vector<Dataset> authorUndo, authorRedo;
+        char element[16] = "O";
+    };
+    std::vector<StructureTab> tabs;
+    int activeTab = 0;
+    bool creationMode = false;
+    int creationPick = -1;
+    int creationMeasure = -1;
+    int creationAngle = -1;
+    int creationDihedral = -1;
+    std::vector<Dataset> authorUndo, authorRedo;
+    char creationElement[16] = "O";
+    bool showLatticePanel = false;
+    bool openNewCell = false;
+    bool openTriclinicCell = false;
+    float newCellA = 5.f, newCellB = 5.f, newCellC = 5.f;
+    float newAlpha = 90.f, newBeta = 90.f, newGamma = 90.f;
     App(HWND w, Renderer &r) : window(w), gpu(r) {
         preferences.load();
         theme(preferences.theme);
@@ -747,6 +782,8 @@ struct App {
         cameras[1].mode = 2;
         cameras[2].mode = 4;
         update();
+        tabs.push_back(captureTab());
+        activeTab = 0;
     }
     ~App() {
         Shell_NotifyIconW(NIM_DELETE, &desktop::tray);
@@ -1125,6 +1162,7 @@ struct App {
         redo.clear();
     }
     void add(Op op) {
+        structureEditIsLatest = false;
         checkpoint();
         Modifier m{op};
         if (op == Op::Slice) {
@@ -1242,11 +1280,270 @@ struct App {
         }
         return changed;
     }
+    bool structureEditIsLatest = false;
+    std::string tabTitle() const {
+        if (!path.empty()) return utf8(path.filename().wstring());
+        if (!source.comment.empty()) {
+            std::string text = source.comment;
+            if (text.size() > 28) text.resize(28);
+            return text;
+        }
+        return "Untitled structure";
+    }
+    StructureTab captureTab() const {
+        StructureTab tab;
+        tab.title = tabTitle();
+        tab.source = source;
+        tab.graph = modifierGraph;
+        tab.undo = undo;
+        tab.redo = redo;
+        tab.path = path;
+        tab.frames = frames;
+        tab.current = current;
+        tab.readerName = readerName;
+        for (int i = 0; i < 4; ++i) tab.cameras[i] = cameras[i];
+        tab.creationMode = creationMode;
+        tab.picked = creationPick;
+        tab.measure = creationMeasure;
+        tab.angleAtom = creationAngle;
+        tab.dihedralAtom = creationDihedral;
+        tab.authorUndo = authorUndo;
+        tab.authorRedo = authorRedo;
+        snprintf(tab.element, sizeof(tab.element), "%s", creationElement);
+        return tab;
+    }
+    void restoreTab(const StructureTab &tab) {
+        source = tab.source;
+        modifierGraph = tab.graph;
+        undo = tab.undo;
+        redo = tab.redo;
+        path = tab.path;
+        frames = tab.frames;
+        current = tab.current;
+        readerName = tab.readerName;
+        for (int i = 0; i < 4; ++i) cameras[i] = tab.cameras[i];
+        creationMode = tab.creationMode;
+        creationPick = tab.picked;
+        creationMeasure = tab.measure;
+        creationAngle = tab.angleAtom;
+        creationDihedral = tab.dihedralAtom;
+        authorUndo = tab.authorUndo;
+        authorRedo = tab.authorRedo;
+        snprintf(creationElement, sizeof(creationElement), "%s", tab.element);
+        pipelineCheckpoint.reset();
+        pipelineCheckpointNode = SIZE_MAX;
+        unwrapAccumulators.clear();
+        structureEditIsLatest = !authorUndo.empty();
+        syncAppearance(source.species);
+        update();
+    }
+    bool documentsBusy() const { return busy || pipelineBusy || indexing; }
+    void switchTab(int index) {
+        if (index < 0 || index >= int(tabs.size()) || index == activeTab) return;
+        if (documentsBusy()) {
+            status = "Wait for the current load or pipeline to finish before switching tabs";
+            return;
+        }
+        tabs[activeTab] = captureTab();
+        activeTab = index;
+        restoreTab(tabs[activeTab]);
+        status = "Switched to " + tabs[activeTab].title;
+    }
+    void newStructureTab(Dataset data, const std::string &title) {
+        if (documentsBusy()) {
+            status = "Wait for the current load or pipeline to finish before opening a tab";
+            return;
+        }
+        if (!tabs.empty()) tabs[activeTab] = captureTab();
+        StructureTab tab;
+        tab.source = std::move(data);
+        tab.title = title;
+        tab.readerName = "Authored structure";
+        tab.graph = {};
+        snprintf(tab.element, sizeof(tab.element), "C");
+        tabs.push_back(std::move(tab));
+        activeTab = int(tabs.size()) - 1;
+        restoreTab(tabs[activeTab]);
+        status = "New tab: " + title;
+    }
+    void closeTab(int index) {
+        if (index < 0 || index >= int(tabs.size())) return;
+        if (documentsBusy()) {
+            status = "Wait for the current load or pipeline to finish before closing a tab";
+            return;
+        }
+        if (tabs.size() == 1) {
+            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+            tabs.erase(tabs.begin());
+            activeTab = 0;
+            return;
+        }
+        if (index == activeTab) {
+            tabs[activeTab] = captureTab();
+            int next = index + 1 < int(tabs.size()) ? index + 1 : index - 1;
+            StructureTab keep = tabs[next];
+            tabs.erase(tabs.begin() + index);
+            activeTab = next > index ? next - 1 : next;
+            restoreTab(tabs[activeTab]);
+            (void)keep;
+        } else {
+            tabs.erase(tabs.begin() + index);
+            if (index < activeTab) --activeTab;
+        }
+        status = "Closed structure tab";
+    }
+    bool sameAtomCount() const { return source.atoms.size() == result.data.atoms.size(); }
+    void rememberStructure() {
+        if (authorUndo.size() >= 64) authorUndo.erase(authorUndo.begin());
+        authorUndo.push_back(source);
+        authorRedo.clear();
+        structureEditIsLatest = true;
+    }
+    void adoptStructure(Dataset data, const std::string &message) {
+        rememberStructure();
+        source = std::move(data);
+        frames.clear();
+        current = 0;
+        pendingFrame = -1;
+        mods.clear();
+        modifierGraph.selected = 0;
+        creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+        syncAppearance(source.species);
+        update();
+        status = message;
+    }
+    void editStructure(const std::string &message, const std::function<void(Dataset &)> &edit) {
+        if (!sameAtomCount() && !mods.empty()) {
+            status = "Clear modifiers first: the pipeline changed the atom count";
+            return;
+        }
+        rememberStructure();
+        edit(source);
+        source.sourceCount = source.atoms.size();
+        source.bounds();
+        if (!mods.empty()) {
+            mods.clear();
+            modifierGraph.selected = 0;
+        }
+        syncAppearance(source.species);
+        update();
+        status = message;
+    }
+    void deletePickedAtom() {
+        if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
+            status = "Pick an atom in Creation Mode first";
+            return;
+        }
+        int index = creationPick;
+        editStructure("Deleted atom " + std::to_string(index + 1), [&](Dataset &data) {
+            data.atoms.erase(data.atoms.begin() + index);
+            data.bonds.clear();
+        });
+        creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+    }
+    void replacePickedElement() {
+        if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
+            status = "Pick an atom in Creation Mode first";
+            return;
+        }
+        std::string symbol = creationElement[0] ? creationElement : "C";
+        int index = creationPick;
+        editStructure("Replaced atom " + std::to_string(index + 1) + " with " + symbol, [&](Dataset &data) {
+            data.atoms[index].type = authoring::speciesIndex(data, symbol);
+        });
+    }
+    void addAtomAt(Vec3 position) {
+        std::string symbol = creationElement[0] ? creationElement : "C";
+        editStructure("Added " + symbol, [&](Dataset &data) {
+            uint32_t type = authoring::speciesIndex(data, symbol);
+            data.atoms.push_back({position.x, position.y, position.z, type});
+            creationPick = int(data.atoms.size() - 1);
+        });
+    }
+    void nudgePicked(int axis, float delta) {
+        if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
+            status = "Pick an atom in Creation Mode first";
+            return;
+        }
+        int index = creationPick;
+        editStructure("Moved atom " + std::to_string(index + 1), [&](Dataset &data) {
+            float &coord = axis == 0 ? data.atoms[index].x : axis == 1 ? data.atoms[index].y
+                                                                        : data.atoms[index].z;
+            coord += delta;
+        });
+        creationPick = index;
+    }
+    void resetView() {
+        for (auto &camera : cameras) {
+            camera.yaw = .65f;
+            camera.pitch = .48f;
+            camera.zoom = 1.f;
+            camera.panX = camera.panY = 0;
+        }
+        cameras[0].mode = 0;
+        cameras[1].mode = 2;
+        cameras[2].mode = 4;
+        cameras[3].mode = 7;
+        for (int i = 0; i < 4; ++i) fitCamera(i, false);
+        status = "Reset the camera on every viewport";
+    }
+    void addHydrogensCommand() {
+        if (source.atoms.size() > 2500) {
+            status = "Add Hydrogens is limited to 2500 atoms";
+            return;
+        }
+        int added = 0;
+        editStructure("Added hydrogens", [&](Dataset &data) { added = authoring::addHydrogens(data); });
+        if (added >= 0) status = "Added " + std::to_string(added) + " hydrogen atoms";
+    }
+    void cleanGeometryCommand() {
+        if (source.atoms.size() > 2500) {
+            status = "Clean Geometry is limited to 2500 atoms";
+            return;
+        }
+        editStructure("Cleaned bond lengths toward covalent radii",
+                      [](Dataset &data) { authoring::cleanGeometry(data); });
+    }
+    void setDisplayStyle(int style) {
+        particleShape = 0;
+        if (style == 1) radius = 1.15f;
+        else if (style == 2) radius = 0.12f;
+        else if (style == 3) radius = 0.05f;
+        else radius = 0.32f;
+        status = style == 1 ? "Display style: Space filling"
+                 : style == 2 ? "Display style: Stick"
+                 : style == 3 ? "Display style: Line"
+                              : "Display style: Ball and stick";
+    }
     void history(bool forward) {
+        if (structureEditIsLatest) {
+            if (!forward && !authorUndo.empty()) {
+                authorRedo.push_back(source);
+                source = authorUndo.back();
+                authorUndo.pop_back();
+                if (authorUndo.empty()) structureEditIsLatest = false;
+                creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+                syncAppearance(source.species);
+                update();
+                status = "Undid structure edit";
+                return;
+            }
+            if (forward && !authorRedo.empty()) {
+                authorUndo.push_back(source);
+                source = authorRedo.back();
+                authorRedo.pop_back();
+                creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+                syncAppearance(source.species);
+                update();
+                status = "Redid structure edit";
+                return;
+            }
+        }
         if (!applyModifierHistory(mods, undo, redo, forward)) return;
         modifierGraph.selected = mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1);
         pipelineCheckpoint.reset();
         pipelineCheckpointNode=SIZE_MAX;
+        structureEditIsLatest = false;
         update();
     }
     void load(const std::filesystem::path &p, int frame = 0) {
@@ -1910,7 +2207,13 @@ struct App {
             const bool fileOpen = ImGui::BeginMenu("File");
             recordUiTestItem("menu.file", "File");
             if (fileOpen) {
+                if (enabledItem("New Tab", "menu.file.new-tab", "Ctrl+T"))
+                    newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
                 if (enabledItem("Load File...", "menu.file.load-file", "Ctrl+I")) open();
+                if (enabledItem("Load File in New Tab...", "menu.file.load-new-tab")) {
+                    newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+                    open();
+                }
                 disabledItem("Load Remote File", "menu.file.load-remote", "Ctrl+Shift+I",
                              "Not available");
                 if (enabledItem("Export File...", "menu.file.export", "Ctrl+E"))
@@ -1968,6 +2271,89 @@ struct App {
                 if (enabledItem("System Information...", "menu.help.system-info"))
                     showSystemInfo = true;
                 if (enabledItem("About AtomX", "menu.help.about")) showAbout = true;
+                ImGui::EndMenu();
+            }
+            const bool viewOpen = ImGui::BeginMenu("View");
+            recordUiTestItem("menu.view", "View");
+            if (viewOpen) {
+                if (enabledItem("Reset Camera", "menu.view.reset-camera")) resetView();
+                if (enabledItem("Fit Structure in View", "menu.view.fit")) {
+                    for (int i = 0; i < 4; ++i) fitCamera(i, false);
+                }
+                if (enabledItem(showWorkspace ? "Hide Project Panel" : "Show Project Panel",
+                                "menu.view.project"))
+                    showWorkspace = !showWorkspace;
+                if (enabledItem(showLatticePanel ? "Hide Lattice Properties" : "Show Lattice Properties",
+                                "menu.view.lattice"))
+                    showLatticePanel = !showLatticePanel;
+                if (enabledItem(cell ? "Hide Unit Cell" : "Show Unit Cell", "menu.view.cell"))
+                    cell = !cell;
+                if (enabledItem("Ball and Stick", "menu.view.ball-and-stick")) setDisplayStyle(0);
+                if (enabledItem("Space Filling", "menu.view.space-filling")) setDisplayStyle(1);
+                if (enabledItem("Stick", "menu.view.stick")) setDisplayStyle(2);
+                if (enabledItem("Line", "menu.view.line")) setDisplayStyle(3);
+                ImGui::EndMenu();
+            }
+            const bool modifyOpen = ImGui::BeginMenu("Modify");
+            recordUiTestItem("menu.modify", "Modify");
+            if (modifyOpen) {
+                if (enabledItem(creationMode ? "Exit Creation Mode" : "Enter Creation Mode",
+                                "menu.modify.creation-mode"))
+                    creationMode = !creationMode;
+                if (enabledItem("Delete Picked Atom", "menu.modify.delete-atom")) deletePickedAtom();
+                if (enabledItem("Create Vacancy at Picked Atom", "menu.modify.vacancy")) deletePickedAtom();
+                if (enabledItem("Replace Picked Atom", "menu.modify.replace-atom")) replacePickedElement();
+                if (enabledItem("Dope Picked Atom with Element", "menu.modify.dope")) replacePickedElement();
+                if (enabledItem("Add Hydrogens", "menu.modify.add-hydrogens")) addHydrogensCommand();
+                if (enabledItem("Clean Geometry", "menu.modify.clean")) cleanGeometryCommand();
+                ImGui::EndMenu();
+            }
+            const bool buildOpen = ImGui::BeginMenu("Build");
+            recordUiTestItem("menu.build", "Build");
+            if (buildOpen) {
+                if (enabledItem("New Orthogonal Cell...", "menu.build.orthogonal-cell")) openNewCell = true;
+                if (enabledItem("New Triclinic Cell...", "menu.build.triclinic-cell")) openTriclinicCell = true;
+                if (enabledItem("Supercell 2 x 2 x 1", "menu.build.supercell-221"))
+                    adoptStructure(authoring::replicate(source, 2, 2, 1), "Built a 2 x 2 x 1 supercell");
+                if (enabledItem("Supercell 2 x 2 x 2", "menu.build.supercell-222"))
+                    adoptStructure(authoring::replicate(source, 2, 2, 2), "Built a 2 x 2 x 2 supercell");
+                if (enabledItem("Cleave Along C and Add Vacuum", "menu.build.cleave"))
+                    adoptStructure(authoring::cleaveAndVacuum(source, 2, 0.5, 15),
+                                   "Cleaved the cell along c and added 15 A of vacuum");
+                if (enabledItem("Add 15 A Vacuum Along C", "menu.build.vacuum"))
+                    adoptStructure(authoring::addVacuum(source, 2, 15), "Added 15 A of vacuum along c");
+                if (enabledItem("Stack a Second Layer", "menu.build.layer"))
+                    adoptStructure(authoring::stackLayers(source, 15),
+                                   "Stacked a second layer with a 15 A gap");
+                if (enabledItem("Graphene Sheet", "menu.build.graphene"))
+                    newStructureTab(authoring::grapheneSheet(6, 4), "Graphene sheet");
+                if (enabledItem("Zigzag Nanotube (8,0)", "menu.build.nanotube"))
+                    newStructureTab(authoring::zigzagNanotube(8, 6), "Zigzag nanotube (8,0)");
+                if (enabledItem("FCC Nanoparticle", "menu.build.nanoparticle"))
+                    newStructureTab(authoring::fccNanoparticle("Cu", 8), "FCC nanoparticle");
+                if (enabledItem("Place Water Above Structure", "menu.build.water"))
+                    adoptStructure(authoring::placeWater(source, 3), "Placed a water molecule 3 A above the structure");
+                ImGui::EndMenu();
+            }
+            const bool toolsOpen = ImGui::BeginMenu("Tools");
+            recordUiTestItem("menu.tools", "Tools");
+            if (toolsOpen) {
+                if (enabledItem("Show Lattice Parameters", "menu.tools.lattice")) showLatticePanel = true;
+                if (enabledItem("Measure Distance Between Two Atoms", "menu.tools.measure")) {
+                    if (creationPick >= 0 && creationMeasure >= 0)
+                        status = "Distance " + std::to_string(authoring::distance(source, creationPick, creationMeasure)) + " angstrom";
+                    else status = "Click the first atom, then Shift-click the second atom";
+                }
+                if (enabledItem("Measure Bond Angle of Three Atoms", "menu.tools.angle")) {
+                    if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0)
+                        status = "Bond angle " + std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)) + " degrees (vertex is the second atom)";
+                    else status = "Click, Shift-click the vertex, then Ctrl-click the third atom";
+                }
+                if (enabledItem("Measure Dihedral Angle of Four Atoms", "menu.tools.dihedral")) {
+                    if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0)
+                        status = "Dihedral " + std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)) + " degrees";
+                    else status = "Click, Shift-click, Ctrl-click, then Alt-click the fourth atom";
+                }
                 ImGui::EndMenu();
             }
             titleWindow->DC.LayoutType = savedLayout;
@@ -2188,6 +2574,40 @@ struct App {
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
                 active = i;
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                ImGui::OpenPopup("viewport-structure-menu");
+            if (creationMode && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                std::abs(ImGui::GetMouseDragDelta(0).x) < 4.f &&
+                std::abs(ImGui::GetMouseDragDelta(0).y) < 4.f) {
+                int hit = -1;
+                float best = U(16) * U(16);
+                auto mvp = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
+                const auto &atoms = result.data.atoms;
+                const size_t step = atoms.size() > 60000 ? atoms.size() / 60000 : 1;
+                for (size_t index = 0; index < atoms.size(); index += step) {
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(
+                        &q, DirectX::XMVector4Transform(
+                                DirectX::XMVectorSet(atoms[index].x, atoms[index].y, atoms[index].z, 1), mvp));
+                    if (q.w <= 0 || q.z <= 0) continue;
+                    float sx = p.x + (q.x / q.w + 1) * avail.x * .5f;
+                    float sy = p.y + (1 - q.y / q.w) * avail.y * .5f;
+                    float dx = sx - ImGui::GetIO().MousePos.x, dy = sy - ImGui::GetIO().MousePos.y;
+                    float dist = dx * dx + dy * dy;
+                    if (dist < best) {
+                        best = dist;
+                        hit = int(index);
+                    }
+                }
+                if (hit >= 0 && ImGui::GetIO().KeyAlt) creationDihedral = hit;
+                else if (hit >= 0 && ImGui::GetIO().KeyCtrl) creationAngle = hit;
+                else if (hit >= 0 && ImGui::GetIO().KeyShift) creationMeasure = hit;
+                else if (hit >= 0) {
+                    creationPick = hit;
+                    creationMeasure = creationAngle = creationDihedral = -1;
+                }
+                if (hit >= 0) active = i;
+            }
             if (ImGui::IsMouseDragging(0) && viewportTool == 2) {
                 cam.yaw -= ImGui::GetIO().MouseDelta.x * .008f;
                 cam.pitch =
@@ -2296,6 +2716,27 @@ struct App {
                 break;
             case ViewportCursor::Arrow: break;
             }
+        }
+        if (creationPick >= 0 && size_t(creationPick) < result.data.atoms.size()) {
+            const auto &atom = result.data.atoms[creationPick];
+            auto mvp = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
+            DirectX::XMFLOAT4 q;
+            DirectX::XMStoreFloat4(
+                &q, DirectX::XMVector4Transform(DirectX::XMVectorSet(atom.x, atom.y, atom.z, 1), mvp));
+            if (q.w > 0 && q.z > 0) {
+                ImVec2 at{p.x + (q.x / q.w + 1) * avail.x * .5f, p.y + (1 - q.y / q.w) * avail.y * .5f};
+                draw->AddCircle(at, U(10), IM_COL32(255, 196, 64, 255), 20, U(2));
+            }
+        }
+        if (ImGui::BeginPopup("viewport-structure-menu")) {
+            if (ImGui::MenuItem(creationMode ? "Exit Creation Mode" : "Enter Creation Mode"))
+                creationMode = !creationMode;
+            if (ImGui::MenuItem("Add Atom at Cell Center"))
+                addAtomAt(authoring::cartesian(source, 0.5, 0.5, 0.5));
+            if (ImGui::MenuItem("Delete Picked Atom", nullptr, false, creationPick >= 0)) deletePickedAtom();
+            if (ImGui::MenuItem("Replace Picked Atom", nullptr, false, creationPick >= 0)) replacePickedElement();
+            if (ImGui::MenuItem("Add Hydrogens")) addHydrogensCommand();
+            ImGui::EndPopup();
         }
         if (i == active) {
             draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(95, 180, 255, 255));
@@ -2500,14 +2941,140 @@ struct App {
         }
         ImGui::EndChild();
     }
+    void documentTabBar() {
+        if (tabs.empty()) tabs.push_back(captureTab());
+        if (activeTab >= 0 && activeTab < int(tabs.size())) tabs[activeTab].title = tabTitle();
+        ImGui::BeginChild("##document-tabs", {-1, U(30)}, ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoScrollbar);
+        int closing = -1;
+        for (int i = 0; i < int(tabs.size()); ++i) {
+            ImGui::PushID(i);
+            std::string label = tabs[i].title.empty() ? "Untitled structure" : tabs[i].title;
+            if (i == activeTab && creationMode) label += "  [Creation]";
+            if (ImGui::Selectable(label.c_str(), i == activeTab, 0, {U(168), U(22)})) switchTab(i);
+            recordUiTestItem("document.tab." + std::to_string(i), label.c_str());
+            ImGui::SameLine(0, U(2));
+            if (ImGui::SmallButton("x")) closing = i;
+            recordUiTestItem("document.tab.close." + std::to_string(i));
+            ImGui::PopID();
+            ImGui::SameLine();
+        }
+        if (ImGui::SmallButton("New Tab"))
+            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+        recordUiTestItem("document.tab.new", "New Tab");
+        ImGui::EndChild();
+        if (closing >= 0) closeTab(closing);
+    }
+    void modelingToolbar() {
+        ImGui::BeginChild("##modeling-toolbar", {-1, U(128)}, ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoScrollbar);
+        auto action = [&](const char *name, const char *label, const char *tip, auto &&fn) {
+            const float width = ImGui::CalcTextSize(label).x + U(28);
+            if (ImGui::GetCursorPosX() > U(12) && ImGui::GetContentRegionAvail().x < width)
+                ImGui::NewLine();
+            if (ImGui::Button(label)) fn();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            recordUiTestItem(name, label);
+            ImGui::SameLine();
+        };
+        action("model.creation-mode", creationMode ? "Exit Creation Mode" : "Enter Creation Mode",
+               "Turn atom editing on or off for this structure", [&] { creationMode = !creationMode; });
+        action("model.add-atom", "Add Atom", "Add the typed element at the center of the cell", [&] {
+            Vec3 p = authoring::cartesian(source, 0.5, 0.5, 0.5);
+            addAtomAt(p);
+        });
+        action("model.delete-atom", "Delete Atom", "Delete the picked atom", [&] { deletePickedAtom(); });
+        ImGui::SetNextItemWidth(U(48));
+        ImGui::InputText("##creation-element", creationElement, sizeof(creationElement));
+        recordUiTestItem("model.element", "Element");
+        ImGui::SameLine();
+        action("model.replace-element", "Replace Element",
+               "Change the picked atom to the element symbol in the box", [&] { replacePickedElement(); });
+        action("model.add-hydrogens", "Add Hydrogens",
+               "Attach hydrogens to under-coordinated C, N, O, and similar atoms", [&] { addHydrogensCommand(); });
+        action("model.clean", "Clean Geometry",
+               "Nudge close pairs toward the sum of their covalent radii", [&] { cleanGeometryCommand(); });
+        action("model.ball-and-stick", "Ball and Stick", "Normal sphere radius", [&] { setDisplayStyle(0); });
+        action("model.space-filling", "Space Filling", "Large van-der-Waals-like spheres", [&] { setDisplayStyle(1); });
+        action("model.stick", "Stick", "Thin bonds-style spheres", [&] { setDisplayStyle(2); });
+        action("model.line", "Line", "Very small spheres", [&] { setDisplayStyle(3); });
+        action("model.fit", "Fit Structure", "Frame the structure in every viewport", [&] {
+            for (int i = 0; i < 4; ++i) fitCamera(i, false);
+        });
+        action("model.reset-view", "Reset View", "Restore the default cameras and fit the structure",
+               [&] { resetView(); });
+        action("model.measure-distance", "Measure Distance",
+               "Report the distance between the clicked atom and the Shift-clicked atom", [&] {
+                   if (creationPick >= 0 && creationMeasure >= 0)
+                       status = "Distance " + std::to_string(authoring::distance(source, creationPick, creationMeasure)) + " angstrom";
+                   else status = "Click the first atom, then Shift-click the second atom";
+               });
+        action("model.measure-angle", "Measure Bond Angle",
+               "Report the angle at the Shift-clicked atom", [&] {
+                   if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0)
+                       status = "Bond angle " + std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)) + " degrees";
+                   else status = "Click, Shift-click the vertex, then Ctrl-click the third atom";
+               });
+        action("model.measure-dihedral", "Measure Dihedral Angle",
+               "Report the dihedral of four picked atoms", [&] {
+                   if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0)
+                       status = "Dihedral " + std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)) + " degrees";
+                   else status = "Click, Shift-click, Ctrl-click, then Alt-click the fourth atom";
+               });
+        action("model.vacancy", "Create Vacancy", "Remove the picked atom and leave a vacancy", [&] { deletePickedAtom(); });
+        if (creationMode) {
+            action("model.nudge-x", "Move Plus X", "Move the picked atom by 0.2 angstrom along +X", [&] { nudgePicked(0, 0.2f); });
+            action("model.nudge-y", "Move Plus Y", "Move the picked atom by 0.2 angstrom along +Y", [&] { nudgePicked(1, 0.2f); });
+            action("model.nudge-z", "Move Plus Z", "Move the picked atom by 0.2 angstrom along +Z", [&] { nudgePicked(2, 0.2f); });
+            action("model.nudge-x-neg", "Move Minus X", "Move the picked atom by 0.2 angstrom along -X", [&] { nudgePicked(0, -0.2f); });
+            action("model.nudge-y-neg", "Move Minus Y", "Move the picked atom by 0.2 angstrom along -Y", [&] { nudgePicked(1, -0.2f); });
+            action("model.nudge-z-neg", "Move Minus Z", "Move the picked atom by 0.2 angstrom along -Z", [&] { nudgePicked(2, -0.2f); });
+        }
+        ImGui::NewLine();
+        if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0) {
+            ImGui::Text("Distance %.3f A | Bond angle %.2f deg | Dihedral %.2f deg",
+                        authoring::distance(source, creationPick, creationMeasure),
+                        authoring::bondAngle(source, creationPick, creationMeasure, creationAngle),
+                        authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral));
+        } else if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0) {
+            ImGui::Text("Distance %.3f A | Bond angle %.2f deg",
+                        authoring::distance(source, creationPick, creationMeasure),
+                        authoring::bondAngle(source, creationPick, creationMeasure, creationAngle));
+        } else if (creationPick >= 0 && creationMeasure >= 0) {
+            ImGui::Text("Distance: %.3f A", authoring::distance(source, creationPick, creationMeasure));
+        } else if (creationMode) {
+            ImGui::TextDisabled("Creation Mode: click an atom. Shift-click measures distance. Ctrl-click sets the bond angle. Alt-click sets the dihedral.");
+        } else {
+            ImGui::TextDisabled("Right-click the structure and choose Enter Creation Mode to add, move, replace, or delete atoms.");
+        }
+        ImGui::EndChild();
+    }
+    void latticePanel() {
+        const auto lattice = authoring::latticeOf(result.data.cell[0] != 0 || result.data.cell[4] != 0 ||
+                                                           result.data.cell[8] != 0
+                                                       ? result.data
+                                                       : source);
+        ImGui::BeginChild("Lattice properties", {-1, U(78)}, ImGuiChildFlags_Borders);
+        ImGui::Text("Lattice  %s", lattice.system);
+        ImGui::SameLine();
+        ImGui::Text("a %.3f A   b %.3f A   c %.3f A", lattice.a, lattice.b, lattice.c);
+        ImGui::Text("alpha %.2f deg   beta %.2f deg   gamma %.2f deg   volume %.2f A^3",
+                    lattice.alpha, lattice.beta, lattice.gamma, lattice.volume);
+        ImGui::TextDisabled("1 A = 0.1 nm. Group and space-group labels are not assigned yet.");
+        recordUiTestItem("lattice.properties");
+        ImGui::EndChild();
+    }
     void center(float w, float h) {
         fixed("Viewport workspace", leftWidth(), topInset(), w - leftWidth() - rightWidth(),
               h - topInset());
+        documentTabBar();
+        modelingToolbar();
+        if (showLatticePanel) latticePanel();
         auto avail = ImGui::GetContentRegionAvail();
         float dataH = showTable ? U(280) : 0;
         float gap = ImGui::GetStyle().ItemSpacing.y;
         // Exact stack: viewports, button row, optional inspector, timeline.
-        float sceneH = std::max(U(150),
+        float sceneH = std::max(U(120),
                                 avail.y - dataH - U(128) - ImGui::GetFrameHeight() -
                                     gap * (showTable ? 3 : 2));
         if (quad) {
@@ -5004,6 +5571,8 @@ struct App {
         auto &io = ImGui::GetIO();
         // Menu accelerators. Ctrl+O loads per OVITO; Ctrl+Z/Y stay on undo /
         // redo; Ctrl+P focuses the Quick command search.
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T))
+            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E)) showDataExport = true;
@@ -5017,6 +5586,59 @@ struct App {
             history(false);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
             history(true);
+        if (creationMode && ImGui::IsKeyPressed(ImGuiKey_Delete) && !io.WantTextInput)
+            deletePickedAtom();
+        if (openNewCell) {
+            ImGui::OpenPopup("New Orthogonal Cell");
+            openNewCell = false;
+        }
+        if (openTriclinicCell) {
+            ImGui::OpenPopup("New Triclinic Cell");
+            openTriclinicCell = false;
+        }
+        if (ImGui::BeginPopupModal("New Orthogonal Cell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("Create an empty orthogonal cell with one atom at the center.");
+            ImGui::InputFloat("Length a (A)", &newCellA);
+            ImGui::InputFloat("Length b (A)", &newCellB);
+            ImGui::InputFloat("Length c (A)", &newCellC);
+            ImGui::InputText("Element symbol", creationElement, sizeof(creationElement));
+            if (ImGui::Button("Create Cell", {U(140), 0})) {
+                newCellA = std::clamp(newCellA, 1.f, 200.f);
+                newCellB = std::clamp(newCellB, 1.f, 200.f);
+                newCellC = std::clamp(newCellC, 1.f, 200.f);
+                newStructureTab(authoring::orthogonalCell(newCellA, newCellB, newCellC, creationElement),
+                                "Orthogonal cell");
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", {U(110), 0})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (ImGui::BeginPopupModal("New Triclinic Cell", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("Create a cell from lengths a, b, c and angles alpha, beta, gamma.");
+            ImGui::InputFloat("Length a (angstrom)", &newCellA);
+            ImGui::InputFloat("Length b (angstrom)", &newCellB);
+            ImGui::InputFloat("Length c (angstrom)", &newCellC);
+            ImGui::InputFloat("Angle alpha (degrees)", &newAlpha);
+            ImGui::InputFloat("Angle beta (degrees)", &newBeta);
+            ImGui::InputFloat("Angle gamma (degrees)", &newGamma);
+            ImGui::InputText("Element symbol", creationElement, sizeof(creationElement));
+            if (ImGui::Button("Create Triclinic Cell", {U(180), 0})) {
+                newCellA = std::clamp(newCellA, 1.f, 200.f);
+                newCellB = std::clamp(newCellB, 1.f, 200.f);
+                newCellC = std::clamp(newCellC, 1.f, 200.f);
+                newAlpha = std::clamp(newAlpha, 20.f, 160.f);
+                newBeta = std::clamp(newBeta, 20.f, 160.f);
+                newGamma = std::clamp(newGamma, 20.f, 160.f);
+                newStructureTab(authoring::triclinicCell(newCellA, newCellB, newCellC, newAlpha, newBeta, newGamma,
+                                                        creationElement),
+                                "Triclinic cell");
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", {U(110), 0})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
         if (playing && !busy && frames.size() > 1 && ImGui::GetTime() - lastFrame > 1 / fps) {
             lastFrame = ImGui::GetTime();
             load(path, (current + 1) % int(frames.size()));
@@ -5063,8 +5685,10 @@ struct App {
             ImGui::EndGroup();
             ImGui::Separator();
             ImGui::TextWrapped(
-                "A Direct3D 11 accelerated structure viewer and modifier pipeline, "
-                "modeled on the OVITO workflow.");
+                "AtomX 1.0 is a Direct3D 11 structure viewer with a modifier pipeline, "
+                "browser-style structure tabs, and Creation Mode for adding, moving, "
+                "replacing, and deleting atoms. Build tools cover cells, supercells, "
+                "vacuum, layers, sheets, nanotubes, and nanoparticles.");
             if (ImGui::Button("Close", {U(110), 0})) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
