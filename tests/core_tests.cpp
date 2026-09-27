@@ -1,4 +1,5 @@
 #include "../src/analysis.hpp"
+#include "../src/authoring.hpp"
 #include "../src/elements.hpp"
 #include <iostream>
 using namespace atomx;
@@ -186,6 +187,21 @@ static Dataset referenceSliceFilter(const Dataset &data, const Modifier &m) {
 }
 int main() {
     try {
+        Dataset edited;
+        edited.cell={2,0,0,0,2,0,0,0,2};
+        edited.atoms={{1,1,1,0}};
+        require(!authoring::setCellParameters(edited,2,2,2,10,10,170,{},
+                    {true,true,true},true),"invalid cell is rejected");
+        require(edited.cell[0]==2 && edited.atoms[0].x==1,
+                "invalid cell leaves the structure intact");
+        require(authoring::setCellParameters(edited,4,4,4,90,90,90,{},
+                    {true,false,true},true),"valid cell can be applied");
+        require(std::abs(edited.atoms[0].x-2)<1e-5 && edited.pbc[0] && !edited.pbc[1],
+                "fractional mode moves atoms and applies periodic boundaries");
+        require(authoring::setCellParameters(edited,6,6,6,90,90,90,{},
+                    {false,false,false},false),"fixed Cartesian cell edit succeeds");
+        require(std::abs(edited.atoms[0].x-2)<1e-5 && edited.cell[0]==6,
+                "Cartesian mode preserves atom positions");
         auto angleOutputs=modifierOutputs(Modifier{Op::BondAngleDistribution},7);
         require(angleOutputs.size()==2 &&
                     angleOutputs[0].kind==DataObject::Kind::Table &&

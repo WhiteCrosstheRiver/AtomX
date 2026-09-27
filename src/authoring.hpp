@@ -60,7 +60,7 @@ inline LatticeParameters latticeOf(const Dataset &data) {
     if (right && edges) p.system = "Cubic";
     else if (right && ab) p.system = "Tetragonal";
     else if (right) p.system = "Orthorhombic";
-    else if (ab && nearEq(p.alpha, 90) && nearEq(p.beta, 90) && near(p.gamma, 120))
+    else if (ab && nearEq(p.alpha, 90) && nearEq(p.beta, 90) && nearEq(p.gamma, 120))
         p.system = "Hexagonal";
     else if (std::abs(p.a - p.b) < 0.05 * std::max(p.a, 1.0) &&
              std::abs(p.a - p.c) < 0.05 * std::max(p.a, 1.0) &&
@@ -132,6 +132,48 @@ inline Dataset triclinicCell(double a, double b, double c, double alpha, double 
     data.atoms.push_back({p.x, p.y, p.z, type});
     finish(data, "Custom crystal cell");
     return data;
+}
+
+inline bool validCellParameters(double a, double b, double c, double alpha, double beta, double gamma) {
+    if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c) ||
+        !std::isfinite(alpha) || !std::isfinite(beta) || !std::isfinite(gamma) ||
+        a <= 1e-5 || b <= 1e-5 || c <= 1e-5 ||
+        alpha <= 0 || alpha >= 180 || beta <= 0 || beta >= 180 || gamma <= 0 || gamma >= 180)
+        return false;
+    const double ar=alpha*kPi/180, br=beta*kPi/180, gr=gamma*kPi/180;
+    const double ca=std::cos(ar), cb=std::cos(br), cg=std::cos(gr);
+    const double shape=1+2*ca*cb*cg-ca*ca-cb*cb-cg*cg;
+    return shape>1e-10;
+}
+
+inline bool setCellParameters(Dataset &data, double a, double b, double c,
+                              double alpha, double beta, double gamma,
+                              Vec3 origin, std::array<bool,3> pbc, bool preserveFractional) {
+    if (!validCellParameters(a,b,c,alpha,beta,gamma) ||
+        !std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z)) return false;
+    std::vector<std::array<double,3>> fractionalPositions;
+    if (preserveFractional) {
+        fractionalPositions.reserve(data.atoms.size());
+        for (const auto &atom : data.atoms) {
+            double fa=0, fb=0, fc=0;
+            if (!fractional(data,{atom.x,atom.y,atom.z},fa,fb,fc)) return false;
+            fractionalPositions.push_back({fa,fb,fc});
+        }
+    }
+    const Dataset shape=triclinicCell(a,b,c,alpha,beta,gamma,"C");
+    data.cell=shape.cell;
+    data.origin=origin;
+    data.pbc=pbc;
+    if (preserveFractional) {
+        for (size_t i=0;i<data.atoms.size();++i) {
+            const auto &f=fractionalPositions[i];
+            const Vec3 p=cartesian(data,f[0],f[1],f[2]);
+            data.atoms[i].x=p.x; data.atoms[i].y=p.y; data.atoms[i].z=p.z;
+        }
+    }
+    data.bonds.clear();
+    data.bounds();
+    return true;
 }
 
 inline Dataset replicate(const Dataset &input, int nx, int ny, int nz) {

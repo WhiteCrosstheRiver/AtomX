@@ -607,7 +607,7 @@ static const std::vector<Command> &commandRegistry() {
     return commands;
 }
 // Application version surfaced by Help > About and System Information.
-static const char *atomxVersion = "1.1.0";
+static const char *atomxVersion = "1.2.0";
 struct App {
     HWND window;
     desktop::Preferences preferences;
@@ -844,6 +844,10 @@ struct App {
     std::vector<CreationSnapshot> creationSnapshots;
     int creationSnapshotSelected = -1, creationPropertyPage = 0;
     bool creationPropertiesOpen = true;
+    std::array<double,6> creationCellParameters{};
+    double creationCellOrigin[3]{};
+    std::array<bool,3> creationCellPbc{};
+    bool creationCellPreserveFractional = false;
     int creationHover = -1;
     ImVec2 creationLastHoverMouse{-1,-1};
     CreationDrag creationDrag = CreationDrag::None;
@@ -5362,9 +5366,6 @@ struct App {
             const size_t unit = counts[i] / std::max<size_t>(common, 1);
             if (unit > 1) formula += std::to_string(unit);
         }
-        const bool isRockSalt = counts.size() == 2 && counts[0] == counts[1] &&
-            ((source.species[0] == "Na" && source.species[1] == "Cl") ||
-             (source.species[0] == "Cl" && source.species[1] == "Na"));
         const float footerH=U(32);
         const float propertyH=creationPropertiesOpen
             ? std::max(0.f,std::min(std::max(bodyH*.43f,U(220)),bodyH-U(170))) : 0.f;
@@ -5435,6 +5436,17 @@ struct App {
             };
             if (creationPropertyPage==0) {
                 const auto lattice=authoring::latticeOf(source);
+                if (ImGui::Button("编辑晶胞参数...",{-1,U(28)})) {
+                    creationCellParameters={lattice.a>1e-5?lattice.a:10.0,
+                        lattice.b>1e-5?lattice.b:10.0,lattice.c>1e-5?lattice.c:10.0,
+                        lattice.alpha,lattice.beta,lattice.gamma};
+                    creationCellOrigin[0]=source.origin.x;
+                    creationCellOrigin[1]=source.origin.y;
+                    creationCellOrigin[2]=source.origin.z;
+                    creationCellPbc=source.pbc;
+                    creationCellPreserveFractional=false;
+                    ImGui::OpenPopup("编辑模拟晶胞");
+                }
                 char value[80];
                 for (const auto [name,length]:{std::pair{"a",lattice.a},
                     {"b",lattice.b},{"c",lattice.c}}) {
@@ -5445,8 +5457,8 @@ struct App {
                     snprintf(value,sizeof(value),"%.2f°",angle); propertyRow(name,value);
                 }
                 snprintf(value,sizeof(value),"%.2f Å³",lattice.volume); propertyRow("体积 V",value);
-                propertyRow("空间群",isRockSalt?"Fm-3m (225)":"—");
-                propertyRow("布拉维格子",isRockSalt?"面心立方 cF":"—");
+                propertyRow("空间群","未计算");
+                propertyRow("布拉维格子","未计算");
                 propertyRow("原子数",std::to_string(source.atoms.size()));
                 snprintf(value,sizeof(value),"%.4f Å⁻³",lattice.volume>0
                     ? double(source.atoms.size())/lattice.volume:0.0);
@@ -5477,6 +5489,66 @@ struct App {
                     snprintf(position,sizeof(position),"%.3f, %.3f, %.3f",atom.x,atom.y,atom.z);
                     propertyRow("位置",position);
                 }
+            }
+            if (ImGui::BeginPopupModal("编辑模拟晶胞",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("晶格常数 (Å)");
+            for (int axis=0;axis<3;++axis) {
+                ImGui::PushID(axis);
+                ImGui::SetNextItemWidth(U(120));
+                ImGui::InputDouble(axis==0?"a":axis==1?"b":"c",
+                    &creationCellParameters[size_t(axis)],0,0,"%.6f");
+                ImGui::PopID();
+            }
+            ImGui::TextUnformatted("晶格角 (°)");
+            for (int axis=0;axis<3;++axis) {
+                ImGui::PushID(axis+3);
+                ImGui::SetNextItemWidth(U(120));
+                ImGui::InputDouble(axis==0?"α":axis==1?"β":"γ",
+                    &creationCellParameters[size_t(axis+3)],0,0,"%.4f");
+                ImGui::PopID();
+            }
+            ImGui::TextUnformatted("晶胞原点 (Å)");
+            for (int axis=0;axis<3;++axis) {
+                if (axis) ImGui::SameLine();
+                ImGui::PushID(axis+6);
+                ImGui::SetNextItemWidth(U(90));
+                ImGui::InputDouble(axis==0?"X":axis==1?"Y":"Z",
+                    &creationCellOrigin[axis],0,0,"%.4f");
+                ImGui::PopID();
+            }
+            ImGui::TextUnformatted("周期性边界");
+            for (int axis=0;axis<3;++axis) {
+                if (axis) ImGui::SameLine();
+                ImGui::PushID(axis+9);
+                ImGui::Checkbox(axis==0?"X":axis==1?"Y":"Z",
+                    &creationCellPbc[size_t(axis)]);
+                ImGui::PopID();
+            }
+            ImGui::Checkbox("保持原子的分数坐标",&creationCellPreserveFractional);
+            ImGui::TextDisabled("关闭时保持笛卡尔坐标；开启时原子随晶胞变形。");
+            const auto &p=creationCellParameters;
+            bool valid=authoring::validCellParameters(p[0],p[1],p[2],p[3],p[4],p[5]);
+            for (double coordinate : creationCellOrigin)
+                valid &= std::isfinite(coordinate) && std::abs(coordinate)<1e7;
+            if (creationCellPreserveFractional && authoring::latticeOf(source).volume<1e-8)
+                valid=false;
+            if (!valid) ImGui::TextColored({1.f,.52f,.35f,1.f},"晶胞尺寸或角度无效；分数坐标需要有效的原晶胞。");
+            ImGui::BeginDisabled(!valid);
+            if (ImGui::Button("应用",{U(90),U(32)})) {
+                const Vec3 origin{float(creationCellOrigin[0]),float(creationCellOrigin[1]),
+                    float(creationCellOrigin[2])};
+                const auto periodic=creationCellPbc;
+                const bool preserve=creationCellPreserveFractional;
+                editStructure("编辑模拟晶胞",[&](Dataset &data) {
+                    authoring::setCellParameters(data,p[0],p[1],p[2],p[3],p[4],p[5],
+                        origin,periodic,preserve);
+                });
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("取消",{U(90),U(32)})) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
             }
             ImGui::End();
         }
