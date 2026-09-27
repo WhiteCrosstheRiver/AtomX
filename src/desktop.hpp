@@ -17,14 +17,14 @@ inline std::filesystem::path settingsPath() {
     return path / "settings.ini";
 }
 struct Preferences {
-    int theme = 1, font = 0, size = 18;
+    int theme = 0, font = 0, size = 18;
     // Most recently opened files, persisted across launches and shown by the
     // File > Recent Files submenu. Newest entry first, at most 8 kept.
     static constexpr int maxRecentFiles = 8;
     std::vector<std::wstring> recentFiles;
     void load() {
         auto p = settingsPath().wstring();
-        theme = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Theme", 1, p.c_str())), 0, 2);
+        theme = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Theme", 0, p.c_str())), 0, 2);
         font = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Font", 0, p.c_str())), 0, 2);
         size = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Size", 18, p.c_str())), 14, 20);
         recentFiles.clear();

@@ -18,6 +18,8 @@
 #include <iomanip>
 #include <optional>
 #include <memory>
+#include <cctype>
+#include <numeric>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -285,13 +287,17 @@ static ImVec4 accent{.10f,.34f,.62f,1};
 // table feeds the merged icon font; every button also carries a text fallback
 // for the case where the system font is unavailable or a glyph is missing.
 static const ImWchar iconGlyphRanges[] = {
-    0xE70D,0xE70D, 0xE70E,0xE70E, 0xE713,0xE713,
-    0xE71D,0xE71D, 0xE722,0xE722, 0xE768,0xE768, 0xE769,0xE769,
+    0xE70D,0xE70D, 0xE70E,0xE70F, 0xE713,0xE713,
+    0xE71D,0xE71D, 0xE722,0xE722, 0xE72A,0xE72A, 0xE734,0xE734,
+    0xE768,0xE768, 0xE769,0xE769,
     0xE76B,0xE76B, 0xE76C,0xE76C, 0xE792,0xE792, 0xE7A6,0xE7A7,
-    0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE81E,0xE81E,
+    0xE7AD,0xE7AD, 0xE7B3,0xE7B3, 0xE7B8,0xE7B8, 0xE7C9,0xE7C9,
+    0xE80F,0xE80F, 0xE81E,0xE81E,
     0xE823,0xE823, 0xE892,0xE892, 0xE893,0xE893,
-    0xE8A7,0xE8A7, 0xE8A9,0xE8A9, 0xE8AA,0xE8AA, 0xE8B5,0xE8B5,
-    0xE8C8,0xE8C8, 0xE8E5,0xE8E5, 0xE8F1,0xE8F1, 0xE91B,0xE91B,
+    0xE8A0,0xE8A0, 0xE8A4,0xE8A4, 0xE8A7,0xE8A7, 0xE8A9,0xE8AB,
+    0xE8B1,0xE8B1, 0xE8B5,0xE8B5, 0xE8B7,0xE8B7,
+    0xE8C8,0xE8C8, 0xE8D7,0xE8D7, 0xE8E5,0xE8E5, 0xE8F1,0xE8F1,
+    0xE8FA,0xE8FA, 0xE91B,0xE91B,
     0xE72C,0xE72C, 0xE74D,0xE74D, 0xE7F4,0xE7F4, 0xE192,0xE192,
     0xE9D9,0xE9D9,
     0};
@@ -316,7 +322,7 @@ static int glyphUtf8(unsigned codepoint, char out[8]) {
 static bool glyphAvailable(unsigned codepoint) {
     return iconFont && iconFont->FindGlyphNoFallback(ImWchar(codepoint)) != nullptr;
 }
-static void theme(int choice = 1) {
+static void theme(int choice = 0) {
     ImGui::GetStyle() = ImGuiStyle{};
     if (choice == 1) ImGui::StyleColorsLight(); else ImGui::StyleColorsDark();
     auto &s = ImGui::GetStyle();
@@ -326,6 +332,47 @@ static void theme(int choice = 1) {
     s.FrameBorderSize = 1; s.PopupBorderSize = 1; s.GrabRounding = 2;
     s.DisabledAlpha = .72f;
     auto *c = s.Colors;
+    if (choice == 0) {
+        // P12 "View mode dark": the AtomX redesign reference palette.
+        // Window #16181b, panels #1a1d20, borders #22262a, hairlines
+        // #2c3137, control wells #111316, popups #1d2024 / border #33383e,
+        // text #e6e8eb / #aeb4bb / #9aa1a9 / #6b727a, accent amber #f0a431.
+        accent = {.941f,.643f,.192f,1}; // #f0a431
+        c[ImGuiCol_Text] = {.902f,.910f,.922f,1};        // #e6e8eb
+        c[ImGuiCol_TextDisabled] = {.420f,.447f,.478f,1}; // #6b727a
+        c[ImGuiCol_TextSelectedBg] = {.941f,.643f,.192f,.30f};
+        c[ImGuiCol_WindowBg] = {.102f,.114f,.125f,1};    // #1a1d20
+        c[ImGuiCol_ChildBg] = {.102f,.114f,.125f,1};     // #1a1d20
+        c[ImGuiCol_PopupBg] = {.114f,.125f,.141f,1};     // #1d2024
+        c[ImGuiCol_Border] = {.133f,.149f,.165f,1};      // #22262a
+        c[ImGuiCol_Separator] = {.133f,.149f,.165f,1};   // #22262a
+        c[ImGuiCol_FrameBg] = {.067f,.075f,.086f,1};     // #111316
+        c[ImGuiCol_FrameBgHovered] = {.086f,.094f,.106f,1};
+        c[ImGuiCol_FrameBgActive] = {.114f,.125f,.141f,1};
+        c[ImGuiCol_Button] = {.125f,.137f,.157f,1};      // #202328
+        c[ImGuiCol_ButtonHovered] = {.149f,.165f,.184f,1}; // #262a2f
+        c[ImGuiCol_ButtonActive] = {.173f,.192f,.216f,1}; // #2c3137
+        c[ImGuiCol_Header] = {.137f,.153f,.173f,1};      // #23272c
+        c[ImGuiCol_HeaderHovered] = {.153f,.169f,.188f,1}; // #272b30
+        c[ImGuiCol_HeaderActive] = {.173f,.192f,.216f,1};
+        c[ImGuiCol_Tab] = {.125f,.137f,.157f,1};
+        c[ImGuiCol_TabHovered] = {.149f,.165f,.184f,1};
+        c[ImGuiCol_TabSelected] = {.149f,.163f,.188f,1}; // #262a30
+        c[ImGuiCol_TitleBgActive] = {.102f,.114f,.125f,1};
+        c[ImGuiCol_TableHeaderBg] = {.125f,.137f,.157f,1};
+        c[ImGuiCol_TableRowBgAlt] = {1,1,1,.025f};
+        c[ImGuiCol_ScrollbarBg] = {.102f,.114f,.125f,1};
+        c[ImGuiCol_ScrollbarGrab] = {.180f,.200f,.220f,1};
+        c[ImGuiCol_ScrollbarGrabHovered] = {.220f,.239f,.259f,1};
+        c[ImGuiCol_ScrollbarGrabActive] = {.941f,.643f,.192f,1};
+        c[ImGuiCol_SliderGrab] = accent;
+        c[ImGuiCol_CheckMark] = accent;
+        c[ImGuiCol_PlotHistogram] = accent;
+        c[ImGuiCol_PlotLines] = accent;
+        c[ImGuiCol_NavCursor] = accent;
+        s.ScaleAllSizes(uiScale);
+        return;
+    }
     if (choice == 1) {
         accent = {.08f,.32f,.61f,1};
         c[ImGuiCol_Text] = {.08f,.10f,.13f,1};
@@ -560,7 +607,7 @@ static const std::vector<Command> &commandRegistry() {
     return commands;
 }
 // Application version surfaced by Help > About and System Information.
-static const char *atomxVersion = "1.0.0";
+static const char *atomxVersion = "1.1.0";
 struct App {
     HWND window;
     desktop::Preferences preferences;
@@ -596,6 +643,7 @@ struct App {
     int current = 0, budget = 2000000;
     bool playing = false, quad = true, particles = true, cell = true, showTable = false,
          showCatalog = false;
+    bool loopPlayback = true; // P12 timeline loop toggle (design: Loop control).
     bool histogramPreviewTab = false;
     bool globalAttributesTab = false;
     bool bondsTab = false;
@@ -667,6 +715,9 @@ struct App {
     // Right panel section switcher (icon row that replaced the text tabs):
     // 0 pipeline, 1 render, 2 analysis, 3 system.
     int rightTab = 0;
+    // P12 left-panel selection: -1 data source, -2 particles, -3 simulation
+    // cell, >=0 selected modifier row.
+    int panelSelection = -1;
     // Latest status message shown as a fading overlay in the active viewport
     // (replaces the removed full-width status bar).
     std::string overlayStatus;
@@ -749,6 +800,7 @@ struct App {
         std::string readerName = "Generated crystal";
         Camera cameras[4]{};
         bool creationMode = false;
+        bool creationSketch = false;
         int picked = -1;
         int measure = -1;
         int angleAtom = -1;
@@ -758,7 +810,10 @@ struct App {
     };
     std::vector<StructureTab> tabs;
     int activeTab = 0;
+    int creationReturnTab = -1;
+    std::string creationBasedOn;
     bool creationMode = false;
+    bool creationSketch = false;
     int creationPick = -1;
     int creationMeasure = -1;
     int creationAngle = -1;
@@ -1282,6 +1337,8 @@ struct App {
     }
     bool structureEditIsLatest = false;
     std::string tabTitle() const {
+        if (creationMode && activeTab >= 0 && activeTab < int(tabs.size()))
+            return tabs[size_t(activeTab)].title;
         if (!path.empty()) return utf8(path.filename().wstring());
         if (!source.comment.empty()) {
             std::string text = source.comment;
@@ -1303,6 +1360,7 @@ struct App {
         tab.readerName = readerName;
         for (int i = 0; i < 4; ++i) tab.cameras[i] = cameras[i];
         tab.creationMode = creationMode;
+        tab.creationSketch = creationSketch;
         tab.picked = creationPick;
         tab.measure = creationMeasure;
         tab.angleAtom = creationAngle;
@@ -1323,6 +1381,7 @@ struct App {
         readerName = tab.readerName;
         for (int i = 0; i < 4; ++i) cameras[i] = tab.cameras[i];
         creationMode = tab.creationMode;
+        creationSketch = tab.creationSketch;
         creationPick = tab.picked;
         creationMeasure = tab.measure;
         creationAngle = tab.angleAtom;
@@ -1365,6 +1424,68 @@ struct App {
         activeTab = int(tabs.size()) - 1;
         restoreTab(tabs[activeTab]);
         status = "New tab: " + title;
+    }
+    void openCreationTab() {
+        if (documentsBusy()) {
+            status = "Wait for the current operation before opening Creation Mode";
+            return;
+        }
+        const int origin = activeTab;
+        const Camera viewCamera = cameras[active];
+        Dataset editable = result.data.atoms.empty() ? source : result.data;
+        editable.sourceCount = editable.atoms.size();
+        // Creation view previews close atomic neighbours as bonds. This is a
+        // visual default on the copied structure, never a pipeline modifier
+        // on the source document. Existing explicit topology wins.
+        if (editable.bonds.empty() && editable.atoms.size() <= 5000) {
+            std::vector<float> radii;
+            radii.reserve(editable.species.size());
+            float largest = 0.f;
+            for (const auto &name : editable.species) {
+                const auto *element = elements::find(name);
+                const float value = element ? element->covalent : .8f;
+                radii.push_back(value);
+                largest = std::max(largest, value);
+            }
+            if (largest > 0) {
+                try {
+                    const float maxDistance = largest * 2.4f;
+                    forEachNeighborPair(editable, maxDistance,
+                        [&](uint32_t first, uint32_t second, double distanceSquared,
+                            std::array<int32_t, 3> image) {
+                            const auto a = editable.atoms[first].type;
+                            const auto b = editable.atoms[second].type;
+                            if (a >= radii.size() || b >= radii.size()) return;
+                            const double threshold = 1.2 * (radii[a] + radii[b]);
+                            if (image == std::array<int32_t, 3>{0,0,0} &&
+                                distanceSquared <= threshold * threshold)
+                                editable.bonds.push_back({first, second, image});
+                        });
+                    editable.bondStyle.radius = .045f;
+                    editable.bondStyle.color = {.25f,.75f,.21f,1.f};
+                } catch (const std::exception &) {
+                    editable.bonds.clear();
+                }
+            }
+        }
+        creationBasedOn = path.empty() ? tabTitle() : utf8(path.filename().wstring());
+        const std::string title = tabTitle() + " · 创作";
+        newStructureTab(std::move(editable), title);
+        if (activeTab == origin) return;
+        creationReturnTab = origin;
+        cameras[3] = viewCamera;
+        cameras[3].mode = 7;
+        active = 3;
+        creationMode = true;
+        creationSketch = false;
+        status = "Creation Mode: " + title;
+    }
+    void leaveCreationTab() {
+        if (creationReturnTab >= 0 && creationReturnTab < int(tabs.size()) &&
+            creationReturnTab != activeTab)
+            switchTab(creationReturnTab);
+        else
+            creationMode = false;
     }
     void closeTab(int index) {
         if (index < 0 || index >= int(tabs.size())) return;
@@ -1763,6 +1884,7 @@ struct App {
         }
         if (busy && job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             busy = false;
+            indexing = false;
             try {
                 auto l = job.get();
                 readerName = io::info(io::detect(l.path)).name;
@@ -1877,13 +1999,23 @@ struct App {
         ImGui::Begin(name, nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                         ImGuiWindowFlags_NoSavedSettings | (std::string(name) == "Title" ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
+                         ImGuiWindowFlags_NoSavedSettings | ((std::string(name) == "Title" ||
+                         (creationMode && std::string_view(name).starts_with("Creation"))) ?
+                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
     }
     void recordUiTestItem(const std::string &name,const char *explicitLabel=nullptr) {
         if (!captureUiTestItems) return;
         const ImGuiID id=explicitLabel ? ImGui::GetID(explicitLabel) : ImGui::GetItemID();
         uiTestItems[name]={id,ImGui::GetItemRectMin(),ImGui::GetItemRectMax(),
                            ImGui::IsItemHovered(),ImGui::IsItemClicked()};
+    }
+    // Records a captured item whose ImGui item context has since moved on
+    // (the pipeline rows draw badges/names after their row button).
+    void recordUiTestItemExplicit(const std::string &name, ImGuiID id, ImVec2 mn, ImVec2 mx,
+                                  bool hovered, bool clicked, const char *explicitLabel = nullptr) {
+        if (!captureUiTestItems) return;
+        if (explicitLabel) id = ImGui::GetID(explicitLabel);
+        uiTestItems[name] = {id, mn, mx, hovered, clicked};
     }
     // Stroke icon for the viewport navigation cluster (zoom / pan / orbit /
     // field of view). Drawn on a 16-unit grid centered in the button so the
@@ -2130,6 +2262,152 @@ struct App {
         ImGui::SameLine();
     }
     bool usingIconFont() const { return iconFont != nullptr; }
+    // ---- P12 redesign system widgets -------------------------------------
+    // Section caption: 10px-equivalent uppercase letter-spaced label used by
+    // the redesign panels (MODIFICATIONS / VISUAL ELEMENTS / RANGE / ...).
+    void sectionLabel(const char *text, const char *rightText = nullptr) {
+        auto *dl = ImGui::GetWindowDrawList();
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float height = ImGui::GetTextLineHeight();
+        dl->AddText(p, ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
+        if (rightText && rightText[0]) {
+            const ImVec2 ts = ImGui::CalcTextSize(rightText);
+            const float avail = ImGui::GetContentRegionAvail().x;
+            dl->AddText({p.x + ImGui::CalcTextSize(text).x + U(8) + std::max(0.f, avail - ts.x), p.y},
+                        ImGui::GetColorU32(ImGuiCol_TextDisabled), rightText);
+        }
+        ImGui::Dummy({ImGui::GetContentRegionAvail().x, height});
+    }
+    // Scrub bar: the 24px control well (#111316, hairline border) with an
+    // amber fill and right-aligned value, cursor ew-resize. Drag or click
+    // sets the value; replaces the old sliders for the six redesign controls
+    // (radius scale, cell line width, slice distance/slab width, color-code
+    // start/end) while operating on the SAME state variables.
+    bool scrubBar(const char *id, double *value, double mn, double mx,
+                  const char *format, const char *unit, float width = 0,
+                  const char *leftCaption = nullptr) {
+        if (width > 0) ImGui::SetNextItemWidth(width);
+        ImGui::PushID(id);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float h = U(24);
+        const float w = width > 0 ? width : std::max(U(40), ImGui::GetContentRegionAvail().x);
+        ImGui::InvisibleButton("##scrub", {w, h});
+        const bool hovered = ImGui::IsItemHovered();
+        const bool itemActive = ImGui::IsItemActive();
+        bool changed = false;
+        if (itemActive) {
+            const double t = std::clamp((ImGui::GetIO().MousePos.x - p.x) / std::max(w, 1.f), 0.f, 1.f);
+            const double next = mn + t * (mx - mn);
+            if (std::abs(next - *value) > 1e-9) { *value = next; changed = true; }
+        }
+        if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        auto *dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, {p.x + w, p.y + h}, ImGui::GetColorU32(ImGuiCol_FrameBg), U(3));
+        dl->AddRect(p, {p.x + w, p.y + h},
+                    ImGui::GetColorU32(hovered ? ImGuiCol_TextDisabled : ImGuiCol_Border), U(3));
+        const double t = mx > mn ? std::clamp((*value - mn) / (mx - mn), 0.0, 1.0) : 0.0;
+        if (t > 0)
+            dl->AddRectFilled(p, {p.x + float(t * w), p.y + h}, IM_COL32(240, 164, 49, 36), U(3),
+                              ImDrawFlags_RoundCornersLeft);
+        if (t > 0 && t < 1)
+            dl->AddLine({p.x + float(t * w), p.y}, {p.x + float(t * w), p.y + h},
+                        IM_COL32(240, 164, 49, 204));
+        char text[64];
+        snprintf(text, sizeof(text), format, *value);
+        if (unit && unit[0])
+            snprintf(text + strlen(text), sizeof(text) - strlen(text), " %s", unit);
+        const float textY = p.y + (h - ImGui::GetTextLineHeight()) * .5f;
+        if (leftCaption && leftCaption[0])
+            dl->AddText({p.x + U(8), textY}, ImGui::GetColorU32(ImGuiCol_TextDisabled), leftCaption);
+        const ImVec2 ts = ImGui::CalcTextSize(text);
+        dl->AddText({p.x + w - ts.x - U(8), textY}, ImGui::GetColorU32(ImGuiCol_Text), text);
+        if (hovered && !active) ImGui::SetTooltip("%s", id + 2); // id is "##label"
+        ImGui::PopID();
+        return changed;
+    }
+    bool scrubBar(const char *id, float *value, float mn, float mx,
+                  const char *format, const char *unit, float width = 0,
+                  const char *leftCaption = nullptr) {
+        double v = *value;
+        if (scrubBar(id, &v, mn, mx, format, unit, width, leftCaption)) {
+            *value = float(v);
+            return true;
+        }
+        return false;
+    }
+    // Segmented pill control: well container with flex segments; the selected
+    // segment gets #2d3238 fill and amber text. Returns the selected index.
+    int segmented(const char *id, int currentValue, std::initializer_list<const char *> labels,
+                  float width = 0, const char **recordedNames = nullptr) {
+        ImGui::PushID(id);
+        if (width > 0) ImGui::SetNextItemWidth(width);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float w = width > 0 ? width : std::max(U(60), ImGui::GetContentRegionAvail().x);
+        const float h = U(24);
+        const int count = int(labels.size());
+        const float pad = U(2);
+        const float segment = (w - pad * 2) / std::max(count, 1);
+        auto *dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, {p.x + w, p.y + h}, ImGui::GetColorU32(ImGuiCol_FrameBg), U(3));
+        dl->AddRect(p, {p.x + w, p.y + h}, ImGui::GetColorU32(ImGuiCol_Border), U(3));
+        int pickedResult = currentValue;
+        int index = 0;
+        for (const char *label : labels) {
+            const ImVec2 a{p.x + pad + segment * index, p.y + pad};
+            const ImVec2 b{p.x + pad + segment * (index + 1), p.y + h - pad};
+            const bool selected = index == currentValue;
+            ImGui::SetCursorScreenPos(a);
+            ImGui::PushID(index);
+            if (ImGui::InvisibleButton("##seg", {segment, b.y - a.y})) pickedResult = index;
+            const bool hovered = ImGui::IsItemHovered();
+            ImGui::PopID();
+            if (selected || hovered)
+                dl->AddRectFilled(a, b, ImGui::GetColorU32(ImGuiCol_TabSelected), U(2));
+            const ImVec2 ts = ImGui::CalcTextSize(label);
+            dl->AddText({(a.x + b.x - ts.x) * .5f, (a.y + b.y - ts.y) * .5f},
+                        ImGui::GetColorU32(selected ? ImGuiCol_NavCursor : ImGuiCol_TextDisabled),
+                        label);
+            if (recordedNames && recordedNames[index]) recordUiTestItem(recordedNames[index], label);
+            ++index;
+        }
+        ImGui::SetCursorScreenPos({p.x, p.y + h});
+        ImGui::Dummy({w, 0});
+        ImGui::PopID();
+        return pickedResult;
+    }
+    // Toggle switch (30x16 rounded, amber when on) used in the inspector
+    // header for toggleable nodes.
+    bool toggleSwitch(const char *id, bool *value) {
+        ImGui::PushID(id);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float w = U(30), h = U(16);
+        ImGui::InvisibleButton("##switch", {w, h});
+        if (ImGui::IsItemClicked(0)) *value = !*value;
+        auto *dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, {p.x + w, p.y + h},
+                          ImGui::GetColorU32(*value ? ImGuiCol_NavCursor : ImGuiCol_Tab), U(8));
+        const float knob = h - U(4);
+        dl->AddCircleFilled({p.x + (*value ? w - U(2) - knob * .5f : U(2) + knob * .5f),
+                             p.y + h * .5f},
+                            knob * .5f, ImGui::GetColorU32(ImGuiCol_WindowBg), 12);
+        const bool changed = ImGui::IsItemClicked(0);
+        ImGui::PopID();
+        return changed;
+    }
+    // 2-letter mono modifier badge with hairline border; amber when selected.
+    void monoBadge(const char *text, bool selected) {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float w = U(24), h = U(15);
+        auto *dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, {p.x + w, p.y + h}, 0, U(2));
+        dl->AddRect(p, {p.x + w, p.y + h},
+                    ImGui::GetColorU32(selected ? ImGuiCol_NavCursor : ImGuiCol_Tab, selected ? 1.f : 1.f),
+                    U(2));
+        const ImVec2 ts = ImGui::CalcTextSize(text);
+        dl->AddText({p.x + (w - ts.x) * .5f, p.y + (h - ts.y) * .5f},
+                    ImGui::GetColorU32(selected ? ImGuiCol_NavCursor : ImGuiCol_TextDisabled), text);
+        ImGui::Dummy({w + U(2), h});
+    }
     void control(const char *id, int kind, const char *tip) {
         ImGui::PushStyleColor(ImGuiCol_Button, {0,0,0,0});
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
@@ -2159,12 +2437,166 @@ struct App {
             d->AddLine({c.x,c.y-9},{c.x,c.y},color,1.7f);
         }
     }
-    float leftWidth() const { return showWorkspace ? U(220) : 0.f; }
-    float rightWidth() const { return U(preferences.size >= 19 ? 400.f : 370.f); }
+    float pipelineWidth() const { return U(268); }   // P12 left panel column
+    float workspaceWidth() const { return showWorkspace ? U(220) : 0.f; }
+    float leftWidth() const { return workspaceWidth() + pipelineWidth(); }
+    float rightWidth() const { return U(316); }      // P12 inspector column
+    float statusHeight() const { return U(24); }     // P12 bottom status strip
     float titleBarHeight() const { return U(42); }
     float toolBarHeight() const { return U(34); }
-    float topInset() const { return titleBarHeight() + toolBarHeight(); }
+    float topInset() const { return titleBarHeight() + (creationMode ? U(94) : toolBarHeight()); }
+    void creationTop(float w) {
+        const float titleH = titleBarHeight();
+        fixed("Creation tabs", 0, 0, w, titleH);
+        ImGui::SetCursorPosY(U(3));
+        if (logo.Get()) ImGui::Image((ImTextureID)(intptr_t)logo.Get(), {U(30), U(30)});
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("AtomX  %s", atomxVersion);
+        ImGui::SameLine(0, U(16));
+        for (int index = 0; index < int(tabs.size()); ++index) {
+            ImGui::PushID(index);
+            const bool selected = index == activeTab;
+            if (selected) ImGui::PushStyleColor(ImGuiCol_Button, {0.102f, 0.114f, 0.125f, 1.f});
+            const std::string name = selected ? tabTitle() : tabs[size_t(index)].title;
+            const std::string label = name;
+            if (ImGui::Button(label.c_str(), {U(212), U(32)})) switchTab(index);
+            if (selected) ImGui::PopStyleColor();
+            ImGui::SameLine(0, U(2));
+            if (ImGui::SmallButton("x")) closeTab(index);
+            ImGui::SameLine(0, U(5));
+            ImGui::PopID();
+        }
+        if (ImGui::SmallButton("+"))
+            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+        ImGui::SetCursorPosX(w - U(210));
+        ImGui::SetCursorPosY(U(5));
+        control("##minimize", 0, "Minimize to taskbar"); ImGui::SameLine();
+        control("##maximize", 1, "Maximize / restore"); ImGui::SameLine();
+        control("##tray", 2, "Close to system tray"); ImGui::SameLine();
+        control("##exit", 3, "Exit AtomX");
+        ImGui::End();
+
+        fixed("Creation menu", 0, titleH, w, U(38));
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.22f, 0.86f, 0.48f, 1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text, {0.05f, 0.07f, 0.06f, 1.f});
+        if (ImGui::Button("创作模式")) leaveCreationTab();
+        recordUiTestItem("creation.return-view", "Creation mode badge");
+        ImGui::PopStyleColor(2);
+        ImGui::SameLine(0, U(10));
+        auto menu = [&](const char *caption, const char *id, auto &&items) {
+            if (ImGui::Button(caption)) ImGui::OpenPopup(id);
+            if (ImGui::BeginPopup(id)) { items(); ImGui::EndPopup(); }
+            ImGui::SameLine(0, U(3));
+        };
+        menu("文件", "##create-file", [&] {
+            if (ImGui::MenuItem("打开结构...", "Ctrl+O")) open();
+            if (ImGui::MenuItem("导出结构...", "Ctrl+E")) showDataExport = true;
+            if (ImGui::MenuItem("关闭创作标签")) leaveCreationTab();
+        });
+        menu("编辑", "##create-edit", [&] {
+            if (ImGui::MenuItem("撤销", "Ctrl+Z")) history(false);
+            if (ImGui::MenuItem("重做", "Ctrl+Y")) history(true);
+            if (ImGui::MenuItem("删除选中", "Del")) deletePickedAtom();
+        });
+        menu("视图", "##create-view", [&] {
+            if (ImGui::MenuItem("晶胞边框", nullptr, cell)) cell = !cell;
+            if (ImGui::MenuItem("化学键", nullptr, result.data.bondStyle.visible)) {
+                source.bondStyle.visible = !source.bondStyle.visible; update();
+            }
+            if (ImGui::MenuItem("球棍")) setDisplayStyle(0);
+            if (ImGui::MenuItem("填充")) setDisplayStyle(1);
+            if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
+        });
+        menu("修改", "##create-modify", [&] {
+            if (ImGui::MenuItem("替换元素")) replacePickedElement();
+            if (ImGui::MenuItem("删除 / 空位")) deletePickedAtom();
+            if (ImGui::MenuItem("自动加氢")) addHydrogensCommand();
+            if (ImGui::MenuItem("几何优化")) cleanGeometryCommand();
+        });
+        menu("构建", "##create-build", [&] {
+            if (ImGui::MenuItem("新建晶体...")) openNewCell = true;
+            if (ImGui::MenuItem("三斜晶胞...")) openTriclinicCell = true;
+            if (ImGui::MenuItem("超胞 2 x 2 x 2"))
+                adoptStructure(authoring::replicate(source, 2, 2, 2), "Built supercell");
+        });
+        menu("工具", "##create-tools", [&] {
+            if (ImGui::MenuItem("重置视角")) resetView();
+            if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
+        });
+        const std::string base = "基于 " + creationBasedOn;
+        const float textWidth = ImGui::CalcTextSize(base.c_str()).x;
+        if (ImGui::GetCursorPosX() + textWidth < w - U(14)) {
+            ImGui::SetCursorPosX(w - textWidth - U(14));
+            ImGui::TextDisabled("%s", base.c_str());
+        }
+        ImGui::End();
+
+        fixed("Creation tool strip", 0, titleH + U(38), w, U(56));
+        ImGui::SetCursorPosY(U(7));
+        auto icon = [&](const char *id, unsigned codepoint, const char *fallback, const char *tip,
+                        ImVec4 tone, bool selected, auto &&action) {
+            ImGui::PushID(id);
+            const ImVec4 bg = selected ? tone : ImVec4{tone.x * .14f, tone.y * .14f, tone.z * .14f, 1.f};
+            ImGui::PushStyleColor(ImGuiCol_Button, bg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {tone.x * .35f, tone.y * .35f, tone.z * .35f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, tone);
+            ImGui::PushStyleColor(ImGuiCol_Text, selected ? ImVec4{.04f,.06f,.07f,1.f} : tone);
+            ImGui::PushStyleColor(ImGuiCol_Border, {tone.x * .4f, tone.y * .4f, tone.z * .4f, 1.f});
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, U(1));
+            char glyph[8];
+            if (glyphAvailable(codepoint)) glyphUtf8(codepoint, glyph);
+            else snprintf(glyph, sizeof(glyph), "%s", fallback);
+            const bool pressed = ImGui::Button(glyph, {U(35), U(35)});
+            if (pressed) action();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(5);
+            ImGui::PopID();
+            ImGui::SameLine(0, U(4));
+        };
+        auto divider = [&] { toolbarSeparator(U(35)); };
+        const ImVec4 gray{.62f,.67f,.73f,1}, cyan{.11f,.65f,.95f,1}, green{.20f,.86f,.49f,1},
+            orange{.95f,.57f,.18f,1}, red{.95f,.25f,.30f,1}, gold{.95f,.67f,.14f,1},
+            violet{.72f,.53f,1.f,1}, blue{.58f,.68f,1.f,1};
+        icon("undo",0xE7A7,"<","Undo",gray,false,[&]{history(false);});
+        icon("redo",0xE7A6,">","Redo",gray,false,[&]{history(true);}); divider();
+        icon("select",0xE7C9,"S","Select atoms",cyan,!creationSketch,[&]{creationSketch=false;});
+        icon("rotate",0xE7AD,"R","Rotate view",cyan,false,[&]{viewportTool=2;});
+        icon("pan",0xE72A,"P","Pan view",green,false,[&]{viewportTool=1;});
+        icon("move",0xE8AB,"M","Move picked atom",orange,false,[&]{nudgePicked(0,.2f);});
+        icon("draw",0xE70F,"+","Draw atoms",green,creationSketch,[&]{creationSketch=true;}); divider();
+        icon("delete",0xE74D,"X","Delete selected atom",red,false,[&]{deletePickedAtom();});
+        icon("hydrogen",0xE8FA,"H+","Add hydrogens",violet,false,[&]{addHydrogensCommand();});
+        icon("clean",0xE734,"*","Clean geometry",violet,false,[&]{cleanGeometryCommand();}); divider();
+        icon("distance",0xE8A0,"D","Measure distance",gold,false,[&]{status="Shift-click a second atom to measure distance";});
+        icon("angle",0xE8B1,"A","Measure angle",gold,false,[&]{status="Click, Shift-click, Ctrl-click to measure angle";}); divider();
+        icon("ball",0xE80F,"B","Ball and stick",blue,radius<.6f,[&]{setDisplayStyle(0);});
+        icon("stick",0xE8A4,"I","Stick",blue,false,[&]{setDisplayStyle(2);});
+        icon("fill",0xE8B7,"O","Space filling",blue,radius>=.6f,[&]{setDisplayStyle(1);}); divider();
+        icon("cell",0xE8A7,"C","Show cell",cyan,cell,[&]{cell=!cell;});
+        icon("bond",0xE8D7,"-","Show bonds",cyan,source.bondStyle.visible,[&]{source.bondStyle.visible=!source.bondStyle.visible;update();}); divider();
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.57f,0.39f,0.91f,1.f});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.67f,0.50f,1.f,1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text, {0.08f,0.05f,0.13f,1.f});
+        if (ImGui::Button("建晶体", {U(78), U(35)})) openNewCell=true;
+        ImGui::PopStyleColor(3);
+        ImGui::SameLine(0,U(4));
+        ImGui::PushStyleColor(ImGuiCol_Button, {0.13f,0.09f,0.22f,1.f});
+        ImGui::PushStyleColor(ImGuiCol_Text, violet);
+        if (ImGui::Button("超胞", {U(65), U(35)}))
+            adoptStructure(authoring::replicate(source,2,2,2),"Built supercell");
+        ImGui::SameLine(0,U(4));
+        if (ImGui::Button("切面·真空", {U(100), U(35)}))
+            adoptStructure(authoring::addVacuum(source,2,15),"Added vacuum");
+        ImGui::PopStyleColor(2);
+        divider();
+        icon("home",0xE80F,"H","Reset camera",gray,false,[&]{resetView();});
+        icon("fit",0xE8AA,"F","Fit structure",gray,false,[&]{fitCamera(3,false);});
+        ImGui::End();
+    }
     void top(float w) {
+        if (creationMode) { creationTop(w); return; }
         const float titleH = titleBarHeight(), barH = toolBarHeight();
         fixed("Title", 0, 0, w, titleH);
         ImGui::SetCursorPosY(U(4));
@@ -2280,6 +2712,8 @@ struct App {
                 if (enabledItem("Fit Structure in View", "menu.view.fit")) {
                     for (int i = 0; i < 4; ++i) fitCamera(i, false);
                 }
+                if (enabledItem("Fit Selected in View", "menu.view.fit-selected", nullptr))
+                    fitCamera(active, true);
                 if (enabledItem(showWorkspace ? "Hide Project Panel" : "Show Project Panel",
                                 "menu.view.project"))
                     showWorkspace = !showWorkspace;
@@ -2299,7 +2733,7 @@ struct App {
             if (modifyOpen) {
                 if (enabledItem(creationMode ? "Exit Creation Mode" : "Enter Creation Mode",
                                 "menu.modify.creation-mode"))
-                    creationMode = !creationMode;
+                    creationMode ? leaveCreationTab() : openCreationTab();
                 if (enabledItem("Delete Picked Atom", "menu.modify.delete-atom")) deletePickedAtom();
                 if (enabledItem("Create Vacancy at Picked Atom", "menu.modify.vacancy")) deletePickedAtom();
                 if (enabledItem("Replace Picked Atom", "menu.modify.replace-atom")) replacePickedElement();
@@ -2358,10 +2792,41 @@ struct App {
             }
             titleWindow->DC.LayoutType = savedLayout;
         }
+        // P12: centered "file — fileInfo" caption between the menus and the
+        // window controls (file in secondary text, the rest faint).
+        {
+            auto *dl = ImGui::GetWindowDrawList();
+            const std::string fileName = creationMode ? tabTitle() : path.empty()
+                ? std::string("Untitled structure")
+                : utf8(path.filename().wstring());
+            const std::string info = readerName + " · " + std::to_string(std::max<size_t>(frames.size(), 1)) +
+                (frames.size() > 1 ? " frames" : " frame");
+            const ImVec2 dash = ImGui::CalcTextSize("  —  ");
+            const ImVec2 fs = ImGui::CalcTextSize(fileName.c_str());
+            const float total = fs.x + dash.x + ImGui::CalcTextSize(info.c_str()).x;
+            float x = (w - total) * .5f;
+            const float y = U(13);
+            dl->AddText({x, y}, IM_COL32(174, 180, 187, 255), fileName.c_str());
+            x += fs.x;
+            dl->AddText({x, y}, ImGui::GetColorU32(ImGuiCol_TextDisabled, .62f), "  -  ");
+            x += dash.x;
+            dl->AddText({x, y}, ImGui::GetColorU32(ImGuiCol_TextDisabled, .62f), info.c_str());
+        }
+        // P12: amber "View mode" marker chip at the right edge, in front of
+        // the min/max/close cluster.
+        {
+            auto *dl = ImGui::GetWindowDrawList();
+            const float chipX = w - U(215) - U(96);
+            const float cy = U(20);
+            dl->AddRectFilled({chipX, cy - U(3)}, {chipX + U(6), cy + U(3)},
+                              ImGui::GetColorU32(ImGuiCol_NavCursor), U(1));
+            dl->AddText({chipX + U(12), U(13)}, ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                        "View mode");
+        }
         // OVITO parity: the "Pipelines: <source>" selector lives in the
         // window's top strip, right-aligned before the min/max/close cluster
         // (which occupies the right ~U(215) of the row).
-        const std::string sourceLabel = path.empty()
+        const std::string sourceLabel = creationMode ? tabTitle() : path.empty()
             ? readerName
             : utf8(path.filename().wstring()) + "  [" + readerName + "]";
         {
@@ -2389,6 +2854,71 @@ struct App {
         control("##tray",2,"Close to system tray (keep running)"); ImGui::SameLine();
         control("##exit",3,"Power off: exit AtomX completely");
         ImGui::End();
+        if (creationMode) {
+            fixed("Creation mode header", 0, titleH, w, U(38));
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.494f, 0.871f, 0.494f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
+            if (ImGui::Button("创作模式")) leaveCreationTab();
+            ImGui::PopStyleColor(2);
+            ImGui::SameLine();
+            if (ImGui::Button("返回视图")) leaveCreationTab();
+            recordUiTestItem("creation.return-view", "Return to view");
+            ImGui::SameLine();
+            if (ImGui::Button("File")) ImGui::OpenPopup("creation-file");
+            if (ImGui::BeginPopup("creation-file")) {
+                if (ImGui::MenuItem("Export structure...")) showDataExport = true;
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Edit")) ImGui::OpenPopup("creation-edit");
+            if (ImGui::BeginPopup("creation-edit")) {
+                if (ImGui::MenuItem("Undo", "Ctrl+Z")) history(false);
+                if (ImGui::MenuItem("Redo", "Ctrl+Y")) history(true);
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Build")) ImGui::OpenPopup("creation-build");
+            if (ImGui::BeginPopup("creation-build")) {
+                if (ImGui::MenuItem("Orthogonal cell...")) openNewCell = true;
+                if (ImGui::MenuItem("Triclinic cell...")) openTriclinicCell = true;
+                if (ImGui::MenuItem("Supercell 2 x 2 x 2"))
+                    adoptStructure(authoring::replicate(source, 2, 2, 2), "Built supercell");
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("Based on %s", creationBasedOn.c_str());
+            ImGui::End();
+            fixed("Creation mode tools", 0, titleH + U(38), w, U(56));
+            auto tool = [&](const char *label, const char *tip, auto &&fn) {
+                if (ImGui::Button(label, {0, U(34)})) fn();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                ImGui::SameLine(0, U(5));
+            };
+            tool("Select", "Pick an atom in the viewport", [&] { creationSketch = false; });
+            if (creationSketch) {
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.18f, 0.55f, 0.31f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.23f, 0.65f, 0.37f, 1.f});
+            }
+            tool("Draw atom", "Click empty space to place the chosen element", [&] {
+                creationSketch = true;
+            });
+            if (creationSketch) ImGui::PopStyleColor(2);
+            tool("Add atom", "Add the chosen element at the center of the cell", [&] {
+                addAtomAt(authoring::cartesian(source, .5, .5, .5));
+            });
+            tool("Delete", "Delete the selected atom", [&] { deletePickedAtom(); });
+            ImGui::SetNextItemWidth(U(48));
+            ImGui::InputText("##creation-element-toolbar", creationElement, sizeof(creationElement));
+            ImGui::SameLine();
+            tool("Replace", "Replace the selected atom with this element", [&] { replacePickedElement(); });
+            tool("Hydrogens", "Add hydrogens", [&] { addHydrogensCommand(); });
+            tool("Clean", "Clean geometry", [&] { cleanGeometryCommand(); });
+            tool("Ball + stick", "Ball and stick display", [&] { setDisplayStyle(0); });
+            tool("Space fill", "Space filling display", [&] { setDisplayStyle(1); });
+            tool("Fit", "Fit the structure", [&] { fitCamera(3, false); });
+            ImGui::End();
+            return;
+        }
         // Compact OVITO-style toolbar: grouped icon-only flat buttons with
         // subtle separators; every action, tooltip and recorded UI-test name
         // of the former text toolbar is preserved.
@@ -2423,6 +2953,34 @@ struct App {
                        "Rotate the view"))
             cameras[active].yaw += .35f;
         toolbarSeparator(barH);
+        // P12 tool pill group: Orbit / Pan / Zoom pills over the existing
+        // viewportTool state (design: Orbit/Pan/Select pill container).
+        {
+            struct Pill { const char *name; const char *label; int tool; };
+            const Pill pills[] = {
+                {"toolbar.pill.orbit", "Orbit", 2},
+                {"toolbar.pill.pan", "Pan", 1},
+                {"toolbar.pill.zoom", "Zoom", 0},
+            };
+            const float pillH = U(24);
+            for (const auto &pill : pills) {
+                const bool selected = viewportTool == pill.tool;
+                if (selected) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, {0.941f, 0.643f, 0.192f, 1.f});
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.957f, 0.694f, 0.263f, 1.f});
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.957f, 0.694f, 0.263f, 1.f});
+                    ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
+                }
+                if (ImGui::Button(pill.label, {0, pillH}))
+                    viewportTool = pill.tool;
+                if (selected) ImGui::PopStyleColor(4);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s tool — drag in the active viewport",
+                                                              pill.label);
+                recordUiTestItem(pill.name, pill.label);
+                ImGui::SameLine();
+            }
+        }
+        toolbarSeparator(barH);
         if (iconButton("toolbar.snapshot", 0xE722, "Snapshot",
                        "Save a snapshot image"))
             exportImage();
@@ -2452,6 +3010,31 @@ struct App {
         if (iconButton("toolbar.workspace", 0xE91B, "Workspace",
                        "Toggle the workspace side panel"))
             showWorkspace = !showWorkspace;
+        ImGui::SameLine();
+        // P12 primary buttons: green 创作模式 (Creation Mode) and amber Render.
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.494f, 0.871f, 0.494f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.573f, 0.906f, 0.573f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.573f, 0.906f, 0.573f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
+            if (ImGui::Button(creationMode ? "退出创作模式" : "创作模式", {0, U(28)}))
+                creationMode ? leaveCreationTab() : openCreationTab();
+            ImGui::PopStyleColor(4);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Open this structure in Creation Mode (atom editing)");
+            recordUiTestItem("toolbar.creation-mode", creationMode ? "退出创作模式" : "创作模式");
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.941f, 0.643f, 0.192f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.957f, 0.694f, 0.263f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.957f, 0.694f, 0.263f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
+            if (ImGui::Button("Render", {0, U(28)}))
+                exportImage();
+            ImGui::PopStyleColor(4);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Render the active viewport to a PNG image");
+            recordUiTestItem("toolbar.render-primary", "Render");
+        }
         // Quick command search (Ctrl+P) pinned to the right edge of the row;
         // the matching entry list renders in a floating window drawn after
         // every other window so nothing can cover it.
@@ -2480,7 +3063,7 @@ struct App {
         ImGui::End();
     }
     void left(float h) {
-        fixed("Workspace", 0, topInset(), leftWidth(), h - topInset());
+        fixed("Workspace", 0, topInset(), workspaceWidth(), h - topInset() - statusHeight());
         heading("WORKSPACE");
         ImGui::TextColored(accent, "ATOMIC STRUCTURES");
         ImGui::Spacing();
@@ -2536,40 +3119,284 @@ struct App {
         }
         ImGui::End();
     }
+    // P12 left PIPELINE panel (268px): header with the node action strip,
+    // the "Add modification" button, then MODIFICATIONS / VISUAL ELEMENTS /
+    // DATA SOURCE rows in the redesign row style (checkbox, mono badge,
+    // name, right meta). All recorded names and actions are identical to the
+    // previous pipeline stack + action strip.
+    static std::string nodeBadgeText(const ModifierNode &m) {
+        const char *name = m.displayName.empty() ? opName(m.op) : m.displayName.c_str();
+        std::string letters;
+        bool lastSpace = true;
+        for (const char *p = name; *p && letters.size() < 2; ++p) {
+            if (isalpha((unsigned char)*p)) {
+                if (lastSpace || letters.empty()) letters += char(toupper((unsigned char)*p));
+                lastSpace = false;
+            } else if (*p == ' ') {
+                lastSpace = true;
+            }
+        }
+        while (letters.size() < 2 && name[0]) letters += char(toupper((unsigned char)name[1]));
+        return letters;
+    }
+    void pipelineRow(const char *id, const char *badge, const char *name, const char *meta,
+                     bool *enabled, bool selected, bool isModifier, int index,
+                     const char *enabledRecordName = nullptr) {
+        ImGui::PushID(id);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        const float rowH = U(30);
+        const float w = ImGui::GetContentRegionAvail().x;
+        const bool rowClicked = ImGui::InvisibleButton("##row", {w, rowH});
+        const bool hovered = ImGui::IsItemHovered();
+        const bool rowPress = ImGui::IsItemClicked(0); // down-transition flag for the UI harness
+        const ImGuiID rowId = ImGui::GetItemID();
+        const ImVec2 rowMin = ImGui::GetItemRectMin(), rowMax = ImGui::GetItemRectMax();
+        auto *dl = ImGui::GetWindowDrawList();
+        if (selected)
+            dl->AddRectFilled(p, {p.x + w, p.y + rowH}, ImGui::GetColorU32(ImGuiCol_Header));
+        else if (hovered)
+            dl->AddRectFilled(p, {p.x + w, p.y + rowH}, ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+        if (selected && isModifier)
+            dl->AddRectFilled(p, {p.x + U(2), p.y + rowH}, IM_COL32(240, 164, 49, 255));
+        float x = p.x + U(14);
+        if (index == -1) {
+            // Data source row: green 6px dot instead of a checkbox.
+            const ImVec2 c{x, p.y + (rowH - U(6)) * .5f};
+            dl->AddRectFilled(c, {c.x + U(6), c.y + U(6)}, IM_COL32(87, 171, 90, 255), U(1));
+        } else {
+        // Checkbox (14px, amber when on)
+        {
+            const ImVec2 c{x, p.y + (rowH - U(14)) * .5f};
+            if (*enabled) {
+                dl->AddRectFilled(c, {c.x + U(14), c.y + U(14)}, ImGui::GetColorU32(ImGuiCol_NavCursor), U(2));
+                float cx0 = c.x + U(3), cy0 = c.y + U(7.2f);
+                dl->AddLine({cx0, cy0}, {cx0 + U(2.2f), cy0 + U(2.4f)}, IM_COL32(22, 24, 27, 255), U(1.6f));
+                dl->AddLine({cx0 + U(2.2f), cy0 + U(2.4f)}, {cx0 + U(7.4f), c.y + U(3.6f)}, IM_COL32(22, 24, 27, 255), U(1.6f));
+            } else {
+                dl->AddRectFilled(c, {c.x + U(14), c.y + U(14)}, ImGui::GetColorU32(ImGuiCol_FrameBg), U(2));
+                dl->AddRect(c, {c.x + U(14), c.y + U(14)}, ImGui::GetColorU32(ImGuiCol_Tab), U(2));
+            }
+            const ImVec2 cursor = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos(c);
+            ImGui::InvisibleButton("##toggle", {U(14), U(14)});
+            const bool togglePress = ImGui::IsItemClicked(0);
+            const bool toggleHover = ImGui::IsItemHovered();
+            const ImGuiID toggleId = ImGui::GetItemID();
+            const ImVec2 toggleMin = ImGui::GetItemRectMin(), toggleMax = ImGui::GetItemRectMax();
+            if (togglePress && isModifier && enabled) {
+                checkpoint();
+                *enabled = !*enabled;
+                update(size_t(index));
+            }
+            if (enabledRecordName)
+                recordUiTestItemExplicit(enabledRecordName, toggleId, toggleMin, toggleMax,
+                                         toggleHover, togglePress);
+            ImGui::SetCursorScreenPos(cursor);
+        }
+        }
+        x += U(14) + U(9);
+        // Badge, name and meta are drawn directly on the row's draw list so
+        // the mid-row cursor juggling for the checkbox cannot wrap lines.
+        ImGui::SetCursorScreenPos({x, p.y + (rowH - U(15)) * .5f});
+        monoBadge(badge, selected);
+        x += U(24) + U(9);
+        {
+            const ImVec2 ts = ImGui::CalcTextSize(name);
+            dl->AddText({x, p.y + (rowH - ts.y) * .5f},
+                        ImGui::GetColorU32(*enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled),
+                        name);
+            if (meta && meta[0]) {
+                const ImVec2 ms = ImGui::CalcTextSize(meta);
+                dl->AddText({p.x + w - ms.x - U(12), p.y + (rowH - ms.y) * .5f},
+                            ImGui::GetColorU32(ImGuiCol_TextDisabled), meta);
+            }
+        }
+        // The row button already advanced the flow; pin the cursor to the row
+        // end so the badge Dummy cannot push following rows down.
+        ImGui::SetCursorScreenPos({p.x, p.y + rowH});
+        if (rowClicked) {
+            if (isModifier) {
+                modifierGraph.selected = size_t(index);
+                panelSelection = index;
+            } else {
+                panelSelection = index; // -1 source, -2 particles, -3 cell
+            }
+        }
+        recordUiTestItemExplicit(std::string("pipeline.node.select.") + id, rowId, rowMin, rowMax,
+                                 hovered, rowPress, name);
+        ImGui::PopID();
+    }
+    void pipelinePanel(float h) {
+        fixed("Pipeline", workspaceWidth(), topInset(), pipelineWidth(),
+              h - topInset() - statusHeight());
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(4), U(3)});
+        // Header: PIPELINE caption + node action strip (up/down/duplicate/
+        // delete acting on the selected node; identical record names).
+        {
+            const float headerH = U(36);
+            auto *dl = ImGui::GetWindowDrawList();
+            const ImVec2 hp = ImGui::GetCursorScreenPos();
+            const float w = ImGui::GetContentRegionAvail().x;
+            dl->AddRectFilled(hp, {hp.x + w, hp.y + headerH}, ImGui::GetColorU32(ImGuiCol_WindowBg));
+            dl->AddLine({hp.x, hp.y + headerH}, {hp.x + w, hp.y + headerH},
+                        ImGui::GetColorU32(ImGuiCol_Border));
+            ImGui::SetCursorPos({ImGui::GetCursorPosX() + U(14), ImGui::GetCursorPosY() + U(11)});
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+            ImGui::TextUnformatted("PIPELINE");
+            ImGui::PopStyleColor();
+            const bool isMod = modifierGraph.selected < mods.size();
+            const std::string selectId =
+                isMod ? mods[modifierGraph.selected].id : std::string();
+            ImGui::SameLine();
+            // Right-aligned 24px icon cluster.
+            const float btn = U(24);
+            float right = hp.x + w - U(8);
+            auto place = [&](float width) { right -= width; ImGui::SetCursorScreenPos({right, hp.y + U(6)}); };
+            place(btn);
+            if (iconButton("pipeline.strip.delete", 0xE74D, "x",
+                           "Delete the selected modification", false, btn,
+                           ("pipeline.node.delete." + selectId).c_str())) {
+                checkpoint();
+                modifierGraph.erase(modifierGraph.selected);
+                update(modifierGraph.selected);
+            }
+            place(btn);
+            ImGui::BeginDisabled(!isMod || modifierGraph.selected + 1 >= mods.size());
+            if (iconButton("pipeline.strip.up", 0xE70E, "^",
+                           "Move the selected modification up (later in the pipeline)", false, btn,
+                           ("pipeline.node.up." + selectId).c_str())) {
+                checkpoint();
+                modifierGraph.move(modifierGraph.selected, modifierGraph.selected + 1);
+                update(modifierGraph.selected);
+            }
+            ImGui::EndDisabled();
+            place(btn);
+            ImGui::BeginDisabled(!isMod || modifierGraph.selected == 0);
+            if (iconButton("pipeline.strip.down", 0xE70D, "v",
+                           "Move the selected modification down (earlier in the pipeline)", false, btn,
+                           ("pipeline.node.down." + selectId).c_str())) {
+                checkpoint();
+                modifierGraph.move(modifierGraph.selected, modifierGraph.selected - 1);
+                update(modifierGraph.selected - 1);
+            }
+            ImGui::EndDisabled();
+            place(btn);
+            if (iconButton("pipeline.strip.copy", 0xE8C8, "Copy",
+                           "Duplicate the selected modification", false, btn,
+                           ("pipeline.node.copy." + selectId).c_str())) {
+                checkpoint();
+                auto copy = mods[modifierGraph.selected];
+                copy.id = std::to_string(nextModifierId++);
+                copy.error.clear();
+                copy.outputs.clear();
+                copy.dirty = true;
+                modifierGraph.insert(std::move(copy), modifierGraph.selected + 1);
+                update();
+            }
+            ImGui::SetCursorScreenPos({hp.x + U(1), hp.y + headerH + U(10)});
+        }
+        // Add modification button (30px, amber plus, kbd M chip).
+        {
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            const float w = ImGui::GetContentRegionAvail().x - U(20);
+            const float bH = U(30);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_Tab));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetStyleColorVec4(ImGuiCol_Tab));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
+            if (ImGui::Button("   Add modification        M", {w, bH}))
+                showCatalog = true;
+            ImGui::PopStyleColor(5);
+            auto *dl = ImGui::GetWindowDrawList();
+            dl->AddLine({p.x + U(10), p.y + bH * .5f}, {p.x + U(24), p.y + bH * .5f},
+                        ImGui::GetColorU32(ImGuiCol_NavCursor), U(1.5f));
+            dl->AddLine({p.x + U(17), p.y + bH * .5f - U(7)}, {p.x + U(17), p.y + bH * .5f + U(7)},
+                        ImGui::GetColorU32(ImGuiCol_NavCursor), U(1.5f));
+            recordUiTestItem("pipeline.add-modification");
+            catalogAnchor = {ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + 2};
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + U(10));
+        }
+        // MODIFICATIONS rows.
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + U(4));
+        sectionLabel("MODIFICATIONS",
+                     std::to_string(mods.size()).c_str());
+        if (mods.empty())
+            ImGui::TextWrapped("No modifiers. Data flows unchanged from source.");
+        for (int i = int(mods.size()) - 1; i >= 0; i--) {
+            auto &m = mods[size_t(i)];
+            const std::string meta = m.error.empty() ? std::string() : "! " + m.error;
+            bool enabled = m.enabled;
+            const std::string name = m.displayName.empty() ? opName(m.op) : m.displayName;
+            ImGui::PushID(m.id.c_str());
+            const std::string enabledRecord = std::string("pipeline.node.enabled.") + m.id;
+            pipelineRow(m.id.c_str(), nodeBadgeText(m).c_str(), name.c_str(), meta.c_str(),
+                        &enabled, panelSelection == i, true, i, enabledRecord.c_str());
+            if (enabled != m.enabled) {
+                checkpoint();
+                m.enabled = enabled;
+                update(size_t(i));
+            }
+            if (!m.error.empty() && ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", m.error.c_str());
+            ImGui::PopID();
+        }
+        // VISUAL ELEMENTS rows.
+        ImGui::Spacing();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + U(4));
+        sectionLabel("VISUAL ELEMENTS");
+        {
+            std::string meta = std::to_string(result.data.atoms.size());
+            bool on = particles;
+            pipelineRow("particles", "PA", "Particles", meta.c_str(), &on, panelSelection == -2, false, -2);
+            if (on != particles) particles = on;
+            bool onCell = cell;
+            const double a = std::hypot(result.data.cell[0], result.data.cell[1], result.data.cell[2]);
+            char cellMeta[32];
+            snprintf(cellMeta, sizeof(cellMeta), "%.2f A", a);
+            pipelineRow("cell", "SC", "Simulation cell", a > 0 ? cellMeta : "", &onCell,
+                        panelSelection == -3, false, -3);
+            if (onCell != cell) cell = onCell;
+        }
+        // DATA SOURCE row.
+        ImGui::Spacing();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + U(4));
+        sectionLabel("DATA SOURCE");
+        {
+            const std::string fileName =
+                path.empty() ? "Generated crystal" : utf8(path.filename().wstring());
+            char fr[32];
+            snprintf(fr, sizeof(fr), "%zu fr", std::max<size_t>(frames.size(), 1));
+            bool always = true;
+            pipelineRow("src", "XYZ", fileName.c_str(), fr, &always, panelSelection == -1, false, -1);
+        }
+        ImGui::PopStyleVar();
+        ImGui::End();
+    }
     const char *views = "Top\0Bottom\0Front\0Back\0Left\0Right\0Ortho\0Perspective\0";
     void viewport(int i, float w, float h) {
         ImGui::PushID(i);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{U(4),U(4)});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,creationMode ? ImVec2{0,0} : ImVec2{U(4),U(4)});
         ImGui::PushStyleColor(ImGuiCol_ChildBg,{0,0,0,1});
-        ImGui::BeginChild("view", {w, h}, ImGuiChildFlags_Borders,
+        ImGui::BeginChild("view", {w, h}, creationMode ? ImGuiChildFlags_None : ImGuiChildFlags_Borders,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         auto &cam = cameras[i];
-        ImGui::PushStyleColor(ImGuiCol_Text,{.95f,.97f,1,1});
-        ImGui::PushStyleColor(ImGuiCol_TextDisabled,{.73f,.78f,.85f,1});
-        ImGui::PushStyleColor(ImGuiCol_FrameBg,{.035f,.045f,.06f,1});
-        ImGui::PushStyleColor(ImGuiCol_Button,{.10f,.13f,.17f,1});
-        ImGui::PushStyleColor(ImGuiCol_PopupBg,{.055f,.07f,.095f,1});
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered,{.16f,.26f,.39f,1});
-        ImGui::PushStyleColor(ImGuiCol_Header,{.12f,.21f,.34f,1});
-        ImGui::SetNextItemWidth(U(140));
-        ImGui::Combo("##camera", &cam.mode, views);
-        ImGui::SameLine();
-        ImGui::TextDisabled(i == active ? "ACTIVE" : "");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Fit")) {
-            fitCamera(i,false);
-        }
-        ImGui::SameLine();
-        ImGui::BeginDisabled(selectedCount==0);
-        if (ImGui::SmallButton("Fit selected")) fitCamera(i,true);
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered() && selectedCount==0)
-            ImGui::SetTooltip("Select particles in the data table first");
-        ImGui::PopStyleColor(7);
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();
+        std::vector<float> originalRadii;
+        if (creationMode) {
+            originalRadii.reserve(gpu.styles.size());
+            for (auto &style : gpu.styles) {
+                originalRadii.push_back(style.visual[0]);
+                const float baseRadius = style.visual[0] > 0 ? style.visual[0] :
+                    style.visual[3] > 0 ? style.visual[3] : radius;
+                style.visual[0] = baseRadius * .43f;
+            }
+        }
         gpu.target(targets[i], int(avail.x), int(avail.y));
             gpu.draw(targets[i], result.data, cam, radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles, cell);
+        for (size_t type = 0; type < originalRadii.size(); ++type)
+            gpu.styles[type].visual[0] = originalRadii[type];
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
@@ -2605,6 +3432,26 @@ struct App {
                 else if (hit >= 0) {
                     creationPick = hit;
                     creationMeasure = creationAngle = creationDihedral = -1;
+                } else if (creationSketch && !ImGui::GetIO().KeyAlt &&
+                           !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
+                    using namespace DirectX;
+                    const float nx = 2.f * (ImGui::GetIO().MousePos.x - p.x) / std::max(avail.x, 1.f) - 1.f;
+                    const float ny = 1.f - 2.f * (ImGui::GetIO().MousePos.y - p.y) / std::max(avail.y, 1.f);
+                    const XMMATRIX inverse = XMMatrixInverse(nullptr, mvp);
+                    auto worldPoint = [&](float depth) {
+                        XMFLOAT4 point;
+                        XMStoreFloat4(&point, XMVector4Transform(XMVectorSet(nx, ny, depth, 1.f), inverse));
+                        const float reciprocal = std::abs(point.w) > 1e-6f ? 1.f / point.w : 1.f;
+                        return Vec3{point.x * reciprocal, point.y * reciprocal, point.z * reciprocal};
+                    };
+                    const Vec3 nearPoint = worldPoint(0.f), farPoint = worldPoint(1.f);
+                    const Vec3 center = authoring::cartesian(source, .5f, .5f, .5f);
+                    const float dz = farPoint.z - nearPoint.z;
+                    const float t = std::abs(dz) > 1e-6f ? (center.z - nearPoint.z) / dz : .5f;
+                    const Vec3 placed{nearPoint.x + (farPoint.x - nearPoint.x) * t,
+                                      nearPoint.y + (farPoint.y - nearPoint.y) * t,
+                                      center.z};
+                    addAtomAt(placed);
                 }
                 if (hit >= 0) active = i;
             }
@@ -2658,14 +3505,29 @@ struct App {
                 for (int k = 1; k <= 4; k *= 2)
                     if (!(j & k) && valid[j] && valid[j | k] &&
                         (cellDimension == 1 || (!(j & 4) && !((j | k) & 4)))) {
-                        auto c = ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]*cellGlow});
-                        auto hi = ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]});
-                        draw->AddLine(corners[j], corners[j | k], c, cellWidth+4.f);
-                        if (!cellDashed) draw->AddLine(corners[j], corners[j | k], hi, cellWidth);
+                        auto c = creationMode ? IM_COL32(90,95,102,55) :
+                            ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]*cellGlow});
+                        auto hi = creationMode ? IM_COL32(114,119,125,128) :
+                            ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]});
+                        if (!creationMode) draw->AddLine(corners[j], corners[j | k], c, cellWidth+4.f);
+                        if (!cellDashed) draw->AddLine(corners[j], corners[j | k], hi, creationMode ? U(1) : cellWidth);
                         else { auto a=corners[j], b=corners[j|k]; for(int q=0;q<8;q+=2){float t0=q/8.f,t1=(q+1)/8.f;draw->AddLine({a.x+(b.x-a.x)*t0,a.y+(b.y-a.y)*t0},{a.x+(b.x-a.x)*t1,a.y+(b.y-a.y)*t1},hi,cellWidth);} }
                     }
-            if (cellLabels) { draw->AddText(corners[0], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "O"); draw->AddText(corners[1], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "A"); draw->AddText(corners[2], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "B"); draw->AddText(corners[4], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "C"); }
+            if (creationMode) {
+                draw->AddText(corners[1], IM_COL32(232,75,70,255), "a");
+                draw->AddText(corners[2], IM_COL32(42,207,100,255), "b");
+                draw->AddText(corners[4], IM_COL32(32,170,237,255), "c");
+            } else if (cellLabels) { draw->AddText(corners[0], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "O"); draw->AddText(corners[1], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "A"); draw->AddText(corners[2], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "B"); draw->AddText(corners[4], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "C"); }
             draw->PopClipRect();
+        }
+        if (creationMode) {
+            const ImVec2 o{p.x+U(34),p.y+avail.y-U(39)};
+            draw->AddLine(o,{o.x+U(22),o.y-U(5)},IM_COL32(231,58,62,255),U(2));
+            draw->AddLine(o,{o.x+U(17),o.y+U(10)},IM_COL32(37,209,89,255),U(2));
+            draw->AddLine(o,{o.x,o.y-U(26)},IM_COL32(34,172,237,255),U(2));
+            draw->AddText({o.x+U(24),o.y-U(12)},IM_COL32(231,58,62,255),"x");
+            draw->AddText({o.x+U(18),o.y+U(7)},IM_COL32(37,209,89,255),"y");
+            draw->AddText({o.x-U(4),o.y-U(38)},IM_COL32(34,172,237,255),"z");
         }
         if (colorCoding && colorLegend && avail.x >= U(220) && avail.y >= U(110)) {
             const float sx = U(174), sy = U(64), pad = U(8);
@@ -2695,10 +3557,90 @@ struct App {
             auto highSize=ImGui::CalcTextSize(high);
             draw->AddText({barX+barW-highSize.x,a.y+U(42)},IM_COL32(218,226,237,255),high);
         }
-        if (ImGui::IsItemHovered()) {
-            const char* toolHint = viewportTool == 0 ? "Zoom" : viewportTool == 1 ? "Pan" : viewportTool == 2 ? "Orbit" : "FOV";
-            draw->AddText({p.x + U(12), p.y + avail.y - U(25)}, IM_COL32(190, 202, 215, 255),
-                          (std::string("Tool: ") + toolHint + "   Wheel zoom").c_str());
+        // P12 viewport chrome: name + projection tag top-left, fit /
+        // maximize buttons top-right, pick-info chip bottom-right, amber
+        // ring on the active viewport. The camera selector itself lives in
+        // the View menu and the Render panel; the tool identity surfaces
+        // through the OS cursor and the toolbar pill group.
+        if (!creationMode) {
+            draw->PushClipRect(p, {p.x + avail.x, p.y + avail.y}, true);
+            static const char *viewNames[8] = {"TOP", "BOTTOM", "FRONT", "BACK",
+                                               "LEFT", "RIGHT", "ORTHO", "PERSPECTIVE"};
+            const int mode = std::clamp(cam.mode, 0, 7);
+            const bool activeVp = i == active;
+            const ImVec2 lp{p.x + U(10), p.y + U(8)};
+            const ImVec2 nameSize = ImGui::CalcTextSize(viewNames[mode]);
+            draw->AddText(lp, activeVp ? IM_COL32(240, 164, 49, 255) : IM_COL32(174, 180, 187, 235),
+                          viewNames[mode]);
+            draw->AddText({lp.x + nameSize.x + U(8), lp.y + U(1)}, IM_COL32(93, 100, 108, 255),
+                          mode < 6 ? "ortho" : "fov 35°");
+            const float btn = U(22);
+            auto vpBtn = [&](const char *id, ImVec2 min, const char *tip) {
+                ImGui::SetCursorScreenPos(min);
+                ImGui::PushID(id);
+                const bool pressed = ImGui::InvisibleButton(id, {btn, btn});
+                ImGui::PopID();
+                if (ImGui::IsItemHovered()) {
+                    draw->AddRectFilled(min, {min.x + btn, min.y + btn}, IM_COL32(255, 255, 255, 20), U(3));
+                    ImGui::SetTooltip("%s", tip);
+                }
+                return pressed;
+            };
+            const ImVec2 fitMin{p.x + avail.x - U(6) - btn * 2 - U(1), p.y + U(5)};
+            const ImVec2 maxMin{fitMin.x + btn + U(1), fitMin.y};
+            if (vpBtn("##vpfit", fitMin, "Zoom to extents (this viewport)"))
+                fitCamera(i, false);
+            recordUiTestItem("viewport.fit." + std::to_string(i));
+            if (vpBtn("##vpmax", maxMin, "Maximize / restore viewport")) {
+                active = i;
+                quad = !quad;
+            }
+            recordUiTestItem("viewport.max." + std::to_string(i));
+            // corner-bracket fit icon + maximize arrows
+            {
+                auto bracket = [&](ImVec2 bmin, float size) {
+                    const float L = U(4);
+                    draw->AddLine(bmin, {bmin.x + L, bmin.y}, IM_COL32(150, 156, 164, 255));
+                    draw->AddLine(bmin, {bmin.x, bmin.y + L}, IM_COL32(150, 156, 164, 255));
+                    draw->AddLine({bmin.x + size, bmin.y}, {bmin.x + size - L, bmin.y}, IM_COL32(150, 156, 164, 255));
+                    draw->AddLine({bmin.x + size, bmin.y}, {bmin.x + size, bmin.y + L}, IM_COL32(150, 156, 164, 255));
+                    draw->AddLine({bmin.x, bmin.y + size}, {bmin.x + L, bmin.y + size}, IM_COL32(150, 156, 164, 255));
+                    draw->AddLine({bmin.x, bmin.y + size}, {bmin.x, bmin.y + size - L}, IM_COL32(150, 156, 164, 255));
+                    draw->AddLine({bmin.x + size, bmin.y + size}, {bmin.x + size - L, bmin.y + size}, IM_COL32(150, 156, 164, 255));
+                    draw->AddLine({bmin.x + size, bmin.y + size}, {bmin.x + size, bmin.y + size - L}, IM_COL32(150, 156, 164, 255));
+                };
+                bracket({fitMin.x + U(4), fitMin.y + U(4)}, btn - U(8));
+                // maximize icon: two diagonal arrows
+                const float inset = U(6);
+                draw->AddLine({maxMin.x + inset, maxMin.y + btn - inset},
+                              {maxMin.x + btn - inset, maxMin.y + inset}, IM_COL32(150, 156, 164, 255));
+                draw->AddLine({maxMin.x + btn - inset, maxMin.y + inset},
+                              {maxMin.x + btn - inset - U(4), maxMin.y + inset}, IM_COL32(150, 156, 164, 255));
+                draw->AddLine({maxMin.x + btn - inset, maxMin.y + inset},
+                              {maxMin.x + btn - inset, maxMin.y + inset + U(4)}, IM_COL32(150, 156, 164, 255));
+                draw->AddLine({maxMin.x + inset, maxMin.y + btn - inset},
+                              {maxMin.x + inset + U(4), maxMin.y + btn - inset}, IM_COL32(150, 156, 164, 255));
+                draw->AddLine({maxMin.x + inset, maxMin.y + btn - inset},
+                              {maxMin.x + inset, maxMin.y + btn - inset - U(4)}, IM_COL32(150, 156, 164, 255));
+            }
+            // Pick info chip (design: #id type x y z, bottom-right).
+            if (activeVp && creationPick >= 0 &&
+                size_t(creationPick) < result.data.atoms.size()) {
+                const auto &atom = result.data.atoms[size_t(creationPick)];
+                const std::string typeName = atom.type < result.data.species.size()
+                    ? result.data.species[atom.type] : "?";
+                char chip[160];
+                snprintf(chip, sizeof(chip), "#%d %s  x %.3f  y %.3f  z %.3f", creationPick,
+                         typeName.c_str(), atom.x, atom.y, atom.z);
+                const ImVec2 ts = ImGui::CalcTextSize(chip);
+                const ImVec2 cmin{p.x + avail.x - ts.x - U(18), p.y + avail.y - ts.y - U(15)};
+                draw->AddRectFilled(cmin, {cmin.x + ts.x + U(18), cmin.y + ts.y + U(10)},
+                                    IM_COL32(15, 17, 19, 224), U(3));
+                draw->AddRect(cmin, {cmin.x + ts.x + U(18), cmin.y + ts.y + U(10)},
+                              IM_COL32(44, 49, 55, 255), U(3));
+                draw->AddText({cmin.x + U(9), cmin.y + U(5)}, IM_COL32(174, 180, 187, 255), chip);
+            }
+            draw->PopClipRect();
         }
         // 3D-tool cursor: while the pointer is over any viewport area, the
         // cursor reflects the active tool. Pan/orbit ride the ImGui cursor
@@ -2729,8 +3671,14 @@ struct App {
             }
         }
         if (ImGui::BeginPopup("viewport-structure-menu")) {
+            if (ImGui::MenuItem("Zoom to extents")) fitCamera(i, false);
+            if (ImGui::MenuItem("Maximize / restore viewport")) {
+                active = i;
+                quad = !quad;
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem(creationMode ? "Exit Creation Mode" : "Enter Creation Mode"))
-                creationMode = !creationMode;
+                creationMode ? leaveCreationTab() : openCreationTab();
             if (ImGui::MenuItem("Add Atom at Cell Center"))
                 addAtomAt(authoring::cartesian(source, 0.5, 0.5, 0.5));
             if (ImGui::MenuItem("Delete Picked Atom", nullptr, false, creationPick >= 0)) deletePickedAtom();
@@ -2738,8 +3686,8 @@ struct App {
             if (ImGui::MenuItem("Add Hydrogens")) addHydrogensCommand();
             ImGui::EndPopup();
         }
-        if (i == active) {
-            draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(95, 180, 255, 255));
+        if (i == active && !creationMode) {
+            draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(240, 164, 49, 191));
             // Fading status overlay at the viewport's bottom-left (replaces the
             // removed status bar); hides after ~4 s or on the next message.
             if (!overlayStatus.empty()) {
@@ -2770,22 +3718,31 @@ struct App {
         playing = false;
         pendingFrame = std::clamp(frame, 0, int(frames.size())-1);
     }
-    bool transport(const char *name, unsigned glyph, int kind, const char *tip) {
+    bool transport(const char *name, unsigned glyph, int kind, const char *tip,
+                   bool highlight = false) {
         // Compact transport icon button; keeps the legacy vector-drawn arrows
         // when the Segoe MDL2 icon font is unavailable so the cluster never
-        // degrades to blank or text-only buttons.
+        // degrades to blank or text-only buttons. highlight renders the amber
+        // active state (design: the amber Play button while playing).
         char label[8];
         const bool useGlyph = glyphAvailable(glyph);
         if (useGlyph)
             glyphUtf8(glyph, label);
+        if (highlight) {
+            ImGui::PushStyleColor(ImGuiCol_Button, {0.941f, 0.643f, 0.192f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.957f, 0.694f, 0.263f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.957f, 0.694f, 0.263f, 1.f});
+            ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
+        }
         ImGui::PushID(name);
         const bool pressed = useGlyph ? ImGui::Button(label, {U(26), U(26)})
                                       : ImGui::Button("##transport", {U(26), U(26)});
         const auto p = ImGui::GetItemRectMin();
         ImGui::PopID();
+        if (highlight) ImGui::PopStyleColor(4);
         if (!useGlyph) {
             auto *d = ImGui::GetWindowDrawList();
-            auto color = ImGui::GetColorU32(ImGuiCol_Text);
+            auto color = highlight ? IM_COL32(22, 24, 27, 255) : ImGui::GetColorU32(ImGuiCol_Text);
             ImVec2 c{p.x+U(13),p.y+U(13)};
             if (kind == 2 && playing) {
                 d->AddRectFilled({c.x-U(4),c.y-U(5)},{c.x-U(1),c.y+U(5)},color);
@@ -2802,7 +3759,7 @@ struct App {
         return pressed;
     }
     void timeline() {
-        ImGui::BeginChild("Trajectory timeline", {-1,U(128)}, ImGuiChildFlags_Borders,
+        ImGui::BeginChild("Trajectory timeline", {-1,U(94)}, ImGuiChildFlags_Borders,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         // Compact OVITO-style spacing for the whole timeline area.
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(4), U(2)});
@@ -2839,9 +3796,44 @@ struct App {
         ImGui::BeginDisabled(frames.size()<2 || indexing && busy);
         if (transport("##first",0xE892,0,"First frame (Home)")) seekFrame(0); ImGui::SameLine();
         if (transport("##previous",0xE76B,1,"Previous frame (Left)")) seekFrame(selected-1); ImGui::SameLine();
-        if (transport("##play",playing ? 0xE769 : 0xE768,2,"Play / pause")) playing = !playing; ImGui::SameLine();
+        if (transport("##play",playing ? 0xE769 : 0xE768,2,"Play / pause",playing)) playing = !playing; ImGui::SameLine();
         if (transport("##next",0xE76C,3,"Next frame (Right)")) seekFrame(selected+1); ImGui::SameLine();
         if (transport("##last",0xE893,4,"Last frame (End)")) seekFrame(last);
+        ImGui::SameLine();
+        // P12 loop toggle: vector-drawn cycle arrows, amber while active
+        // (design: Loop transport control).
+        {
+            ImGui::PushID("timeline.loop");
+            if (loopPlayback) {
+                ImGui::PushStyleColor(ImGuiCol_Button, {0.941f, 0.643f, 0.192f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.957f, 0.694f, 0.263f, 1.f});
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.957f, 0.694f, 0.263f, 1.f});
+            }
+            const bool pressed = ImGui::Button("##loop", {square, square});
+            if (loopPlayback) ImGui::PopStyleColor(3);
+            const auto pr = ImGui::GetItemRectMin();
+            auto *dl = ImGui::GetWindowDrawList();
+            const ImVec2 c{pr.x + square * .5f, pr.y + square * .5f};
+            const float r = square * .30f;
+            const ImU32 ink = loopPlayback ? IM_COL32(22, 24, 27, 255)
+                                           : ImGui::GetColorU32(ImGuiCol_Text);
+            dl->PathClear();
+            dl->PathArcTo(c, r, 0.7f, 5.6f, 20);
+            dl->PathStroke(ink, 0, std::max(1.4f, U(1.4f)));
+            for (float a : {0.7f, 5.6f}) {
+                const ImVec2 t{c.x + std::cos(a) * r, c.y + std::sin(a) * r};
+                const ImVec2 dir{std::cos(a), std::sin(a)};
+                const float s = square * .11f;
+                dl->AddTriangleFilled(t,
+                                      {t.x - dir.x * s - dir.y * s, t.y - dir.y * s + dir.x * s},
+                                      {t.x - dir.x * s + dir.y * s, t.y - dir.y * s - dir.x * s},
+                                      ink);
+            }
+            ImGui::PopID();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Loop playback");
+            recordUiTestItem("timeline.loop");
+            if (pressed) loopPlayback = !loopPlayback;
+        }
         toolbarSeparator(ImGui::GetFrameHeight());
         ImGui::SetNextItemWidth(U(96));
         int edit = selected + 1;
@@ -2881,47 +3873,49 @@ struct App {
             autoKey = !autoKey;
         ImGui::PopStyleVar(2);
         auto p = ImGui::GetCursorScreenPos();
-        float width = ImGui::GetContentRegionAvail().x, height = U(65);
+        float width = ImGui::GetContentRegionAvail().x, height = U(47);
         ImGui::InvisibleButton("##frame ruler", {width,height}, ImGuiButtonFlags_EnableNav);
         bool hovered = ImGui::IsItemHovered(), focused = ImGui::IsItemFocused();
         recordUiTestItem("timeline.ruler");
         auto *d = ImGui::GetWindowDrawList();
-        // P11 OVITO-style ruler: a rounded track bar with the played portion
-        // accent-tinted, short minor/major ticks and frame labels beneath it,
-        // and a single circular knob on the track for the current frame. All
-        // colors derive from the theme (text/accent), never hardcoded.
-        const float left = p.x+U(15), right = p.x+width-U(18);
-        const float trackTop = p.y+U(14), trackBottom = trackTop+U(9);
+        // P12 redesign ruler: 8px track near the top with the played portion
+        // amber-tinted, minor/major ticks below it (played ticks warm),
+        // labels above, and a 1px amber playhead with a diamond knob. All
+        // colors derive from the redesign palette; the 1/2/5-decade label
+        // step and the click/drag seek behavior are unchanged.
+        const float left = p.x+U(2), right = p.x+width-U(2);
+        const float trackTop = p.y+U(22), trackBottom = trackTop+U(8);
         const float trackWidth = std::max(1.f, right-left);
-        const auto text = ImGui::GetColorU32(ImGuiCol_Text);
-        const auto tick = ImGui::GetColorU32(ImGuiCol_Text, .45f);
-        const auto trackRest = ImGui::GetColorU32(ImGuiCol_Text, .14f);
-        ImVec4 playedTint = accent; playedTint.w *= .55f;
-        const auto trackPlayed = ImGui::GetColorU32(playedTint);
         const int64_t major = timelineLabelStep(last, trackWidth);
         int64_t minor = major >= 5 ? major/5 : 1;
         while (last > 0 && minor < last && trackWidth*float(minor)/float(last) < U(3))
             minor *= 2;
         auto xFor = [&](int frame) { return left+trackWidth*(last ? float(frame)/last : 0.f); };
-        d->AddRectFilled({left,trackTop},{right,trackBottom},trackRest,U(4));
+        d->AddRectFilled({left,trackTop},{right,trackBottom},ImGui::GetColorU32(ImGuiCol_FrameBg),U(1));
+        d->AddRect({left,trackTop},{right,trackBottom},ImGui::GetColorU32(ImGuiCol_Border),U(1));
         const float knobX = xFor(selected);
         if (knobX > left+1.f)
-            d->AddRectFilled({left,trackTop},{knobX,trackBottom},trackPlayed,U(4),
+            d->AddRectFilled({left,trackTop},{knobX,trackBottom},IM_COL32(240,164,49,56),U(1),
                              ImDrawFlags_RoundCornersLeft);
         for (int64_t frame=0;frame<=last;frame+=minor) {
             const float x=xFor(int(frame));
             const bool isMajor = frame%major==0;
-            d->AddLine({x,trackBottom},{x,trackBottom+U(isMajor?8.f:4.f)},tick,U(1));
+            const ImU32 tickColor = frame <= selected ? IM_COL32(138,106,58,255)
+                                                      : IM_COL32(61,67,74,255);
+            d->AddLine({x,trackBottom},{x,trackBottom+U(isMajor?8.f:4.f)},tickColor,U(1));
             if (isMajor) {
                 const auto label=std::to_string(frame); // 0-based, matching the spinner's "/ total".
                 const auto size=ImGui::CalcTextSize(label.c_str());
                 d->AddText({std::clamp(x-size.x*.5f,p.x+2.f,p.x+width-size.x-2.f),
-                            trackBottom+U(10)},text,label.c_str());
+                            p.y+U(4)},IM_COL32(107,114,122,255),label.c_str());
             }
         }
-        d->AddCircleFilled({knobX,(trackTop+trackBottom)*.5f},U(5),ImGui::GetColorU32(accent));
-        d->AddCircle({knobX,(trackTop+trackBottom)*.5f},U(5),
-                     ImGui::GetColorU32(ImGuiCol_Text,.6f),0,U(1.5f));
+        d->AddLine({knobX,p.y+U(12)},{knobX,p.y+height-U(2)},IM_COL32(240,164,49,255),U(1));
+        {
+            const float cy = p.y + U(14.5f), r = U(4.5f);
+            d->AddQuadFilled({knobX, cy - r}, {knobX + r, cy}, {knobX, cy + r}, {knobX - r, cy},
+                             IM_COL32(240, 164, 49, 255));
+        }
         const bool scrubbing = ImGui::IsItemActive() && ImGui::IsMouseDown(0);
         if (scrubbing && last>0)
             seekFrame(int(std::lround(std::clamp((ImGui::GetIO().MousePos.x-left)/trackWidth,0.f,1.f)*last)));
@@ -2966,7 +3960,7 @@ struct App {
         if (closing >= 0) closeTab(closing);
     }
     void modelingToolbar() {
-        ImGui::BeginChild("##modeling-toolbar", {-1, U(128)}, ImGuiChildFlags_None,
+        ImGui::BeginChild("##modeling-toolbar", {-1, U(72)}, ImGuiChildFlags_None,
                           ImGuiWindowFlags_NoScrollbar);
         auto action = [&](const char *name, const char *label, const char *tip, auto &&fn) {
             const float width = ImGui::CalcTextSize(label).x + U(28);
@@ -3066,17 +4060,19 @@ struct App {
     }
     void center(float w, float h) {
         fixed("Viewport workspace", leftWidth(), topInset(), w - leftWidth() - rightWidth(),
-              h - topInset());
-        documentTabBar();
-        modelingToolbar();
+              h - topInset() - statusHeight());
+        // The reference workspace opens directly onto the viewport. Keep
+        // document tabs visible only when there is another tab to switch to.
+        if (tabs.size() > 1) documentTabBar();
+        if (creationMode) modelingToolbar();
         if (showLatticePanel) latticePanel();
         auto avail = ImGui::GetContentRegionAvail();
         float dataH = showTable ? U(280) : 0;
         float gap = ImGui::GetStyle().ItemSpacing.y;
         // Exact stack: viewports, button row, optional inspector, timeline.
         float sceneH = std::max(U(120),
-                                avail.y - dataH - U(128) - ImGui::GetFrameHeight() -
-                                    gap * (showTable ? 3 : 2));
+                                avail.y - dataH - U(94) - ImGui::GetFrameHeight() -
+                                    gap * (showTable ? 4 : 3) - U(18));
         if (quad) {
             float vw = (avail.x - ImGui::GetStyle().ItemSpacing.x) * .5f, vh = (sceneH - gap) * .5f;
             viewport(0, vw, vh);
@@ -3567,8 +4563,163 @@ struct App {
         timeline();
         ImGui::End();
     }
+    void creationWorkspace(float w, float h) {
+        const float leftW = U(240), rightW = U(275);
+        const float y = topInset(), bodyH = h - y - statusHeight();
+        fixed("Creation structure", 0, y, leftW, bodyH);
+        ImGui::Spacing();
+        ImGui::TextDisabled("结构");
+        std::vector<size_t> counts(source.species.size());
+        for (const auto &atom : source.atoms)
+            if (atom.type < counts.size()) ++counts[atom.type];
+        size_t common = 0;
+        for (size_t count : counts) if (count) common = std::gcd(common, count);
+        std::string formula;
+        for (size_t i = 0; i < counts.size(); ++i) if (counts[i]) {
+            formula += source.species[i];
+            const size_t unit = counts[i] / std::max<size_t>(common, 1);
+            if (unit > 1) formula += std::to_string(unit);
+        }
+        const bool isRockSalt = counts.size() == 2 && counts[0] == counts[1] &&
+            ((source.species[0] == "Na" && source.species[1] == "Cl") ||
+             (source.species[0] == "Cl" && source.species[1] == "Na"));
+        const std::string displayName = isRockSalt ? "氯化钠 岩盐" :
+            creationBasedOn.empty() ? "未命名结构" : creationBasedOn;
+        if (headingFont) ImGui::PushFont(headingFont);
+        ImGui::TextWrapped("%s", displayName.c_str());
+        if (headingFont) ImGui::PopFont();
+        ImGui::Text("%s", formula.empty() ? "—" : formula.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s 原子", number(source.atoms.size()).c_str());
+        ImGui::Spacing();
+        ImGui::Separator();
+        if (headingFont) ImGui::PushFont(headingFont);
+        ImGui::TextUnformatted("组成");
+        if (headingFont) ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::TextDisabled("点击选中同元素");
+        for (size_t type = 0; type < source.species.size(); ++type) {
+            const size_t count = counts[type];
+            if (!count) continue;
+            ImGui::PushID(int(type));
+            const auto p = ImGui::GetCursorScreenPos();
+            const auto color = typeColor(type);
+            ImGui::GetWindowDrawList()->AddCircleFilled({p.x+U(7),p.y+U(9)},U(6),
+                ImGui::GetColorU32({color[0],color[1],color[2],1.f}));
+            ImGui::Dummy({U(17),U(19)});
+            ImGui::SameLine();
+            std::string elementName = source.species[type] == "Na" ? "钠" :
+                source.species[type] == "Cl" ? "氯" :
+                (elements::find(source.species[type]) ? elements::find(source.species[type])->name : "");
+            std::string row = source.species[type] + "     " + elementName +
+                "                         " + std::to_string(count);
+            if (ImGui::Selectable(row.c_str(), false, 0, {0,U(24)})) {
+                for (size_t i = 0; i < source.atoms.size(); ++i)
+                    if (source.atoms[i].type == type) { creationPick = int(i); break; }
+            }
+            ImGui::PopID();
+        }
+        ImGui::Separator();
+        if (headingFont) ImGui::PushFont(headingFont);
+        ImGui::TextUnformatted("晶格");
+        if (headingFont) ImGui::PopFont();
+        const auto lattice = authoring::latticeOf(source);
+        auto propertyRow = [&](const char *name, const std::string &value) {
+            ImGui::TextDisabled("%s", name);
+            ImGui::SameLine();
+            const float x = std::max(ImGui::GetCursorPosX(), leftW - ImGui::CalcTextSize(value.c_str()).x - U(24));
+            ImGui::SetCursorPosX(x);
+            ImGui::TextUnformatted(value.c_str());
+            ImGui::Separator();
+        };
+        char value[80];
+        for (const auto [name, length] : {std::pair{"a",lattice.a}, {"b",lattice.b}, {"c",lattice.c}}) {
+            snprintf(value,sizeof(value),"%.4f Å",length); propertyRow(name,value);
+        }
+        for (const auto [name, angle] : {std::pair{"α",lattice.alpha}, {"β",lattice.beta}, {"γ",lattice.gamma}}) {
+            snprintf(value,sizeof(value),"%.2f°",angle); propertyRow(name,value);
+        }
+        snprintf(value,sizeof(value),"%.2f Å³",lattice.volume); propertyRow("体积 V",value);
+        propertyRow("空间群",isRockSalt?"Fm-3m (225)":"—");
+        propertyRow("布拉维格子",isRockSalt?"面心立方 cF":"—");
+        propertyRow("原子数",std::to_string(source.atoms.size()));
+        snprintf(value,sizeof(value),"%.4f Å⁻³",
+                 lattice.volume > 0 ? double(source.atoms.size()) / lattice.volume : 0.0);
+        propertyRow("密度",value);
+        ImGui::End();
+
+        fixed("Creation canvas", leftW, y, w - leftW - rightW, bodyH);
+        ImGui::SetCursorPos({0,0});
+        viewport(3, w - leftW - rightW, bodyH);
+        ImGui::End();
+
+        fixed("Creation selection", w - rightW, y, rightW, bodyH);
+        if (headingFont) ImGui::PushFont(headingFont);
+        ImGui::TextUnformatted("选中");
+        if (headingFont) ImGui::PopFont();
+        if (creationPick < 0) {
+            ImGui::TextDisabled("点击原子选择");
+            ImGui::TextDisabled("Shift + 点击 多选 · 拖动空白处 框选");
+            ImGui::TextDisabled("中键拖动 旋转 · 滚轮 缩放");
+            ImGui::TextDisabled("右键 更多操作");
+        }
+        ImGui::Separator();
+        if (creationPick >= 0 && size_t(creationPick) < source.atoms.size()) {
+            const Atom atom = source.atoms[size_t(creationPick)];
+            const char *symbol = atom.type < source.species.size()
+                ? source.species[atom.type].c_str() : "?";
+            colorSwatch(typeColor(atom.type));
+            ImGui::SameLine();
+            ImGui::Text("%s  Atom #%d", symbol, creationPick);
+            float position[3] = {atom.x, atom.y, atom.z};
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::InputFloat3("Position (A)", position, "%.4f")) {
+                const int index = creationPick;
+                editStructure("Moved atom " + std::to_string(index), [&](Dataset &data) {
+                    data.atoms[size_t(index)].x = position[0];
+                    data.atoms[size_t(index)].y = position[1];
+                    data.atoms[size_t(index)].z = position[2];
+                });
+                creationPick = index;
+            }
+            ImGui::TextDisabled("Replace element");
+            for (const char *element : {"H", "C", "N", "O", "Si", "Fe", "Cu", "Ni"}) {
+                if (ImGui::Button(element, {U(37), U(29)})) {
+                    snprintf(creationElement, sizeof(creationElement), "%s", element);
+                    replacePickedElement();
+                }
+                if (std::string_view(element) != "Ni") ImGui::SameLine();
+            }
+            ImGui::Spacing();
+            if (ImGui::Button("Delete / make vacancy", {-1, U(34)})) deletePickedAtom();
+        }
+        ImGui::Separator();
+        if (headingFont) ImGui::PushFont(headingFont);
+        ImGui::TextUnformatted("历史");
+        if (headingFont) ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::TextDisabled("点击回到该步");
+        const ImVec2 row = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddRectFilled({row.x,row.y+U(2)},
+            {row.x+U(3),row.y+U(23)},IM_COL32(32,163,241,255));
+        ImGui::Indent(U(13));
+        const std::string origin = "从 " + (creationBasedOn.empty() ? std::string("新结构") : creationBasedOn);
+        ImGui::TextUnformatted(origin.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu",source.atoms.size());
+        ImGui::Unindent(U(13));
+        for (size_t step = 0; step < authorUndo.size(); ++step)
+            ImGui::TextDisabled("%zu  编辑结构",step+1);
+        if (!authorUndo.empty() || !authorRedo.empty()) {
+            if (ImGui::Button("撤销", {U(80), U(30)})) history(false);
+            ImGui::SameLine();
+            if (ImGui::Button("重做", {U(80), U(30)})) history(true);
+        }
+        ImGui::End();
+    }
     void right(float w, float h) {
-        fixed("Properties", w - rightWidth(), topInset(), rightWidth(), h - topInset());
+        fixed("Properties", w - rightWidth(), topInset(), rightWidth(),
+              h - topInset() - statusHeight());
         // Tighter than the global theme so checkboxes, combos and sliders hug
         // their labels. release() runs before End(): End() asserts
         // "Missing PopStyleVar()" (and blocks startup) if these are still pushed.
@@ -3606,134 +4757,161 @@ struct App {
                        "System", rightTab == 3))
             rightTab = 3;
         ImGui::PopStyleVar();
-        // The Pipelines data-source selector moved into the title-bar strip
-        // (OVITO layout); the panel starts directly with Add modification.
-        if (ImGui::Button("Add modification...", {-1, U(28)}))
-            showCatalog = true;
-        recordUiTestItem("pipeline.add-modification");
-        {
-            auto p = ImGui::GetItemRectMax();
-            const float cy = p.y - U(14);
-            ImGui::GetWindowDrawList()->AddTriangleFilled({p.x-U(18),cy-U(4)},{p.x-U(10),cy-U(4)},{p.x-U(14),cy+U(1)},ImGui::GetColorU32(ImGuiCol_Text));
-        }
-        catalogAnchor = {ImGui::GetItemRectMax().x, ImGui::GetItemRectMax().y + 2};
+        // P12 inspector header: category caption, mono badge chip, node name
+        // and — for toggleable modifiers — the 30x16 toggle switch.
         if (rightTab == 0) {
-                ImGui::BeginChild("Stack", {-1, U(205)}, ImGuiChildFlags_Borders);
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(4), U(2)});
-                // Panel-side failure indicator (replaces the removed status
-                // bar): the failing node carries the red "!" below and this
-                // one-line hint repeats the message inside the panel.
-                for (const auto &failed : mods)
-                    if (!failed.error.empty()) {
-                        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(4), U(2)});
-                        ImGui::TextColored({1, .32f, .28f, 1}, "! %s", failed.error.c_str());
-                        ImGui::PopStyleVar();
-                        break;
-                    }
-                if (mods.empty())
-                    ImGui::TextWrapped("Add a modification to start processing.");
-                bool stackMutated = false;
-                constexpr float stripGutter = 30.f; // Room for the right-side action strip.
-                for (int i = int(mods.size()) - 1; i >= 0; i--) {
-                    auto &m = mods[i];
-                    ImGui::PushID(m.id.c_str());
-                    const auto &style = ImGui::GetStyle();
-                    const float labelWidth = std::max(0.f, ImGui::GetContentRegionAvail().x -
-                        ImGui::GetFrameHeight() - style.ItemSpacing.x * 2 - U(stripGutter));
-                    bool enabled = m.enabled;
-                    bool enabledChanged=ImGui::Checkbox("##enabled", &enabled);
-                    recordUiTestItem(std::string("pipeline.node.enabled.")+m.id);
-                    if (enabledChanged) {
-                        checkpoint();
-                        m.enabled = enabled;
-                        update(size_t(i));
-                    }
-                    ImGui::SameLine();
-                    const char *name = m.displayName.empty() ? opName(m.op) : m.displayName.c_str();
-                    if (ImGui::Selectable(name, modifierGraph.selected == size_t(i),
-                                          ImGuiSelectableFlags_None,{labelWidth,0}))
-                        modifierGraph.selected = size_t(i);
-                    recordUiTestItem(std::string("pipeline.node.select.")+m.id);
-                    if (!m.error.empty()) {
-                        ImGui::SameLine();
-                        ImGui::TextColored({1, .32f, .28f, 1}, "!");
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m.error.c_str());
-                    }
-                    ImGui::PopID();
+            const bool modSel = modifierGraph.selected < mods.size();
+            const char *cat = modSel ? mods[modifierGraph.selected].category.c_str()
+                                     : panelSelection == -2 ? "Visual element"
+                                     : panelSelection == -3 ? "Visual element"
+                                                            : "Data source";
+            const std::string badgeText =
+                modSel ? nodeBadgeText(mods[modifierGraph.selected])
+                       : std::string(panelSelection == -2 ? "PA"
+                                     : panelSelection == -3 ? "SC" : "XYZ");
+            const char *badge = badgeText.c_str();
+            const std::string sourceName =
+                path.empty() ? std::string("Generated crystal")
+                             : utf8(path.filename().wstring());
+            const char *name = modSel
+                ? (mods[modifierGraph.selected].displayName.empty()
+                       ? opName(mods[modifierGraph.selected].op)
+                       : mods[modifierGraph.selected].displayName.c_str())
+                : panelSelection == -2 ? "Particles"
+                : panelSelection == -3 ? "Simulation cell"
+                                       : sourceName.c_str();
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextUnformatted(cat);
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+            monoBadge(badge, modSel);
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
+            ImGui::TextUnformatted(name);
+            ImGui::PopStyleColor();
+            if (modSel) {
+                ImGui::SameLine();
+                const float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - U(30);
+                ImGui::SetCursorPosX(right);
+                bool enabled = mods[modifierGraph.selected].enabled;
+                ImGui::PushID(mods[modifierGraph.selected].id.c_str());
+                if (toggleSwitch("##enable-node", &enabled)) {
+                    checkpoint();
+                    mods[modifierGraph.selected].enabled = enabled;
+                    update(modifierGraph.selected);
                 }
-                ImGui::PopStyleVar();
-                ImGui::EndChild();
-                // Vertical action strip pinned to the stack's right edge. It
-                // acts on the selected node; every button keeps its recorded
-                // UI-test name keyed by that node id. Overlaid as a borderless
-                // transparent child on top of the stack region.
-                if (!mods.empty()) {
-                    constexpr float stripButton = 24.f;
-                    const ImVec2 stackMin = ImGui::GetItemRectMin(), stackMax = ImGui::GetItemRectMax();
-                    const ImVec2 flowCursor = ImGui::GetCursorPos();
-                    ImGui::PushStyleColor(ImGuiCol_ChildBg, {0,0,0,0});
-                    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {U(1), U(2)});
-                    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(2), U(2)});
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(4), U(2)});
-                    ImGui::SetCursorScreenPos({stackMax.x - U(stripGutter), stackMin.y + U(3)});
-                    if (ImGui::BeginChild("##node-actions", {U(stripGutter) - U(2), U(4*stripButton + 3*2 + 6)},
-                                          ImGuiChildFlags_None,
-                                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground)) {
-                        if (modifierGraph.selected < mods.size()) {
-                            const size_t selectedNode = modifierGraph.selected;
-                            const std::string selectId = mods[selectedNode].id;
-                            if (iconButton("pipeline.strip.delete", 0xE74D, "x",
-                                           "Delete the selected modification", false,
-                                           U(stripButton), ("pipeline.node.delete."+selectId).c_str())) {
-                                checkpoint();
-                                modifierGraph.erase(selectedNode);
-                                update(selectedNode);
-                                stackMutated = true;
-                            }
-                            ImGui::BeginDisabled(selectedNode + 1 >= mods.size());
-                            if (iconButton("pipeline.strip.up", 0xE70E, "^",
-                                           "Move the selected modification up (later in the pipeline)",
-                                           false, U(stripButton),
-                                           ("pipeline.node.up."+selectId).c_str())) {
-                                checkpoint();
-                                modifierGraph.move(selectedNode, selectedNode + 1);
-                                update(selectedNode);
-                                stackMutated = true;
-                            }
-                            ImGui::EndDisabled();
-                            ImGui::BeginDisabled(selectedNode == 0);
-                            if (iconButton("pipeline.strip.down", 0xE70D, "v",
-                                           "Move the selected modification down (earlier in the pipeline)",
-                                           false, U(stripButton),
-                                           ("pipeline.node.down."+selectId).c_str())) {
-                                checkpoint();
-                                modifierGraph.move(selectedNode, selectedNode - 1);
-                                update(selectedNode - 1);
-                                stackMutated = true;
-                            }
-                            ImGui::EndDisabled();
-                            if (iconButton("pipeline.strip.copy", 0xE8C8, "Copy",
-                                           "Duplicate the selected modification", false,
-                                           U(stripButton), ("pipeline.node.copy."+selectId).c_str())) {
-                                checkpoint();
-                                auto copy = mods[selectedNode];
-                                copy.id = std::to_string(nextModifierId++);
-                                copy.error.clear(); copy.outputs.clear(); copy.dirty = true;
-                                modifierGraph.insert(std::move(copy), selectedNode + 1);
-                                update();
-                                stackMutated = true;
-                            }
+                ImGui::PopID();
+                recordUiTestItem(std::string("pipeline.node.enabled.") +
+                                 mods[modifierGraph.selected].id);
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+        }
+            // P12 bespoke inspector panels for the pseudo-nodes selectable in
+            // the left panel: Data source / Particles / Simulation cell.
+            if (rightTab == 0 && modifierGraph.selected >= mods.size()) {
+                if (panelSelection == -1) {
+                    ImGui::Spacing();
+                    auto gridLabel = [](const char *label) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                        ImGui::TextUnformatted(label);
+                        ImGui::PopStyleColor();
+                    };
+                    gridLabel("File");
+                    ImGui::TextWrapped("%s", path.empty() ? "(generated)"
+                                                          : utf8(path.wstring()).c_str());
+                    gridLabel("Reader");
+                    ImGui::TextUnformatted(readerName.c_str());
+                    gridLabel("Frames");
+                    ImGui::Text("%zu%s", std::max<size_t>(frames.size(), 1),
+                                frames.size() > 1 ? " · indexed" : "");
+                    gridLabel("Particles");
+                    ImGui::Text("%s · stride %d", number(source.sourceCount).c_str(),
+                                int(source.stride));
+                    ImGui::Spacing();
+                    sectionLabel("PARTICLE TYPES");
+                    {
+                        std::vector<size_t> counts(result.data.species.size(), 0);
+                        for (const auto &a : result.data.atoms)
+                            if (a.type < counts.size()) ++counts[a.type];
+                        for (size_t t = 0; t < result.data.species.size(); ++t) {
+                            colorSwatch(typeColor(t));
+                            ImGui::SameLine();
+                            ImGui::Text("%s", result.data.species[t].c_str());
+                            ImGui::SameLine(ImGui::GetContentRegionAvail().x - U(110));
+                            ImGui::TextDisabled("%s", number(counts[t]).c_str());
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("%.2f A",
+                                                t < gpu.styles.size() ? gpu.styles[t].visual[3] : radius);
                         }
                     }
-                    ImGui::EndChild();
-                    ImGui::PopStyleVar(3);
+                    ImGui::Spacing();
+                    sectionLabel("SIMULATION CELL");
+                    {
+                        const auto &cv = result.data.cell;
+                        const bool lattice = cv[0] != 0 || cv[4] != 0 || cv[8] != 0;
+                        for (int row = 0; row < 3; ++row) {
+                            ImGui::TextDisabled("%c", 'a' + row);
+                            for (int col = 0; col < 3; ++col) {
+                                ImGui::SameLine();
+                                ImGui::Text("%11.4f", cv[row * 3 + col]);
+                            }
+                        }
+                        if (lattice) {
+                            ImGui::TextDisabled("o");
+                            for (int col = 0; col < 3; ++col) {
+                                ImGui::SameLine();
+                                ImGui::Text("%11.4f", col == 0 ? result.data.origin.x
+                                                    : col == 1 ? result.data.origin.y
+                                                               : result.data.origin.z);
+                            }
+                        }
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("PBC:  %s  %s  %s", source.pbc[0] ? "X" : "-",
+                                            source.pbc[1] ? "Y" : "-", source.pbc[2] ? "Z" : "-");
+                    }
+                } else if (panelSelection == -2) {
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                    ImGui::TextUnformatted("Radius scale");
                     ImGui::PopStyleColor();
-                    // The overlay child is an item in the Properties flow;
-                    // restore the cursor so the parameter section follows the
-                    // stack rather than the strip.
-                    ImGui::SetCursorPos(flowCursor);
+                    if (scrubBar("##Radius scale", &radius, .02f, 2.f, "%.2f", "x"))
+                        status = "Particle radius scale updated";
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                    ImGui::TextUnformatted("Shape");
+                    ImGui::PopStyleColor();
+                    const int shape = segmented("##Particle shape",
+                                                particleShape == 2 ? 1 : 0, {"Sphere", "Cube"});
+                    if (particleShape != (shape == 1 ? 2 : 0)) {
+                        particleShape = shape == 1 ? 2 : 0;
+                        status = "Particle shape updated";
+                    }
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("Base radii from Cordero 2008 covalent radii. Per-type "
+                                       "overrides take precedence; selection and color coding "
+                                       "override type colors.");
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                    ImGui::TextUnformatted("Line width");
+                    ImGui::PopStyleColor();
+                    if (scrubBar("##Cell line width", &cellWidth, .5f, 4.f, "%.1f", "px"))
+                        status = "Cell line width updated";
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                    ImGui::TextUnformatted("Line color");
+                    ImGui::PopStyleColor();
+                    ImGui::ColorEdit3("##Cell line color", cellColor);
                 }
-                if (!stackMutated && !mods.empty() && modifierGraph.selected < mods.size()) {
+            }
+        if (rightTab == 0) {
+            // Selected modifier parameter section (the stack itself lives in
+            // the left PIPELINE panel).
+            if (modifierGraph.selected < mods.size()) {
                     auto &m = mods[modifierGraph.selected];
                     ImGui::PushID(m.id.c_str());
                     heading(m.displayName.empty() ? opName(m.op) : m.displayName.c_str());
@@ -3753,9 +4931,32 @@ struct App {
                         ImGui::EndDisabled();
                         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                             ImGui::SetTooltip("Miller index input requires OVITO Pro and is not implemented.");
-                        ImGui::SetNextItemWidth(U(140));
-                        changed |= ImGui::DragScalar("Distance", ImGuiDataType_Double, &distance,
-                                                     .02f, nullptr, nullptr, "%.4g");
+                        // P12 design controls: the plane normal as an X/Y/Z
+                        // segmented control, Distance and Slab width as scrub
+                        // bars over the same state. The free-form normal
+                        // fields remain below for arbitrary planes.
+                        {
+                            const int axis = std::abs(normal[0]) >= std::abs(normal[1])
+                                ? (std::abs(normal[0]) >= std::abs(normal[2]) ? 0 : 2)
+                                : (std::abs(normal[1]) >= std::abs(normal[2]) ? 1 : 2);
+                            const int pickedAxis =
+                                segmented("##Slice normal", axis, {"X", "Y", "Z"}, U(180));
+                            if (pickedAxis != axis) {
+                                normal[0] = normal[1] = normal[2] = 0;
+                                normal[pickedAxis] = 1;
+                                changed = true;
+                            }
+                            const auto &cv = result.data.cell;
+                            const auto &og = result.data.origin;
+                            double extent = 0;
+                            for (int r = 0; r < 3; ++r)
+                                extent = std::max(extent,
+                                                  std::hypot(cv[r * 3], cv[r * 3 + 1], cv[r * 3 + 2]) +
+                                                      std::abs(r == 0 ? og.x : r == 1 ? og.y : og.z));
+                            changed |= scrubBar("##Slice distance", &distance, 0.0,
+                                                extent > 0 ? extent : 10.0, "%.2f", "A");
+                            changed |= scrubBar("##Slab width", &width, 0.0, 6.0, "%.2f", "A");
+                        }
                         ImGui::SetNextItemWidth(U(140));
                         changed |= ImGui::DragFloat("Normal (x)", &normal[0], .01f);
                         ImGui::SetNextItemWidth(U(140));
@@ -3765,8 +4966,7 @@ struct App {
                         const double minimumWidth = 0;
                         ImGui::SetNextItemWidth(U(140));
                         changed |= ImGui::DragScalar("Slab width", ImGuiDataType_Double, &width,
-                                                     .02f, &minimumWidth, nullptr, "%.4g");
-                        changed |= ImGui::Checkbox("Reverse orientation", &reverse);
+                                                     .02f, &minimumWidth, nullptr, "%.4g");                        changed |= ImGui::Checkbox("Reverse orientation", &reverse);
                         changed |= ImGui::Checkbox("Create selection (do not delete)", &createSelection);
                         changed |= ImGui::Checkbox("Apply to selection only", &applySelectionOnly);
                         changed |= ImGui::Checkbox("Visualize plane", &visualize);
@@ -4511,20 +5711,49 @@ struct App {
                             }
                             ImGui::Dummy({barWidth, barHeight});
                         }
-                        if (edited.colorAutoRange) {
-                            double lo = 0, hi = 0;
-                            const bool hasRange = propertyValueRange(result.data, edited.property, lo, hi);
-                            ImGui::BeginDisabled(!hasRange);
-                            float low = hasRange ? float(lo) : 0.f, high = hasRange ? float(hi) : 0.f;
-                            ImGui::DragFloat("Start value", &low, .01f);
-                            ImGui::DragFloat("End value", &high, .01f);
-                            ImGui::EndDisabled();
-                            if (!hasRange)
-                                ImGui::TextDisabled("The property has no finite values on this frame.");
-                        } else {
-                            float low = edited.colorMin, high = edited.colorMax;
-                            if (ImGui::DragFloat("Start value", &low, .01f)) { edited.colorMin = low; edited.colorAllFramesRange = false; changed = true; }
-                            if (ImGui::DragFloat("End value", &high, .01f)) { edited.colorMax = high; edited.colorAllFramesRange = false; changed = true; }
+                        // P12: START/END scrub bars over the same range state
+                        // (design RANGE group). Scrubbing in automatic mode
+                        // switches the node to a manual range.
+                        {
+                            double plo = 0, phi = 0;
+                            const bool hasPR = propertyValueRange(result.data, edited.property, plo, phi);
+                            double sMin = -1e9, sMax = 1e9;
+                            if (hasPR) {
+                                const double pad = (phi - plo) * .1 + 1e-6;
+                                sMin = plo - pad;
+                                sMax = phi + pad;
+                            }
+                            if (edited.colorAutoRange) {
+                                ImGui::BeginDisabled(!hasPR);
+                                double low = hasPR ? plo : 0, high = hasPR ? phi : 1;
+                                if (scrubBar("##Color start", &low, sMin, sMax, "%.4g", nullptr,
+                                             0, "START") |
+                                    scrubBar("##Color end", &high, sMin, sMax, "%.4g", nullptr,
+                                             0, "END")) {
+                                    edited.colorMin = float(low);
+                                    edited.colorMax = float(high);
+                                    edited.colorAutoRange = false;
+                                    edited.colorAllFramesRange = false;
+                                    changed = true;
+                                }
+                                ImGui::EndDisabled();
+                                if (!hasPR)
+                                    ImGui::TextDisabled("The property has no finite values on this frame.");
+                            } else {
+                                double low = edited.colorMin, high = edited.colorMax;
+                                if (scrubBar("##Color start", &low, sMin, sMax, "%.4g", nullptr,
+                                             0, "START")) {
+                                    edited.colorMin = float(low);
+                                    edited.colorAllFramesRange = false;
+                                    changed = true;
+                                }
+                                if (scrubBar("##Color end", &high, sMin, sMax, "%.4g", nullptr,
+                                             0, "END")) {
+                                    edited.colorMax = float(high);
+                                    edited.colorAllFramesRange = false;
+                                    changed = true;
+                                }
+                            }
                         }
                         bool automatic = edited.colorAutoRange;
                         if (ImGui::Checkbox("Automatic range", &automatic)) { edited.colorAutoRange = automatic; changed = true; }
@@ -4801,19 +6030,14 @@ struct App {
                 if (cell) {
                     ImGui::Combo("Cell dimensionality", &cellDimension, "2D\0" "3D\0");
                     ImGui::ColorEdit4("Cell line color", cellColor, ImGuiColorEditFlags_AlphaBar);
-                    ImGui::SliderFloat("Line width", &cellWidth, .5f, 4.f, "%.1f px");
+                    if (scrubBar("##Cell line width scene", &cellWidth, .5f, 4.f, "%.1f", "px")) {}
                     ImGui::SliderFloat("Glow", &cellGlow, 0.f, 1.f, "%.2f");
                     ImGui::Checkbox("Dashed secondary edges", &cellDashed); ImGui::Checkbox("Show cell labels", &cellLabels);
                     ImGui::TextDisabled("PBC: %s %s %s", source.pbc[0]?"X":"-", source.pbc[1]?"Y":"-", source.pbc[2]?"Z":"-");
                 }
-                heading("Data source");
-                ImGui::TextWrapped("%s", path.empty() ? "Generated FCC crystal"
-                                                      : utf8(path.wstring()).c_str());
-                ImGui::TextDisabled("Reader: %s", readerName.c_str());
-                ImGui::TextDisabled("Trajectory: %zu frame(s)", std::max<size_t>(frames.size(), 1));
                 heading("Particle appearance");
                 if (focusParticleAppearance) { ImGui::SetScrollHereY(0.f); focusParticleAppearance = false; }
-                ImGui::SliderFloat("Radius", &radius, .02f, 2.f, "%.2f");
+                if (scrubBar("##Particle radius", &radius, .02f, 2.f, "%.2f", "x")) {}
                 const char *shapes = "Sphere / Ellipsoid\0Circle\0Cube / "
                                      "Box\0Cylinder\0Spherocylinder\0Square\0Mesh / User-defined\0";
                 ImGui::Combo("Default shape", &particleShape, shapes);
@@ -5089,7 +6313,32 @@ struct App {
                 break;
             }
         }
+        // Merge Chinese button glyphs into the base font while it is still
+        // the atlas's active destination. The heading font is added later.
+        ImFontGlyphRangesBuilder chineseBuilder;
+        chineseBuilder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+        chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位");
+        static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
+        chineseBuilder.AddRanges(extraRanges);
+        ImVector<ImWchar> chineseRanges;
+        chineseBuilder.BuildRanges(&chineseRanges);
+        {
+            ImFontConfig cjkMerge{};
+            cjkMerge.MergeMode = true;
+            for (const char *cjkFile : {"C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/Deng.ttf",
+                                        "C:/Windows/Fonts/msyh.ttc"}) {
+                if (io.Fonts->AddFontFromFileTTF(cjkFile, float(preferences.size) * uiScale,
+                                                 &cjkMerge, chineseRanges.Data))
+                    break;
+            }
+        }
         headingFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeuib.ttf", float(preferences.size)*uiScale);
+        {
+            ImFontConfig headingMerge{};
+            headingMerge.MergeMode = true;
+            io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/simhei.ttf",
+                float(preferences.size)*uiScale, &headingMerge, chineseRanges.Data);
+        }
         ImGui_ImplDX11_CreateDeviceObjects();
     }
     void startDataExport(const std::filesystem::path &destination) {
@@ -5323,7 +6572,8 @@ struct App {
         ImGui::SetNextWindowSize({U(540),U(preferences.size >= 19 ? 480.f : 410.f)});
         if (ImGui::BeginPopupModal("Settings", nullptr, ImGuiWindowFlags_NoResize)) {
             heading("APPEARANCE");
-            bool changed = ImGui::Combo("Theme", &preferences.theme, "Slate dark\0Classic light\0Midnight\0");
+            bool changed = ImGui::Combo("Theme", &preferences.theme,
+                                        "View mode dark\0Classic light\0Midnight\0");
             bool fontChanged = ImGui::Combo("Font", &preferences.font, "Segoe UI\0Arial\0Consolas\0");
             fontChanged |= ImGui::SliderInt("Font size", &preferences.size, 14,20,"%d px");
             if (changed || fontChanged) {
@@ -5370,13 +6620,21 @@ struct App {
                 ImGui::BeginDisabled();
                 ImGui::Selectable(name);
                 ImGui::EndDisabled();
+                // P12: muted entries carry the mono PLANNED badge.
+                const ImVec2 r = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddText({r.x - ImGui::CalcTextSize("PLANNED").x - U(8), r.y - ImGui::GetTextLineHeight() - U(1)},
+                                                    IM_COL32(107, 114, 122, 255), "PLANNED");
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("Not implemented. This entry does not execute an algorithm.");
             };
             auto beginCard = [&](const char *title) {
                 ImGui::BeginChild(title,{0,0},ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
                                   ImGuiWindowFlags_NoScrollbar);
-                heading(title);
+                // P12: amber group caption (design: amber uppercase headers).
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(ImGuiCol_NavCursor));
+                ImGui::TextUnformatted(title);
+                ImGui::PopStyleColor();
+                ImGui::Separator();
             };
             auto endCard = [&] { ImGui::EndChild(); };
             if (ImGui::BeginTable("Modifier categories",4,ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
@@ -5554,6 +6812,37 @@ struct App {
             closePalette();
         ImGui::End();
     }
+    // P12 bottom status strip (design: mono status row #0f1113): the newest
+    // status message plus particle / selection / tool / fps facts. The
+    // viewport overlay still fades the newest message in the active view.
+    void statusStrip(float w, float h) {
+        fixed("##status-strip", 0, h - statusHeight(), w, statusHeight());
+        if (creationMode) {
+            ImGui::TextColored({0.29f,0.87f,0.51f,1},"创作");
+            ImGui::SameLine();
+            ImGui::TextDisabled("点击选择 · Shift 多选 · 拖动框选 · 中键旋转 · 滚轮缩放 · Del 删除");
+            ImGui::SameLine(std::max(U(900),w-U(370)));
+            ImGui::TextDisabled("%zu 原子 · 选中 %d  单位 Å (1 Å = 0.1 nm)",
+                source.atoms.size(),creationPick >= 0 ? 1 : 0);
+            ImGui::End();
+            return;
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(12), U(4)});
+        ImGui::PushStyleColor(ImGuiCol_Text, playing ? IM_COL32(240, 164, 49, 255)
+                                                     : IM_COL32(87, 171, 90, 255));
+        ImGui::TextUnformatted(status.c_str());
+        ImGui::PopStyleColor();
+        ImGui::SameLine(U(420));
+        ImGui::TextDisabled("%s particles", number(result.data.atoms.size()).c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s selected", number(selectedCount).c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("tool %s", viewportTool == 0 ? "zoom"
+                                     : viewportTool == 1 ? "pan"
+                                     : viewportTool == 2 ? "orbit" : "fov");
+        ImGui::PopStyleVar();
+        ImGui::End();
+    }
     void ui() {
         poll();
         editCheckpoint.beginFrame(ImGui::IsMouseDown(ImGuiMouseButton_Left));
@@ -5641,13 +6930,25 @@ struct App {
         }
         if (playing && !busy && frames.size() > 1 && ImGui::GetTime() - lastFrame > 1 / fps) {
             lastFrame = ImGui::GetTime();
-            load(path, (current + 1) % int(frames.size()));
+            const int next = current + 1;
+            if (next < int(frames.size()))
+                load(path, next);
+            else if (loopPlayback)
+                load(path, 0);
+            else
+                playing = false;
         }
         float w = io.DisplaySize.x, h = io.DisplaySize.y;
         top(w);
-        if (showWorkspace) left(h);
-        right(w, h);
-        center(w, h);
+        if (creationMode) {
+            creationWorkspace(w, h);
+        } else {
+            if (showWorkspace) left(h);
+            pipelinePanel(h);
+            right(w, h);
+            center(w, h);
+        }
+        statusStrip(w, h);
         catalog();
         settings();
         commandPalette();
@@ -5750,7 +7051,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
              smokeColorLegend = false, smokeBondPairs = false, smokeInspectorNode = false,
              smokeHistogram = false, smokeTypesPanel = false, smokePalette = false,
-             smokeMenu = false;
+             smokeMenu = false, smokeCreation = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
@@ -5765,6 +7066,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (a == L"--smoke-types-panel") smokeTypesPanel = true;
             else if (a == L"--palette") smokePalette = true;
             else if (a == L"--menu") smokeMenu = true;
+            else if (a == L"--smoke-creation") smokeCreation = true;
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -5804,7 +7106,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", 17);
         uiScale = std::max(1.f, GetDpiForWindow(window)/96.f);
-        theme();
+        theme(0); // P12: the redesigned "View mode dark" palette is the startup default.
         ImGui_ImplWin32_Init(window);
         ImGui_ImplDX11_Init(gpu.device.Get(), gpu.context.Get());
         SetWindowPos(window, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
@@ -5873,6 +7175,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             int ticks = 0;
             bool inspectorSmokeStarted = false;
             bool bondSmokeStarted = false;
+            bool creationSmokeStarted = false;
             while (!done) {
                 MSG msg;
                 while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -5901,6 +7204,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 } catch (const std::exception &e) {
                     app.error = e.what();
                 }
+                if (smokeCreation && !creationSmokeStarted && !app.documentsBusy() &&
+                    !app.result.data.atoms.empty()) {
+                    app.openCreationTab();
+                    creationSmokeStarted = app.creationMode;
+                }
                 if (smokeInspectorNode && !inspectorSmokeStarted && !app.busy &&
                     !app.indexing && !app.pipelineBusy) {
                     app.inspectPipelineNode(0);
@@ -5922,12 +7230,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     bondSmokeStarted = true;
                 }
                 ImGui::Render();
-                float clear[4] = {.15f, .17f, .2f, 1};
+                float clear[4] = {.086f, .094f, .106f, 1}; // #16181b design background
                 gpu.context->OMSetRenderTargets(1, gpu.back.GetAddressOf(), nullptr);
                 gpu.context->ClearRenderTargetView(gpu.back.Get(), clear);
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
                 if (smoke && !app.busy && !app.pipelineBusy && !app.inspectorBusy &&
-                    (!smokeInspectorNode || inspectorSmokeStarted) && ++ticks >= smoke) {
+                    (!smokeInspectorNode || inspectorSmokeStarted) &&
+                    (!smokeCreation || creationSmokeStarted) && ++ticks >= smoke) {
                     if (!shot.empty()) {
                         // Capture before the error abort below so a failing
                         // run still documents the dialog it died on.

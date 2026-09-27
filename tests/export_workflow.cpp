@@ -198,6 +198,20 @@ int main() {
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
             frame();
+            const int originalTab = app.activeTab;
+            const size_t originalTabCount = app.tabs.size();
+            const size_t originalAtomCount = app.result.data.atoms.size();
+            click("toolbar.creation-mode");
+            frame();
+            requireExport(app.creationMode && app.tabs.size() == originalTabCount + 1 &&
+                              app.activeTab != originalTab &&
+                              app.source.atoms.size() == originalAtomCount &&
+                              app.uiTestItems.contains("creation.return-view"),
+                          "Creation Mode opens an editable copy in a separate workspace tab");
+            click("creation.return-view");
+            frame();
+            requireExport(!app.creationMode && app.activeTab == originalTab,
+                          "leaving Creation Mode restores the original view tab");
             // The compact icon row replaced the Pipeline/Render/Analysis/
             // System text tab bar; each icon switches the panel section.
             requireExport(app.uiTestItems.contains("panel.tab.pipeline") &&
