@@ -170,6 +170,7 @@ class Renderer {
     ComPtr<ID3D11GeometryShader> bondGS;
     ComPtr<ID3D11InputLayout> bondLayout;
     UINT bondVertexCount = 0;
+    bool bondDisplayOmitted = false;
     // Translucent slice-plane overlay: an unlit, alpha-blended polygon drawn
     // after atoms and bonds with depth testing but no depth writes.
     ComPtr<ID3D11VertexShader> planeVS;
@@ -182,6 +183,8 @@ class Renderer {
     UINT planeVertexCount = 0;
 
   public:
+    bool bondsUploaded() const { return bondVertexCount != 0; }
+    bool bondsOmittedForPerformance() const { return bondDisplayOmitted; }
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swap;
@@ -554,7 +557,9 @@ float4 slicePlanePixel():SV_TARGET { return color; }
     void upload(const atomx::Dataset &d, const std::vector<uint8_t> &selected,
                 const std::vector<uint8_t> &colorSelected = {}) {
         std::vector<BondVertex> bondVertices;
-        bondVertices.reserve(d.bonds.size() * 4);
+        bondDisplayOmitted = d.bonds.size() > atomx::interactiveBondBudget;
+        if (!bondDisplayOmitted && d.bondStyle.visible)
+            bondVertices.reserve(d.bonds.size() * 4);
         const bool particleOverride = d.particleColors.size() == d.atoms.size();
         const auto atomColor = [&](uint32_t index) {
             const auto &atom = d.atoms[index];
@@ -569,6 +574,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             }
             return result;
         };
+        if (!bondDisplayOmitted && d.bondStyle.visible)
         for (const auto &bond : d.bonds) {
             if (bond.a >= d.atoms.size() || bond.b >= d.atoms.size()) continue;
             if (!d.bondStyle.showPeriodicImages &&
@@ -865,7 +871,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             DirectX::XMStoreFloat4x4(&bondCamera.viewProjection, view * proj);
             bondCamera.viewport={float(t.w),float(t.h)};
             bondCamera.width=d.bondStyle.width;
-            bondCamera.radius=d.bondStyle.radius;
+            bondCamera.radius=d.bonds.size() > atomx::cylinderBondBudget
+                ? 0.f : d.bondStyle.radius;
             bondCamera.color={d.bondStyle.color[0],d.bondStyle.color[1],d.bondStyle.color[2],d.bondStyle.color[3]};
             bondCamera.colorByType=d.bondStyle.colorByType ? 1.f : 0.f;
             context->UpdateSubresource(bondConstants.Get(),0,nullptr,&bondCamera,0,0);

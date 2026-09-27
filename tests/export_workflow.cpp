@@ -198,6 +198,10 @@ int main() {
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
             frame();
+            app.pipelinePane = 268.f;
+            app.propertiesPane = 316.f;
+            app.workspacePane = 220.f;
+            app.inspectorPane = 180.f;
             app.showTable = true;
             frame();
             requireExport(app.uiTestItems.contains("layout.inspector-splitter") &&
@@ -205,6 +209,31 @@ int main() {
                           app.uiTestItems.contains("layout.Pipeline edge-splitter") &&
                           app.uiTestItems.contains("layout.Properties edge-splitter"),
                           "major normal-mode panels expose draggable splitters");
+            for (const auto &name : {"layout.Pipeline edge-splitter",
+                                     "layout.Properties edge-splitter"}) {
+                const auto splitter = app.uiTestItems.at(name);
+                const float x = (splitter.min.x + splitter.max.x) * .5f;
+                const float y = (splitter.min.y + splitter.max.y) * .5f;
+                float &pane = name == std::string("layout.Pipeline edge-splitter")
+                    ? app.pipelinePane : app.propertiesPane;
+                const float before = pane;
+                guiIO.AddMousePosEvent(x,y); frame();
+                guiIO.AddMouseButtonEvent(0,true); frame();
+                guiIO.AddMousePosEvent(x+60.f,y); frame();
+                if (!(std::abs(pane-before)>20.f)) {
+                    const auto item=app.uiTestItems.at(name);
+                    throw std::runtime_error(std::string("side-panel splitter drag failed: ")+name+
+                        " rect="+std::to_string(splitter.min.x)+","+std::to_string(splitter.min.y)+
+                        "-"+std::to_string(splitter.max.x)+","+std::to_string(splitter.max.y)+
+                        " hovered="+(item.hovered?"yes":"no")+
+                        " clicked="+(item.clicked?"yes":"no")+
+                        " before="+std::to_string(before)+" after="+std::to_string(pane));
+                }
+                app.layoutDirty=false;
+                guiIO.AddMouseButtonEvent(0,false); frame();
+                pane=before;
+                frame();
+            }
             {
                 const auto splitter = app.uiTestItems.at("layout.inspector-splitter");
                 const float x = (splitter.min.x + splitter.max.x) * .5f;
@@ -213,12 +242,19 @@ int main() {
                 guiIO.AddMousePosEvent(x, y); frame();
                 guiIO.AddMouseButtonEvent(0, true); frame();
                 guiIO.AddMousePosEvent(x, y + 80.f); frame();
-                requireExport(app.inspectorPane < before - 30.f,
-                              "dragging inspector boundary down must return space to viewports");
+                if (!(app.inspectorPane < before - 30.f)) {
+                    const auto item=app.uiTestItems.at("layout.inspector-splitter");
+                    throw std::runtime_error("inspector splitter drag failed: rect="+
+                        std::to_string(splitter.min.x)+","+std::to_string(splitter.min.y)+"-"+
+                        std::to_string(splitter.max.x)+","+std::to_string(splitter.max.y)+
+                        " hovered="+(item.hovered?"yes":"no")+
+                        " clicked="+(item.clicked?"yes":"no")+
+                        " before="+std::to_string(before)+
+                        " after="+std::to_string(app.inspectorPane));
+                }
                 app.layoutDirty = false;
                 guiIO.AddMouseButtonEvent(0, false); frame();
-                app.inspectorPane = before;
-                app.preferences.inspectorPane = int(before);
+                app.inspectorPane = 400.f;
                 app.showTable = false;
                 frame();
             }

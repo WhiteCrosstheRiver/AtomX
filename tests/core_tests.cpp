@@ -1730,6 +1730,17 @@ int main() {
         auto pairCutoffResult=evaluate(pairCutoffData,{pairCutoffBonds});
         require(pairCutoffResult.data.bonds==std::vector<Bond>{{0,1,{0,0,0}}},
                 "type-pair bond cutoffs use the symmetric type-pair threshold");
+        Dataset denseBondData=crystal(24); // The 55,296-atom Cu/Ni UI fixture.
+        Modifier denseBondNode{Op::CreateBonds};
+        denseBondNode.value=3.2f;
+        bool denseBondsRejected=false;
+        try { (void)evaluate(denseBondData,{denseBondNode}); }
+        catch (const ModifierExecutionError &e) {
+            denseBondsRejected=e.nodeIndex==0 &&
+                std::string(e.what()).find("Bond budget exceeded")!=std::string::npos;
+        }
+        require(denseBondsRejected,
+                "dense cutoff bond creation stops at the interactive budget before allocating millions of bonds");
         pairCutoffBonds.bondCylinders=true;
         pairCutoffBonds.bondRadius=.14f;
         auto cylinderBondResult=evaluate(pairCutoffData,{pairCutoffBonds});

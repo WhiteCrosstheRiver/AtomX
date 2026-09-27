@@ -320,6 +320,12 @@ int main(int argc, char **argv) {
         renderer.draw(t,bonded,cam,.18f,0,0,0,0,0,1,false,false,false,bg);
         if (imageHash(t)==styledBondImage)
             throw std::runtime_error("Bond appearance settings must change rendered output");
+        bonded.bonds.assign(atomx::interactiveBondBudget+1, {0,1,{0,0,0}});
+        renderer.upload(bonded,{});
+        if (!renderer.bondsOmittedForPerformance() || renderer.bondsUploaded())
+            throw std::runtime_error("Oversized external bond topology must skip GPU geometry upload");
+        bonded.bonds.resize(1);
+        renderer.upload(bonded,{});
         atomx::Dataset typed;
         typed.species = {"A", "B"};
         typed.atoms = {{-.55f, 0, 0, 0}, {.55f, 0, 0, 1}};

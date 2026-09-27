@@ -97,6 +97,8 @@ struct BondStyle {
     bool colorByType = false;
     bool showPeriodicImages = true;
 };
+inline constexpr size_t interactiveBondBudget = 200000;
+inline constexpr size_t cylinderBondBudget = 20000;
 struct Dataset {
     std::vector<Atom> atoms;
     std::vector<std::string> species;
@@ -3255,6 +3257,8 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     r.data.bondStyle.colorByType = m.bondColorByType;
                     r.data.bondStyle.showPeriodicImages = m.bondShowPeriodicImages;
                     if (m.discardExistingBonds) r.data.bonds.clear();
+                    if (r.data.bonds.size() > interactiveBondBudget)
+                        throw std::runtime_error("Too many bonds for interactive display; reduce the cutoff or filter the structure");
                     double searchCutoff=m.value;
                     if (m.bondTypeCutoffsEnabled)
                         searchCutoff=*std::max_element(m.bondTypeCutoffs.begin(),m.bondTypeCutoffs.end());
@@ -3279,7 +3283,9 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                                                     const double pairCutoff=m.bondTypeCutoffs[a*typeCount+b];
                                                     if (distanceSquared>pairCutoff*pairCutoff) return;
                                                 }
-                                                r.data.bonds.push_back({i, j, image});
+                                                 if (r.data.bonds.size() >= interactiveBondBudget)
+                                                     throw std::runtime_error("Bond budget exceeded (200,000); reduce the cutoff for this dense structure");
+                                                 r.data.bonds.push_back({i, j, image});
                                             }, cancel);
                     }
                     auto key = [](Bond &bond) {

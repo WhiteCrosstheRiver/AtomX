@@ -1304,7 +1304,12 @@ struct App {
         if (op == Op::CommonNeighborAnalysis || op == Op::CreateBonds ||
             op == Op::CoordinationAnalysis || op == Op::ClusterAnalysis ||
             op == Op::RadialDistribution || op == Op::SelectOverlapping) m.value = cutoff;
-        if (op == Op::CreateBonds) m.value = 3.2f; // OVITO default cutoff radius
+        if (op == Op::CreateBonds) {
+            // Dense structures can produce millions of pairs at 3.2 A. Require
+            // an explicit physical cutoff instead of starting a costly job.
+            m.value = result.data.atoms.size() > 10000 ? 0.f : 3.2f;
+            if (result.data.atoms.size() > 10000) m.bondCylinders = false;
+        }
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
         if (op == Op::BondLengthDistribution) m.type = 64;
         if (op == Op::BondAngleDistribution) m.type = 90;
@@ -1320,7 +1325,9 @@ struct App {
         if (op == Op::ComputeProperty) m.property = "x*x + y*y + z*z";
         modifierGraph.insert(makeNode(m));
         update();
-        status = std::string("Added ") + opName(op);
+        status = op == Op::CreateBonds && result.data.atoms.size() > 10000
+            ? "Large structure: set a bond cutoff explicitly; fast lines are the default"
+            : std::string("Added ") + opName(op);
     }
     // Display-only synchronous preview of the simulation cell entering pipeline
     // node `nodeIndex`: applies the cell-affecting modifiers upstream without
@@ -3942,7 +3949,7 @@ struct App {
         auto avail = ImGui::GetContentRegionAvail();
         std::vector<float> originalRadii;
         const bool compactBondView = !creationMode && result.data.bondStyle.visible &&
-            result.data.bondStyle.radius > 0 && !result.data.bonds.empty();
+            result.data.bondStyle.radius > 0 && gpu.bondsUploaded();
         if (creationMode || compactBondView) {
             const float particleScale = creationMode ? .43f : .50f;
             originalRadii.reserve(gpu.styles.size());
@@ -5149,12 +5156,13 @@ struct App {
     }
     void verticalSplitter(const char *id, float x, float h, float &size,
                           float minimum, float maximum, float sign, float reset) {
-        ImGui::SetNextWindowPos({x - U(4), topInset()});
-        ImGui::SetNextWindowSize({U(8), h - topInset() - statusHeight()});
+        ImGui::SetNextWindowPos({x - U(7), topInset()});
+        ImGui::SetNextWindowSize({U(14), h - topInset() - statusHeight()});
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, {1, 1});
         const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBackground |
-            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus;
+            ImGuiWindowFlags_NoNav;
         ImGui::Begin(id, nullptr, flags);
         ImGui::InvisibleButton("##splitter", ImGui::GetContentRegionAvail());
         recordUiTestItem(std::string("layout.") + id + "-splitter");
@@ -5175,8 +5183,14 @@ struct App {
         const ImVec2 mn = ImGui::GetWindowPos(), mx = ImGui::GetWindowSize();
         ImGui::GetWindowDrawList()->AddLine({x, mn.y}, {x, mn.y + mx.y},
             active || hovered ? ImGui::GetColorU32(accent) : ImGui::GetColorU32(ImGuiCol_Separator));
+        const float midY = mn.y + mx.y * .5f;
+        ImGui::GetWindowDrawList()->AddRectFilled({x-U(3), midY-U(24)},
+            {x+U(3), midY+U(24)}, ImGui::GetColorU32(active || hovered ? ImGuiCol_ButtonHovered : ImGuiCol_Button), U(3));
+        for (int i=-1;i<=1;++i)
+            ImGui::GetWindowDrawList()->AddCircleFilled({x,midY+U(9*i)},U(1.4f),
+                active || hovered ? ImGui::GetColorU32(accent) : ImGui::GetColorU32(ImGuiCol_TextDisabled));
         ImGui::End();
-        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(2);
     }
     void layoutSplitters(float w, float h) {
         const float minCenter = U(320);
@@ -6687,6 +6701,8 @@ struct App {
                                 checkpoint(); m.value = bondCutoff; update();
                             }
                             recordUiTestItem(std::string("pipeline.bonds-cutoff.")+m.id, "Cutoff radius");
+                            if (result.data.atoms.size() > 10000 && m.value <= 0)
+                                ImGui::TextWrapped("Large structure: choose a small cutoff to create bonds. Atom rendering remains GPU accelerated.");
                             ImGui::SeparatorText("Options");
                             bool discard = m.discardExistingBonds;
                             if (ImGui::Checkbox("Discard existing bonds", &discard)) {
@@ -6764,6 +6780,10 @@ struct App {
                             float bondRadius = m.bondRadius;
                             auto color = m.bondColor;
                             bool changed = ImGui::Checkbox("Show bonds", &visible);
+                            if (result.data.bonds.size() > atomx::interactiveBondBudget)
+                                ImGui::TextWrapped("Bond display paused: this dataset exceeds the interactive bond budget.");
+                            else if (result.data.bonds.size() > atomx::cylinderBondBudget && cylinders)
+                                ImGui::TextWrapped("Fast line preview is active for this bond count.");
                             const char *representations[] = {"Screen-space lines", "3D cylinders"};
                             int representation = cylinders ? 1 : 0;
                             if (ImGui::Combo("Bond representation", &representation, representations, 2)) {
