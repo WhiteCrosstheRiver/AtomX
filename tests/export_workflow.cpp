@@ -198,6 +198,30 @@ int main() {
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
             frame();
+            app.showTable = true;
+            frame();
+            requireExport(app.uiTestItems.contains("layout.inspector-splitter") &&
+                          app.uiTestItems.contains("layout.timeline-splitter") &&
+                          app.uiTestItems.contains("layout.Pipeline edge-splitter") &&
+                          app.uiTestItems.contains("layout.Properties edge-splitter"),
+                          "major normal-mode panels expose draggable splitters");
+            {
+                const auto splitter = app.uiTestItems.at("layout.inspector-splitter");
+                const float x = (splitter.min.x + splitter.max.x) * .5f;
+                const float y = (splitter.min.y + splitter.max.y) * .5f;
+                const float before = app.inspectorPane;
+                guiIO.AddMousePosEvent(x, y); frame();
+                guiIO.AddMouseButtonEvent(0, true); frame();
+                guiIO.AddMousePosEvent(x, y + 80.f); frame();
+                requireExport(app.inspectorPane < before - 30.f,
+                              "dragging inspector boundary down must return space to viewports");
+                app.layoutDirty = false;
+                guiIO.AddMouseButtonEvent(0, false); frame();
+                app.inspectorPane = before;
+                app.preferences.inspectorPane = int(before);
+                app.showTable = false;
+                frame();
+            }
             const int originalTab = app.activeTab;
             const size_t originalTabCount = app.tabs.size();
             const size_t originalAtomCount = app.result.data.atoms.size();

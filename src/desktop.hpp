@@ -18,6 +18,8 @@ inline std::filesystem::path settingsPath() {
 }
 struct Preferences {
     int theme = 0, font = 0, size = 18;
+    int workspacePane = 220, pipelinePane = 268, propertiesPane = 316;
+    int inspectorPane = 180, timelinePane = 94;
     // Most recently opened files, persisted across launches and shown by the
     // File > Recent Files submenu. Newest entry first, at most 8 kept.
     static constexpr int maxRecentFiles = 8;
@@ -27,6 +29,11 @@ struct Preferences {
         theme = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Theme", 0, p.c_str())), 0, 2);
         font = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Font", 0, p.c_str())), 0, 2);
         size = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Size", 18, p.c_str())), 14, 20);
+        workspacePane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"WorkspaceWidth", 220, p.c_str())), 150, 480);
+        pipelinePane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"PipelineWidth", 268, p.c_str())), 180, 520);
+        propertiesPane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"PropertiesWidth", 316, p.c_str())), 200, 560);
+        inspectorPane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"InspectorHeight", 180, p.c_str())), 90, 900);
+        timelinePane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"TimelineHeight", 94, p.c_str())), 56, 300);
         recentFiles.clear();
         for (int i = 0; i < maxRecentFiles; ++i) {
             wchar_t buffer[32768]{};
@@ -41,6 +48,12 @@ struct Preferences {
             if (!WritePrivateProfileStringW(L"Appearance", entry.first,
                                             std::to_wstring(entry.second).c_str(), p.c_str()))
                 throw std::runtime_error("Unable to save appearance settings");
+        for (auto entry : {std::pair{L"WorkspaceWidth",workspacePane},
+                           {L"PipelineWidth",pipelinePane}, {L"PropertiesWidth",propertiesPane},
+                           {L"InspectorHeight",inspectorPane}, {L"TimelineHeight",timelinePane}})
+            if (!WritePrivateProfileStringW(L"Layout",entry.first,
+                                            std::to_wstring(entry.second).c_str(),p.c_str()))
+                throw std::runtime_error("Unable to save panel layout");
         // Writing an empty value removes the key, so a shorter list shrinks.
         for (int i = 0; i < maxRecentFiles; ++i) {
             const auto key = L"File" + std::to_wstring(i);

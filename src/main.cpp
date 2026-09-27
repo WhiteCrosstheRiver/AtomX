@@ -629,6 +629,9 @@ struct App {
     ImVec2 catalogAnchor{};
     char modifierSearch[128]{};
     bool showWorkspace = false, indexing = false;
+    float workspacePane = 220, pipelinePane = 268, propertiesPane = 316;
+    float inspectorPane = 180, timelinePane = 94;
+    bool layoutDirty = false;
     int pendingFrame = -1;
     Renderer &gpu;
     Dataset source = crystal(24);
@@ -870,6 +873,11 @@ struct App {
     float newAlpha = 90.f, newBeta = 90.f, newGamma = 90.f;
     App(HWND w, Renderer &r) : window(w), gpu(r) {
         preferences.load();
+        workspacePane = float(preferences.workspacePane);
+        pipelinePane = float(preferences.pipelinePane);
+        propertiesPane = float(preferences.propertiesPane);
+        inspectorPane = float(preferences.inspectorPane);
+        timelinePane = float(preferences.timelinePane);
         theme(preferences.theme);
         refreshFont = true;
         logo = desktop::loadLogo(gpu.device.Get(), icon);
@@ -2654,10 +2662,10 @@ struct App {
             d->AddLine({c.x,c.y-9},{c.x,c.y},color,1.7f);
         }
     }
-    float pipelineWidth() const { return U(268); }   // P12 left panel column
-    float workspaceWidth() const { return showWorkspace ? U(220) : 0.f; }
+    float pipelineWidth() const { return U(pipelinePane); }
+    float workspaceWidth() const { return showWorkspace ? U(workspacePane) : 0.f; }
     float leftWidth() const { return workspaceWidth() + pipelineWidth(); }
-    float rightWidth() const { return U(316); }      // P12 inspector column
+    float rightWidth() const { return U(propertiesPane); }
     float statusHeight() const { return U(24); }     // P12 bottom status strip
     float titleBarHeight() const { return U(42); }
     float toolBarHeight() const { return U(34); }
@@ -4290,8 +4298,8 @@ struct App {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",tip);
         return pressed;
     }
-    void timeline() {
-        ImGui::BeginChild("Trajectory timeline", {-1,U(94)}, ImGuiChildFlags_Borders,
+    void timeline(float height) {
+        ImGui::BeginChild("Trajectory timeline", {-1,height}, ImGuiChildFlags_Borders,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         // Compact OVITO-style spacing for the whole timeline area.
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(4), U(2)});
@@ -4404,9 +4412,13 @@ struct App {
         if (iconButton("timeline.key", 0xE192, "Key", "Toggle auto-key mode", autoKey, square))
             autoKey = !autoKey;
         ImGui::PopStyleVar(2);
+        if (height < U(90)) {
+            ImGui::EndChild();
+            return;
+        }
         auto p = ImGui::GetCursorScreenPos();
-        float width = ImGui::GetContentRegionAvail().x, height = U(47);
-        ImGui::InvisibleButton("##frame ruler", {width,height}, ImGuiButtonFlags_EnableNav);
+        float width = ImGui::GetContentRegionAvail().x, rulerHeight = U(47);
+        ImGui::InvisibleButton("##frame ruler", {width,rulerHeight}, ImGuiButtonFlags_EnableNav);
         bool hovered = ImGui::IsItemHovered(), focused = ImGui::IsItemFocused();
         recordUiTestItem("timeline.ruler");
         auto *d = ImGui::GetWindowDrawList();
@@ -4442,7 +4454,7 @@ struct App {
                             p.y+U(4)},IM_COL32(107,114,122,255),label.c_str());
             }
         }
-        d->AddLine({knobX,p.y+U(12)},{knobX,p.y+height-U(2)},IM_COL32(240,164,49,255),U(1));
+        d->AddLine({knobX,p.y+U(12)},{knobX,p.y+rulerHeight-U(2)},IM_COL32(240,164,49,255),U(1));
         {
             const float cy = p.y + U(14.5f), r = U(4.5f);
             d->AddQuadFilled({knobX, cy - r}, {knobX + r, cy}, {knobX, cy + r}, {knobX - r, cy},
@@ -4590,6 +4602,31 @@ struct App {
         recordUiTestItem("lattice.properties");
         ImGui::EndChild();
     }
+    void horizontalSplitter(const char *id, float &size, float minimum, float maximum,
+                            bool growsUp, const char *tooltip) {
+        ImGui::PushID(id);
+        const ImVec2 start = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##splitter", {-1, U(7)});
+        const bool hovered = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
+        recordUiTestItem(std::string("layout.") + id + "-splitter");
+        if (hovered || active) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        if (hovered) ImGui::SetTooltip("%s", tooltip);
+        if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.f)) {
+            const float delta = ImGui::GetIO().MouseDelta.y / uiScale * (growsUp ? -1.f : 1.f);
+            if (delta != 0.f) {
+                size = std::clamp(size + delta, minimum, maximum);
+                layoutDirty = true;
+            }
+        }
+        if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            size = !strcmp(id, "inspector") ? 180.f : 94.f;
+            layoutDirty = true;
+        }
+        const ImU32 color = active || hovered ? ImGui::GetColorU32(accent) : ImGui::GetColorU32(ImGuiCol_Separator);
+        ImGui::GetWindowDrawList()->AddLine({start.x, start.y + U(3)},
+                                            {start.x + ImGui::GetItemRectSize().x, start.y + U(3)}, color);
+        ImGui::PopID();
+    }
     void center(float w, float h) {
         fixed("Viewport workspace", leftWidth(), topInset(), w - leftWidth() - rightWidth(),
               h - topInset() - statusHeight());
@@ -4598,12 +4635,15 @@ struct App {
         if (creationMode) modelingToolbar();
         if (showLatticePanel) latticePanel();
         auto avail = ImGui::GetContentRegionAvail();
-        float dataH = showTable ? U(280) : 0;
+        const float handleH = U(7);
         float gap = ImGui::GetStyle().ItemSpacing.y;
+        const float timelineH = std::clamp(U(timelinePane), U(56), std::max(U(56), avail.y * .32f));
+        const float maxDataH = std::max(U(90), avail.y - timelineH - ImGui::GetFrameHeight() - U(140) - U(35));
+        const float dataH = showTable ? std::clamp(U(inspectorPane), U(90), maxDataH) : 0.f;
         // Exact stack: viewports, button row, optional inspector, timeline.
         float sceneH = std::max(U(120),
-                                avail.y - dataH - U(94) - ImGui::GetFrameHeight() -
-                                    gap * (showTable ? 4 : 3) - U(18));
+                                avail.y - dataH - timelineH - ImGui::GetFrameHeight() -
+                                    gap * (showTable ? 5 : 4) - handleH * (showTable ? 2 : 1) - U(18));
         if (quad) {
             float vw = (avail.x - ImGui::GetStyle().ItemSpacing.x) * .5f, vh = (sceneH - gap) * .5f;
             viewport(0, vw, vh);
@@ -4618,6 +4658,8 @@ struct App {
         ImGui::SameLine();
         ImGui::Text("%s particles  |  %zu selected", number(result.data.atoms.size()).c_str(), selectedCount);
         if (showTable) {
+            horizontalSplitter("inspector", inspectorPane, 90.f, maxDataH / uiScale, true,
+                               "Drag to resize data inspector; double-click to reset");
             ImGui::BeginChild("Inspector", {-1, dataH}, ImGuiChildFlags_Borders);
             std::string inspectLabel = "Final pipeline output";
             if (inspectorNode >= 0 && inspectorNode < int(mods.size()))
@@ -5091,8 +5133,52 @@ struct App {
             }
             ImGui::EndChild();
         }
-        timeline();
+        horizontalSplitter("timeline", timelinePane, 56.f,
+                           std::max(56.f, avail.y * .32f / uiScale), true,
+                           "Drag to resize timeline; double-click to reset");
+        timeline(timelineH);
         ImGui::End();
+    }
+    void verticalSplitter(const char *id, float x, float h, float &size,
+                          float minimum, float maximum, float sign, float reset) {
+        ImGui::SetNextWindowPos({x - U(4), topInset()});
+        ImGui::SetNextWindowSize({U(8), h - topInset() - statusHeight()});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBackground |
+            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus;
+        ImGui::Begin(id, nullptr, flags);
+        ImGui::InvisibleButton("##splitter", ImGui::GetContentRegionAvail());
+        recordUiTestItem(std::string("layout.") + id + "-splitter");
+        const bool hovered = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
+        if (hovered || active) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        if (hovered) ImGui::SetTooltip("Drag to resize panel; double-click to reset");
+        if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.f)) {
+            const float delta = ImGui::GetIO().MouseDelta.x * sign / uiScale;
+            if (delta != 0.f) {
+                size = std::clamp(size + delta, minimum, maximum);
+                layoutDirty = true;
+            }
+        }
+        if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            size = reset;
+            layoutDirty = true;
+        }
+        const ImVec2 mn = ImGui::GetWindowPos(), mx = ImGui::GetWindowSize();
+        ImGui::GetWindowDrawList()->AddLine({x, mn.y}, {x, mn.y + mx.y},
+            active || hovered ? ImGui::GetColorU32(accent) : ImGui::GetColorU32(ImGuiCol_Separator));
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+    void layoutSplitters(float w, float h) {
+        const float minCenter = U(320);
+        if (showWorkspace)
+            verticalSplitter("Workspace edge", workspaceWidth(), h, workspacePane, 150.f,
+                std::max(150.f, (w - pipelineWidth() - rightWidth() - minCenter) / uiScale), 1.f, 220.f);
+        verticalSplitter("Pipeline edge", leftWidth(), h, pipelinePane, 180.f,
+            std::max(180.f, (w - workspaceWidth() - rightWidth() - minCenter) / uiScale), 1.f, 268.f);
+        verticalSplitter("Properties edge", w - rightWidth(), h, propertiesPane, 200.f,
+            std::max(200.f, (w - leftWidth() - minCenter) / uiScale), -1.f, 316.f);
     }
     void homeWorkspace(float w, float h) {
         fixed("Home workspace", 0, topInset(), w, h - topInset() - statusHeight());
@@ -7731,6 +7817,16 @@ struct App {
             pipelinePanel(h);
             right(w, h);
             center(w, h);
+            layoutSplitters(w, h);
+        }
+        if (layoutDirty && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            preferences.workspacePane = int(std::lround(workspacePane));
+            preferences.pipelinePane = int(std::lround(pipelinePane));
+            preferences.propertiesPane = int(std::lround(propertiesPane));
+            preferences.inspectorPane = int(std::lround(inspectorPane));
+            preferences.timelinePane = int(std::lround(timelinePane));
+            try { preferences.save(); layoutDirty = false; }
+            catch (const std::exception &ex) { status = ex.what(); }
         }
         statusStrip(w, h);
         creationDialogs();
