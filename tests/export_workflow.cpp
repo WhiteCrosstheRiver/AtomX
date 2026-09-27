@@ -208,6 +208,11 @@ int main() {
                               app.source.atoms.size() == originalAtomCount &&
                               app.uiTestItems.contains("creation.return-view"),
                           "Creation Mode opens an editable copy in a separate workspace tab");
+            click("creation.properties-toggle");
+            requireExport(!app.creationPropertiesOpen,"creation file properties can collapse");
+            frame();
+            click("creation.properties-toggle");
+            requireExport(app.creationPropertiesOpen,"creation file properties can reopen");
             click("creation.return-view");
             frame();
             requireExport(!app.creationMode && app.activeTab == originalTab,
@@ -666,6 +671,9 @@ int main() {
             const int first=tabs.activeTab;
             requireExport(first!=view && tabs.creationMode && tabs.tabs.size()==3,
                           "view context opens one creation tab");
+            requireExport(tabs.creationSnapshots.size()==1 &&
+                          tabs.creationSnapshots[0].data->atoms.size()==2,
+                          "creation workspace starts with an immutable source snapshot");
             const ImVec2 viewportSize{1000,1000};
             const auto projection=tabs.creationProjection(tabs.result.data,tabs.cameras[3],viewportSize);
             requireExport(tabs.creationScreenRadius(tabs.result.data.atoms[0],projection,viewportSize)>U(12),
@@ -687,16 +695,27 @@ int main() {
             tabs.addAtomAt({1,1,1}); ready();
             requireExport(tabs.source.atoms.size()==3 && !tabs.authorUndo.empty(),
                           "creation edit records history");
+            tabs.saveCreationSnapshot("three atoms");
+            tabs.addAtomAt({2,2,2}); ready();
+            requireExport(tabs.source.atoms.size()==4 &&
+                          tabs.creationSnapshots.back().data->atoms.size()==3,
+                          "later edits do not mutate a saved workspace result");
+            tabs.restoreCreationSnapshot(1); ready();
+            requireExport(tabs.source.atoms.size()==3 && tabs.creationSnapshotSelected==1,
+                          "restoring a snapshot stays in the same tab and records history");
+            tabs.creationPropertiesOpen=false;
             tabs.switchTab(view); ready();
             requireExport(!tabs.creationMode && tabs.source.atoms.size()==2,
                           "creation edit leaves view document intact");
             tabs.openCreationTab(); ready();
             requireExport(tabs.activeTab!=first && tabs.tabs.size()==4 &&
-                          tabs.source.atoms.size()==2 && tabs.authorUndo.empty(),
+                          tabs.source.atoms.size()==2 && tabs.authorUndo.empty() &&
+                          tabs.creationSnapshots.size()==1 && tabs.creationPropertiesOpen,
                           "reopening creates an independent creation copy");
             tabs.switchTab(first); ready();
-            requireExport(tabs.source.atoms.size()==3 && !tabs.authorUndo.empty(),
-                          "creation copy restores its own structure and history");
+            requireExport(tabs.source.atoms.size()==3 && !tabs.authorUndo.empty() &&
+                          tabs.creationSnapshots.size()==2 && !tabs.creationPropertiesOpen,
+                          "creation copy restores its own structure, workspace and panel state");
         }
         ImGui::DestroyContext();
         for (const auto &e : std::filesystem::directory_iterator(dir))

@@ -791,6 +791,10 @@ struct App {
     // fields above; a tab is only a snapshot taken when leaving it.
     enum class CreationTool { Select, Rotate, Pan, Move, Sketch };
     enum class CreationDrag { None, Box, Move, Rotate, Pan, Sketch };
+    struct CreationSnapshot {
+        std::shared_ptr<const Dataset> data;
+        std::string name, time;
+    };
     struct StructureTab {
         uint64_t id = 0, sourceTabId = 0;
         std::string title = "Structure";
@@ -817,6 +821,9 @@ struct App {
         int angleAtom = -1;
         int dihedralAtom = -1;
         std::vector<Dataset> authorUndo, authorRedo;
+        std::vector<CreationSnapshot> snapshots;
+        int selectedSnapshot = -1, propertyPage = 0;
+        bool propertiesOpen = true;
         char element[16] = "O";
     };
     std::vector<StructureTab> tabs;
@@ -831,6 +838,9 @@ struct App {
     bool creationSketch = false;
     CreationTool creationTool = CreationTool::Select;
     std::vector<int> creationSelection;
+    std::vector<CreationSnapshot> creationSnapshots;
+    int creationSnapshotSelected = -1, creationPropertyPage = 0;
+    bool creationPropertiesOpen = true;
     int creationHover = -1;
     ImVec2 creationLastHoverMouse{-1,-1};
     CreationDrag creationDrag = CreationDrag::None;
@@ -1418,6 +1428,10 @@ struct App {
         tab.dihedralAtom = creationDihedral;
         tab.authorUndo = authorUndo;
         tab.authorRedo = authorRedo;
+        tab.snapshots = creationSnapshots;
+        tab.selectedSnapshot = creationSnapshotSelected;
+        tab.propertyPage = creationPropertyPage;
+        tab.propertiesOpen = creationPropertiesOpen;
         snprintf(tab.element, sizeof(tab.element), "%s", creationElement);
         return tab;
     }
@@ -1452,6 +1466,10 @@ struct App {
         creationDihedral = tab.dihedralAtom;
         authorUndo = tab.authorUndo;
         authorRedo = tab.authorRedo;
+        creationSnapshots = tab.snapshots;
+        creationSnapshotSelected = tab.selectedSnapshot;
+        creationPropertyPage = tab.propertyPage;
+        creationPropertiesOpen = tab.propertiesOpen;
         snprintf(creationElement, sizeof(creationElement), "%s", tab.element);
         pipelineCheckpoint.reset();
         pipelineCheckpointNode = SIZE_MAX;
@@ -1509,6 +1527,28 @@ struct App {
         tabs.push_back(std::move(tab));
         activeTab = int(tabs.size()) - 1;
         restoreTab(tabs[size_t(activeTab)]);
+    }
+    void saveCreationSnapshot(std::string name = {}) {
+        if (!creationMode) return;
+        if (creationSnapshots.size()>=24) {
+            status="工作区最多暂存 24 个结果；请删除不需要的快照";
+            return;
+        }
+        if (name.empty()) name="快照 " + std::to_string(creationSnapshots.size()+1);
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        char time[16];
+        snprintf(time,sizeof(time),"%02u:%02u",now.wHour,now.wMinute);
+        creationSnapshots.push_back({std::make_shared<const Dataset>(source),std::move(name),time});
+        creationSnapshotSelected=int(creationSnapshots.size())-1;
+        status="已暂存当前结构到工作区";
+    }
+    void restoreCreationSnapshot(int index) {
+        if (index<0||index>=int(creationSnapshots.size()) || !creationSnapshots[size_t(index)].data)
+            return;
+        const auto snapshot=creationSnapshots[size_t(index)];
+        adoptStructure(*snapshot.data,"已载入工作区快照："+snapshot.name);
+        creationSnapshotSelected=index;
     }
     void configureCrystalPreset(int preset) {
         crystalPreset=preset;
@@ -1628,6 +1668,8 @@ struct App {
         creationSketch = false;
         creationTool = CreationTool::Select;
         creationSelection.clear();
+        creationSnapshots.clear();
+        saveCreationSnapshot("原始 · " + basedOn);
         status = "Creation Mode: " + title;
     }
     void leaveCreationTab() {
@@ -1672,6 +1714,7 @@ struct App {
     }
     void adoptStructure(Dataset data, const std::string &message) {
         rememberStructure();
+        creationSnapshotSelected=-1;
         source = std::move(data);
         frames.clear();
         current = 0;
@@ -1690,6 +1733,7 @@ struct App {
             return;
         }
         rememberStructure();
+        creationSnapshotSelected=-1;
         edit(source);
         source.sourceCount = source.atoms.size();
         source.bounds();
@@ -1805,6 +1849,7 @@ struct App {
                 authorRedo.push_back(source);
                 source = authorUndo.back();
                 authorUndo.pop_back();
+                creationSnapshotSelected=-1;
                 if (authorUndo.empty()) structureEditIsLatest = false;
                 creationPick = creationMeasure = creationAngle = creationDihedral = -1;
                 creationSelection.clear();
@@ -1817,6 +1862,7 @@ struct App {
                 authorUndo.push_back(source);
                 source = authorRedo.back();
                 authorRedo.pop_back();
+                creationSnapshotSelected=-1;
                 creationPick = creationMeasure = creationAngle = creationDihedral = -1;
                 creationSelection.clear();
                 syncAppearance(source.species);
@@ -5067,6 +5113,7 @@ struct App {
             creationTool = CreationTool::Sketch;
             source.atoms.clear();
             update();
+            saveCreationSnapshot("空白结构");
         }
         ImGui::SameLine(0,U(16));
         if (ImGui::Button("从晶体开始", {cardW,U(100)})) openCrystalDialog = true;
@@ -5131,6 +5178,7 @@ struct App {
                         creationMode=true;
                         chooseCreationTool(CreationTool::Select);
                         cameras[3].mode=7; active=3;
+                        saveCreationSnapshot("晶体初始");
                     }
                     ImGui::CloseCurrentPopup();
                 } catch (const std::exception &e) { status=e.what(); }
@@ -5195,9 +5243,6 @@ struct App {
     void creationWorkspace(float w, float h) {
         const float leftW = U(240), rightW = U(275);
         const float y = topInset(), bodyH = h - y - statusHeight();
-        fixed("Creation structure", 0, y, leftW, bodyH);
-        ImGui::Spacing();
-        ImGui::TextDisabled("结构");
         std::vector<size_t> counts(source.species.size());
         for (const auto &atom : source.atoms)
             if (atom.type < counts.size()) ++counts[atom.type];
@@ -5212,71 +5257,125 @@ struct App {
         const bool isRockSalt = counts.size() == 2 && counts[0] == counts[1] &&
             ((source.species[0] == "Na" && source.species[1] == "Cl") ||
              (source.species[0] == "Cl" && source.species[1] == "Na"));
-        const std::string displayName = isRockSalt ? "氯化钠 岩盐" :
-            creationBasedOn.empty() ? "未命名结构" : creationBasedOn;
-        if (headingFont) ImGui::PushFont(headingFont);
-        ImGui::TextWrapped("%s", displayName.c_str());
-        if (headingFont) ImGui::PopFont();
-        ImGui::Text("%s", formula.empty() ? "—" : formula.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s 原子", number(source.atoms.size()).c_str());
-        ImGui::Spacing();
+        const float footerH=U(32);
+        const float propertyH=creationPropertiesOpen
+            ? std::max(0.f,std::min(std::max(bodyH*.43f,U(220)),bodyH-U(170))) : 0.f;
+        const float workH=std::max(U(80),bodyH-propertyH-footerH);
+        fixed("Creation snapshots",0,y,leftW,workH);
+        ImGui::TextDisabled("工作区");
+        ImGui::SameLine(leftW-U(68));
+        ImGui::PushStyleColor(ImGuiCol_Button,{.25f,.19f,.11f,1});
+        ImGui::PushStyleColor(ImGuiCol_Text,{1.f,.69f,.23f,1});
+        if (ImGui::Button("暂存",{U(50),U(26)})) saveCreationSnapshot();
+        ImGui::PopStyleColor(2);
         ImGui::Separator();
-        if (headingFont) ImGui::PushFont(headingFont);
-        ImGui::TextUnformatted("组成");
-        if (headingFont) ImGui::PopFont();
+        ImGui::Text("%s",creationBasedOn.empty()?"未命名结构":creationBasedOn.c_str());
         ImGui::SameLine();
-        ImGui::TextDisabled("点击选中同元素");
-        for (size_t type = 0; type < source.species.size(); ++type) {
-            const size_t count = counts[type];
-            if (!count) continue;
-            ImGui::PushID(int(type));
-            const auto p = ImGui::GetCursorScreenPos();
-            const auto color = typeColor(type);
-            ImGui::GetWindowDrawList()->AddCircleFilled({p.x+U(7),p.y+U(9)},U(6),
-                ImGui::GetColorU32({color[0],color[1],color[2],1.f}));
-            ImGui::Dummy({U(17),U(19)});
+        ImGui::TextDisabled("%zu 快照",creationSnapshots.size());
+        ImGui::Spacing();
+        const auto current=ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddCircleFilled({current.x+U(7),current.y+U(9)},U(5),IM_COL32(65,227,127,255));
+        ImGui::Dummy({U(18),U(18)}); ImGui::SameLine();
+        ImGui::TextUnformatted("当前编辑");
+        ImGui::Indent(U(22));
+        ImGui::TextDisabled("%s · %s 原子 · 第 %zu 步",formula.empty()?"—":formula.c_str(),
+            number(source.atoms.size()).c_str(),authorUndo.size()+1);
+        ImGui::Unindent(U(22));
+        ImGui::Spacing();
+        ImGui::TextDisabled("暂存的结果  SNAPSHOTS");
+        int restoreIndex=-1,removeIndex=-1;
+        for (int index=0;index<int(creationSnapshots.size());++index) {
+            ImGui::PushID(index);
+            const auto &snapshot=creationSnapshots[size_t(index)];
+            if (ImGui::Selectable(snapshot.name.c_str(),creationSnapshotSelected==index,0,{leftW-U(58),U(27)}))
+                restoreIndex=index;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("载入 %s",snapshot.name.c_str());
             ImGui::SameLine();
-            std::string elementName = source.species[type] == "Na" ? "钠" :
-                source.species[type] == "Cl" ? "氯" :
-                (elements::find(source.species[type]) ? elements::find(source.species[type])->name : "");
-            std::string row = source.species[type] + "     " + elementName +
-                "                         " + std::to_string(count);
-            if (ImGui::Selectable(row.c_str(), false, 0, {0,U(24)})) {
-                creationSelection.clear();
-                for (size_t i = 0; i < source.atoms.size(); ++i)
-                    if (source.atoms[i].type == type) creationSelection.push_back(int(i));
-                creationPick=creationSelection.empty()?-1:creationSelection.back();
-            }
+            if (ImGui::SmallButton("x")) removeIndex=index;
+            ImGui::TextDisabled("%s · %s 原子",snapshot.time.c_str(),
+                snapshot.data?number(snapshot.data->atoms.size()).c_str():"0");
             ImGui::PopID();
         }
-        ImGui::Separator();
-        if (headingFont) ImGui::PushFont(headingFont);
-        ImGui::TextUnformatted("晶格");
-        if (headingFont) ImGui::PopFont();
-        const auto lattice = authoring::latticeOf(source);
-        auto propertyRow = [&](const char *name, const std::string &value) {
-            ImGui::TextDisabled("%s", name);
+        ImGui::End();
+        if (removeIndex>=0) {
+            creationSnapshots.erase(creationSnapshots.begin()+removeIndex);
+            if (creationSnapshotSelected==removeIndex) creationSnapshotSelected=-1;
+            else if (creationSnapshotSelected>removeIndex) --creationSnapshotSelected;
+        } else if (restoreIndex>=0) restoreCreationSnapshot(restoreIndex);
+
+        if (creationPropertiesOpen) {
+            fixed("Creation file properties",0,y+workH,leftW,propertyH);
+            ImGui::TextDisabled("属性");
             ImGui::SameLine();
-            const float x = std::max(ImGui::GetCursorPosX(), leftW - ImGui::CalcTextSize(value.c_str()).x - U(24));
-            ImGui::SetCursorPosX(x);
-            ImGui::TextUnformatted(value.c_str());
+            const char *pages[]{"晶格 3D","组成","选中"};
+            for (int page=0;page<3;++page) {
+                if (page) ImGui::SameLine(0,U(2));
+                const bool selected=creationPropertyPage==page;
+                if (selected)
+                    ImGui::PushStyleColor(ImGuiCol_Button,{.23f,.25f,.29f,1});
+                if (ImGui::SmallButton(pages[page])) creationPropertyPage=page;
+                if (selected) ImGui::PopStyleColor();
+            }
             ImGui::Separator();
-        };
-        char value[80];
-        for (const auto [name, length] : {std::pair{"a",lattice.a}, {"b",lattice.b}, {"c",lattice.c}}) {
-            snprintf(value,sizeof(value),"%.4f Å",length); propertyRow(name,value);
+            auto propertyRow=[&](const char *name,const std::string &value) {
+                ImGui::TextDisabled("%s",name);
+                ImGui::SameLine();
+                ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
+                    leftW-ImGui::CalcTextSize(value.c_str()).x-U(24)));
+                ImGui::TextUnformatted(value.c_str());
+                ImGui::Separator();
+            };
+            if (creationPropertyPage==0) {
+                const auto lattice=authoring::latticeOf(source);
+                char value[80];
+                for (const auto [name,length]:{std::pair{"a",lattice.a},
+                    {"b",lattice.b},{"c",lattice.c}}) {
+                    snprintf(value,sizeof(value),"%.4f Å",length); propertyRow(name,value);
+                }
+                for (const auto [name,angle]:{std::pair{"α",lattice.alpha},
+                    {"β",lattice.beta},{"γ",lattice.gamma}}) {
+                    snprintf(value,sizeof(value),"%.2f°",angle); propertyRow(name,value);
+                }
+                snprintf(value,sizeof(value),"%.2f Å³",lattice.volume); propertyRow("体积 V",value);
+                propertyRow("空间群",isRockSalt?"Fm-3m (225)":"—");
+                propertyRow("布拉维格子",isRockSalt?"面心立方 cF":"—");
+                propertyRow("原子数",std::to_string(source.atoms.size()));
+                snprintf(value,sizeof(value),"%.4f Å⁻³",lattice.volume>0
+                    ? double(source.atoms.size())/lattice.volume:0.0);
+                propertyRow("密度",value);
+            } else if (creationPropertyPage==1) {
+                ImGui::TextDisabled("点击元素可选中同种原子");
+                for (size_t type=0;type<source.species.size();++type) {
+                    if (!counts[type]) continue;
+                    ImGui::PushID(int(type));
+                    const auto color=typeColor(type);
+                    ImGui::ColorButton("##type",{color[0],color[1],color[2],1},0,{U(14),U(14)});
+                    ImGui::SameLine();
+                    const std::string row=source.species[type]+"    "+std::to_string(counts[type]);
+                    if (ImGui::Selectable(row.c_str())) {
+                        creationSelection.clear();
+                        for (size_t i=0;i<source.atoms.size();++i)
+                            if (source.atoms[i].type==type) creationSelection.push_back(int(i));
+                        creationPick=creationSelection.empty()?-1:creationSelection.back();
+                    }
+                    ImGui::PopID();
+                }
+            } else {
+                propertyRow("已选中",std::to_string(creationSelection.size()));
+                if (creationPick>=0 && size_t(creationPick)<source.atoms.size()) {
+                    const auto &atom=source.atoms[size_t(creationPick)];
+                    propertyRow("元素",atom.type<source.species.size()?source.species[atom.type]:"?");
+                    char position[80];
+                    snprintf(position,sizeof(position),"%.3f, %.3f, %.3f",atom.x,atom.y,atom.z);
+                    propertyRow("位置",position);
+                }
+            }
+            ImGui::End();
         }
-        for (const auto [name, angle] : {std::pair{"α",lattice.alpha}, {"β",lattice.beta}, {"γ",lattice.gamma}}) {
-            snprintf(value,sizeof(value),"%.2f°",angle); propertyRow(name,value);
-        }
-        snprintf(value,sizeof(value),"%.2f Å³",lattice.volume); propertyRow("体积 V",value);
-        propertyRow("空间群",isRockSalt?"Fm-3m (225)":"—");
-        propertyRow("布拉维格子",isRockSalt?"面心立方 cF":"—");
-        propertyRow("原子数",std::to_string(source.atoms.size()));
-        snprintf(value,sizeof(value),"%.4f Å⁻³",
-                 lattice.volume > 0 ? double(source.atoms.size()) / lattice.volume : 0.0);
-        propertyRow("密度",value);
+        fixed("Creation properties toggle",0,y+workH+propertyH,leftW,footerH);
+        if (ImGui::Button(creationPropertiesOpen?"属性面板    收起":"属性面板    展开",{-1,U(25)}))
+            creationPropertiesOpen=!creationPropertiesOpen;
+        recordUiTestItem("creation.properties-toggle","Creation file properties toggle");
         ImGui::End();
 
         fixed("Creation canvas", leftW, y, w - leftW - rightW, bodyH);
