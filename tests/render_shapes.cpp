@@ -332,6 +332,18 @@ int main(int argc, char **argv) {
         renderer.styles[1].color = {.05f, .2f, 1, 1};
         renderer.styles[1].visual = {.42f, 2, 1, 0};
         renderer.styles[1].axes = {1.8f, .65f, 1, 0};
+        typed.bonds.push_back({0,1,{0,0,0}});
+        typed.bondStyle.radius=.14f;
+        typed.bondStyle.colorByType=true;
+        renderer.upload(typed, {});
+        renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
+        const auto splitColorBondImage = imageHash(t);
+        typed.bondStyle.colorByType=false;
+        renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
+        if (imageHash(t) == splitColorBondImage)
+            throw std::runtime_error("Bond cylinders must honor particle-colored and uniform modes");
+        typed.bonds.clear();
+        renderer.upload(typed, {});
         renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
         const auto perTypeImage = imageHash(t);
         renderer.styles[0].visual[2] = 0;

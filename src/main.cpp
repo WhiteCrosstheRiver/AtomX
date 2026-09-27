@@ -1654,13 +1654,14 @@ struct App {
                                 distanceSquared <= threshold * threshold)
                                 editable.bonds.push_back({first, second, image});
                         });
-                    editable.bondStyle.radius = .045f;
-                    editable.bondStyle.color = {.25f,.75f,.21f,1.f};
                 } catch (const std::exception &) {
                     editable.bonds.clear();
                 }
             }
         }
+        editable.bondStyle.radius = .12f;
+        editable.bondStyle.colorByType = true;
+        editable.bondStyle.showPeriodicImages = false;
         const std::string basedOn = path.empty() ? tabTitle() : utf8(path.filename().wstring());
         const std::string title = tabTitle() + " · 创作";
         newStructureTab(std::move(editable), title);
@@ -3940,19 +3941,23 @@ struct App {
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();
         std::vector<float> originalRadii;
-        if (creationMode) {
+        const bool compactBondView = !creationMode && result.data.bondStyle.visible &&
+            result.data.bondStyle.radius > 0 && !result.data.bonds.empty();
+        if (creationMode || compactBondView) {
+            const float particleScale = creationMode ? .43f : .50f;
             originalRadii.reserve(gpu.styles.size());
             for (auto &style : gpu.styles) {
                 originalRadii.push_back(style.visual[0]);
                 const float baseRadius = style.visual[0] > 0 ? style.visual[0] :
                     style.visual[3] > 0 ? style.visual[3] : radius;
-                style.visual[0] = baseRadius * .43f;
+                style.visual[0] = baseRadius * particleScale;
             }
         }
         gpu.target(targets[i], int(avail.x), int(avail.y));
             gpu.draw(targets[i], result.data, cam, radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles, cell);
-        for (size_t type = 0; type < originalRadii.size(); ++type)
-            gpu.styles[type].visual[0] = originalRadii[type];
+        if (creationMode)
+            for (size_t type = 0; type < originalRadii.size(); ++type)
+                gpu.styles[type].visual[0] = originalRadii[type];
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         const bool viewportHovered = ImGui::IsItemHovered();
         if (creationMode) creationPointer(p,avail,cam,viewportHovered);
@@ -4249,6 +4254,9 @@ struct App {
                 }
             }
         }
+        if (compactBondView)
+            for (size_t type = 0; type < originalRadii.size(); ++type)
+                gpu.styles[type].visual[0] = originalRadii[type];
         ImGui::EndChild();
         ImGui::PopStyleColor(); ImGui::PopStyleVar();
         ImGui::PopID();
@@ -6750,6 +6758,8 @@ struct App {
                                                        "Type-pair mode supports at most 32 particle types.");
                             bool visible = m.bondsVisible;
                             bool cylinders = m.bondCylinders;
+                            bool colorByType = m.bondColorByType;
+                            bool showPeriodicImages = m.bondShowPeriodicImages;
                             float width = m.bondWidth;
                             float bondRadius = m.bondRadius;
                             auto color = m.bondColor;
@@ -6765,10 +6775,15 @@ struct App {
                                                             .001f, 100.f, "%.4g units");
                             else
                                 changed |= ImGui::SliderFloat("Line width", &width, .5f, 12.f, "%.1f px");
-                            changed |= ImGui::ColorEdit3("Bond color", color.data());
+                            changed |= ImGui::Checkbox("Color by particle type", &colorByType);
+                            changed |= ImGui::Checkbox("Show periodic boundary bonds", &showPeriodicImages);
+                            if (!colorByType)
+                                changed |= ImGui::ColorEdit3("Bond color", color.data());
                             if (changed) {
                                 checkpoint(); m.bondsVisible=visible; m.bondCylinders=cylinders;
-                                m.bondWidth=width; m.bondRadius=bondRadius; m.bondColor=color; update();
+                                m.bondWidth=width; m.bondRadius=bondRadius; m.bondColor=color;
+                                m.bondColorByType=colorByType;
+                                m.bondShowPeriodicImages=showPeriodicImages; update();
                             }
                         }
                         else {
@@ -6895,6 +6910,9 @@ struct App {
                     if (ImGui::Checkbox("Show this type", &visible))
                         style.visual[2] = visible ? 1.f : 0.f;
                     ImGui::ColorEdit3("Type color", style.color.data());
+                    if (ImGui::IsItemDeactivatedAfterEdit() && result.data.bondStyle.colorByType &&
+                        !result.data.bonds.empty())
+                        gpu.upload(result.data, result.selected, result.colorSelected);
                     bool inheritRadius = style.visual[0] == 0;
                     if (ImGui::Checkbox("Use default radius", &inheritRadius))
                         setDefaultRadius(result.data.species[appearanceType], style, inheritRadius);
@@ -7932,7 +7950,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
              smokeColorLegend = false, smokeBondPairs = false, smokeInspectorNode = false,
              smokeHistogram = false, smokeTypesPanel = false, smokePalette = false,
-             smokeMenu = false, smokeCreation = false;
+              smokeMenu = false, smokeCreation = false, smokeBondCloseup = false;
         std::filesystem::path input, shot;
         for (int i = 1; i < argc; i++) {
             std::wstring a = argv[i];
@@ -7942,6 +7960,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 smokeExport = true;
             else if (a == L"--smoke-color-legend") smokeColorLegend = true;
             else if (a == L"--smoke-bond-pairs") smokeBondPairs = true;
+            else if (a == L"--smoke-bond-closeup") { smokeBondPairs = true; smokeBondCloseup = true; }
             else if (a == L"--smoke-inspector-node") smokeInspectorNode = true;
             else if (a == L"--smoke-histogram") smokeHistogram = true;
             else if (a == L"--smoke-types-panel") smokeTypesPanel = true;
@@ -8017,6 +8036,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
             if (smokeColorLegend) app.add(Op::ColorCoding);
             if (smokeTypesPanel) app.focusParticleAppearance = true;
+             if (smokeBondCloseup) { app.quad = false; app.active = 3; }
             if (desktopTest) {
                 auto requireWindow = [](bool ok, const char *message) {
                     if (!ok) throw std::runtime_error(message);
@@ -8116,6 +8136,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     app.showTable = true;
                     app.bondsTab = true;
                     app.add(Op::CreateBonds);
+                     if (smokeBondCloseup) app.showTable = false;
                     auto &bondNode = app.mods.back();
                     const size_t typeCount = app.source.species.size();
                     bondNode.bondTypeCutoffsEnabled = true;

@@ -94,6 +94,8 @@ struct BondStyle {
     // A positive radius selects a shaded world-space cylinder; zero keeps screen-space lines.
     float radius = 0;
     std::array<float, 4> color{.72f,.78f,.86f,1.f};
+    bool colorByType = false;
+    bool showPeriodicImages = true;
 };
 struct Dataset {
     std::vector<Atom> atoms;
@@ -762,7 +764,9 @@ struct Modifier {
     bool discardExistingBonds = false;
     double bondLowerCutoff = 0;
     bool bondTypeCutoffsEnabled = false;
-    bool bondCylinders = false;
+    bool bondCylinders = true;
+    bool bondColorByType = true;
+    bool bondShowPeriodicImages = false;
     std::vector<float> bondTypeCutoffs;
     int colorGradient = 0;
     bool colorAutoRange = true, colorSymmetricRange = false, colorReverse = false;
@@ -775,7 +779,7 @@ struct Modifier {
     bool scatterSelectedOnly = false;
     bool bondsVisible = true;
     float bondWidth = 1.5f;
-    float bondRadius = .2f; // cylinder diameter 0.4 units, matching OVITO's default bond width
+    float bondRadius = .16f;
     std::array<float,4> bondColor{.72f,.78f,.86f,1.f};
     std::array<float,3> assignColor{1.f,.15f,.12f};
     std::vector<uint32_t> manualSelection;
@@ -3248,6 +3252,8 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     r.data.bondStyle.width = m.bondWidth;
                     r.data.bondStyle.radius = m.bondCylinders ? m.bondRadius : 0.f;
                     r.data.bondStyle.color = m.bondColor;
+                    r.data.bondStyle.colorByType = m.bondColorByType;
+                    r.data.bondStyle.showPeriodicImages = m.bondShowPeriodicImages;
                     if (m.discardExistingBonds) r.data.bonds.clear();
                     double searchCutoff=m.value;
                     if (m.bondTypeCutoffsEnabled)

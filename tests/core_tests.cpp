@@ -1721,6 +1721,10 @@ int main() {
         pairCutoffData.atoms={{0,0,0,0},{.8f,0,0,1},{1.6f,0,0,1}};
         pairCutoffData.bounds();
         Modifier pairCutoffBonds{Op::CreateBonds};
+        require(pairCutoffBonds.bondCylinders && pairCutoffBonds.bondColorByType &&
+                    !pairCutoffBonds.bondShowPeriodicImages &&
+                    pairCutoffBonds.bondRadius > 0,
+                "new Create bonds nodes default to shaded, particle-colored cylinders without boundary stubs");
         pairCutoffBonds.bondTypeCutoffsEnabled=true;
         pairCutoffBonds.bondTypeCutoffs={.2f,.9f,.9f,.2f};
         auto pairCutoffResult=evaluate(pairCutoffData,{pairCutoffBonds});
@@ -1739,7 +1743,7 @@ int main() {
         pairCutoffBonds.bondCylinders=false;
         pairCutoffBonds.bondRadius=.08f;
         require(evaluate(pairCutoffData,{pairCutoffBonds}).data.bondStyle.radius==0,
-                "screen-space line representation remains the default");
+                "screen-space line representation remains available");
         pairCutoffBonds.bondTypeCutoffs={0,0,0,0};
         require(evaluate(pairCutoffData,{pairCutoffBonds}).data.bonds.empty(),
                 "zero type-pair cutoffs disable bond generation without rejecting the node");
