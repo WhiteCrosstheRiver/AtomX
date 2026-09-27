@@ -1,6 +1,7 @@
 #include "renderer.hpp"
 #include "analysis.hpp"
 #include "authoring.hpp"
+#include "symmetry.hpp"
 #include "structure_io.hpp"
 #include "desktop.hpp"
 #include "imgui.h"
@@ -827,6 +828,8 @@ struct App {
         std::vector<CreationSnapshot> snapshots;
         int selectedSnapshot = -1, propertyPage = 0;
         bool propertiesOpen = true;
+        std::optional<symmetry::Info> symmetryInfo;
+        bool symmetryChecked = false;
         char element[16] = "O";
     };
     std::vector<StructureTab> tabs;
@@ -844,6 +847,8 @@ struct App {
     std::vector<CreationSnapshot> creationSnapshots;
     int creationSnapshotSelected = -1, creationPropertyPage = 0;
     bool creationPropertiesOpen = true;
+    std::optional<symmetry::Info> creationSymmetry;
+    bool creationSymmetryChecked = false;
     std::array<double,6> creationCellParameters{};
     double creationCellOrigin[3]{};
     std::array<bool,3> creationCellPbc{};
@@ -865,7 +870,9 @@ struct App {
     bool openNewCell = false;
     bool openTriclinicCell = false;
     bool openCrystalDialog = false, openSupercellDialog = false, openSurfaceDialog = false;
-    int crystalPreset = 1, supercellFactor[3] = {2,2,1}, surfaceAxis = 2;
+    int crystalPreset = 1, supercellFactor[3] = {2,2,1};
+    int crystalSpaceGroup = 225;
+    int surfaceMiller[3] = {0,0,1};
     int surfaceLayers = 3;
     float crystalA = 5.64f, crystalB = 5.64f, crystalC = 5.64f;
     float crystalAlpha = 90.f, crystalBeta = 90.f, crystalGamma = 90.f;
@@ -1451,6 +1458,8 @@ struct App {
         tab.selectedSnapshot = creationSnapshotSelected;
         tab.propertyPage = creationPropertyPage;
         tab.propertiesOpen = creationPropertiesOpen;
+        tab.symmetryInfo = creationSymmetry;
+        tab.symmetryChecked = creationSymmetryChecked;
         snprintf(tab.element, sizeof(tab.element), "%s", creationElement);
         return tab;
     }
@@ -1489,6 +1498,8 @@ struct App {
         creationSnapshotSelected = tab.selectedSnapshot;
         creationPropertyPage = tab.propertyPage;
         creationPropertiesOpen = tab.propertiesOpen;
+        creationSymmetry = tab.symmetryInfo;
+        creationSymmetryChecked = tab.symmetryChecked;
         snprintf(creationElement, sizeof(creationElement), "%s", tab.element);
         pipelineCheckpoint.reset();
         pipelineCheckpointNode = SIZE_MAX;
@@ -1585,7 +1596,9 @@ struct App {
         else if (preset==3) { crystalA=2.866f; add("Fe",0,0,0); }
         else if (preset==4) { crystalA=crystalB=3.209f; crystalC=5.211f;
             crystalGamma=120.f; add("Mg",1.f/3,2.f/3,.25f); add("Mg",2.f/3,1.f/3,.75f); }
-        else { crystalA=crystalB=crystalC=10.f; add("C",0,0,0); }
+        else if (preset==5) { crystalA=crystalB=crystalC=10.f; add("C",0,0,0); }
+        else { crystalA=crystalB=crystalC=5.64f; crystalSpaceGroup=225;
+            add("Na",0,0,0); add("Cl",.5f,.5f,.5f); }
         if (preset<=3) crystalB=crystalC=crystalA;
     }
     Dataset crystalFromDialog() {
@@ -1594,6 +1607,17 @@ struct App {
         Dataset data=authoring::triclinicCell(crystalA,crystalB,crystalC,
             crystalAlpha,crystalBeta,crystalGamma,"C");
         data.atoms.clear(); data.species.clear();
+        if (crystalPreset==6) {
+            std::vector<symmetry::Site> sites;
+            sites.reserve(crystalBasis.size());
+            for (const auto &basis:crystalBasis)
+                sites.push_back({basis.element,{basis.fractional[0],basis.fractional[1],
+                    basis.fractional[2]}});
+            auto expanded=symmetry::expandAsymmetricUnit(data,sites,crystalSpaceGroup);
+            if (!expanded)
+                throw std::runtime_error("空间群与晶胞参数不相容，或原子基元无效");
+            return std::move(*expanded);
+        }
         const std::array<std::array<float,3>,4> f{{{{0,0,0}},{{0,.5f,.5f}},{{.5f,0,.5f}},{{.5f,.5f,0}}}};
         const size_t copies=crystalPreset<=2?4:crystalPreset==3?2:1;
         for (const auto &basis:crystalBasis) {
@@ -1734,6 +1758,7 @@ struct App {
     }
     void adoptStructure(Dataset data, const std::string &message) {
         rememberStructure();
+        creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
         source = std::move(data);
         frames.clear();
@@ -1753,6 +1778,7 @@ struct App {
             return;
         }
         rememberStructure();
+        creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
         edit(source);
         source.sourceCount = source.atoms.size();
@@ -1866,6 +1892,7 @@ struct App {
     void history(bool forward) {
         if (creationMode || structureEditIsLatest || !authorRedo.empty()) {
             if (!forward && !authorUndo.empty()) {
+                creationSymmetry.reset(); creationSymmetryChecked=false;
                 authorRedo.push_back(source);
                 source = authorUndo.back();
                 authorUndo.pop_back();
@@ -1879,6 +1906,7 @@ struct App {
                 return;
             }
             if (forward && !authorRedo.empty()) {
+                creationSymmetry.reset(); creationSymmetryChecked=false;
                 authorUndo.push_back(source);
                 source = authorRedo.back();
                 authorRedo.pop_back();
@@ -2233,11 +2261,15 @@ struct App {
     void fixed(const char *name, float x, float y, float w, float h) {
         ImGui::SetNextWindowPos({x, y});
         ImGui::SetNextWindowSize({std::max(w, 1.f), std::max(h, 1.f)});
+        const std::string_view panel=name;
+        const bool scrollableCreationPanel=panel=="Creation snapshots" ||
+            panel=="Creation file properties" || panel=="Creation selection";
         ImGui::Begin(name, nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                         ImGuiWindowFlags_NoSavedSettings | ((std::string(name) == "Title" ||
-                         (creationMode && std::string_view(name).starts_with("Creation"))) ?
+                         ImGuiWindowFlags_NoSavedSettings | ((panel == "Title" ||
+                         (creationMode && panel.starts_with("Creation") &&
+                          !scrollableCreationPanel)) ?
                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
     }
     void recordUiTestItem(const std::string &name,const char *explicitLabel=nullptr) {
@@ -5240,9 +5272,16 @@ struct App {
         }
         ImGui::SetNextWindowSize({U(580),U(580)},ImGuiCond_Appearing);
         if (ImGui::BeginPopupModal("建晶体##v2",nullptr,ImGuiWindowFlags_NoSavedSettings)) {
-            const char *presets="Cu · FCC\0NaCl · 岩盐\0Si · 金刚石\0Fe · BCC\0Mg · HCP\0自定义 P1\0";
+            const char *presets="Cu · FCC\0NaCl · 岩盐\0Si · 金刚石\0Fe · BCC\0Mg · HCP\0自定义 P1\0按空间群构建\0";
             int preset=crystalPreset;
             if (ImGui::Combo("结构模板",&preset,presets)) configureCrystalPreset(preset);
+            if (crystalPreset==6) {
+                ImGui::InputInt("空间群编号 (1-230)",&crystalSpaceGroup);
+                const auto setting=symmetry::defaultSetting(crystalSpaceGroup);
+                if (setting) ImGui::TextDisabled("标准设置：%s · Hall #%d",
+                    setting->symbol.c_str(),setting->hall);
+                else ImGui::TextColored({1.f,.52f,.35f,1.f},"空间群编号须在 1 到 230 之间");
+            }
             const bool cubic=crystalPreset<=3,hexagonal=crystalPreset==4;
             ImGui::TextDisabled("晶格参数（Å）");
             if (ImGui::InputFloat("a",&crystalA,.1f,1.f,"%.4f") && cubic)
@@ -5279,7 +5318,9 @@ struct App {
             if (ImGui::Button("+ 添加原子") && crystalBasis.size()<32)
                 crystalBasis.push_back(CrystalBasis{});
             if (creationMode) ImGui::Checkbox("替换当前创作结构（否则新标签页）",&crystalReplaceCurrent);
-            const bool valid=crystalA>0&&crystalB>0&&crystalC>0&&!crystalBasis.empty();
+            const bool valid=authoring::validCellParameters(crystalA,crystalB,crystalC,
+                crystalAlpha,crystalBeta,crystalGamma)&&!crystalBasis.empty()&&
+                (crystalPreset!=6 || (crystalSpaceGroup>=1&&crystalSpaceGroup<=230));
             ImGui::BeginDisabled(!valid);
             if (ImGui::Button("生成晶胞",{U(110),U(36)})) {
                 try {
@@ -5323,29 +5364,29 @@ struct App {
         }
         if (openSurfaceDialog) { ImGui::OpenPopup("切面·真空##v2"); openSurfaceDialog=false; }
         if (ImGui::BeginPopupModal("切面·真空##v2",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Combo("晶面",&surfaceAxis,"(100)\0(010)\0(001)\0");
+            ImGui::InputInt3("Miller 指数 (h k l)",surfaceMiller);
             ImGui::InputInt("层数",&surfaceLayers);
             ImGui::InputFloat("真空厚度 (Å)",&surfaceVacuum,1.f,5.f,"%.2f");
             const uint64_t count=uint64_t(source.atoms.size())*uint64_t(std::max(surfaceLayers,0));
             ImGui::Text("预览：%llu 原子 · 真空 %.2f Å",static_cast<unsigned long long>(count),surfaceVacuum);
+            ImGui::TextDisabled("在 (hkl) 面内重排晶胞；沿法向添加真空，关闭法向周期边界。");
             const bool valid=creationMode && surfaceLayers>=1&&surfaceLayers<=12&&
-                surfaceVacuum>=0&&count<=60000;
+                std::isfinite(surfaceVacuum)&&surfaceVacuum>=0&&count<=60000&&
+                (surfaceMiller[0]||surfaceMiller[1]||surfaceMiller[2])&&
+                std::all_of(std::begin(surfaceMiller),std::end(surfaceMiller),
+                    [](int n){return n>=-6&&n<=6;})&&
+                std::all_of(source.pbc.begin(),source.pbc.end(),[](bool periodic){return periodic;});
             ImGui::BeginDisabled(!valid);
             if (ImGui::Button("生成切面",{U(110),U(35)})) {
-                int repeat[3]={1,1,1}; repeat[surfaceAxis]=surfaceLayers;
-                auto slab=authoring::replicate(source,repeat[0],repeat[1],repeat[2]);
-                const auto axes=authoring::axes(slab.cell);
-                const Vec3 normal=surfaceAxis==0?axes.a:surfaceAxis==1?axes.b:axes.c;
-                const float length=std::max(float(authoring::length(normal)),1e-6f);
-                slab=authoring::addVacuum(slab,surfaceAxis,surfaceVacuum);
-                const float offset=surfaceVacuum/(2.f*length);
-                for (auto &atom:slab.atoms) {
-                    atom.x+=normal.x*offset; atom.y+=normal.y*offset; atom.z+=normal.z*offset;
+                auto slab=authoring::millerSurface(source,surfaceMiller[0],surfaceMiller[1],
+                    surfaceMiller[2],surfaceLayers,surfaceVacuum);
+                if (slab) {
+                    adoptStructure(std::move(*slab),"已生成 Miller 切面和真空层");
+                    fitCamera(3,false);
+                    ImGui::CloseCurrentPopup();
+                } else {
+                    status="无法生成该切面；请检查晶胞与 Miller 指数";
                 }
-                authoring::finish(slab,"Surface slab with vacuum");
-                adoptStructure(std::move(slab),"已生成切面和真空层");
-                fitCamera(3,false);
-                ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled(); ImGui::SameLine();
             if (ImGui::Button("取消",{U(80),U(35)})) ImGui::CloseCurrentPopup();
@@ -5436,6 +5477,10 @@ struct App {
             };
             if (creationPropertyPage==0) {
                 const auto lattice=authoring::latticeOf(source);
+                if (!creationSymmetryChecked && symmetry::prepared(source)) {
+                    creationSymmetry=symmetry::analyze(source);
+                    creationSymmetryChecked=true;
+                }
                 if (ImGui::Button("编辑晶胞参数...",{-1,U(28)})) {
                     creationCellParameters={lattice.a>1e-5?lattice.a:10.0,
                         lattice.b>1e-5?lattice.b:10.0,lattice.c>1e-5?lattice.c:10.0,
@@ -5457,8 +5502,38 @@ struct App {
                     snprintf(value,sizeof(value),"%.2f°",angle); propertyRow(name,value);
                 }
                 snprintf(value,sizeof(value),"%.2f Å³",lattice.volume); propertyRow("体积 V",value);
-                propertyRow("空间群","未计算");
-                propertyRow("布拉维格子","未计算");
+                std::string group="未计算",bravais="未计算";
+                if (creationSymmetry) {
+                    group=creationSymmetry->symbol+" ("+
+                        std::to_string(creationSymmetry->number)+")";
+                    const int number=creationSymmetry->number;
+                    const char *system=number<=2?"三斜":number<=15?"单斜":
+                        number<=74?"正交":number<=142?"四方":number<=167?"三方":
+                        number<=194?"六方":"立方";
+                    const char code=creationSymmetry->symbol.empty()? '?':creationSymmetry->symbol[0];
+                    bravais=std::string(system)+" "+code;
+                } else if (source.atoms.size()>symmetry::interactiveAtomLimit)
+                    group="原子过多；请先截取晶胞";
+                else if (!source.pbc[0] || !source.pbc[1] || !source.pbc[2])
+                    group="需三维周期晶胞";
+                else if (creationSymmetryChecked)
+                    group="识别失败";
+                propertyRow("空间群",group);
+                propertyRow("布拉维格子",bravais);
+                if (creationSymmetry) {
+                    propertyRow("对称操作",std::to_string(creationSymmetry->operations));
+                    propertyRow("原胞原子数",std::to_string(creationSymmetry->primitiveAtoms));
+                    if (creationSymmetry->primitiveAtoms>0 &&
+                        size_t(creationSymmetry->primitiveAtoms)<source.atoms.size()) {
+                        if (ImGui::Button("转换为原胞",{-1,U(28)})) {
+                            auto primitive=symmetry::primitive(source);
+                            if (primitive && primitive->atoms.size()<source.atoms.size()) {
+                                adoptStructure(std::move(*primitive),"已转换为 primitive cell");
+                                fitCamera(3,false);
+                            } else status="原胞转换失败；检查晶胞与周期性";
+                        }
+                    }
+                }
                 propertyRow("原子数",std::to_string(source.atoms.size()));
                 snprintf(value,sizeof(value),"%.4f Å⁻³",lattice.volume>0
                     ? double(source.atoms.size())/lattice.volume:0.0);
@@ -7263,7 +7338,7 @@ struct App {
         // the atlas's active destination. The heading font is added later.
         ImFontGlyphRangesBuilder chineseBuilder;
         chineseBuilder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-        chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位");
+        chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位转换原胞对称操作识别失败三维周期晶面重排沿法向添加关闭边界编号须标准设置参数相容基元无效");
         static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
         chineseBuilder.AddRanges(extraRanges);
         ImVector<ImWchar> chineseRanges;

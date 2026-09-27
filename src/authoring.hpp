@@ -5,6 +5,7 @@
 #include "core.hpp"
 #include "elements.hpp"
 #include <cmath>
+#include <numeric>
 #include <string>
 
 namespace atomx::authoring {
@@ -236,6 +237,77 @@ inline Dataset cleaveAndVacuum(const Dataset &input, int axis, double keepFracti
     data.cell[o + 2] *= keepFraction;
     finish(data, "Cleaved surface");
     return addVacuum(data, axis, vacuum);
+}
+
+inline std::pair<int,int> bezout(int a,int b) {
+    const int signA=a<0?-1:1, signB=b<0?-1:1;
+    int oldR=std::abs(a),r=std::abs(b),oldS=1,s=0,oldT=0,t=1;
+    while (r) {
+        const int q=oldR/r;
+        const int nextR=oldR-q*r; oldR=r; r=nextR;
+        const int nextS=oldS-q*s; oldS=s; s=nextS;
+        const int nextT=oldT-q*t; oldT=t; t=nextT;
+    }
+    return {oldS*signA,oldT*signB};
+}
+
+// Re-express the lattice in a unimodular basis with a and b parallel to (hkl).
+// This retains all atoms, builds `layers` repeats, and adds vacuum perpendicular
+// to the surface. The out-of-plane boundary becomes nonperiodic.
+inline std::optional<Dataset> millerSurface(const Dataset &input,int h,int k,int l,
+                                             int layers,double vacuum) {
+    if ((!h&&!k&&!l) || layers<1 || layers>12 || !std::isfinite(vacuum) || vacuum<0 ||
+        input.atoms.empty() || input.atoms.size()*size_t(layers)>60000 ||
+        !std::all_of(input.pbc.begin(),input.pbc.end(),[](bool x){return x;}) ||
+        latticeOf(input).volume<1e-8) return std::nullopt;
+    const int divisor=std::gcd(std::gcd(std::abs(h),std::abs(k)),std::abs(l));
+    h/=divisor; k/=divisor; l/=divisor;
+    int u[3]{},v[3]{},w[3]{};
+    if (!h&&!k) {
+        const int sign=l<0?-1:1;
+        u[0]=1; v[1]=sign; w[2]=sign;
+    } else {
+        const int g=std::gcd(std::abs(h),std::abs(k));
+        const auto [p,q]=bezout(h,k);
+        const auto [r,s]=bezout(g,l);
+        u[0]=-k/g; u[1]=h/g;
+        v[0]=-p*l; v[1]=-q*l; v[2]=g;
+        w[0]=r*p; w[1]=r*q; w[2]=s;
+    }
+    Dataset data=input;
+    for (int coordinate=0;coordinate<3;++coordinate) {
+        const double a=input.cell[size_t(coordinate)];
+        const double b=input.cell[size_t(3+coordinate)];
+        const double c=input.cell[size_t(6+coordinate)];
+        data.cell[size_t(coordinate)]=u[0]*a+u[1]*b+u[2]*c;
+        data.cell[size_t(3+coordinate)]=v[0]*a+v[1]*b+v[2]*c;
+        data.cell[size_t(6+coordinate)]=w[0]*a+w[1]*b+w[2]*c;
+    }
+    for (auto &atom:data.atoms) {
+        double fa=0,fb=0,fc=0;
+        if (!fractional(data,{atom.x,atom.y,atom.z},fa,fb,fc)) return std::nullopt;
+        const auto wrap=[](double value){value-=std::floor(value); return value;};
+        const Vec3 p=cartesian(data,wrap(fa),wrap(fb),wrap(fc));
+        atom.x=p.x; atom.y=p.y; atom.z=p.z;
+    }
+    data=replicate(data,1,1,layers);
+    const auto axesNow=axes(data.cell);
+    Vec3 normal=cross(axesNow.a,axesNow.b);
+    const double normalLength=length(normal);
+    if (normalLength<1e-8) return std::nullopt;
+    normal=scale(normal,1.0/normalLength);
+    if (dot(normal,axesNow.c)<0) normal=scale(normal,-1);
+    for (int coordinate=0;coordinate<3;++coordinate)
+        data.cell[size_t(6+coordinate)]+=vacuum*(coordinate==0?normal.x:
+                                               coordinate==1?normal.y:normal.z);
+    const Vec3 offset=scale(normal,vacuum*.5);
+    for (auto &atom:data.atoms) {
+        atom.x+=offset.x; atom.y+=offset.y; atom.z+=offset.z;
+    }
+    data.pbc={true,true,false};
+    finish(data,"Miller surface ("+std::to_string(h)+" "+std::to_string(k)+" "+
+        std::to_string(l)+")");
+    return data;
 }
 
 inline Dataset stackLayers(const Dataset &input, double gapAngstrom) {
