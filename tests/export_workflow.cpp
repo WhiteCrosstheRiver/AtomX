@@ -627,6 +627,65 @@ int main() {
                               app.result.data.tables.back().rows.size()==previouslyPublishedTableRows,
                           "failed evaluation retains the prior result and keeps its stale marker");
         }
+        {
+            App tabs(window, testRenderer);
+            tabs.configureCrystalPreset(1);
+            const auto nacl=tabs.crystalFromDialog();
+            requireExport(nacl.atoms.size()==8 && nacl.species.size()==2,
+                          "NaCl crystal dialog preset builds the conventional rocksalt cell");
+            auto ready = [&] {
+                for (int i=0; i<3000 && tabs.documentsBusy(); ++i) {
+                    tabs.poll();
+                    Sleep(1);
+                }
+                requireExport(!tabs.documentsBusy(), "tab operation finishes");
+            };
+            ready();
+            const auto fixture=dir / "tabs.xyz";
+            Dataset structure;
+            structure.species={"Na","Cl"};
+            structure.cell={5.6f,0,0,0,5.6f,0,0,0,5.6f};
+            structure.atoms={{0,0,0,0},{2.8f,2.8f,2.8f,1}};
+            structure.sourceCount=2;
+            io::write(fixture,io::Format::XYZ,structure,{});
+            tabs.newHomeTab(); ready();
+            requireExport(tabs.homeMode && tabs.tabs.size()==2,"Ctrl+T creates a home tab");
+            tabs.openFileTab(fixture); ready();
+            requireExport(tabs.tabs.size()==2 && !tabs.homeMode && tabs.source.atoms.size()==2,
+                          "opening a file replaces an active home tab");
+            const int view=tabs.activeTab;
+            tabs.openCreationTab(); ready();
+            const int first=tabs.activeTab;
+            requireExport(first!=view && tabs.creationMode && tabs.tabs.size()==3,
+                          "view context opens one creation tab");
+            const float yaw=tabs.cameras[3].yaw;
+            auto pointerFrame=[&](float x,float y,bool middle) {
+                guiIO.AddMousePosEvent(x,y);
+                guiIO.AddMouseButtonEvent(2,middle);
+                ImGui::NewFrame();
+                tabs.creationPointer({0,0},{1000,1000},tabs.cameras[3],true);
+                ImGui::Render();
+            };
+            pointerFrame(100,100,false);
+            pointerFrame(100,100,true);
+            pointerFrame(145,112,true);
+            pointerFrame(145,112,false);
+            requireExport(tabs.cameras[3].yaw!=yaw && tabs.creationDrag==App::CreationDrag::None,
+                          "middle-button drag rotates creation camera and releases its drag state");
+            tabs.addAtomAt({1,1,1}); ready();
+            requireExport(tabs.source.atoms.size()==3 && !tabs.authorUndo.empty(),
+                          "creation edit records history");
+            tabs.switchTab(view); ready();
+            requireExport(!tabs.creationMode && tabs.source.atoms.size()==2,
+                          "creation edit leaves view document intact");
+            tabs.openCreationTab(); ready();
+            requireExport(tabs.activeTab!=first && tabs.tabs.size()==4 &&
+                          tabs.source.atoms.size()==2 && tabs.authorUndo.empty(),
+                          "reopening creates an independent creation copy");
+            tabs.switchTab(first); ready();
+            requireExport(tabs.source.atoms.size()==3 && !tabs.authorUndo.empty(),
+                          "creation copy restores its own structure and history");
+        }
         ImGui::DestroyContext();
         for (const auto &e : std::filesystem::directory_iterator(dir))
             std::filesystem::remove(e.path());

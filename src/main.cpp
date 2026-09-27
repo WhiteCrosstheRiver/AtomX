@@ -789,8 +789,13 @@ struct App {
     std::filesystem::path colorRangePath;
     // One structure per browser-style tab. The live document stays in the
     // fields above; a tab is only a snapshot taken when leaving it.
+    enum class CreationTool { Select, Rotate, Pan, Move, Sketch };
+    enum class CreationDrag { None, Box, Move, Rotate, Pan, Sketch };
     struct StructureTab {
+        uint64_t id = 0, sourceTabId = 0;
         std::string title = "Structure";
+        bool home = false;
+        std::string basedOn;
         Dataset source;
         PipelineGraph graph;
         std::vector<std::vector<ModifierNode>> undo, redo;
@@ -799,8 +804,14 @@ struct App {
         int current = 0;
         std::string readerName = "Generated crystal";
         Camera cameras[4]{};
+        std::vector<ParticleStyle> styles;
+        float radius = .32f;
+        int particleShape = 0, viewportTool = 0;
+        bool cell = true, particles = true, quad = false;
         bool creationMode = false;
         bool creationSketch = false;
+        CreationTool creationTool = CreationTool::Select;
+        std::vector<int> selection;
         int picked = -1;
         int measure = -1;
         int angleAtom = -1;
@@ -810,10 +821,21 @@ struct App {
     };
     std::vector<StructureTab> tabs;
     int activeTab = 0;
+    uint64_t nextTabId = 1;
+    bool homeMode = false;
     int creationReturnTab = -1;
     std::string creationBasedOn;
     bool creationMode = false;
     bool creationSketch = false;
+    CreationTool creationTool = CreationTool::Select;
+    std::vector<int> creationSelection;
+    int creationHover = -1;
+    ImVec2 creationLastHoverMouse{-1,-1};
+    CreationDrag creationDrag = CreationDrag::None;
+    ImVec2 creationDragStart{}, creationDragPrevious{};
+    bool creationDragMoved = false, creationDragShift = false;
+    std::vector<std::pair<int,Vec3>> creationDragAtoms;
+    Vec3 creationMoveDelta{};
     int creationPick = -1;
     int creationMeasure = -1;
     int creationAngle = -1;
@@ -823,6 +845,15 @@ struct App {
     bool showLatticePanel = false;
     bool openNewCell = false;
     bool openTriclinicCell = false;
+    bool openCrystalDialog = false, openSupercellDialog = false, openSurfaceDialog = false;
+    int crystalPreset = 1, supercellFactor[3] = {2,2,1}, surfaceAxis = 2;
+    int surfaceLayers = 3;
+    float crystalA = 5.64f, crystalB = 5.64f, crystalC = 5.64f;
+    float crystalAlpha = 90.f, crystalBeta = 90.f, crystalGamma = 90.f;
+    float surfaceVacuum = 15.f;
+    bool crystalReplaceCurrent = true;
+    struct CrystalBasis { char element[8] = "Na"; float fractional[3]{}; };
+    std::vector<CrystalBasis> crystalBasis;
     float newCellA = 5.f, newCellB = 5.f, newCellC = 5.f;
     float newAlpha = 90.f, newBeta = 90.f, newGamma = 90.f;
     App(HWND w, Renderer &r) : window(w), gpu(r) {
@@ -837,7 +868,9 @@ struct App {
         cameras[1].mode = 2;
         cameras[2].mode = 4;
         update();
-        tabs.push_back(captureTab());
+        auto initial = captureTab();
+        initial.id = nextTabId++;
+        tabs.push_back(std::move(initial));
         activeTab = 0;
     }
     ~App() {
@@ -1337,6 +1370,7 @@ struct App {
     }
     bool structureEditIsLatest = false;
     std::string tabTitle() const {
+        if (homeMode) return "新标签页";
         if (creationMode && activeTab >= 0 && activeTab < int(tabs.size()))
             return tabs[size_t(activeTab)].title;
         if (!path.empty()) return utf8(path.filename().wstring());
@@ -1349,7 +1383,13 @@ struct App {
     }
     StructureTab captureTab() const {
         StructureTab tab;
+        if (activeTab >= 0 && activeTab < int(tabs.size())) {
+            tab.id = tabs[size_t(activeTab)].id;
+            tab.sourceTabId = tabs[size_t(activeTab)].sourceTabId;
+        }
         tab.title = tabTitle();
+        tab.home = homeMode;
+        tab.basedOn = creationBasedOn;
         tab.source = source;
         tab.graph = modifierGraph;
         tab.undo = undo;
@@ -1359,8 +1399,17 @@ struct App {
         tab.current = current;
         tab.readerName = readerName;
         for (int i = 0; i < 4; ++i) tab.cameras[i] = cameras[i];
+        tab.styles = gpu.styles;
+        tab.radius = radius;
+        tab.particleShape = particleShape;
+        tab.viewportTool = viewportTool;
+        tab.cell = cell;
+        tab.particles = particles;
+        tab.quad = quad;
         tab.creationMode = creationMode;
         tab.creationSketch = creationSketch;
+        tab.creationTool = creationTool;
+        tab.selection = creationSelection;
         tab.picked = creationPick;
         tab.measure = creationMeasure;
         tab.angleAtom = creationAngle;
@@ -1371,6 +1420,8 @@ struct App {
         return tab;
     }
     void restoreTab(const StructureTab &tab) {
+        homeMode = tab.home;
+        creationBasedOn = tab.basedOn;
         source = tab.source;
         modifierGraph = tab.graph;
         undo = tab.undo;
@@ -1380,9 +1431,20 @@ struct App {
         current = tab.current;
         readerName = tab.readerName;
         for (int i = 0; i < 4; ++i) cameras[i] = tab.cameras[i];
+        radius = tab.radius;
+        particleShape = tab.particleShape;
+        viewportTool = tab.viewportTool;
+        cell = tab.cell;
+        particles = tab.particles;
+        quad = tab.quad;
         creationMode = tab.creationMode;
         creationSketch = tab.creationSketch;
-        creationPick = tab.picked;
+        creationTool = tab.creationTool;
+        creationSelection = tab.selection;
+        creationPick = creationSelection.empty() ? tab.picked : creationSelection.back();
+        creationHover = -1;
+        creationLastHoverMouse={-1,-1};
+        creationDrag = CreationDrag::None;
         creationMeasure = tab.measure;
         creationAngle = tab.angleAtom;
         creationDihedral = tab.dihedralAtom;
@@ -1393,7 +1455,13 @@ struct App {
         pipelineCheckpointNode = SIZE_MAX;
         unwrapAccumulators.clear();
         structureEditIsLatest = !authorUndo.empty();
-        syncAppearance(source.species);
+        appearanceMemory.clear();
+        appearanceNames = source.species;
+        gpu.resetStyles(source.species.size(), &source.species);
+        for (size_t i = 0; i < tab.styles.size() && i < gpu.styles.size(); ++i)
+            gpu.styles[i] = tab.styles[i];
+        for (size_t i = 0; i < appearanceNames.size() && i < gpu.styles.size(); ++i)
+            appearanceMemory[appearanceNames[i]] = gpu.styles[i];
         update();
     }
     bool documentsBusy() const { return busy || pipelineBusy || indexing; }
@@ -1413,24 +1481,97 @@ struct App {
             status = "Wait for the current load or pipeline to finish before opening a tab";
             return;
         }
+        const bool replaceHome = homeMode && !tabs.empty();
         if (!tabs.empty()) tabs[activeTab] = captureTab();
         StructureTab tab;
+        tab.id = replaceHome ? tabs[size_t(activeTab)].id : nextTabId++;
         tab.source = std::move(data);
         tab.title = title;
         tab.readerName = "Authored structure";
         tab.graph = {};
         snprintf(tab.element, sizeof(tab.element), "C");
-        tabs.push_back(std::move(tab));
-        activeTab = int(tabs.size()) - 1;
+        if (replaceHome) tabs[size_t(activeTab)] = std::move(tab);
+        else { tabs.push_back(std::move(tab)); activeTab = int(tabs.size()) - 1; }
         restoreTab(tabs[activeTab]);
         status = "New tab: " + title;
+    }
+    void newHomeTab() {
+        if (documentsBusy()) { status = "Wait for the current operation before opening a tab"; return; }
+        if (!tabs.empty()) tabs[size_t(activeTab)] = captureTab();
+        StructureTab tab;
+        tab.id = nextTabId++;
+        tab.home = true;
+        tab.title = "新标签页";
+        tabs.push_back(std::move(tab));
+        activeTab = int(tabs.size()) - 1;
+        restoreTab(tabs[size_t(activeTab)]);
+    }
+    void configureCrystalPreset(int preset) {
+        crystalPreset=preset;
+        crystalBasis.clear();
+        auto add=[&](const char *element,float x,float y,float z) {
+            CrystalBasis atom;
+            snprintf(atom.element,sizeof(atom.element),"%s",element);
+            atom.fractional[0]=x; atom.fractional[1]=y; atom.fractional[2]=z;
+            crystalBasis.push_back(atom);
+        };
+        crystalAlpha=crystalBeta=crystalGamma=90.f;
+        if (preset==0) { crystalA=3.615f; add("Cu",0,0,0); }
+        else if (preset==1) { crystalA=5.64f; add("Na",0,0,0); add("Cl",.5f,.5f,.5f); }
+        else if (preset==2) { crystalA=5.431f; add("Si",0,0,0); add("Si",.25f,.25f,.25f); }
+        else if (preset==3) { crystalA=2.866f; add("Fe",0,0,0); }
+        else if (preset==4) { crystalA=crystalB=3.209f; crystalC=5.211f;
+            crystalGamma=120.f; add("Mg",1.f/3,2.f/3,.25f); add("Mg",2.f/3,1.f/3,.75f); }
+        else { crystalA=crystalB=crystalC=10.f; add("C",0,0,0); }
+        if (preset<=3) crystalB=crystalC=crystalA;
+    }
+    Dataset crystalFromDialog() {
+        if (!(crystalA>0&&crystalB>0&&crystalC>0) || crystalBasis.empty())
+            throw std::runtime_error("晶格长度和原子基元必须有效");
+        Dataset data=authoring::triclinicCell(crystalA,crystalB,crystalC,
+            crystalAlpha,crystalBeta,crystalGamma,"C");
+        data.atoms.clear(); data.species.clear();
+        const std::array<std::array<float,3>,4> f{{{{0,0,0}},{{0,.5f,.5f}},{{.5f,0,.5f}},{{.5f,.5f,0}}}};
+        const size_t copies=crystalPreset<=2?4:crystalPreset==3?2:1;
+        for (const auto &basis:crystalBasis) {
+            const auto type=authoring::speciesIndex(data,basis.element);
+            for (size_t copy=0;copy<copies;++copy) {
+                const std::array<float,3> offset=crystalPreset==3 && copy==1
+                    ? std::array<float,3>{.5f,.5f,.5f} : f[copy];
+                const auto wrap=[](float v){ v=std::fmod(v,1.f); return v<0?v+1.f:v; };
+                const auto p=authoring::cartesian(data,
+                    wrap(basis.fractional[0]+offset[0]),
+                    wrap(basis.fractional[1]+offset[1]),
+                    wrap(basis.fractional[2]+offset[2]));
+                data.atoms.push_back({p.x,p.y,p.z,type});
+            }
+        }
+        authoring::finish(data,"Built crystal");
+        return data;
+    }
+    void openFileTab(const std::filesystem::path &file) {
+        if (file.empty()) return;
+        if (documentsBusy()) { status = "Wait for the current operation before opening a file"; return; }
+        if (!tabs.empty()) tabs[size_t(activeTab)] = captureTab();
+        StructureTab tab;
+        tab.id = homeMode && !tabs.empty() ? tabs[size_t(activeTab)].id : nextTabId++;
+        tab.title = utf8(file.filename().wstring());
+        if (homeMode && !tabs.empty()) tabs[size_t(activeTab)] = std::move(tab);
+        else { tabs.push_back(std::move(tab)); activeTab = int(tabs.size()) - 1; }
+        restoreTab(tabs[size_t(activeTab)]);
+        load(file);
     }
     void openCreationTab() {
         if (documentsBusy()) {
             status = "Wait for the current operation before opening Creation Mode";
             return;
         }
+        if (source.sampled() || result.data.sampled()) {
+            status = "Cannot edit a sampled preview; load the complete structure first";
+            return;
+        }
         const int origin = activeTab;
+        const uint64_t originId = tabs[size_t(origin)].id;
         const Camera viewCamera = cameras[active];
         Dataset editable = result.data.atoms.empty() ? source : result.data;
         editable.sourceCount = editable.atoms.size();
@@ -1468,24 +1609,29 @@ struct App {
                 }
             }
         }
-        creationBasedOn = path.empty() ? tabTitle() : utf8(path.filename().wstring());
+        const std::string basedOn = path.empty() ? tabTitle() : utf8(path.filename().wstring());
         const std::string title = tabTitle() + " · 创作";
         newStructureTab(std::move(editable), title);
         if (activeTab == origin) return;
         creationReturnTab = origin;
+        tabs[size_t(activeTab)].sourceTabId = originId;
+        tabs[size_t(activeTab)].basedOn = basedOn;
+        creationBasedOn = basedOn;
         cameras[3] = viewCamera;
         cameras[3].mode = 7;
         active = 3;
         creationMode = true;
         creationSketch = false;
+        creationTool = CreationTool::Select;
+        creationSelection.clear();
         status = "Creation Mode: " + title;
     }
     void leaveCreationTab() {
-        if (creationReturnTab >= 0 && creationReturnTab < int(tabs.size()) &&
-            creationReturnTab != activeTab)
-            switchTab(creationReturnTab);
-        else
-            creationMode = false;
+        const uint64_t sourceId = activeTab >= 0 && activeTab < int(tabs.size())
+            ? tabs[size_t(activeTab)].sourceTabId : 0;
+        for (int index = 0; index < int(tabs.size()); ++index)
+            if (sourceId && tabs[size_t(index)].id == sourceId) { switchTab(index); return; }
+        newHomeTab();
     }
     void closeTab(int index) {
         if (index < 0 || index >= int(tabs.size())) return;
@@ -1494,9 +1640,9 @@ struct App {
             return;
         }
         if (tabs.size() == 1) {
-            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
-            tabs.erase(tabs.begin());
+            tabs.clear();
             activeTab = 0;
+            newHomeTab();
             return;
         }
         if (index == activeTab) {
@@ -1529,6 +1675,7 @@ struct App {
         mods.clear();
         modifierGraph.selected = 0;
         creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+        creationSelection.clear();
         syncAppearance(source.species);
         update();
         status = message;
@@ -1551,26 +1698,37 @@ struct App {
         status = message;
     }
     void deletePickedAtom() {
-        if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
+        std::vector<int> selected=creationSelection;
+        if (selected.empty() && creationPick>=0) selected.push_back(creationPick);
+        selected.erase(std::remove_if(selected.begin(),selected.end(),[&](int index) {
+            return index<0||size_t(index)>=source.atoms.size();
+        }),selected.end());
+        if (selected.empty()) {
             status = "Pick an atom in Creation Mode first";
             return;
         }
-        int index = creationPick;
-        editStructure("Deleted atom " + std::to_string(index + 1), [&](Dataset &data) {
-            data.atoms.erase(data.atoms.begin() + index);
+        std::sort(selected.begin(),selected.end());
+        selected.erase(std::unique(selected.begin(),selected.end()),selected.end());
+        editStructure("删除 " + std::to_string(selected.size()) + " 个原子", [&](Dataset &data) {
+            for (auto it=selected.rbegin();it!=selected.rend();++it)
+                data.atoms.erase(data.atoms.begin()+*it);
             data.bonds.clear();
         });
+        creationSelection.clear();
         creationPick = creationMeasure = creationAngle = creationDihedral = -1;
     }
     void replacePickedElement() {
-        if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
+        std::vector<int> selected=creationSelection;
+        if (selected.empty() && creationPick>=0) selected.push_back(creationPick);
+        if (selected.empty()) {
             status = "Pick an atom in Creation Mode first";
             return;
         }
         std::string symbol = creationElement[0] ? creationElement : "C";
-        int index = creationPick;
-        editStructure("Replaced atom " + std::to_string(index + 1) + " with " + symbol, [&](Dataset &data) {
-            data.atoms[index].type = authoring::speciesIndex(data, symbol);
+        editStructure("替换 " + std::to_string(selected.size()) + " 个原子 → " + symbol, [&](Dataset &data) {
+            const auto type=authoring::speciesIndex(data,symbol);
+            for (int index:selected)
+                if (index>=0&&size_t(index)<data.atoms.size()) data.atoms[size_t(index)].type=type;
         });
     }
     void addAtomAt(Vec3 position) {
@@ -1579,6 +1737,7 @@ struct App {
             uint32_t type = authoring::speciesIndex(data, symbol);
             data.atoms.push_back({position.x, position.y, position.z, type});
             creationPick = int(data.atoms.size() - 1);
+            creationSelection={creationPick};
         });
     }
     void nudgePicked(int axis, float delta) {
@@ -1637,13 +1796,14 @@ struct App {
                               : "Display style: Ball and stick";
     }
     void history(bool forward) {
-        if (structureEditIsLatest) {
+        if (creationMode || structureEditIsLatest || !authorRedo.empty()) {
             if (!forward && !authorUndo.empty()) {
                 authorRedo.push_back(source);
                 source = authorUndo.back();
                 authorUndo.pop_back();
                 if (authorUndo.empty()) structureEditIsLatest = false;
                 creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+                creationSelection.clear();
                 syncAppearance(source.species);
                 update();
                 status = "Undid structure edit";
@@ -1654,6 +1814,7 @@ struct App {
                 source = authorRedo.back();
                 authorRedo.pop_back();
                 creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+                creationSelection.clear();
                 syncAppearance(source.species);
                 update();
                 status = "Redid structure edit";
@@ -1666,6 +1827,12 @@ struct App {
         pipelineCheckpointNode=SIZE_MAX;
         structureEditIsLatest = false;
         update();
+    }
+    void jumpCreationHistory(size_t position) {
+        const size_t end=authorUndo.size()+authorRedo.size();
+        if (position>end) return;
+        while (authorUndo.size()>position) history(false);
+        while (authorUndo.size()<position && !authorRedo.empty()) history(true);
     }
     void load(const std::filesystem::path &p, int frame = 0) {
         if (busy || p.empty())
@@ -1936,11 +2103,11 @@ struct App {
             dropNotice = extraFiles > 0
                 ? " (" + std::to_string(extraFiles) + " more dropped file(s) ignored)"
                 : "";
-            load(droppedPath);
+            openFileTab(droppedPath);
         }
     }
     void open() {
-        load(dialog(window, false,
+        openFileTab(dialog(window, false,
                     L"Atom "
                     L"structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*."
                     L"data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro\0All files\0*.*\0",
@@ -2444,8 +2611,78 @@ struct App {
     float statusHeight() const { return U(24); }     // P12 bottom status strip
     float titleBarHeight() const { return U(42); }
     float toolBarHeight() const { return U(34); }
-    float topInset() const { return titleBarHeight() + (creationMode ? U(94) : toolBarHeight()); }
-    void creationTop(float w) {
+    float topInset() const { return titleBarHeight() + (homeMode ? 0.f : creationMode ? U(94) : titleBarHeight() + toolBarHeight()); }
+    void drawCreationIcon(ImDrawList *draw, ImVec2 center, std::string_view name, ImU32 color) {
+        auto point=[&](float x,float y) { return ImVec2{center.x+U(x-12),center.y+U(y-12)}; };
+        auto line=[&](float x,float y,float a,float b) {
+            draw->AddLine(point(x,y),point(a,b),color,U(1.8f));
+        };
+        auto circle=[&](float x,float y,float r) {
+            draw->AddCircle(point(x,y),U(r),color,20,U(1.8f));
+        };
+        auto rect=[&](float x,float y,float a,float b) {
+            draw->AddRect(point(x,y),point(a,b),color,U(1),0,U(1.8f));
+        };
+        if (name=="undo"||name=="redo") {
+            const bool flip=name=="redo";
+            const float a=flip?19:5,b=flip?5:19;
+            line(a,11,flip?14:10,6); line(a,11,flip?14:10,16);
+            line(a,11,b,11); circle(flip?11:13,15,5);
+        } else if (name=="select") {
+            ImVec2 pts[]={point(5,3),point(19,11),point(12,13),point(9,20)};
+            draw->AddPolyline(pts,4,color,ImDrawFlags_Closed,U(1.8f));
+        } else if (name=="rotate") {
+            circle(12,12,8); line(19,4,20,9); line(20,9,15,9);
+        } else if (name=="pan") {
+            line(12,2,12,22);line(2,12,22,12);
+            line(12,2,9,5);line(12,2,15,5);line(12,22,9,19);line(12,22,15,19);
+            line(2,12,5,9);line(2,12,5,15);line(22,12,19,9);line(22,12,19,15);
+        } else if (name=="move") {
+            circle(12,12,3.5f);line(12,1,12,6);line(12,18,12,23);
+            line(1,12,6,12);line(18,12,23,12);
+        } else if (name=="draw") {
+            line(4,19,17,5);line(17,5,21,9);line(21,9,8,22);line(8,22,4,22);
+            line(4,22,4,19);line(14,8,18,12);
+        } else if (name=="delete") {
+            line(4,7,20,7);line(7,7,8,20);line(8,20,16,20);line(16,20,17,7);
+            line(9,7,9,4);line(9,4,15,4);line(15,4,15,7);line(10,11,10,17);line(14,11,14,17);
+        } else if (name=="hydrogen") {
+            draw->AddText(point(3,3),color,"H+");
+        } else if (name=="clean") {
+            line(12,3,14,9);line(14,9,20,11);line(20,11,14,13);
+            line(14,13,12,19);line(12,19,10,13);line(10,13,4,11);line(4,11,10,9);line(10,9,12,3);
+        } else if (name=="distance") {
+            line(3,12,21,12);line(3,8,3,16);line(21,8,21,16);
+            line(8,10,8,14);line(12,9,12,15);line(16,10,16,14);
+        } else if (name=="angle") {
+            line(4,20,20,20);line(4,20,15,5);circle(4,20,3);
+        } else if (name=="ball"||name=="fill") {
+            circle(8,8,4);circle(17,16,4);
+            if (name=="ball") line(10,10,15,14);
+        } else if (name=="stick") {
+            line(5,19,19,5);line(5,11,13,19);
+        } else if (name=="cell") {
+            line(4,7,12,3);line(12,3,20,7);line(20,7,20,17);
+            line(20,17,12,21);line(12,21,4,17);line(4,17,4,7);
+            line(4,7,12,11);line(12,11,20,7);line(12,11,12,21);
+        } else if (name=="bond") {
+            circle(5,12,2.5f);circle(19,12,2.5f);line(8,12,16,12);
+        } else if (name=="crystal") {
+            rect(4,4,20,20);line(4,12,20,12);line(12,4,12,20);
+            for (float x:{8.f,16.f}) for (float y:{8.f,16.f}) circle(x,y,.7f);
+        } else if (name=="supercell") {
+            rect(3,3,11,11);rect(13,3,21,11);rect(3,13,11,21);rect(13,13,21,21);
+        } else if (name=="surf") {
+            line(3,21,21,21);line(3,17,21,17);line(3,13,21,13);
+            line(12,3,12,9);line(12,3,9,6);line(12,3,15,6);
+        } else if (name=="home") {
+            line(3,11,12,3);line(12,3,21,11);line(5,9,5,20);line(5,20,19,20);line(19,20,19,9);
+        } else if (name=="fit") {
+            line(3,9,3,3);line(3,3,9,3);line(21,9,21,3);line(21,3,15,3);
+            line(3,15,3,21);line(3,21,9,21);line(21,15,21,21);line(21,21,15,21);
+        }
+    }
+    void browserTabStrip(float w) {
         const float titleH = titleBarHeight();
         fixed("Creation tabs", 0, 0, w, titleH);
         ImGui::SetCursorPosY(U(3));
@@ -2454,6 +2691,7 @@ struct App {
         ImGui::AlignTextToFramePadding();
         ImGui::Text("AtomX  %s", atomxVersion);
         ImGui::SameLine(0, U(16));
+        int closing = -1;
         for (int index = 0; index < int(tabs.size()); ++index) {
             ImGui::PushID(index);
             const bool selected = index == activeTab;
@@ -2461,14 +2699,20 @@ struct App {
             const std::string name = selected ? tabTitle() : tabs[size_t(index)].title;
             const std::string label = name;
             if (ImGui::Button(label.c_str(), {U(212), U(32)})) switchTab(index);
+            const bool isHome=selected?homeMode:tabs[size_t(index)].home;
+            const bool isCreation=selected?creationMode:tabs[size_t(index)].creationMode;
+            if (!isHome) {
+                const auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddCircleFilled({lo.x+U(12),(lo.y+hi.y)*.5f},U(4),
+                    isCreation?IM_COL32(70,225,134,255):IM_COL32(245,173,53,255));
+            }
             if (selected) ImGui::PopStyleColor();
             ImGui::SameLine(0, U(2));
-            if (ImGui::SmallButton("x")) closeTab(index);
+            if (ImGui::SmallButton("x")) closing = index;
             ImGui::SameLine(0, U(5));
             ImGui::PopID();
         }
-        if (ImGui::SmallButton("+"))
-            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+        if (ImGui::SmallButton("+")) newHomeTab();
         ImGui::SetCursorPosX(w - U(210));
         ImGui::SetCursorPosY(U(5));
         control("##minimize", 0, "Minimize to taskbar"); ImGui::SameLine();
@@ -2476,6 +2720,11 @@ struct App {
         control("##tray", 2, "Close to system tray"); ImGui::SameLine();
         control("##exit", 3, "Exit AtomX");
         ImGui::End();
+        if (closing >= 0) closeTab(closing);
+    }
+    void creationTop(float w) {
+        const float titleH = titleBarHeight();
+        browserTabStrip(w);
 
         fixed("Creation menu", 0, titleH, w, U(38));
         ImGui::PushStyleColor(ImGuiCol_Button, {0.22f, 0.86f, 0.48f, 1.f});
@@ -2515,10 +2764,9 @@ struct App {
             if (ImGui::MenuItem("几何优化")) cleanGeometryCommand();
         });
         menu("构建", "##create-build", [&] {
-            if (ImGui::MenuItem("新建晶体...")) openNewCell = true;
-            if (ImGui::MenuItem("三斜晶胞...")) openTriclinicCell = true;
-            if (ImGui::MenuItem("超胞 2 x 2 x 2"))
-                adoptStructure(authoring::replicate(source, 2, 2, 2), "Built supercell");
+            if (ImGui::MenuItem("建晶体...")) openCrystalDialog = true;
+            if (ImGui::MenuItem("超胞...")) openSupercellDialog = true;
+            if (ImGui::MenuItem("切面·真空...")) openSurfaceDialog = true;
         });
         menu("工具", "##create-tools", [&] {
             if (ImGui::MenuItem("重置视角")) resetView();
@@ -2536,22 +2784,22 @@ struct App {
         ImGui::SetCursorPosY(U(7));
         auto icon = [&](const char *id, unsigned codepoint, const char *fallback, const char *tip,
                         ImVec4 tone, bool selected, auto &&action) {
+            (void)codepoint; (void)fallback;
             ImGui::PushID(id);
-            const ImVec4 bg = selected ? tone : ImVec4{tone.x * .14f, tone.y * .14f, tone.z * .14f, 1.f};
-            ImGui::PushStyleColor(ImGuiCol_Button, bg);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {tone.x * .35f, tone.y * .35f, tone.z * .35f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, tone);
-            ImGui::PushStyleColor(ImGuiCol_Text, selected ? ImVec4{.04f,.06f,.07f,1.f} : tone);
-            ImGui::PushStyleColor(ImGuiCol_Border, {tone.x * .4f, tone.y * .4f, tone.z * .4f, 1.f});
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, U(1));
-            char glyph[8];
-            if (glyphAvailable(codepoint)) glyphUtf8(codepoint, glyph);
-            else snprintf(glyph, sizeof(glyph), "%s", fallback);
-            const bool pressed = ImGui::Button(glyph, {U(35), U(35)});
+            const bool pressed = ImGui::InvisibleButton("##icon", {U(35), U(35)});
+            const bool hovered = ImGui::IsItemHovered();
+            const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
+            const ImVec4 bg = selected ? tone : ImVec4{tone.x * (hovered ? .30f : .14f),
+                tone.y * (hovered ? .30f : .14f), tone.z * (hovered ? .30f : .14f), 1.f};
+            auto *draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(lo, hi, ImGui::GetColorU32(bg), U(10));
+            draw->AddRect(lo, hi, ImGui::GetColorU32(ImVec4{tone.x*.48f,tone.y*.48f,tone.z*.48f,1}), U(10), 0, U(1));
+            if (selected) draw->AddRect({lo.x-U(2),lo.y-U(2)}, {hi.x+U(2),hi.y+U(2)},
+                ImGui::GetColorU32(tone), U(12), 0, U(1.5f));
+            drawCreationIcon(draw, {(lo.x+hi.x)*.5f,(lo.y+hi.y)*.5f}, id,
+                selected ? IM_COL32(12,18,21,255) : ImGui::GetColorU32(tone));
             if (pressed) action();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor(5);
+            if (hovered) ImGui::SetTooltip("%s", tip);
             ImGui::PopID();
             ImGui::SameLine(0, U(4));
         };
@@ -2561,11 +2809,11 @@ struct App {
             violet{.72f,.53f,1.f,1}, blue{.58f,.68f,1.f,1};
         icon("undo",0xE7A7,"<","Undo",gray,false,[&]{history(false);});
         icon("redo",0xE7A6,">","Redo",gray,false,[&]{history(true);}); divider();
-        icon("select",0xE7C9,"S","Select atoms",cyan,!creationSketch,[&]{creationSketch=false;});
-        icon("rotate",0xE7AD,"R","Rotate view",cyan,false,[&]{viewportTool=2;});
-        icon("pan",0xE72A,"P","Pan view",green,false,[&]{viewportTool=1;});
-        icon("move",0xE8AB,"M","Move picked atom",orange,false,[&]{nudgePicked(0,.2f);});
-        icon("draw",0xE70F,"+","Draw atoms",green,creationSketch,[&]{creationSketch=true;}); divider();
+        icon("select",0xE7C9,"S","Select atoms",cyan,creationTool==CreationTool::Select,[&]{chooseCreationTool(CreationTool::Select);});
+        icon("rotate",0xE7AD,"R","Rotate view",cyan,creationTool==CreationTool::Rotate,[&]{chooseCreationTool(CreationTool::Rotate);});
+        icon("pan",0xE72A,"P","Pan view",green,creationTool==CreationTool::Pan,[&]{chooseCreationTool(CreationTool::Pan);});
+        icon("move",0xE8AB,"M","Move selected atoms",orange,creationTool==CreationTool::Move,[&]{chooseCreationTool(CreationTool::Move);});
+        icon("draw",0xE70F,"+","Draw atoms",green,creationTool==CreationTool::Sketch,[&]{chooseCreationTool(CreationTool::Sketch);}); divider();
         icon("delete",0xE74D,"X","Delete selected atom",red,false,[&]{deletePickedAtom();});
         icon("hydrogen",0xE8FA,"H+","Add hydrogens",violet,false,[&]{addHydrogensCommand();});
         icon("clean",0xE734,"*","Clean geometry",violet,false,[&]{cleanGeometryCommand();}); divider();
@@ -2576,20 +2824,28 @@ struct App {
         icon("fill",0xE8B7,"O","Space filling",blue,radius>=.6f,[&]{setDisplayStyle(1);}); divider();
         icon("cell",0xE8A7,"C","Show cell",cyan,cell,[&]{cell=!cell;});
         icon("bond",0xE8D7,"-","Show bonds",cyan,source.bondStyle.visible,[&]{source.bondStyle.visible=!source.bondStyle.visible;update();}); divider();
-        ImGui::PushStyleColor(ImGuiCol_Button, {0.57f,0.39f,0.91f,1.f});
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.67f,0.50f,1.f,1.f});
-        ImGui::PushStyleColor(ImGuiCol_Text, {0.08f,0.05f,0.13f,1.f});
-        if (ImGui::Button("建晶体", {U(78), U(35)})) openNewCell=true;
-        ImGui::PopStyleColor(3);
-        ImGui::SameLine(0,U(4));
-        ImGui::PushStyleColor(ImGuiCol_Button, {0.13f,0.09f,0.22f,1.f});
-        ImGui::PushStyleColor(ImGuiCol_Text, violet);
-        if (ImGui::Button("超胞", {U(65), U(35)}))
-            adoptStructure(authoring::replicate(source,2,2,2),"Built supercell");
-        ImGui::SameLine(0,U(4));
-        if (ImGui::Button("切面·真空", {U(100), U(35)}))
-            adoptStructure(authoring::addVacuum(source,2,15),"Added vacuum");
-        ImGui::PopStyleColor(2);
+        auto buildButton=[&](const char *id,const char *caption,float width,bool primary,auto &&action) {
+            ImGui::PushID(id);
+            const bool pressed=ImGui::InvisibleButton("##build",{U(width),U(35)});
+            const bool hovered=ImGui::IsItemHovered();
+            const auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
+            auto *draw=ImGui::GetWindowDrawList();
+            const ImU32 fill=primary
+                ? IM_COL32(155,110,244,255)
+                : hovered?IM_COL32(55,35,87,255):IM_COL32(35,23,55,255);
+            const ImU32 foreground=primary?IM_COL32(23,14,34,255):IM_COL32(189,145,255,255);
+            draw->AddRectFilled(lo,hi,fill,U(9));
+            draw->AddRect(lo,hi,primary?IM_COL32(171,134,255,255):IM_COL32(79,49,120,255),U(9));
+            drawCreationIcon(draw,{lo.x+U(16),(lo.y+hi.y)*.5f},id,foreground);
+            const auto textSize=ImGui::CalcTextSize(caption);
+            draw->AddText({lo.x+U(32),(lo.y+hi.y-textSize.y)*.5f},foreground,caption);
+            if (pressed) action();
+            ImGui::PopID();
+            ImGui::SameLine(0,U(4));
+        };
+        buildButton("crystal","建晶体",90,true,[&]{openCrystalDialog=true;});
+        buildButton("supercell","超胞",76,false,[&]{openSupercellDialog=true;});
+        buildButton("surf","切面·真空",116,false,[&]{openSurfaceDialog=true;});
         divider();
         icon("home",0xE80F,"H","Reset camera",gray,false,[&]{resetView();});
         icon("fit",0xE8AA,"F","Fit structure",gray,false,[&]{fitCamera(3,false);});
@@ -2597,20 +2853,17 @@ struct App {
     }
     void top(float w) {
         if (creationMode) { creationTop(w); return; }
+        if (homeMode) { browserTabStrip(w); return; }
         const float titleH = titleBarHeight(), barH = toolBarHeight();
-        fixed("Title", 0, 0, w, titleH);
-        ImGui::SetCursorPosY(U(4));
-        ImGui::Image((ImTextureID)(intptr_t)logo.Get(), {U(32),U(32)});
-        ImGui::SameLine(); ImGui::SetCursorPosY(U(9));
-        ImGui::TextUnformatted("AtomX");
-        ImGui::SameLine(); ImGui::TextDisabled(" / Atomic visualization");
+        browserTabStrip(w);
+        fixed("Title", 0, titleH, w, titleH);
+        ImGui::SetCursorPos({U(12),U(10)});
         // OVITO parity: File / Edit / Help drop-downs live in the title strip
         // next to the logo. Plain BeginMenu calls give the standard behavior
         // (click to open, hover to switch while open, click-away/Esc to
         // close) without BeginMainMenuBar, which cannot coexist with the
         // custom title bar. Disabled entries are honest about being planned.
         {
-            ImGui::SameLine(); ImGui::SetCursorPosY(U(10));
             auto enabledItem = [&](const char *label, const char *record,
                                    const char *shortcut = nullptr) {
                 const bool pressed = ImGui::MenuItem(label, shortcut);
@@ -2640,10 +2893,9 @@ struct App {
             recordUiTestItem("menu.file", "File");
             if (fileOpen) {
                 if (enabledItem("New Tab", "menu.file.new-tab", "Ctrl+T"))
-                    newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+                    newHomeTab();
                 if (enabledItem("Load File...", "menu.file.load-file", "Ctrl+I")) open();
                 if (enabledItem("Load File in New Tab...", "menu.file.load-new-tab")) {
-                    newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
                     open();
                 }
                 disabledItem("Load Remote File", "menu.file.load-remote", "Ctrl+Shift+I",
@@ -2659,7 +2911,7 @@ struct App {
                         int index = 0;
                         for (const auto &file : preferences.recentFiles) {
                             const auto record = "menu.file.recent." + std::to_string(index++);
-                            if (enabledItem(utf8(file).c_str(), record.c_str())) load(file);
+                            if (enabledItem(utf8(file).c_str(), record.c_str())) openFileTab(file);
                         }
                     }
                     ImGui::EndMenu();
@@ -2805,7 +3057,7 @@ struct App {
             const ImVec2 fs = ImGui::CalcTextSize(fileName.c_str());
             const float total = fs.x + dash.x + ImGui::CalcTextSize(info.c_str()).x;
             float x = (w - total) * .5f;
-            const float y = U(13);
+            const float y = titleH + U(13);
             dl->AddText({x, y}, IM_COL32(174, 180, 187, 255), fileName.c_str());
             x += fs.x;
             dl->AddText({x, y}, ImGui::GetColorU32(ImGuiCol_TextDisabled, .62f), "  -  ");
@@ -2817,10 +3069,10 @@ struct App {
         {
             auto *dl = ImGui::GetWindowDrawList();
             const float chipX = w - U(215) - U(96);
-            const float cy = U(20);
+            const float cy = titleH + U(20);
             dl->AddRectFilled({chipX, cy - U(3)}, {chipX + U(6), cy + U(3)},
                               ImGui::GetColorU32(ImGuiCol_NavCursor), U(1));
-            dl->AddText({chipX + U(12), U(13)}, ImGui::GetColorU32(ImGuiCol_TextDisabled),
+            dl->AddText({chipX + U(12), titleH + U(13)}, ImGui::GetColorU32(ImGuiCol_TextDisabled),
                         "View mode");
         }
         // OVITO parity: the "Pipelines: <source>" selector lives in the
@@ -2848,11 +3100,6 @@ struct App {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Data source feeding the pipeline");
         }
-        ImGui::SameLine(w-U(210)); ImGui::SetCursorPosY(U(5));
-        control("##minimize",0,"Minimize to taskbar"); ImGui::SameLine();
-        control("##maximize",1,"Maximize / restore"); ImGui::SameLine();
-        control("##tray",2,"Close to system tray (keep running)"); ImGui::SameLine();
-        control("##exit",3,"Power off: exit AtomX completely");
         ImGui::End();
         if (creationMode) {
             fixed("Creation mode header", 0, titleH, w, U(38));
@@ -2922,7 +3169,7 @@ struct App {
         // Compact OVITO-style toolbar: grouped icon-only flat buttons with
         // subtle separators; every action, tooltip and recorded UI-test name
         // of the former text toolbar is preserved.
-        fixed("Top", 0, titleH, w, barH);
+        fixed("Top", 0, titleH * 2, w, barH);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(6), U(4)});
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(2), U(4)});
         ImGui::SetCursorPosY(U(3));
@@ -3374,6 +3621,185 @@ struct App {
         ImGui::End();
     }
     const char *views = "Top\0Bottom\0Front\0Back\0Left\0Right\0Ortho\0Perspective\0";
+    void chooseCreationTool(CreationTool tool) {
+        creationTool = tool;
+        creationSketch = tool == CreationTool::Sketch;
+        status = tool == CreationTool::Select ? "选择原子或拖动框选" :
+                 tool == CreationTool::Rotate ? "拖动旋转" :
+                 tool == CreationTool::Pan ? "拖动平移" :
+                 tool == CreationTool::Move ? "拖动选中原子" : "点击空白处绘制原子";
+    }
+    void selectCreationAtom(int index, bool shift) {
+        if (index < 0) { if (!shift) creationSelection.clear(); }
+        else if (!shift) creationSelection = {index};
+        else {
+            auto found = std::find(creationSelection.begin(), creationSelection.end(), index);
+            if (found == creationSelection.end()) creationSelection.push_back(index);
+            else creationSelection.erase(found);
+        }
+        creationPick = creationSelection.empty() ? -1 : creationSelection.back();
+    }
+    int creationHit(ImVec2 p, ImVec2 size, const Camera &cam, ImVec2 mouse) {
+        if (result.data.atoms.empty()) return -1;
+        const auto matrix = gpu.matrix(result.data, cam, size.x/std::max(size.y,1.f),true,radius);
+        int hit=-1;
+        float bestDepth=FLT_MAX, bestPixel=FLT_MAX;
+        for (size_t index=0; index<result.data.atoms.size(); ++index) {
+            const auto &atom=result.data.atoms[index];
+            DirectX::XMFLOAT4 q;
+            DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),matrix));
+            if (q.w<=0 || q.z<=0) continue;
+            const float x=p.x+(q.x/q.w+1)*size.x*.5f;
+            const float y=p.y+(1-q.y/q.w)*size.y*.5f;
+            const float dx=x-mouse.x,dy=y-mouse.y, distance=dx*dx+dy*dy;
+            const float hitRadius=U(12);
+            if (distance>hitRadius*hitRadius) continue;
+            const float depth=q.z/q.w;
+            if (depth<bestDepth-1e-4f || (std::abs(depth-bestDepth)<1e-4f && distance<bestPixel)) {
+                hit=int(index); bestDepth=depth; bestPixel=distance;
+            }
+        }
+        return hit;
+    }
+    Vec3 creationWorldAt(ImVec2 screen, float depth, ImVec2 p, ImVec2 size,
+                         const DirectX::XMMATRIX &matrix) {
+        const float nx=2.f*(screen.x-p.x)/std::max(size.x,1.f)-1.f;
+        const float ny=1.f-2.f*(screen.y-p.y)/std::max(size.y,1.f);
+        const auto inverse=DirectX::XMMatrixInverse(nullptr,matrix);
+        DirectX::XMFLOAT4 q;
+        DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+            DirectX::XMVectorSet(nx,ny,depth,1.f),inverse));
+        const float w=std::abs(q.w)>1e-6f?q.w:1.f;
+        return {q.x/w,q.y/w,q.z/w};
+    }
+    void creationPointer(ImVec2 p, ImVec2 size, Camera &cam, bool hovered) {
+        auto &io=ImGui::GetIO();
+        const ImVec2 mouse=io.MousePos;
+        if (hovered && (mouse.x!=creationLastHoverMouse.x || mouse.y!=creationLastHoverMouse.y)) {
+            creationHover=creationHit(p,size,cam,mouse);
+            creationLastHoverMouse=mouse;
+        }
+        if (!hovered && creationDrag==CreationDrag::None) {
+            creationHover=-1;
+            creationLastHoverMouse={-1,-1};
+        }
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+            creationDragStart=creationDragPrevious=mouse;
+            creationDragMoved=false;
+            creationDrag=CreationDrag::Rotate;
+        }
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            creationDragStart=creationDragPrevious=mouse;
+            creationDragMoved=false;
+            creationDragShift=io.KeyShift;
+            const int hit=creationHit(p,size,cam,mouse);
+            if (creationTool==CreationTool::Rotate) creationDrag=CreationDrag::Rotate;
+            else if (creationTool==CreationTool::Pan) creationDrag=CreationDrag::Pan;
+            else if (creationTool==CreationTool::Move && hit>=0) {
+                if (std::find(creationSelection.begin(),creationSelection.end(),hit)==creationSelection.end())
+                    selectCreationAtom(hit,false);
+                creationDrag=CreationDrag::Move;
+                creationDragAtoms.clear();
+                for (int selected : creationSelection)
+                    if (selected>=0 && size_t(selected)<source.atoms.size()) {
+                        const auto &a=source.atoms[size_t(selected)];
+                        creationDragAtoms.push_back({selected,{a.x,a.y,a.z}});
+                    }
+                creationMoveDelta={};
+            } else if (creationTool==CreationTool::Move) creationDrag=CreationDrag::Rotate;
+            else if (creationTool==CreationTool::Sketch && hit<0) creationDrag=CreationDrag::Sketch;
+            else if (hit>=0) { selectCreationAtom(hit,io.KeyShift); creationDrag=CreationDrag::None; }
+            else { if (!io.KeyShift) selectCreationAtom(-1,false); creationDrag=CreationDrag::Box; }
+        }
+        if (creationDrag!=CreationDrag::None &&
+            (ImGui::IsMouseDown(ImGuiMouseButton_Left)||ImGui::IsMouseDown(ImGuiMouseButton_Middle))) {
+            if (std::abs(mouse.x-creationDragStart.x)+std::abs(mouse.y-creationDragStart.y)>U(3))
+                creationDragMoved=true;
+            const float dx=mouse.x-creationDragPrevious.x,dy=mouse.y-creationDragPrevious.y;
+            if (creationDrag==CreationDrag::Sketch && creationDragMoved)
+                creationDrag=CreationDrag::Rotate;
+            if (creationDrag==CreationDrag::Rotate && creationDragMoved) {
+                cam.yaw-=dx*.008f;
+                cam.pitch=std::clamp(cam.pitch+dy*.008f,-1.55f,1.55f);
+                if (cam.mode<6) cam.mode=6;
+            } else if (creationDrag==CreationDrag::Pan && creationDragMoved) {
+                cam.panX+=dx/std::max(size.x,1.f)*cam.zoom;
+                cam.panY-=dy/std::max(size.y,1.f)*cam.zoom;
+            } else if (creationDrag==CreationDrag::Move && creationDragMoved && !creationDragAtoms.empty()) {
+                const auto matrix=gpu.matrix(result.data,cam,size.x/std::max(size.y,1.f),true,radius);
+                const auto &anchor=creationDragAtoms.front().second;
+                DirectX::XMFLOAT4 q;
+                DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                    DirectX::XMVectorSet(anchor.x,anchor.y,anchor.z,1),matrix));
+                if (q.w>0) {
+                    const auto a=creationWorldAt(creationDragStart,q.z/q.w,p,size,matrix);
+                    const auto b=creationWorldAt(mouse,q.z/q.w,p,size,matrix);
+                    creationMoveDelta={b.x-a.x,b.y-a.y,b.z-a.z};
+                    for (const auto &[index,original]:creationDragAtoms) {
+                        auto &atom=result.data.atoms[size_t(index)];
+                        atom.x=original.x+creationMoveDelta.x;
+                        atom.y=original.y+creationMoveDelta.y;
+                        atom.z=original.z+creationMoveDelta.z;
+                    }
+                    gpu.upload(result.data,result.selected,result.colorSelected);
+                }
+            }
+            creationDragPrevious=mouse;
+        }
+        if (creationDrag!=CreationDrag::None &&
+            (ImGui::IsMouseReleased(ImGuiMouseButton_Left)||ImGui::IsMouseReleased(ImGuiMouseButton_Middle))) {
+            if (creationDrag==CreationDrag::Box && creationDragMoved) {
+                const auto matrix=gpu.matrix(result.data,cam,size.x/std::max(size.y,1.f),true,radius);
+                const float x0=std::min(creationDragStart.x,mouse.x),x1=std::max(creationDragStart.x,mouse.x);
+                const float y0=std::min(creationDragStart.y,mouse.y),y1=std::max(creationDragStart.y,mouse.y);
+                if (!creationDragShift) creationSelection.clear();
+                std::vector<uint8_t> already(result.data.atoms.size(),0);
+                for (int selected:creationSelection)
+                    if (selected>=0 && size_t(selected)<already.size()) already[size_t(selected)]=1;
+                for (size_t index=0;index<result.data.atoms.size();++index) {
+                    const auto &atom=result.data.atoms[index];
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                        DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),matrix));
+                    if (q.w<=0||q.z<=0) continue;
+                    const float x=p.x+(q.x/q.w+1)*size.x*.5f,y=p.y+(1-q.y/q.w)*size.y*.5f;
+                    if (x>=x0&&x<=x1&&y>=y0&&y<=y1 && !already[index]) {
+                        creationSelection.push_back(int(index));
+                        already[index]=1;
+                    }
+                }
+                creationPick=creationSelection.empty()?-1:creationSelection.back();
+            } else if (creationDrag==CreationDrag::Move && creationDragMoved) {
+                const auto edits=creationDragAtoms;
+                const auto delta=creationMoveDelta;
+                editStructure("移动 " + std::to_string(edits.size()) + " 个原子",[&](Dataset &data) {
+                    for (const auto &[index,original]:edits) {
+                        auto &atom=data.atoms[size_t(index)];
+                        atom.x=original.x+delta.x; atom.y=original.y+delta.y; atom.z=original.z+delta.z;
+                    }
+                });
+            } else if (creationDrag==CreationDrag::Sketch && !creationDragMoved) {
+                const auto matrix=gpu.matrix(result.data,cam,size.x/std::max(size.y,1.f),true,radius);
+                const auto center=authoring::cartesian(source,.5,.5,.5);
+                DirectX::XMFLOAT4 q;
+                DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                    DirectX::XMVectorSet(center.x,center.y,center.z,1),matrix));
+                if (q.w>0) addAtomAt(creationWorldAt(creationDragStart,q.z/q.w,p,size,matrix));
+            }
+            creationDrag=CreationDrag::None;
+            creationDragAtoms.clear();
+        }
+        if (hovered) {
+            if (creationHover>=0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            else if (creationTool==CreationTool::Pan||creationTool==CreationTool::Move)
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            else if (creationTool==CreationTool::Rotate)
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            else if (creationTool==CreationTool::Sketch)
+                g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
+        }
+    }
     void viewport(int i, float w, float h) {
         ImGui::PushID(i);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,creationMode ? ImVec2{0,0} : ImVec2{U(4),U(4)});
@@ -3398,77 +3824,31 @@ struct App {
         for (size_t type = 0; type < originalRadii.size(); ++type)
             gpu.styles[type].visual[0] = originalRadii[type];
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
+        const bool viewportHovered = ImGui::IsItemHovered();
+        if (creationMode) creationPointer(p,avail,cam,viewportHovered);
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
                 active = i;
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                if (creationMode && creationHover>=0 &&
+                    std::find(creationSelection.begin(),creationSelection.end(),creationHover)==creationSelection.end())
+                    selectCreationAtom(creationHover,false);
                 ImGui::OpenPopup("viewport-structure-menu");
-            if (creationMode && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
-                std::abs(ImGui::GetMouseDragDelta(0).x) < 4.f &&
-                std::abs(ImGui::GetMouseDragDelta(0).y) < 4.f) {
-                int hit = -1;
-                float best = U(16) * U(16);
-                auto mvp = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
-                const auto &atoms = result.data.atoms;
-                const size_t step = atoms.size() > 60000 ? atoms.size() / 60000 : 1;
-                for (size_t index = 0; index < atoms.size(); index += step) {
-                    DirectX::XMFLOAT4 q;
-                    DirectX::XMStoreFloat4(
-                        &q, DirectX::XMVector4Transform(
-                                DirectX::XMVectorSet(atoms[index].x, atoms[index].y, atoms[index].z, 1), mvp));
-                    if (q.w <= 0 || q.z <= 0) continue;
-                    float sx = p.x + (q.x / q.w + 1) * avail.x * .5f;
-                    float sy = p.y + (1 - q.y / q.w) * avail.y * .5f;
-                    float dx = sx - ImGui::GetIO().MousePos.x, dy = sy - ImGui::GetIO().MousePos.y;
-                    float dist = dx * dx + dy * dy;
-                    if (dist < best) {
-                        best = dist;
-                        hit = int(index);
-                    }
-                }
-                if (hit >= 0 && ImGui::GetIO().KeyAlt) creationDihedral = hit;
-                else if (hit >= 0 && ImGui::GetIO().KeyCtrl) creationAngle = hit;
-                else if (hit >= 0 && ImGui::GetIO().KeyShift) creationMeasure = hit;
-                else if (hit >= 0) {
-                    creationPick = hit;
-                    creationMeasure = creationAngle = creationDihedral = -1;
-                } else if (creationSketch && !ImGui::GetIO().KeyAlt &&
-                           !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
-                    using namespace DirectX;
-                    const float nx = 2.f * (ImGui::GetIO().MousePos.x - p.x) / std::max(avail.x, 1.f) - 1.f;
-                    const float ny = 1.f - 2.f * (ImGui::GetIO().MousePos.y - p.y) / std::max(avail.y, 1.f);
-                    const XMMATRIX inverse = XMMatrixInverse(nullptr, mvp);
-                    auto worldPoint = [&](float depth) {
-                        XMFLOAT4 point;
-                        XMStoreFloat4(&point, XMVector4Transform(XMVectorSet(nx, ny, depth, 1.f), inverse));
-                        const float reciprocal = std::abs(point.w) > 1e-6f ? 1.f / point.w : 1.f;
-                        return Vec3{point.x * reciprocal, point.y * reciprocal, point.z * reciprocal};
-                    };
-                    const Vec3 nearPoint = worldPoint(0.f), farPoint = worldPoint(1.f);
-                    const Vec3 center = authoring::cartesian(source, .5f, .5f, .5f);
-                    const float dz = farPoint.z - nearPoint.z;
-                    const float t = std::abs(dz) > 1e-6f ? (center.z - nearPoint.z) / dz : .5f;
-                    const Vec3 placed{nearPoint.x + (farPoint.x - nearPoint.x) * t,
-                                      nearPoint.y + (farPoint.y - nearPoint.y) * t,
-                                      center.z};
-                    addAtomAt(placed);
-                }
-                if (hit >= 0) active = i;
             }
-            if (ImGui::IsMouseDragging(0) && viewportTool == 2) {
+            if (!creationMode && ImGui::IsMouseDragging(0) && viewportTool == 2) {
                 cam.yaw -= ImGui::GetIO().MouseDelta.x * .008f;
                 cam.pitch =
                     std::clamp(cam.pitch + ImGui::GetIO().MouseDelta.y * .008f, -1.55f, 1.55f);
                 if (cam.mode < 6)
                     cam.mode = 6;
             }
-            if ((ImGui::IsMouseDragging(1) || ImGui::IsMouseDragging(2)) || (ImGui::IsMouseDragging(0) && viewportTool == 1)) {
+            if (!creationMode && ((ImGui::IsMouseDragging(1) || ImGui::IsMouseDragging(2)) || (ImGui::IsMouseDragging(0) && viewportTool == 1))) {
                 cam.panX += ImGui::GetIO().MouseDelta.x / std::max(avail.x, 1.f) * cam.zoom;
                 cam.panY -= ImGui::GetIO().MouseDelta.y / std::max(avail.y, 1.f) * cam.zoom;
             }
             // Dragging up (negative delta) zooms in, matching the wheel
             // (wheel up -> zoom in) and OVITO's zoom tool.
-            if (viewportTool == 0 && ImGui::GetIO().MouseWheel == 0 && ImGui::IsMouseDragging(0))
+            if (!creationMode && viewportTool == 0 && ImGui::GetIO().MouseWheel == 0 && ImGui::IsMouseDragging(0))
                 cam.zoom = std::clamp(cam.zoom * powf(.985f, -ImGui::GetIO().MouseDelta.y), .01f, 50.f);
             cam.zoom = std::clamp(cam.zoom * powf(.85f, ImGui::GetIO().MouseWheel), .01f, 50.f);
         }
@@ -3648,7 +4028,7 @@ struct App {
         // the zoom magnifier has no stock shape and goes through the Win32
         // WM_SETCURSOR override. The ui() frame start resets both, so leaving
         // the viewport (or no tool) restores the normal arrow.
-        if (ImGui::IsWindowHovered()) {
+        if (!creationMode && ImGui::IsWindowHovered()) {
             switch (cursorForViewportTool(viewportTool)) {
             case ViewportCursor::Hand: ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); break;
             case ViewportCursor::ResizeAll: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll); break;
@@ -3659,31 +4039,58 @@ struct App {
             case ViewportCursor::Arrow: break;
             }
         }
-        if (creationPick >= 0 && size_t(creationPick) < result.data.atoms.size()) {
-            const auto &atom = result.data.atoms[creationPick];
+        if (creationMode) {
             auto mvp = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
-            DirectX::XMFLOAT4 q;
-            DirectX::XMStoreFloat4(
-                &q, DirectX::XMVector4Transform(DirectX::XMVectorSet(atom.x, atom.y, atom.z, 1), mvp));
-            if (q.w > 0 && q.z > 0) {
-                ImVec2 at{p.x + (q.x / q.w + 1) * avail.x * .5f, p.y + (1 - q.y / q.w) * avail.y * .5f};
-                draw->AddCircle(at, U(10), IM_COL32(255, 196, 64, 255), 20, U(2));
+            draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
+            auto ring=[&](int index,ImU32 color,float width) {
+                if (index<0||size_t(index)>=result.data.atoms.size()) return;
+                const auto &atom=result.data.atoms[size_t(index)];
+                DirectX::XMFLOAT4 q;
+                DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                    DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),mvp));
+                if (q.w<=0||q.z<=0) return;
+                const ImVec2 at{p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};
+                draw->AddCircle(at,U(12),color,24,width);
+            };
+            for (int index:creationSelection) ring(index,IM_COL32(29,155,240,255),U(2));
+            if (creationHover>=0 && std::find(creationSelection.begin(),creationSelection.end(),creationHover)==creationSelection.end())
+                ring(creationHover,IM_COL32(221,228,236,180),U(1));
+            if (creationDrag==CreationDrag::Box && creationDragMoved) {
+                const auto mouse=ImGui::GetIO().MousePos;
+                const ImVec2 lo{std::min(creationDragStart.x,mouse.x),std::min(creationDragStart.y,mouse.y)};
+                const ImVec2 hi{std::max(creationDragStart.x,mouse.x),std::max(creationDragStart.y,mouse.y)};
+                draw->AddRectFilled(lo,hi,IM_COL32(29,155,240,35));
+                draw->AddRect(lo,hi,IM_COL32(29,155,240,255));
             }
+            draw->PopClipRect();
         }
         if (ImGui::BeginPopup("viewport-structure-menu")) {
-            if (ImGui::MenuItem("Zoom to extents")) fitCamera(i, false);
-            if (ImGui::MenuItem("Maximize / restore viewport")) {
-                active = i;
-                quad = !quad;
+            if (!creationMode) {
+                ImGui::TextDisabled("%s · %zu 原子",tabTitle().c_str(),result.data.atoms.size());
+                ImGui::Separator();
+                if (ImGui::MenuItem("✎ 在创作模式中打开")) openCreationTab();
+                ImGui::TextDisabled("新标签页 · 增删改原子、建晶体、超胞");
+                ImGui::Separator();
+                if (ImGui::MenuItem("复位视角")) fitCamera(i,false);
+                if (ImGui::MenuItem("导出结构...")) showDataExport=true;
+            } else {
+                ImGui::TextDisabled("%zu 个原子已选中",creationSelection.size());
+                ImGui::Separator();
+                if (ImGui::MenuItem("删除 · 制造空位",nullptr,false,!creationSelection.empty())) deletePickedAtom();
+                if (ImGui::MenuItem("选中同元素",nullptr,false,creationPick>=0)) {
+                    const uint32_t type=source.atoms[size_t(creationPick)].type;
+                    creationSelection.clear();
+                    for (size_t index=0;index<source.atoms.size();++index)
+                        if (source.atoms[index].type==type) creationSelection.push_back(int(index));
+                    creationPick=creationSelection.empty()?-1:creationSelection.back();
+                }
+                if (ImGui::MenuItem("在此添加原子")) {
+                    chooseCreationTool(CreationTool::Sketch);
+                    status="在空白处点击以添加原子";
+                }
+                if (ImGui::MenuItem("复位视角")) fitCamera(i,false);
+                if (ImGui::MenuItem("复制为新创作标签")) openCreationTab();
             }
-            ImGui::Separator();
-            if (ImGui::MenuItem(creationMode ? "Exit Creation Mode" : "Enter Creation Mode"))
-                creationMode ? leaveCreationTab() : openCreationTab();
-            if (ImGui::MenuItem("Add Atom at Cell Center"))
-                addAtomAt(authoring::cartesian(source, 0.5, 0.5, 0.5));
-            if (ImGui::MenuItem("Delete Picked Atom", nullptr, false, creationPick >= 0)) deletePickedAtom();
-            if (ImGui::MenuItem("Replace Picked Atom", nullptr, false, creationPick >= 0)) replacePickedElement();
-            if (ImGui::MenuItem("Add Hydrogens")) addHydrogensCommand();
             ImGui::EndPopup();
         }
         if (i == active && !creationMode) {
@@ -4063,7 +4470,6 @@ struct App {
               h - topInset() - statusHeight());
         // The reference workspace opens directly onto the viewport. Keep
         // document tabs visible only when there is another tab to switch to.
-        if (tabs.size() > 1) documentTabBar();
         if (creationMode) modelingToolbar();
         if (showLatticePanel) latticePanel();
         auto avail = ImGui::GetContentRegionAvail();
@@ -4563,6 +4969,150 @@ struct App {
         timeline();
         ImGui::End();
     }
+    void homeWorkspace(float w, float h) {
+        fixed("Home workspace", 0, topInset(), w, h - topInset() - statusHeight());
+        const float cardW = U(250);
+        ImGui::SetCursorPos({std::max(U(24),w*.5f-cardW*1.55f),U(105)});
+        if (headingFont) ImGui::PushFont(headingFont);
+        ImGui::TextUnformatted("开始使用 AtomX");
+        if (headingFont) ImGui::PopFont();
+        ImGui::SetCursorPosX(std::max(U(24),w*.5f-cardW*1.55f));
+        ImGui::TextDisabled("打开结构，或从空白结构开始创作");
+        ImGui::SetCursorPosX(std::max(U(24),w*.5f-cardW*1.55f));
+        if (ImGui::Button("打开结构文件", {cardW,U(100)})) open();
+        ImGui::SameLine(0,U(16));
+        if (ImGui::Button("新建空白结构", {cardW,U(100)})) {
+            newStructureTab(authoring::orthogonalCell(10,10,10,"C"),"未命名 · 创作");
+            creationMode = true;
+            creationSketch = true;
+            creationTool = CreationTool::Sketch;
+            source.atoms.clear();
+            update();
+        }
+        ImGui::SameLine(0,U(16));
+        if (ImGui::Button("从晶体开始", {cardW,U(100)})) openCrystalDialog = true;
+        ImGui::End();
+    }
+    void creationDialogs() {
+        if (openCrystalDialog) {
+            if (crystalBasis.empty()) configureCrystalPreset(crystalPreset);
+            crystalReplaceCurrent=creationMode;
+            ImGui::OpenPopup("建晶体##v2");
+            openCrystalDialog=false;
+        }
+        ImGui::SetNextWindowSize({U(580),U(580)},ImGuiCond_Appearing);
+        if (ImGui::BeginPopupModal("建晶体##v2",nullptr,ImGuiWindowFlags_NoSavedSettings)) {
+            const char *presets="Cu · FCC\0NaCl · 岩盐\0Si · 金刚石\0Fe · BCC\0Mg · HCP\0自定义 P1\0";
+            int preset=crystalPreset;
+            if (ImGui::Combo("结构模板",&preset,presets)) configureCrystalPreset(preset);
+            const bool cubic=crystalPreset<=3,hexagonal=crystalPreset==4;
+            ImGui::TextDisabled("晶格参数（Å）");
+            if (ImGui::InputFloat("a",&crystalA,.1f,1.f,"%.4f") && cubic)
+                crystalB=crystalC=crystalA;
+            if (cubic) ImGui::BeginDisabled();
+            ImGui::InputFloat("b",&crystalB,.1f,1.f,"%.4f");
+            if (cubic) ImGui::EndDisabled();
+            if (cubic) ImGui::BeginDisabled();
+            ImGui::InputFloat("c",&crystalC,.1f,1.f,"%.4f");
+            if (cubic) ImGui::EndDisabled();
+            if (cubic||hexagonal) ImGui::BeginDisabled();
+            ImGui::InputFloat("α",&crystalAlpha,1.f,5.f,"%.2f");
+            ImGui::InputFloat("β",&crystalBeta,1.f,5.f,"%.2f");
+            if (cubic||hexagonal) ImGui::EndDisabled();
+            if (cubic||hexagonal) ImGui::BeginDisabled();
+            ImGui::InputFloat("γ",&crystalGamma,1.f,5.f,"%.2f");
+            if (cubic||hexagonal) ImGui::EndDisabled();
+            ImGui::Separator();
+            ImGui::TextUnformatted("基元原子（分数坐标）");
+            int remove=-1;
+            for (size_t index=0;index<crystalBasis.size();++index) {
+                auto &atom=crystalBasis[index];
+                ImGui::PushID(int(index));
+                ImGui::SetNextItemWidth(U(70));
+                ImGui::InputText("##element",atom.element,sizeof(atom.element));
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(U(300));
+                ImGui::InputFloat3("##fractional",atom.fractional,"%.4f");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("×")) remove=int(index);
+                ImGui::PopID();
+            }
+            if (remove>=0) crystalBasis.erase(crystalBasis.begin()+remove);
+            if (ImGui::Button("+ 添加原子") && crystalBasis.size()<32)
+                crystalBasis.push_back(CrystalBasis{});
+            if (creationMode) ImGui::Checkbox("替换当前创作结构（否则新标签页）",&crystalReplaceCurrent);
+            const bool valid=crystalA>0&&crystalB>0&&crystalC>0&&!crystalBasis.empty();
+            ImGui::BeginDisabled(!valid);
+            if (ImGui::Button("生成晶胞",{U(110),U(36)})) {
+                try {
+                    Dataset data=crystalFromDialog();
+                    if (creationMode && crystalReplaceCurrent) adoptStructure(std::move(data),"已生成晶胞");
+                    else {
+                        newStructureTab(std::move(data),"晶体 · 创作");
+                        creationMode=true;
+                        chooseCreationTool(CreationTool::Select);
+                        cameras[3].mode=7; active=3;
+                    }
+                    ImGui::CloseCurrentPopup();
+                } catch (const std::exception &e) { status=e.what(); }
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("取消",{U(80),U(36)})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (openSupercellDialog) { ImGui::OpenPopup("超胞##v2"); openSupercellDialog=false; }
+        if (ImGui::BeginPopupModal("超胞##v2",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("沿晶胞 a / b / c 方向重复");
+            ImGui::InputInt3("重复次数",supercellFactor);
+            const uint64_t count=uint64_t(source.atoms.size())*
+                uint64_t(std::max(supercellFactor[0],0))*uint64_t(std::max(supercellFactor[1],0))*
+                uint64_t(std::max(supercellFactor[2],0));
+            ImGui::Text("预览：%llu 原子",static_cast<unsigned long long>(count));
+            const bool valid=creationMode && count<=60000 &&
+                std::all_of(std::begin(supercellFactor),std::end(supercellFactor),[](int n){return n>=1&&n<=12;});
+            ImGui::BeginDisabled(!valid);
+            if (ImGui::Button("扩展",{U(95),U(35)})) {
+                adoptStructure(authoring::replicate(source,supercellFactor[0],supercellFactor[1],supercellFactor[2]),
+                    "已扩展超胞");
+                fitCamera(3,false);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled(); ImGui::SameLine();
+            if (ImGui::Button("取消",{U(80),U(35)})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (openSurfaceDialog) { ImGui::OpenPopup("切面·真空##v2"); openSurfaceDialog=false; }
+        if (ImGui::BeginPopupModal("切面·真空##v2",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Combo("晶面",&surfaceAxis,"(100)\0(010)\0(001)\0");
+            ImGui::InputInt("层数",&surfaceLayers);
+            ImGui::InputFloat("真空厚度 (Å)",&surfaceVacuum,1.f,5.f,"%.2f");
+            const uint64_t count=uint64_t(source.atoms.size())*uint64_t(std::max(surfaceLayers,0));
+            ImGui::Text("预览：%llu 原子 · 真空 %.2f Å",static_cast<unsigned long long>(count),surfaceVacuum);
+            const bool valid=creationMode && surfaceLayers>=1&&surfaceLayers<=12&&
+                surfaceVacuum>=0&&count<=60000;
+            ImGui::BeginDisabled(!valid);
+            if (ImGui::Button("生成切面",{U(110),U(35)})) {
+                int repeat[3]={1,1,1}; repeat[surfaceAxis]=surfaceLayers;
+                auto slab=authoring::replicate(source,repeat[0],repeat[1],repeat[2]);
+                const auto axes=authoring::axes(slab.cell);
+                const Vec3 normal=surfaceAxis==0?axes.a:surfaceAxis==1?axes.b:axes.c;
+                const float length=std::max(float(authoring::length(normal)),1e-6f);
+                slab=authoring::addVacuum(slab,surfaceAxis,surfaceVacuum);
+                const float offset=surfaceVacuum/(2.f*length);
+                for (auto &atom:slab.atoms) {
+                    atom.x+=normal.x*offset; atom.y+=normal.y*offset; atom.z+=normal.z*offset;
+                }
+                authoring::finish(slab,"Surface slab with vacuum");
+                adoptStructure(std::move(slab),"已生成切面和真空层");
+                fitCamera(3,false);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled(); ImGui::SameLine();
+            if (ImGui::Button("取消",{U(80),U(35)})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+    }
     void creationWorkspace(float w, float h) {
         const float leftW = U(240), rightW = U(275);
         const float y = topInset(), bodyH = h - y - statusHeight();
@@ -4614,8 +5164,10 @@ struct App {
             std::string row = source.species[type] + "     " + elementName +
                 "                         " + std::to_string(count);
             if (ImGui::Selectable(row.c_str(), false, 0, {0,U(24)})) {
+                creationSelection.clear();
                 for (size_t i = 0; i < source.atoms.size(); ++i)
-                    if (source.atoms[i].type == type) { creationPick = int(i); break; }
+                    if (source.atoms[i].type == type) creationSelection.push_back(int(i));
+                creationPick=creationSelection.empty()?-1:creationSelection.back();
             }
             ImGui::PopID();
         }
@@ -4657,14 +5209,28 @@ struct App {
         if (headingFont) ImGui::PushFont(headingFont);
         ImGui::TextUnformatted("选中");
         if (headingFont) ImGui::PopFont();
-        if (creationPick < 0) {
+        if (creationSelection.empty()) {
             ImGui::TextDisabled("点击原子选择");
             ImGui::TextDisabled("Shift + 点击 多选 · 拖动空白处 框选");
             ImGui::TextDisabled("中键拖动 旋转 · 滚轮 缩放");
             ImGui::TextDisabled("右键 更多操作");
         }
         ImGui::Separator();
-        if (creationPick >= 0 && size_t(creationPick) < source.atoms.size()) {
+        if (creationSelection.size()>1) {
+            ImGui::Text("已选中 %zu 个原子",creationSelection.size());
+            ImGui::TextDisabled("Shift + 点击继续选择 · 拖动空白处框选");
+            ImGui::Separator();
+            ImGui::TextDisabled("替换元素");
+            int elementIndex=0;
+            for (const char *element : {"H","C","N","O","Si","Fe","Cu","Ni"}) {
+                if (ImGui::Button(element,{U(42),U(30)})) {
+                    snprintf(creationElement,sizeof(creationElement),"%s",element);
+                    replacePickedElement();
+                }
+                if (++elementIndex%4) ImGui::SameLine();
+            }
+            if (ImGui::Button("删除 · 制造空位",{-1,U(34)})) deletePickedAtom();
+        } else if (creationPick >= 0 && size_t(creationPick) < source.atoms.size()) {
             const Atom atom = source.atoms[size_t(creationPick)];
             const char *symbol = atom.type < source.species.size()
                 ? source.species[atom.type].c_str() : "?";
@@ -4683,12 +5249,13 @@ struct App {
                 creationPick = index;
             }
             ImGui::TextDisabled("Replace element");
+            int elementIndex=0;
             for (const char *element : {"H", "C", "N", "O", "Si", "Fe", "Cu", "Ni"}) {
                 if (ImGui::Button(element, {U(37), U(29)})) {
                     snprintf(creationElement, sizeof(creationElement), "%s", element);
                     replacePickedElement();
                 }
-                if (std::string_view(element) != "Ni") ImGui::SameLine();
+                if (++elementIndex%4) ImGui::SameLine();
             }
             ImGui::Spacing();
             if (ImGui::Button("Delete / make vacancy", {-1, U(34)})) deletePickedAtom();
@@ -4704,12 +5271,17 @@ struct App {
             {row.x+U(3),row.y+U(23)},IM_COL32(32,163,241,255));
         ImGui::Indent(U(13));
         const std::string origin = "从 " + (creationBasedOn.empty() ? std::string("新结构") : creationBasedOn);
-        ImGui::TextUnformatted(origin.c_str());
+        if (ImGui::Selectable(origin.c_str(),authorUndo.empty(),0,{rightW-U(75),U(27)}))
+            jumpCreationHistory(0);
         ImGui::SameLine();
         ImGui::TextDisabled("%zu",source.atoms.size());
         ImGui::Unindent(U(13));
-        for (size_t step = 0; step < authorUndo.size(); ++step)
-            ImGui::TextDisabled("%zu  编辑结构",step+1);
+        const size_t historyCount=authorUndo.size()+authorRedo.size();
+        for (size_t step=1;step<=historyCount;++step) {
+            const std::string label=std::to_string(step)+"  编辑结构";
+            if (ImGui::Selectable(label.c_str(),step==authorUndo.size()))
+                jumpCreationHistory(step);
+        }
         if (!authorUndo.empty() || !authorRedo.empty()) {
             if (ImGui::Button("撤销", {U(80), U(30)})) history(false);
             ImGui::SameLine();
@@ -6817,13 +7389,14 @@ struct App {
     // viewport overlay still fades the newest message in the active view.
     void statusStrip(float w, float h) {
         fixed("##status-strip", 0, h - statusHeight(), w, statusHeight());
+        if (homeMode) { ImGui::TextDisabled("AtomX %s · Ctrl+T 新标签页 · Ctrl+O 打开文件",atomxVersion); ImGui::End(); return; }
         if (creationMode) {
             ImGui::TextColored({0.29f,0.87f,0.51f,1},"创作");
             ImGui::SameLine();
             ImGui::TextDisabled("点击选择 · Shift 多选 · 拖动框选 · 中键旋转 · 滚轮缩放 · Del 删除");
             ImGui::SameLine(std::max(U(900),w-U(370)));
-            ImGui::TextDisabled("%zu 原子 · 选中 %d  单位 Å (1 Å = 0.1 nm)",
-                source.atoms.size(),creationPick >= 0 ? 1 : 0);
+            ImGui::TextDisabled("%zu 原子 · 选中 %zu  单位 Å (1 Å = 0.1 nm)",
+                source.atoms.size(),creationSelection.size());
             ImGui::End();
             return;
         }
@@ -6861,9 +7434,10 @@ struct App {
         // Menu accelerators. Ctrl+O loads per OVITO; Ctrl+Z/Y stay on undo /
         // redo; Ctrl+P focuses the Quick command search.
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T))
-            newStructureTab(authoring::orthogonalCell(8, 8, 8, "C"), "Untitled structure");
+            newHomeTab();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) open();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W)) closeTab(activeTab);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E)) showDataExport = true;
         if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S))
             saveSessionState(true);
@@ -6877,6 +7451,22 @@ struct App {
             history(true);
         if (creationMode && ImGui::IsKeyPressed(ImGuiKey_Delete) && !io.WantTextInput)
             deletePickedAtom();
+        if (creationMode && !io.WantTextInput) {
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A)) {
+                creationSelection.clear();
+                for (size_t index=0;index<source.atoms.size();++index)
+                    creationSelection.push_back(int(index));
+                creationPick=creationSelection.empty()?-1:creationSelection.back();
+            }
+            if (!io.KeyCtrl && !io.KeyAlt) {
+                if (ImGui::IsKeyPressed(ImGuiKey_V)) chooseCreationTool(CreationTool::Select);
+                if (ImGui::IsKeyPressed(ImGuiKey_R)) chooseCreationTool(CreationTool::Rotate);
+                if (ImGui::IsKeyPressed(ImGuiKey_T)) chooseCreationTool(CreationTool::Pan);
+                if (ImGui::IsKeyPressed(ImGuiKey_G)) chooseCreationTool(CreationTool::Move);
+                if (ImGui::IsKeyPressed(ImGuiKey_P)) chooseCreationTool(CreationTool::Sketch);
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) selectCreationAtom(-1,false);
+        }
         if (openNewCell) {
             ImGui::OpenPopup("New Orthogonal Cell");
             openNewCell = false;
@@ -6940,7 +7530,9 @@ struct App {
         }
         float w = io.DisplaySize.x, h = io.DisplaySize.y;
         top(w);
-        if (creationMode) {
+        if (homeMode) {
+            homeWorkspace(w, h);
+        } else if (creationMode) {
             creationWorkspace(w, h);
         } else {
             if (showWorkspace) left(h);
@@ -6949,6 +7541,7 @@ struct App {
             center(w, h);
         }
         statusStrip(w, h);
+        creationDialogs();
         catalog();
         settings();
         commandPalette();
@@ -7154,8 +7747,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                               "Custom title must support native dragging");
                 std::ofstream("build/desktop-test.txt") << "PASS: minimize, maximize, close-to-tray, restore, title drag hit test\n";
             }
-            if (!input.empty())
-                app.load(input);
+            if (!input.empty()) app.load(input);
+            else {
+                app.source={};
+                app.result={};
+                app.homeMode=true;
+                app.update();
+                app.tabs[0]=app.captureTab();
+            }
             if (desktopTest && !input.empty()) {
                 app.job.wait(); app.poll();
                 if (app.frames.size() < 2) throw std::runtime_error("Timeline test needs at least two frames");
