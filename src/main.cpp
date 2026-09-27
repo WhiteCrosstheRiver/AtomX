@@ -608,7 +608,7 @@ static const std::vector<Command> &commandRegistry() {
     return commands;
 }
 // Application version surfaced by Help > About and System Information.
-static const char *atomxVersion = "1.2.0";
+static const char *atomxVersion = "1.3.0-dev";
 struct App {
     HWND window;
     desktop::Preferences preferences;
