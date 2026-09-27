@@ -88,7 +88,10 @@ inline LRESULT hitTest(HWND window, LPARAM lp) {
         if (right) return HTRIGHT;
     }
     float scale = std::max(1.f,GetDpiForWindow(window)/96.f);
-    return p.y < 42*scale && p.x < r.right - 220*scale ? HTCAPTION : HTCLIENT;
+    // Browser tabs are real client controls. Only the static brand area can
+    // initiate a native window drag; treating the entire strip as caption
+    // swallows tab clicks before ImGui receives them.
+    return p.y < 42*scale && p.x < 160*scale ? HTCAPTION : HTCLIENT;
 }
 inline ComPtr<ID3D11ShaderResourceView> loadLogo(ID3D11Device *device, HICON &icon) {
     auto resource = FindResourceW(nullptr, MAKEINTRESOURCEW(101), MAKEINTRESOURCEW(10));

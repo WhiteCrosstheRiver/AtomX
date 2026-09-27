@@ -821,7 +821,9 @@ struct App {
     };
     std::vector<StructureTab> tabs;
     int activeTab = 0;
+    int displayedTab = -1;
     uint64_t nextTabId = 1;
+    uint64_t pendingTabId = 0;
     bool homeMode = false;
     int creationReturnTab = -1;
     std::string creationBasedOn;
@@ -1468,9 +1470,11 @@ struct App {
     void switchTab(int index) {
         if (index < 0 || index >= int(tabs.size()) || index == activeTab) return;
         if (documentsBusy()) {
-            status = "Wait for the current load or pipeline to finish before switching tabs";
+            pendingTabId=tabs[size_t(index)].id;
+            status = "Switching tabs after the current operation finishes";
             return;
         }
+        pendingTabId=0;
         tabs[activeTab] = captureTab();
         activeTab = index;
         restoreTab(tabs[activeTab]);
@@ -2691,6 +2695,11 @@ struct App {
         ImGui::AlignTextToFramePadding();
         ImGui::Text("AtomX  %s", atomxVersion);
         ImGui::SameLine(0, U(16));
+        const float tabStart=ImGui::GetCursorPosX();
+        const float tabWidth=std::max(U(180),w-tabStart-U(265));
+        ImGui::BeginChild("##browser-tab-scroll",{tabWidth,titleH-U(2)},ImGuiChildFlags_None,
+            ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoBackground);
+        ImGui::SetCursorPosY(U(3));
         int closing = -1;
         for (int index = 0; index < int(tabs.size()); ++index) {
             ImGui::PushID(index);
@@ -2699,6 +2708,11 @@ struct App {
             const std::string name = selected ? tabTitle() : tabs[size_t(index)].title;
             const std::string label = name;
             if (ImGui::Button(label.c_str(), {U(212), U(32)})) switchTab(index);
+            recordUiTestItem("tabs.tab."+std::to_string(index),label.c_str());
+            if (selected && displayedTab != activeTab) {
+                ImGui::SetScrollHereX(.5f);
+                displayedTab=activeTab;
+            }
             const bool isHome=selected?homeMode:tabs[size_t(index)].home;
             const bool isCreation=selected?creationMode:tabs[size_t(index)].creationMode;
             if (!isHome) {
@@ -2713,8 +2727,30 @@ struct App {
             ImGui::PopID();
         }
         if (ImGui::SmallButton("+")) newHomeTab();
-        ImGui::SetCursorPosX(w - U(210));
-        ImGui::SetCursorPosY(U(5));
+        if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel!=0)
+            ImGui::SetScrollX(ImGui::GetScrollX()-ImGui::GetIO().MouseWheel*U(170));
+        ImGui::EndChild();
+        ImGui::SetCursorPos({w-U(252),U(5)});
+        if (ImGui::InvisibleButton("##all-tabs",{U(36),U(30)})) ImGui::OpenPopup("##all-tabs-popup");
+        {
+            const auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
+            auto *draw=ImGui::GetWindowDrawList();
+            draw->AddRectFilled(lo,hi,ImGui::IsItemHovered()?IM_COL32(43,48,55,255):IM_COL32(28,32,37,255),U(5));
+            const ImVec2 center{(lo.x+hi.x)*.5f,(lo.y+hi.y)*.5f};
+            draw->AddLine({center.x-U(5),center.y-U(2)}, {center.x,center.y+U(3)},IM_COL32(190,199,211,255),U(1.7f));
+            draw->AddLine({center.x,center.y+U(3)}, {center.x+U(5),center.y-U(2)},IM_COL32(190,199,211,255),U(1.7f));
+        }
+        recordUiTestItem("tabs.switcher","All tabs");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("所有标签页 · Ctrl+Tab 切换");
+        if (ImGui::BeginPopup("##all-tabs-popup")) {
+            for (int index=0;index<int(tabs.size());++index) {
+                const auto &entry=tabs[size_t(index)];
+                const std::string name=index==activeTab?tabTitle():entry.title;
+                if (ImGui::Selectable(name.c_str(),index==activeTab)) switchTab(index);
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SetCursorPos({w-U(210),U(5)});
         control("##minimize", 0, "Minimize to taskbar"); ImGui::SameLine();
         control("##maximize", 1, "Maximize / restore"); ImGui::SameLine();
         control("##tray", 2, "Close to system tray"); ImGui::SameLine();
@@ -3639,9 +3675,49 @@ struct App {
         }
         creationPick = creationSelection.empty() ? -1 : creationSelection.back();
     }
+    struct CreationProjection {
+        DirectX::XMMATRIX view, projection, combined;
+    };
+    CreationProjection creationProjection(const Dataset &data, const Camera &camera, ImVec2 size) {
+        std::vector<float> original;
+        original.reserve(gpu.styles.size());
+        for (auto &style:gpu.styles) {
+            original.push_back(style.visual[0]);
+            const float base=style.visual[0]>0?style.visual[0]
+                :style.visual[3]>0?style.visual[3]:radius;
+            style.visual[0]=base*.43f;
+        }
+        CreationProjection projected;
+        projected.combined=gpu.matrix(data,camera,size.x/std::max(size.y,1.f),cell,radius,
+            &projected.view,&projected.projection);
+        for (size_t i=0;i<original.size();++i) gpu.styles[i].visual[0]=original[i];
+        return projected;
+    }
+    float creationScreenRadius(const Atom &atom, const CreationProjection &projection,
+                               ImVec2 size) const {
+        float worldRadius=radius*.43f;
+        if (atom.type<gpu.styles.size()) {
+            const auto &style=gpu.styles[atom.type];
+            const float base=style.visual[0]>0?style.visual[0]
+                :style.visual[3]>0?style.visual[3]:radius;
+            worldRadius=base*.43f*std::max({style.axes[0],style.axes[1],style.axes[2],.05f});
+        }
+        using namespace DirectX;
+        const auto center=XMVector4Transform(XMVectorSet(atom.x,atom.y,atom.z,1),projection.view);
+        const auto projected=XMVector4Transform(center,projection.projection);
+        const auto projectedX=XMVector4Transform(XMVectorAdd(center,XMVectorSet(worldRadius,0,0,0)),projection.projection);
+        const auto projectedY=XMVector4Transform(XMVectorAdd(center,XMVectorSet(0,worldRadius,0,0)),projection.projection);
+        XMFLOAT4 q{},qx{},qy{};
+        XMStoreFloat4(&q,projected); XMStoreFloat4(&qx,projectedX); XMStoreFloat4(&qy,projectedY);
+        if (q.w<=0||qx.w<=0||qy.w<=0) return U(12);
+        const float rx=std::abs(qx.x/qx.w-q.x/q.w)*size.x*.5f;
+        const float ry=std::abs(qy.y/qy.w-q.y/q.w)*size.y*.5f;
+        return std::max(U(6),std::max(rx,ry)*1.12f+U(3));
+    }
     int creationHit(ImVec2 p, ImVec2 size, const Camera &cam, ImVec2 mouse) {
         if (result.data.atoms.empty()) return -1;
-        const auto matrix = gpu.matrix(result.data, cam, size.x/std::max(size.y,1.f),true,radius);
+        const auto projection=creationProjection(result.data,cam,size);
+        const auto matrix=projection.combined;
         int hit=-1;
         float bestDepth=FLT_MAX, bestPixel=FLT_MAX;
         for (size_t index=0; index<result.data.atoms.size(); ++index) {
@@ -3653,7 +3729,7 @@ struct App {
             const float x=p.x+(q.x/q.w+1)*size.x*.5f;
             const float y=p.y+(1-q.y/q.w)*size.y*.5f;
             const float dx=x-mouse.x,dy=y-mouse.y, distance=dx*dx+dy*dy;
-            const float hitRadius=U(12);
+            const float hitRadius=creationScreenRadius(atom,projection,size);
             if (distance>hitRadius*hitRadius) continue;
             const float depth=q.z/q.w;
             if (depth<bestDepth-1e-4f || (std::abs(depth-bestDepth)<1e-4f && distance<bestPixel)) {
@@ -3727,7 +3803,7 @@ struct App {
                 cam.panX+=dx/std::max(size.x,1.f)*cam.zoom;
                 cam.panY-=dy/std::max(size.y,1.f)*cam.zoom;
             } else if (creationDrag==CreationDrag::Move && creationDragMoved && !creationDragAtoms.empty()) {
-                const auto matrix=gpu.matrix(result.data,cam,size.x/std::max(size.y,1.f),true,radius);
+                const auto matrix=creationProjection(result.data,cam,size).combined;
                 const auto &anchor=creationDragAtoms.front().second;
                 DirectX::XMFLOAT4 q;
                 DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
@@ -3750,7 +3826,7 @@ struct App {
         if (creationDrag!=CreationDrag::None &&
             (ImGui::IsMouseReleased(ImGuiMouseButton_Left)||ImGui::IsMouseReleased(ImGuiMouseButton_Middle))) {
             if (creationDrag==CreationDrag::Box && creationDragMoved) {
-                const auto matrix=gpu.matrix(result.data,cam,size.x/std::max(size.y,1.f),true,radius);
+                const auto matrix=creationProjection(result.data,cam,size).combined;
                 const float x0=std::min(creationDragStart.x,mouse.x),x1=std::max(creationDragStart.x,mouse.x);
                 const float y0=std::min(creationDragStart.y,mouse.y),y1=std::max(creationDragStart.y,mouse.y);
                 if (!creationDragShift) creationSelection.clear();
@@ -3780,7 +3856,7 @@ struct App {
                     }
                 });
             } else if (creationDrag==CreationDrag::Sketch && !creationDragMoved) {
-                const auto matrix=gpu.matrix(result.data,cam,size.x/std::max(size.y,1.f),true,radius);
+                const auto matrix=creationProjection(result.data,cam,size).combined;
                 const auto center=authoring::cartesian(source,.5,.5,.5);
                 DirectX::XMFLOAT4 q;
                 DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
@@ -3855,7 +3931,8 @@ struct App {
         auto *draw = ImGui::GetWindowDrawList();
         if (cell) {
             using namespace DirectX;
-            auto m = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
+            auto m = creationMode ? creationProjection(result.data,cam,avail).combined
+                : gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
             ImVec2 corners[8];
             bool valid[8];
             bool lattice = source.cell[0] != 0 || source.cell[4] != 0 || source.cell[8] != 0;
@@ -4040,7 +4117,8 @@ struct App {
             }
         }
         if (creationMode) {
-            auto mvp = gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
+            const auto projection=creationProjection(result.data,cam,avail);
+            auto mvp=projection.combined;
             draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
             auto ring=[&](int index,ImU32 color,float width) {
                 if (index<0||size_t(index)>=result.data.atoms.size()) return;
@@ -4050,7 +4128,8 @@ struct App {
                     DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),mvp));
                 if (q.w<=0||q.z<=0) return;
                 const ImVec2 at{p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};
-                draw->AddCircle(at,U(12),color,24,width);
+                const float screenRadius=creationScreenRadius(atom,projection,avail);
+                draw->AddCircle(at,screenRadius,color,48,width);
             };
             for (int index:creationSelection) ring(index,IM_COL32(29,155,240,255),U(2));
             if (creationHover>=0 && std::find(creationSelection.begin(),creationSelection.end(),creationHover)==creationSelection.end())
@@ -7418,6 +7497,12 @@ struct App {
     }
     void ui() {
         poll();
+        if (pendingTabId && !documentsBusy()) {
+            const uint64_t target=pendingTabId;
+            pendingTabId=0;
+            for (int index=0;index<int(tabs.size());++index)
+                if (tabs[size_t(index)].id==target) { switchTab(index); break; }
+        }
         editCheckpoint.beginFrame(ImGui::IsMouseDown(ImGuiMouseButton_Left));
         // Frame-fresh cursor state: viewport children re-assert the tool
         // cursor while hovered; everywhere else (and for no active tool) the
@@ -7435,6 +7520,14 @@ struct App {
         // redo; Ctrl+P focuses the Quick command search.
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T))
             newHomeTab();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Tab) && tabs.size()>1)
+            switchTab((activeTab+(io.KeyShift?int(tabs.size())-1:1))%int(tabs.size()));
+        if (io.KeyCtrl && !io.KeyAlt) {
+            constexpr ImGuiKey numbers[]{ImGuiKey_1,ImGuiKey_2,ImGuiKey_3,ImGuiKey_4,
+                ImGuiKey_5,ImGuiKey_6,ImGuiKey_7,ImGuiKey_8,ImGuiKey_9};
+            for (int index=0;index<9 && index<int(tabs.size());++index)
+                if (ImGui::IsKeyPressed(numbers[index])) switchTab(index);
+        }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W)) closeTab(activeTab);
@@ -7640,7 +7733,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         int argc;
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-        int adapter = -1, smoke = 0;
+        int adapter = -1, smoke = 0, smokeSelectedAtom = -1;
         bool smokeCatalog = false, smokeSettings = false, smokeExport = false, desktopTest = false,
              smokeColorLegend = false, smokeBondPairs = false, smokeInspectorNode = false,
              smokeHistogram = false, smokeTypesPanel = false, smokePalette = false,
@@ -7660,6 +7753,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             else if (a == L"--palette") smokePalette = true;
             else if (a == L"--menu") smokeMenu = true;
             else if (a == L"--smoke-creation") smokeCreation = true;
+            else if (a == L"--smoke-selected-atom" && i + 1 < argc)
+                smokeSelectedAtom = _wtoi(argv[++i]);
             else if (a == L"--desktop-test") desktopTest = true;
             else if (a == L"--adapter" && i + 1 < argc)
                 adapter = _wtoi(argv[++i]);
@@ -7745,6 +7840,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 RECT r{}; GetWindowRect(window, &r);
                 requireWindow(desktop::hitTest(window, MAKELPARAM(r.left+100,r.top+20)) == HTCAPTION,
                               "Custom title must support native dragging");
+                requireWindow(desktop::hitTest(window, MAKELPARAM(r.left+300,r.top+20)) == HTCLIENT,
+                              "Browser tabs must receive pointer clicks");
                 std::ofstream("build/desktop-test.txt") << "PASS: minimize, maximize, close-to-tray, restore, title drag hit test\n";
             }
             if (!input.empty()) app.load(input);
@@ -7807,6 +7904,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     !app.result.data.atoms.empty()) {
                     app.openCreationTab();
                     creationSmokeStarted = app.creationMode;
+                    if (creationSmokeStarted && smokeSelectedAtom>=0 &&
+                        size_t(smokeSelectedAtom)<app.source.atoms.size())
+                        app.selectCreationAtom(smokeSelectedAtom,false);
                 }
                 if (smokeInspectorNode && !inspectorSmokeStarted && !app.busy &&
                     !app.indexing && !app.pipelineBusy) {

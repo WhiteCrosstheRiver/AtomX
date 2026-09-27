@@ -212,6 +212,14 @@ int main() {
             frame();
             requireExport(!app.creationMode && app.activeTab == originalTab,
                           "leaving Creation Mode restores the original view tab");
+            settlePipeline();
+            click("tabs.tab."+std::to_string(originalTabCount));
+            requireExport(app.creationMode && app.activeTab==int(originalTabCount),
+                          "browser tab pointer click restores the creation document");
+            settlePipeline();
+            click("tabs.tab."+std::to_string(originalTab));
+            requireExport(!app.creationMode && app.activeTab==originalTab,
+                          "browser tab pointer click returns to the view document");
             // The compact icon row replaced the Pipeline/Render/Analysis/
             // System text tab bar; each icon switches the panel section.
             requireExport(app.uiTestItems.contains("panel.tab.pipeline") &&
@@ -658,6 +666,10 @@ int main() {
             const int first=tabs.activeTab;
             requireExport(first!=view && tabs.creationMode && tabs.tabs.size()==3,
                           "view context opens one creation tab");
+            const ImVec2 viewportSize{1000,1000};
+            const auto projection=tabs.creationProjection(tabs.result.data,tabs.cameras[3],viewportSize);
+            requireExport(tabs.creationScreenRadius(tabs.result.data.atoms[0],projection,viewportSize)>U(12),
+                          "selection halo follows the projected atom radius");
             const float yaw=tabs.cameras[3].yaw;
             auto pointerFrame=[&](float x,float y,bool middle) {
                 guiIO.AddMousePosEvent(x,y);
