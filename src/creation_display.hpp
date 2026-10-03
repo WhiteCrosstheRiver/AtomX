@@ -1,5 +1,6 @@
 #pragma once
 #include "authoring.hpp"
+#include "geometry_monitors.hpp"
 #include <cstdio>
 #include <unordered_map>
 
@@ -11,6 +12,9 @@ struct Label {
     bool operator==(const Label &) const = default;
 };
 struct Display {
+    std::vector<geometry::Monitor> monitors;
+    int32_t activeMonitor=-1;
+    bool monitorsVisible=true;
     uint8_t defaultPreset=0; // 0 original, 1 line, 2 stick, 3 ball/stick, 4 CPK.
     std::unordered_map<int,uint8_t> presets;
     float ballRadius=.4f,stickRadius=.2f,cpkScale=.7f,lineWidth=1.6f;
@@ -46,6 +50,11 @@ struct Display {
         return found==labels.end()?defaultLabel:found->second;
     }
     void normalize(size_t count) {
+        for(size_t i=monitors.size();i-->0;) if(!geometry::valid(monitors[i],count)) {
+            monitors.erase(monitors.begin()+i);
+            if(activeMonitor==int(i)) activeMonitor=-1; else if(activeMonitor>int(i)) --activeMonitor;
+        }
+        if(activeMonitor<0 || size_t(activeMonitor)>=monitors.size()) activeMonitor=-1;
         for(auto it=presets.begin();it!=presets.end();) {
             if(it->first<0 || size_t(it->first)>=count || it->second==defaultPreset) it=presets.erase(it);
             else ++it;
@@ -101,7 +110,11 @@ struct Display {
         std::unordered_map<int,uint8_t> nextPresets;
         for(const auto &[index,preset]:presets)
             if(index>=0 && size_t(index)<oldCount && remap[size_t(index)]>=0) nextPresets.emplace(remap[size_t(index)],preset);
-        presets=std::move(nextPresets); normalize(out);
+        presets=std::move(nextPresets);
+        for(auto &monitor:monitors) for(size_t i=0;i<monitor.count;++i) {
+            auto &index=monitor.atoms[i]; index=index>=0 && size_t(index)<oldCount?remap[size_t(index)]:-1;
+        }
+        normalize(out);
     }
     // Bounded arithmetic sampling: global labels never create an entry/string
     // per atom, and drawing does not walk all atoms of a large structure.

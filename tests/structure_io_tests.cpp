@@ -53,6 +53,7 @@ int main() {
             view.display.visibility(2,{0},0);
             view.display.setLabels(2,{1},{creation::LabelKind::Custom,"测试原子\n换行"},false);
             view.display.defaultPreset=3; view.display.presets[1]=4; view.display.ballRadius=.55f; view.display.cpkScale=.8f;
+            view.display.monitors={{2,{0,1,-1,-1}}}; view.display.activeMonitor=0; view.display.monitorsVisible=false;
             view.selection={1}; view.order=3; view.continuous=false; view.ringSize=5;
             const auto nativePath=dir/"model.atomx";
             io::write(nativePath,io::Format::AtomX,native,nativeOptions);
@@ -82,17 +83,25 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=5; rejectBytes(version);
+            auto version=bytes; version[8]=6; rejectBytes(version);
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
-            auto version3=bytes; version3[8]=3;
+            const size_t monitorBytes=13+17*view.display.monitors.size();
+            auto version4=bytes; version4[8]=4; version4.erase(version4.size()-4-monitorBytes,monitorBytes);
+            const auto version4Path=dir/"v4.atomx";
+            { std::ofstream out(version4Path,std::ios::binary); out.write(version4.data(),std::streamsize(version4.size())); }
+            const auto legacy4=document::read(version4Path);
+            require(legacy4.view.display.presets==view.display.presets && legacy4.view.display.monitors.empty(),"v4 retains appearance and defaults to no monitors");
+            auto invalidMonitor=bytes; invalidMonitor[invalidMonitor.size()-4-17]=5; rejectBytes(invalidMonitor);
+            auto invalidMonitorIndex=bytes; for(int i=0;i<4;++i) invalidMonitorIndex[invalidMonitorIndex.size()-4-16+i]=char(-1); rejectBytes(invalidMonitorIndex);
+            auto version3=version4; version3[8]=3;
             const size_t styleBytes=25+5*view.display.presets.size();
             version3.erase(version3.size()-4-styleBytes,styleBytes);
             const auto version3Path=dir/"v3.atomx";
             { std::ofstream out(version3Path,std::ios::binary); out.write(version3.data(),std::streamsize(version3.size())); }
             require(document::read(version3Path).view.display.defaultPreset==0 && document::read(version3Path).view.display.presets.empty(),
                     "version 3 documents use original appearance without style overrides");
-            auto badPreset=bytes; badPreset[badPreset.size()-4-styleBytes]=5; rejectBytes(badPreset);
-            auto badIndex=bytes; for(int i=0;i<4;++i) badIndex[badIndex.size()-9+i]=char(-1); rejectBytes(badIndex);
+            auto badPreset=bytes; badPreset[badPreset.size()-4-monitorBytes-styleBytes]=5; rejectBytes(badPreset);
+            auto badIndex=bytes; for(int i=0;i<4;++i) badIndex[badIndex.size()-monitorBytes-9+i]=char(-1); rejectBytes(badIndex);
             auto version2=version3; version2[8]=2;
             const size_t fragmentBytes=8+view.fragmentKey.size()+4;
             version2.erase(version2.size()-4-fragmentBytes,fragmentBytes);

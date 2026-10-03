@@ -644,6 +644,81 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("geometry monitor fixture",[](Dataset &data) {
+                    data={}; data.species={"C"}; data.cell={12,0,0,0,12,0,0,0,12};
+                    data.atoms={{1,4,2,0},{1,2,2,0},{4,2,2,0},{4,4,4,0},{6,4,4,0}};
+                    data.bonds={{0,1},{1,2},{2,3},{3,4}};
+                }); settlePipeline(); app.creationSelection.clear(); app.creationPick=-1;
+                app.cameras[3].mode=0; app.fitCamera(3,false); frame();
+                auto pointOf=[&](int index) {
+                    const auto vp=app.uiTestItems.at("creation.viewport");
+                    const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};
+                    const auto matrix=app.creationProjection(app.result.data,app.cameras[3],size).combined;
+                    const auto at=geometry::at(app.source,index); DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),matrix));
+                    return ImVec2{vp.min.x+(q.x/q.w+1)*size.x*.5f,vp.min.y+(1-q.y/q.w)*size.y*.5f};
+                };
+                auto pointerClick=[&](ImVec2 at) {
+                    guiIO.AddMousePosEvent(at.x,at.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                    guiIO.AddMouseButtonEvent(0,false); frame(); settlePipeline();
+                };
+                click("creation.tool-distance"); frame();
+                const auto p1=pointOf(1),p2=pointOf(2);
+                pointerClick({(p1.x+p2.x)*.5f,(p1.y+p2.y)*.5f});
+                requireExport(app.creationDisplay.monitors.size()==1 && app.creationDisplay.monitors[0].atoms==std::array<int32_t,4>{1,2,-1,-1} &&
+                    !app.authorUndo.back().data,"distance bond click creates a persistent display-only monitor");
+                app.geometryTarget=4; frame(); click("creation.geometry-apply"); settlePipeline();
+                requireExport(std::abs(authoring::distance(app.source,1,2)-4)<1e-5 && app.source.atoms[1].x==1,"numeric geometry apply reaches exact distance and fixes first side");
+                app.history(false); settlePipeline(); frame();
+                requireExport(std::abs(authoring::distance(app.source,1,2)-3)<1e-5,"numeric edit undo restores geometry and monitor");
+                const auto vp=app.uiTestItems.at("creation.viewport");
+                const ImVec2 blank{vp.max.x-80,vp.min.y+80};
+                const size_t beforeDrag=app.authorUndo.size();
+                guiIO.AddMousePosEvent(blank.x,blank.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                guiIO.AddMousePosEvent(blank.x+30,blank.y-40); frame();
+                requireExport(app.creationDrag==App::CreationDrag::Geometry && app.source.atoms[2].x==4 && app.result.data.atoms[2].x>4,"drag previews in result while source remains unchanged");
+                guiIO.AddMouseButtonEvent(0,false); frame(); settlePipeline();
+                requireExport(app.authorUndo.size()==beforeDrag+1 && authoring::distance(app.source,1,2)>3,"geometry drag commits one history step");
+                app.history(false); settlePipeline(); frame();
+                guiIO.AddKeyEvent(ImGuiMod_Alt,true); frame();
+                guiIO.AddMousePosEvent(blank.x,blank.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                guiIO.AddMousePosEvent(blank.x+20,blank.y-20); frame(); guiIO.AddMouseButtonEvent(0,false); frame(); settlePipeline();
+                guiIO.AddKeyEvent(ImGuiMod_Alt,false); frame();
+                requireExport(app.source.atoms[2].x==4 && app.source.atoms[1].x<1,"Alt drag reverses moving side");
+                app.history(false); settlePipeline(); frame();
+                guiIO.AddMousePosEvent(blank.x,blank.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                guiIO.AddMousePosEvent(blank.x+40,blank.y-40); frame(); guiIO.AddKeyEvent(ImGuiKey_Escape,true); frame();
+                guiIO.AddKeyEvent(ImGuiKey_Escape,false); guiIO.AddMouseButtonEvent(0,false); frame();
+                requireExport(app.authorUndo.size()==beforeDrag && app.result.data.atoms[2].x==4,"Escape cancels preview without a history entry");
+                click("creation.tool-angle"); frame();
+                for(int index:{0,1,2}) {
+                    const auto vpNow=app.uiTestItems.at("creation.viewport"); const ImVec2 extent{vpNow.max.x-vpNow.min.x,vpNow.max.y-vpNow.min.y};
+                    const auto screen=pointOf(index);
+                    requireExport(app.creationHit(vpNow.min,extent,app.cameras[3],screen)==index,"geometry fixture exposes each measurement point");
+                    pointerClick(screen);
+                }
+                requireExport(app.creationDisplay.monitors.size()==2 && app.creationDisplay.monitors[1].count==3,
+                    ("three pointer picks create angle with second atom as vertex; tool="+std::to_string(int(app.creationTool))+" pending="+std::to_string(app.geometryPending.size())+" monitors="+std::to_string(app.creationDisplay.monitors.size())+" status="+app.status).c_str());
+                app.geometryTarget=125; frame(); click("creation.geometry-apply"); settlePipeline();
+                requireExport(std::abs(authoring::bondAngle(app.source,0,1,2)-125)<1e-4,"angle apply rotates the connected branch");
+                app.history(false); settlePipeline(); frame();
+                click("creation.tool-torsion"); frame();
+                pointerClick(pointOf(0)); pointerClick(pointOf(1)); pointerClick(pointOf(2)); pointerClick(pointOf(3));
+                requireExport(app.creationDisplay.monitors.size()==3 && app.creationDisplay.monitors[2].count==4,"four pointer picks create signed torsion monitor");
+                app.geometryTarget=-60; frame(); click("creation.geometry-apply"); settlePipeline();
+                requireExport(std::abs(authoring::dihedralAngle(app.source,0,1,2,3)+60)<1e-4,"torsion numeric apply reaches signed target");
+                const auto monitorTab=app.captureTab(); app.restoreTab(monitorTab); frame();
+                requireExport(app.creationDisplay.monitors.size()==3 && app.geometryPending.empty(),"tab restore retains independent monitors and cancels unfinished picks");
+                const auto monitorFile=dir/"geometry.atomx"; io::ExportOptions monitorOptions;
+                monitorOptions.documentView=app.captureDocumentView(); io::write(monitorFile,io::Format::AtomX,app.source,monitorOptions);
+                requireExport(document::read(monitorFile).view.display.monitors==app.creationDisplay.monitors,"GUI-created monitors persist in native document");
+                click("creation.geometry-remove"); requireExport(app.creationDisplay.monitors.size()==2,"remove control deletes monitor only");
+                app.history(false); frame(); requireExport(app.creationDisplay.monitors.size()==3,"display-only undo restores removed monitor");
+                while(app.authorUndo.size()>baseline) { app.history(false); settlePipeline(); }
+                app.authorRedo.clear(); app.chooseCreationTool(App::CreationTool::Select); frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("motion group fixture",[](Dataset &data) {
                     data={}; data.species={"C","H"};
                     data.atoms={{0,0,0,0},{2,0,0,1},{5,0,0,0},{7,0,0,1}};

@@ -803,8 +803,13 @@ struct App {
     std::filesystem::path colorRangePath;
     // One structure per browser-style tab. The live document stays in the
     // fields above; a tab is only a snapshot taken when leaving it.
-    enum class CreationTool { Select, Rotate, Pan, Move, Sketch, Ring, Fragment };
-    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring, Fragment };
+    enum class CreationTool { Select, Rotate, Pan, Move, Sketch, Ring, Fragment, Distance, Angle, Torsion };
+    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring, Fragment, Geometry };
+    std::vector<int> geometryPending;
+    std::optional<geometry::Plan> geometryDragPlans[2];
+    double geometryTarget=0,geometryDragTarget=0;
+    bool geometryInverted=false,geometryDragInverted=false;
+    int geometryPanelMonitor=-1;
     struct CreationHistoryState {
         std::optional<Dataset> data; // Display-only history does not copy a large structure.
         creation::Display display;
@@ -1583,6 +1588,8 @@ struct App {
         creationHover = -1;
         creationLastHoverMouse={-1,-1};
         creationDrag = CreationDrag::None;
+        geometryPending.clear(); geometryPanelMonitor=-1;
+        geometryDragPlans[0].reset(); geometryDragPlans[1].reset();
         creationMeasure = tab.measure;
         creationAngle = tab.angleAtom;
         creationDihedral = tab.dihedralAtom;
@@ -1880,6 +1887,7 @@ struct App {
             status = "Clear modifiers first: the pipeline changed the atom count";
             return;
         }
+        geometryPanelMonitor=-1; geometryPending.clear();
         rememberStructure(message);
         creationRingPreviewValid=false;
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
@@ -3271,6 +3279,8 @@ struct App {
             line(8,10,8,14);line(12,9,12,15);line(16,10,16,14);
         } else if (name=="angle") {
             line(4,20,20,20);line(4,20,15,5);circle(4,20,3);
+        } else if (name=="torsion") {
+            line(3,18,8,7);line(8,7,16,17);line(16,17,21,6);circle(3,18,1);circle(21,6,1);
         } else if (name=="ball"||name=="fill") {
             circle(8,8,4);circle(17,16,4);
             if (name=="ball") line(10,10,15,14);
@@ -3429,6 +3439,10 @@ struct App {
             if (ImGui::MenuItem("切面·真空...")) openSurfaceDialog = true;
         });
         menu("工具", "##create-tools", [&] {
+            if(ImGui::MenuItem("测量 / 修改距离")) chooseCreationTool(CreationTool::Distance);
+            if(ImGui::MenuItem("测量 / 修改角度")) chooseCreationTool(CreationTool::Angle);
+            if(ImGui::MenuItem("测量 / 修改扭转角")) chooseCreationTool(CreationTool::Torsion);
+            ImGui::Separator();
             if (ImGui::MenuItem("重置视角")) resetView();
             if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
         });
@@ -3482,8 +3496,9 @@ struct App {
         icon("delete",0xE74D,"X","Delete selected atom",red,false,[&]{deletePickedAtom();});
         icon("hydrogen",0xE8FA,"H+","Add hydrogens",violet,false,[&]{addHydrogensCommand();});
         icon("clean",0xE734,"*","Clean geometry",violet,false,[&]{cleanGeometryCommand();}); divider();
-        icon("distance",0xE8A0,"D","Measure distance",gold,false,[&]{status="Shift-click a second atom to measure distance";});
-        icon("angle",0xE8B1,"A","Measure angle",gold,false,[&]{status="Click, Shift-click, Ctrl-click to measure angle";}); divider();
+        icon("distance",0xE8A0,"D","测量 / 修改距离",gold,creationTool==CreationTool::Distance,[&]{chooseCreationTool(CreationTool::Distance);});
+        icon("angle",0xE8B1,"A","测量 / 修改角度",gold,creationTool==CreationTool::Angle,[&]{chooseCreationTool(CreationTool::Angle);});
+        icon("torsion",0,"T","测量 / 修改扭转角",gold,creationTool==CreationTool::Torsion,[&]{chooseCreationTool(CreationTool::Torsion);}); divider();
         icon("ball",0xE80F,"B","Ball and stick",blue,radius<.6f,[&]{setDisplayStyle(0);});
         icon("stick",0xE8A4,"I","Stick",blue,false,[&]{setDisplayStyle(2);});
         icon("fill",0xE8B7,"O","Space filling",blue,radius>=.6f,[&]{setDisplayStyle(1);}); divider();
@@ -4286,7 +4301,165 @@ struct App {
         ImGui::End();
     }
     const char *views = "Top\0Bottom\0Front\0Back\0Left\0Right\0Ortho\0Perspective\0";
+    static bool isGeometryTool(CreationTool tool) {
+        return tool==CreationTool::Distance || tool==CreationTool::Angle || tool==CreationTool::Torsion;
+    }
+    static const char *geometryName(uint8_t count) { return count==2?"距离":count==3?"角度":"扭转角"; }
+    void activateGeometry(int index) {
+        creationDisplay.activeMonitor=index; geometryPanelMonitor=-1; geometryPending.clear();
+    }
+    void addGeometryMonitor(geometry::Monitor m) {
+        if(!geometry::valid(m,source.atoms.size())) return;
+        if(!geometry::value(source,m)) { status="测量点重合或扭转角未定义"; geometryPending.clear(); return; }
+        auto next=creationDisplay;
+        const auto found=std::find(next.monitors.begin(),next.monitors.end(),m);
+        if(found!=next.monitors.end()) { activateGeometry(int(found-next.monitors.begin())); return; }
+        if(next.monitors.size()>=geometry::monitorLimit) { status="测量标记最多 256 个"; geometryPending.clear(); return; }
+        next.monitors.push_back(m); next.activeMonitor=int(next.monitors.size())-1; next.monitorsVisible=true;
+        editCreationDisplay(std::move(next),std::string("创建测量 · ")+geometryName(m.count));
+    }
+    void removeGeometryMonitor() {
+        const int i=creationDisplay.activeMonitor;
+        if(i<0 || size_t(i)>=creationDisplay.monitors.size()) return;
+        auto next=creationDisplay; next.monitors.erase(next.monitors.begin()+i); next.activeMonitor=-1;
+        editCreationDisplay(std::move(next),"移除测量标记");
+    }
+    void applyGeometryValue() {
+        if(documentsBusy() || !sameAtomCount()) return;
+        const int i=creationDisplay.activeMonitor;
+        if(i<0 || size_t(i)>=creationDisplay.monitors.size()) return;
+        try {
+            const auto plan=geometry::prepare(source,creationDisplay.monitors[size_t(i)],geometryInverted);
+            (void)geometry::positions(plan,geometryTarget);
+            if(std::abs(geometry::delta(plan,geometryTarget))<1e-7) return;
+            editStructure(std::string("修改")+geometryName(plan.monitor.count),[&](Dataset &data){geometry::apply(data,plan,geometryTarget);});
+            geometryPanelMonitor=-1;
+        } catch(const std::exception &e) { status=e.what(); }
+    }
+    // Small fixed monitor budget; these overlays never scan all atoms.
+    void geometryOverlay(ImVec2 p,ImVec2 size,Camera &cam,ImDrawList *draw=nullptr,int *hit=nullptr) {
+        if(!sameAtomCount() || !creationDisplay.monitorsVisible) return;
+        const auto matrix=creationProjection(result.data,cam,size).combined;
+        auto project=[&](Vec3 at,ImVec2 &out) {
+            DirectX::XMFLOAT4 q; DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),matrix));
+            if(q.w<=0 || q.z<=0 || q.z>=q.w) return false;
+            out={p.x+(q.x/q.w+1)*size.x*.5f,p.y+(1-q.y/q.w)*size.y*.5f}; return true;
+        };
+        for(size_t step=0;step<creationDisplay.monitors.size();++step) {
+            const size_t active=size_t(creationDisplay.activeMonitor);
+            const size_t i=active>=creationDisplay.monitors.size()?step:
+                step+1==creationDisplay.monitors.size()?active:step<active?step:step+1;
+            const auto &m=creationDisplay.monitors[i];
+            if(!geometry::valid(m,result.data.atoms.size())) continue;
+            ImVec2 pts[4]; bool visible=true;
+            for(size_t j=0;j<m.count;++j) visible=visible && creationAtomVisible(m.atoms[j]) && project(geometry::at(result.data,m.atoms[j]),pts[j]);
+            if(!visible) continue;
+            const auto measured=geometry::value(result.data,m);
+            char caption[80]; if(measured) snprintf(caption,sizeof(caption),m.count==2?"%.3f Å":"%.2f°",*measured); else snprintf(caption,sizeof(caption),"未定义");
+            ImVec2 anchor=m.count==2?ImVec2{(pts[0].x+pts[1].x)*.5f,(pts[0].y+pts[1].y)*.5f}:
+                m.count==3?pts[1]:ImVec2{(pts[1].x+pts[2].x)*.5f,(pts[1].y+pts[2].y)*.5f};
+            anchor.x+=U(8); anchor.y+=U(m.count==4?8.f:-24.f);
+            const auto textSize=ImGui::CalcTextSize(caption);
+            if(hit) {
+                const auto mouse=ImGui::GetIO().MousePos;
+                if(mouse.x>=anchor.x-U(5) && mouse.x<=anchor.x+textSize.x+U(5) && mouse.y>=anchor.y-U(4) && mouse.y<=anchor.y+textSize.y+U(4)) *hit=int(i);
+            }
+            if(!draw) continue;
+            const ImU32 color=int(i)==creationDisplay.activeMonitor?IM_COL32(255,85,96,255):IM_COL32(76,219,155,230);
+            for(size_t j=1;j<m.count;++j) {
+                const float dx=pts[j].x-pts[j-1].x,dy=pts[j].y-pts[j-1].y;
+                const float length=std::hypot(dx,dy); const int segments=std::min(512,std::max(1,int(length/U(9))));
+                for(int k=0;k<segments;++k) {
+                    const float a=float(k)/segments,b=(k+.55f)/segments;
+                    draw->AddLine({pts[j-1].x+dx*a,pts[j-1].y+dy*a},{pts[j-1].x+dx*b,pts[j-1].y+dy*b},color,U(1.5f));
+                }
+            }
+            if(m.count==3 && measured) {
+                const Vec3 center=geometry::at(result.data,m.atoms[1]);
+                const auto a=authoring::sub(geometry::at(result.data,m.atoms[0]),center),b=authoring::sub(geometry::at(result.data,m.atoms[2]),center);
+                const double arcRadius=std::min(authoring::length(a),authoring::length(b))*.28;
+                auto axis=authoring::cross(a,b);
+                if(authoring::length(axis)<1e-8) axis=authoring::cross(a,std::abs(a.x)<std::abs(a.y)?Vec3{1,0,0}:Vec3{0,1,0});
+                const Vec3 start=authoring::add(center,authoring::scale(a,arcRadius/authoring::length(a)));
+                ImVec2 prior{}; bool priorVisible=project(start,prior);
+                for(int k=1;k<=24;++k) {
+                    ImVec2 next{}; const bool nextVisible=project(authoring::rotatedPoint(start,center,axis,*measured*authoring::kPi/180*k/24),next);
+                    if(priorVisible && nextVisible) draw->AddLine(prior,next,color,U(1.5f)); prior=next; priorVisible=nextVisible;
+                }
+            }
+            if(m.count==4 && measured) {
+                const auto a=geometry::at(result.data,m.atoms[0]),b=geometry::at(result.data,m.atoms[1]);
+                const auto c=geometry::at(result.data,m.atoms[2]),d=geometry::at(result.data,m.atoms[3]);
+                const auto axis=authoring::scale(authoring::sub(c,b),1/authoring::length(authoring::sub(c,b)));
+                const auto center=authoring::scale(authoring::add(b,c),.5);
+                const auto first=authoring::sub(authoring::sub(a,b),authoring::scale(axis,authoring::dot(authoring::sub(a,b),axis)));
+                const auto last=authoring::sub(authoring::sub(d,c),authoring::scale(axis,authoring::dot(authoring::sub(d,c),axis)));
+                const double r=std::min(authoring::length(first),authoring::length(last))*.3;
+                const auto start=authoring::add(center,authoring::scale(first,r/authoring::length(first)));
+                const auto end=authoring::add(center,authoring::scale(last,r/authoring::length(last)));
+                ImVec2 pivot{},from{},to{};
+                if(project(center,pivot) && project(start,from) && project(end,to)) {
+                    draw->AddLine(pivot,from,color,U(1.5f)); draw->AddLine(pivot,to,color,U(1.5f));
+                    draw->AddLine(from,to,color,U(1));
+                }
+            }
+            draw->AddRectFilled({anchor.x-U(4),anchor.y-U(3)},{anchor.x+textSize.x+U(4),anchor.y+textSize.y+U(3)},IM_COL32(12,16,19,210),U(3));
+            draw->AddText(anchor,color,caption);
+        }
+        if(draw) for(size_t i=0;i<geometryPending.size();++i) {
+            if(geometryPending[i]<0 || size_t(geometryPending[i])>=result.data.atoms.size()) continue;
+            ImVec2 out; if(project(geometry::at(result.data,geometryPending[i]),out)) {
+                draw->AddCircle(out,U(10),IM_COL32(255,211,91,255),24,U(2));
+                const auto label=std::to_string(i+1); draw->AddText({out.x+U(12),out.y},IM_COL32(255,211,91,255),label.c_str());
+            }
+        }
+    }
+    void geometryPanel() {
+        if(!isGeometryTool(creationTool) && creationDisplay.monitors.empty()) return;
+        ImGui::PushTextWrapPos(0);
+        ImGui::SeparatorText("测量 / 修改几何");
+        if(isGeometryTool(creationTool)) {
+            const int count=creationTool==CreationTool::Distance?2:creationTool==CreationTool::Angle?3:4;
+            ImGui::Text("%s · 已选 %zu / %d 点",geometryName(uint8_t(count)),geometryPending.size(),count);
+            ImGui::TextDisabled("依次点击原子 · 距离也可点击键");
+            ImGui::TextDisabled("角度顶点为第 2 点 · Esc 取消");
+        }
+        if(!creationDisplay.monitors.empty()) {
+            ImGui::BeginChild("##monitors",{0,U(std::min(130.f,float(creationDisplay.monitors.size())*29+6))},ImGuiChildFlags_Borders);
+            for(size_t i=0;i<creationDisplay.monitors.size();++i) {
+                const auto &m=creationDisplay.monitors[i]; const auto measured=geometry::value(result.data,m);
+                char label[160]; if(measured) snprintf(label,sizeof(label),"%s %zu  %.3f %s##%zu",geometryName(m.count),i+1,*measured,m.count==2?"Å":"°",i);
+                else snprintf(label,sizeof(label),"%s %zu  未定义##%zu",geometryName(m.count),i+1,i);
+                if(ImGui::Selectable(label,creationDisplay.activeMonitor==int(i))) activateGeometry(int(i));
+                recordUiTestItem("creation.monitor-"+std::to_string(i));
+            }
+            ImGui::EndChild();
+            bool visible=creationDisplay.monitorsVisible;
+            if(ImGui::Checkbox("显示测量标记",&visible)) { auto next=creationDisplay; next.monitorsVisible=visible; editCreationDisplay(std::move(next),"显示测量标记"); }
+        }
+        const int i=creationDisplay.activeMonitor;
+        if(i>=0 && size_t(i)<creationDisplay.monitors.size()) {
+            const auto &m=creationDisplay.monitors[size_t(i)];
+            if(geometryPanelMonitor!=i) { geometryTarget=geometry::value(source,m).value_or(0); geometryPanelMonitor=i; geometryInverted=false; }
+            std::string atoms; for(size_t j=0;j<m.count;++j) atoms+="#"+std::to_string(m.atoms[j])+(j+1<m.count?" → ":"");
+            ImGui::TextDisabled("%s",atoms.c_str());
+            ImGui::SetNextItemWidth(U(125)); ImGui::InputDouble(m.count==2?"目标 Å":"目标 °",&geometryTarget,0,0,"%.4f");
+            recordUiTestItem("creation.geometry-value");
+            ImGui::Checkbox("反向移动另一侧",&geometryInverted); recordUiTestItem("creation.geometry-invert");
+            ImGui::BeginDisabled(documentsBusy());
+            if(ImGui::Button("应用数值")) applyGeometryValue(); recordUiTestItem("creation.geometry-apply");
+            ImGui::SameLine(); if(ImGui::Button("移除标记")) removeGeometryMonitor(); recordUiTestItem("creation.geometry-remove");
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("点击标记 · 空白处向上 / 右拖增大");
+            ImGui::TextDisabled("Alt 移动另一侧 · Esc 恢复");
+            ImGui::TextDisabled("按实际坐标测量，不取周期最短距离");
+        }
+        ImGui::Separator();
+        ImGui::PopTextWrapPos();
+    }
     void chooseCreationTool(CreationTool tool) {
+        geometryPending.clear(); geometryPanelMonitor=-1;
+        geometryDragPlans[0].reset(); geometryDragPlans[1].reset();
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         if (!pipelineBusy && !creationDragAtoms.empty()) {
             for (const auto &[index,original]:creationDragAtoms) if (index>=0 && size_t(index)<result.data.atoms.size()) {
@@ -4298,6 +4471,7 @@ struct App {
         creationTool = tool;
         creationSketch = tool == CreationTool::Sketch;
         status = tool == CreationTool::Select ? "选择原子或拖动框选" :
+                 isGeometryTool(tool) ? "依次点击测量点 · 点击标记后拖动空白处修改 · Alt 反向 · Esc 取消" :
                  tool == CreationTool::Rotate ? "拖动旋转" :
                  tool == CreationTool::Pan ? "拖动平移" :
                  tool == CreationTool::Move ? "拖动选中原子" :
@@ -4350,6 +4524,7 @@ struct App {
         for (const auto &[index,label]:creationDisplay.labels) { (void)index; missingGlyph(label.text); }
     }
     void refreshCreationDisplay(bool visibilityChanged=true) {
+        geometryPanelMonitor=-1; geometryPending.clear();
         creationRingPreviewValid=false;
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
         creationDisplay.normalize(source.atoms.size());
@@ -4703,6 +4878,7 @@ struct App {
     }
     bool creationPointer(ImVec2 p, ImVec2 size, Camera &cam, bool hovered) {
         auto &io=ImGui::GetIO();
+        if(io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape)) { geometryPending.clear(); geometryPanelMonitor=-1; }
         creationSketchPreviewValid=false;
         if (creationTool!=CreationTool::Fragment || !hovered || io.AppFocusLost || io.MouseWheel!=0 ||
             (creationDrag!=CreationDrag::None && creationDrag!=CreationDrag::Fragment)) {
@@ -4737,7 +4913,7 @@ struct App {
         }
         const ImVec2 mouse=io.MousePos;
         bool contextRequested=false;
-        if (creationDrag!=CreationDrag::None && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (creationDrag!=CreationDrag::None && (ImGui::IsKeyPressed(ImGuiKey_Escape) || io.AppFocusLost)) {
             for (const auto &[index,original]:creationDragAtoms) {
                 auto &a=result.data.atoms[size_t(index)];
                 a.x=original.x; a.y=original.y; a.z=original.z;
@@ -4839,7 +5015,40 @@ struct App {
             creationDragShift=io.KeyShift||io.KeyCtrl;
             creationDragToggle=io.KeyCtrl;
             const int hit=creationHit(p,size,cam,mouse);
-            if (creationTool==CreationTool::Rotate) creationDrag=CreationDrag::Rotate;
+            int monitorHit=-1; geometryOverlay(p,size,cam,nullptr,&monitorHit);
+            if(monitorHit>=0) {
+                const auto count=creationDisplay.monitors[size_t(monitorHit)].count;
+                chooseCreationTool(count==2?CreationTool::Distance:count==3?CreationTool::Angle:CreationTool::Torsion);
+                activateGeometry(monitorHit);
+            } else if(isGeometryTool(creationTool)) {
+                const int count=creationTool==CreationTool::Distance?2:creationTool==CreationTool::Angle?3:4;
+                if(hit>=0) {
+                    if(std::find(geometryPending.begin(),geometryPending.end(),hit)==geometryPending.end()) {
+                        geometryPending.push_back(hit); creationDisplay.activeMonitor=-1;
+                    }
+                    if(int(geometryPending.size())==count) {
+                        geometry::Monitor m; m.count=uint8_t(count);
+                        for(int i=0;i<count;++i) m.atoms[size_t(i)]=geometryPending[size_t(i)];
+                        addGeometryMonitor(m); geometryPending.clear();
+                    }
+                } else if(count==2 && geometryPending.empty() && creationBondHit(p,size,cam,mouse)>=0) {
+                    const auto &b=source.bonds[size_t(creationBondHit(p,size,cam,mouse))];
+                    addGeometryMonitor({2,{int32_t(b.a),int32_t(b.b),-1,-1}});
+                } else if(geometryPending.empty() && creationDisplay.monitorsVisible && creationDisplay.activeMonitor>=0) {
+                    const auto &m=creationDisplay.monitors[size_t(creationDisplay.activeMonitor)];
+                    geometryDragPlans[0].reset(); geometryDragPlans[1].reset();
+                    std::string errors[2];
+                    for(int side=0;side<2;++side) try { geometryDragPlans[side]=geometry::prepare(source,m,side!=0); }
+                        catch(const std::exception &e) { errors[side]=e.what(); }
+                    if(!geometryDragPlans[io.KeyAlt?1:0]) { status=errors[io.KeyAlt?1:0]; g_cursorOverride=LoadCursor(nullptr,IDC_NO); }
+                    else {
+                        creationDrag=CreationDrag::Geometry; geometryDragInverted=io.KeyAlt;
+                        geometryDragTarget=geometry::value(source,m).value_or(0); creationDragAtoms.clear();
+                        for(const auto &plan:geometryDragPlans) if(plan)
+                            creationDragAtoms.insert(creationDragAtoms.end(),plan->originals.begin(),plan->originals.end());
+                    }
+                }
+            } else if (creationTool==CreationTool::Rotate) creationDrag=CreationDrag::Rotate;
             else if (creationTool==CreationTool::Pan) creationDrag=CreationDrag::Pan;
             else if (creationTool==CreationTool::Move && hit>=0) {
                 if (std::find(creationSelection.begin(),creationSelection.end(),hit)==creationSelection.end())
@@ -4874,6 +5083,34 @@ struct App {
             if (std::abs(mouse.x-creationDragStart.x)+std::abs(mouse.y-creationDragStart.y)>U(3))
                 creationDragMoved=true;
             const float dx=mouse.x-creationDragPrevious.x,dy=mouse.y-creationDragPrevious.y;
+            if(creationDrag==CreationDrag::Geometry && creationDragMoved) {
+                const auto &plan=geometryDragPlans[io.KeyAlt?1:0];
+                if(!plan) {
+                    g_cursorOverride=LoadCursor(nullptr,IDC_NO);
+                    if(geometryDragInverted!=io.KeyAlt) {
+                        for(const auto &[index,original]:creationDragAtoms) {
+                            auto &a=result.data.atoms[size_t(index)]; a.x=original.x; a.y=original.y; a.z=original.z;
+                        }
+                        geometryDragInverted=io.KeyAlt;
+                        uploadCreationDisplay(result.data,result.selected,result.colorSelected);
+                    }
+                }
+                else {
+                    const double amount=(mouse.x-creationDragStart.x-(mouse.y-creationDragStart.y))/U(1);
+                    double target=plan->initial+amount*(plan->monitor.count==2?.01:.4);
+                    target=plan->monitor.count==2?std::max(.001,target):plan->monitor.count==3?std::clamp(target,0.,180.):std::remainder(target,360.);
+                    if(target!=geometryDragTarget || io.KeyAlt!=geometryDragInverted) {
+                        for(const auto &[index,original]:creationDragAtoms) {
+                            auto &a=result.data.atoms[size_t(index)]; a.x=original.x; a.y=original.y; a.z=original.z;
+                        }
+                        for(const auto &[index,at]:geometry::positions(*plan,target)) {
+                            auto &a=result.data.atoms[size_t(index)]; a.x=at.x; a.y=at.y; a.z=at.z;
+                        }
+                        geometryDragTarget=target; geometryDragInverted=io.KeyAlt;
+                        uploadCreationDisplay(result.data,result.selected,result.colorSelected);
+                    }
+                }
+            }
             if (creationDrag==CreationDrag::Ring) {
                 const double angle=(double(mouse.x-creationDragStart.x)+double(mouse.y-creationDragStart.y))*.012;
                 creationRingPreview=authoring::rotatedRing(creationRingStart,angle);
@@ -4995,7 +5232,12 @@ struct App {
             ImGui::IsMouseReleased(creationDragButton)) {
             contextRequested=creationDragButton==ImGuiMouseButton_Right &&
                 !creationDragMoved && !io.KeyAlt && !io.KeyShift;
-            if (creationDrag==CreationDrag::Box && creationDragMoved) {
+            if(creationDrag==CreationDrag::Geometry && creationDragMoved) {
+                const auto &plan=geometryDragPlans[geometryDragInverted?1:0];
+                if(plan && std::abs(geometry::delta(*plan,geometryDragTarget))>1e-7)
+                    editStructure(std::string("拖动修改")+geometryName(plan->monitor.count),[&](Dataset &data){geometry::apply(data,*plan,geometryDragTarget);});
+                geometryPanelMonitor=-1;
+            } else if (creationDrag==CreationDrag::Box && creationDragMoved) {
                 const auto matrix=creationProjection(result.data,cam,size).combined;
                 const float x0=std::min(creationDragStart.x,mouse.x),x1=std::max(creationDragStart.x,mouse.x);
                 const float y0=std::min(creationDragStart.y,mouse.y),y1=std::max(creationDragStart.y,mouse.y);
@@ -5069,7 +5311,9 @@ struct App {
             creationLastHoverMouse={-1,-1};
         }
         if (hovered) {
-            if (creationTool==CreationTool::Sketch || creationTool==CreationTool::Ring || creationTool==CreationTool::Fragment) g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
+            if (isGeometryTool(creationTool) || creationTool==CreationTool::Sketch || creationTool==CreationTool::Ring || creationTool==CreationTool::Fragment) {
+                if(!g_cursorOverride) g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
+            }
             else if (creationHover>=0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             else if (creationTool==CreationTool::Pan||creationTool==CreationTool::Move)
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
@@ -5322,6 +5566,7 @@ struct App {
             const auto projection=creationProjection(result.data,cam,avail);
             auto mvp=projection.combined;
             draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
+            geometryOverlay(p,avail,cam,draw);
             if (creationFragmentPreviewValid && !pipelineBusy) {
                 if (const auto *t=currentFragment()) {
                     const auto &placement=creationFragmentPreview;
@@ -5811,18 +6056,21 @@ struct App {
                [&] { resetView(); });
         action("model.measure-distance", "Measure Distance",
                "Report the distance between the clicked atom and the Shift-clicked atom", [&] {
+                   if(creationMode) { chooseCreationTool(CreationTool::Distance); return; }
                    if (creationPick >= 0 && creationMeasure >= 0)
                        status = "Distance " + std::to_string(authoring::distance(source, creationPick, creationMeasure)) + " angstrom";
                    else status = "Click the first atom, then Shift-click the second atom";
                });
         action("model.measure-angle", "Measure Bond Angle",
                "Report the angle at the Shift-clicked atom", [&] {
+                   if(creationMode) { chooseCreationTool(CreationTool::Angle); return; }
                    if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0)
                        status = "Bond angle " + std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)) + " degrees";
                    else status = "Click, Shift-click the vertex, then Ctrl-click the third atom";
                });
         action("model.measure-dihedral", "Measure Dihedral Angle",
                "Report the dihedral of four picked atoms", [&] {
+                   if(creationMode) { chooseCreationTool(CreationTool::Torsion); return; }
                    if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0)
                        status = "Dihedral " + std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)) + " degrees";
                    else status = "Click, Shift-click, Ctrl-click, then Alt-click the fourth atom";
@@ -7020,6 +7268,7 @@ struct App {
         ImGui::End();
 
         fixed("Creation selection", w - rightW, y, rightW, bodyH);
+        geometryPanel();
         if (creationTool==CreationTool::Fragment) {
             ImGui::SeparatorText("放置片段");
             if (const auto *t=currentFragment()) ImGui::TextWrapped("%s",t->name.c_str());
@@ -8805,6 +9054,7 @@ struct App {
         chineseBuilder.AddText("绘制碳环元芳香环大小空白处放置原子或键上接环按住拖动调整朝向松开提交取消环已存在环顶点重合请调整朝向环与隐藏原子重合请先显示原子碳环不自动加氢保存文档文档另存为");
         chineseBuilder.AddText("片段浏览器常用自定义搜索定义连接点末端接枝红圈双击更换拖动旋转右键平移滚轮缩放重置预览开始放置关闭名称库保存到正在读取本机文件已跳过无效上限氢会被替换其他保留甲基乙羟氨酰羧苯烃官能团卤素我的需要最多原子有效直接键不支持周期连通网络通过显式键未知元素长度匹配尚未加载状态改变超过无法暂存被隐藏请重新选择");
         chineseBuilder.AddText("显示样式原有外观线棒球棒整个体系半径比例范德华对应半键共享参数微小原子点便于选择大体系沿用显示预算超限自动降为省略");
+        chineseBuilder.AddText("测量修改几何距离角度扭转角依次点击测量点标记空白处反向取消未定义已选顶点目标应用数值移除显示另一侧恢复按实际坐标不取周期最短距离片段约束连通路径无法独立移动最多重合须大于零超出范围 → Å ° − –");
         chineseBuilder.AddText("运动分组从选择创建按独立片段自动分组已属于取消名称改名选中整组整体移动旋转质心需属性保留原子显式键周期网络隐藏成员先显示不自动限制手工编辑正在查找连接分量暂无采样体系不能上限");
         for (const auto &group:motionGroupCache) chineseBuilder.AddText(group.name.c_str());
         for (const auto &entry:fragmentLibrary) { chineseBuilder.AddText(entry.name.c_str()); chineseBuilder.AddText(entry.category.c_str()); }
@@ -9398,8 +9648,10 @@ struct App {
             history(false);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
             history(true);
-        if (creationMode && ImGui::IsKeyPressed(ImGuiKey_Delete) && !io.WantTextInput)
-            deletePickedAtom();
+        if (creationMode && ImGui::IsKeyPressed(ImGuiKey_Delete) && !io.WantTextInput) {
+            if(isGeometryTool(creationTool) && creationDisplay.activeMonitor>=0) removeGeometryMonitor();
+            else deletePickedAtom();
+        }
         if (creationMode && !io.WantTextInput) {
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) selectCreationAtom(-1,false);
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A)) {

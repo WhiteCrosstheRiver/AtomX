@@ -2,7 +2,7 @@
 #include "creation_display.hpp"
 #include <bit>
 
-// AtomX document v4 (reads v1/v2/v3): little-endian IEEE floats; explicit field order and
+// AtomX document v5 (reads v1..v4): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -108,7 +108,10 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
         valid(index>=0 && size_t(index)<d.atoms.size() && int(label.kind)>=0 && int(label.kind)<=6);
     valid(std::isfinite(v.radius) && v.radius>0 && v.shape>=0 && v.shape<=6 && v.cameraMode>=0 && v.cameraMode<=7);
     valid(std::all_of(v.camera.begin(),v.camera.end(),[](float x){return std::isfinite(x);}) && v.camera[2]>0);
-    valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=6 && v.order>=1 && v.order<=3);
+    valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=9 && v.order>=1 && v.order<=3);
+    valid(v.display.monitors.size()<=geometry::monitorLimit && v.display.activeMonitor>=-1 &&
+        (v.display.activeMonitor<0 || size_t(v.display.activeMonitor)<v.display.monitors.size()));
+    for(const auto &m:v.display.monitors) valid(geometry::valid(m,d.atoms.size()));
     valid(v.ringSize>=4 && v.ringSize<=6);
     valid(v.fragmentKey.size()<=256 && v.fragmentConnector>=0 && v.fragmentConnector<512);
     valid(v.propertyPage>=0 && v.propertyPage<=2 && (v.styles.empty() || v.styles.size()==d.species.size()));
@@ -128,7 +131,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(4));
+    w.bytes(magic,8); w.value(uint32_t(5));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -167,6 +170,8 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     w.value(display.defaultPreset); w.value(display.ballRadius); w.value(display.stickRadius); w.value(display.cpkScale); w.value(display.lineWidth);
     w.value(uint64_t(display.presets.size()));
     for(const auto &[index,preset]:display.presets) { w.value(int32_t(index)); w.value(preset); }
+    w.flag(display.monitorsVisible); w.value(display.activeMonitor); w.value(uint64_t(display.monitors.size()));
+    for(const auto &m:display.monitors) { w.value(m.count); for(auto i:m.atoms) w.value(i); }
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -175,7 +180,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version<1 || version>4) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>5) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -230,6 +235,11 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
         const size_t count=r.count(5,atomCount);
         for(size_t i=0;i<count;++i) { const int index=r.value<int32_t>(); const auto preset=r.value<uint8_t>(); valid(display.presets.emplace(index,preset).second); }
     }
+    if(version>=5) {
+        auto &display=v.display; display.monitorsVisible=r.flag(); display.activeMonitor=r.value<int32_t>();
+        const size_t count=r.count(17,geometry::monitorLimit); display.monitors.resize(count);
+        for(auto &m:display.monitors) { m.count=r.value<uint8_t>(); for(auto &i:m.atoms) i=r.value<int32_t>(); }
+    } else valid(v.tool<=6);
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size()); return result;
 }

@@ -2990,6 +2990,37 @@ int main() {
             display.setPreset(3,{0},3,false);
             require(display.presets.size()==1 && display.presetAt(0)==3,"reset to default releases sparse override");
         }
+        {
+            Dataset molecule; molecule.species={"C"};
+            molecule.atoms={{0,1,0,0},{0,0,0,0},{1,0,0,0},{1,1,1,0},{2,1,1,0},{8,8,8,0}};
+            molecule.sourceCount=molecule.atoms.size(); molecule.bonds={{0,1},{1,2},{2,3},{3,4}};
+            molecule.vectorProperties["Force"]={{0,1,0},{0,1,0},{0,1,0},{0,1,0},{0,1,0},{0,1,0}};
+            const geometry::Monitor distance{2,{1,2,-1,-1}},angle{3,{0,1,2,-1}},torsion{4,{0,1,2,3}};
+            for(bool inverse:{false,true}) for(const auto &m:{distance,angle,torsion}) {
+                auto edited=molecule; const auto plan=geometry::prepare(molecule,m,inverse);
+                const double target=m.count==2?2.:m.count==3?120.:-70.; geometry::apply(edited,plan,target);
+                require(std::abs(*geometry::value(edited,m)-target)<1e-4,"geometry target is reached on either moving side");
+                require(std::abs(authoring::distance(edited,3,4)-authoring::distance(molecule,3,4))<1e-5,"branch remains rigid");
+                require(edited.atoms[5].x==8 && edited.atoms[5].y==8 && edited.cell==molecule.cell && edited.bonds==molecule.bonds,"unrelated fragment, cell and topology unchanged");
+                const int fixed=inverse?m.atoms[m.count-1]:m.atoms[0];
+                require(geometry::at(edited,fixed).x==geometry::at(molecule,fixed).x && geometry::at(edited,fixed).y==geometry::at(molecule,fixed).y,"anchored side unchanged");
+                require(std::abs(authoring::length(edited.vectorProperties["Force"][3])-1)<1e-5,"rigid rotation retains vector magnitude");
+            }
+            auto ring=molecule; ring.bonds.push_back({0,3});
+            bool blocked=false; try { (void)geometry::prepare(ring,torsion); } catch(...) { blocked=true; }
+            require(blocked && ring.atoms[3].z==1,"closed path blocks torsion without mutation");
+            auto periodic=molecule; periodic.bonds[2].image={1,0,0}; blocked=false;
+            try { (void)geometry::prepare(periodic,distance); } catch(...) { blocked=true; }
+            require(blocked,"periodic moving network rejected");
+            auto degenerate=molecule; degenerate.atoms[3]={2,0,0,0};
+            require(!geometry::value(degenerate,torsion),"collinear torsion is undefined, not zero");
+            const auto plan=geometry::prepare(molecule,angle); blocked=false;
+            try { (void)geometry::positions(plan,181); } catch(...) { blocked=true; }
+            require(blocked,"out of range angle rejected");
+            creation::Display display; display.monitors={distance,torsion}; display.activeMonitor=1;
+            display.eraseAtoms(6,{0});
+            require(display.monitors.size()==1 && display.monitors[0].atoms==std::array<int32_t,4>{0,1,-1,-1} && display.activeMonitor==-1,"deleted endpoint removes monitor and surviving monitor remaps");
+        }
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "
                      "semantics, three-axis replication, stack composition, wrap, "
