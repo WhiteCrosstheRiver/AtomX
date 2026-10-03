@@ -1,4 +1,5 @@
 #include "../src/hydrogen_adjust.hpp"
+#include "../src/chemical_settings.hpp"
 #include "../src/creation_document.hpp"
 #include <chrono>
 #include <iostream>
@@ -101,6 +102,23 @@ int main() {try {
     applyRing(ringDraft,ringEdit);requireH(prepare(ringDraft,all).added.size()==6 && std::isnan(ringDraft.scalarProperties["Charge"][0]),
         "ring defaults preserve measured missing values and automatic chemical settings");
     Dataset large;large.species={"C"};large.atoms.resize(60000);
+    auto settings=molecule({"N","O"},{{0,0,0},{8,0,0}});settings.scalarProperties["FormalCharge"]={0,-1};
+    settings.scalarProperties["Charge"]={-.2,.4};settings.vectorProperties["Force"]={{1,2,3},{4,5,6}};
+    const auto propertyEdit=chemistry::prepare(settings,{0,0},1,std::nullopt);chemistry::apply(settings,propertyEdit);
+    requireH(settings.atoms.size()==2 && settings.bonds.empty() && chemistry::charge(settings,0)==1 && chemistry::charge(settings,1)==-1 &&
+        settings.scalarProperties["Charge"][0]==-.2 && settings.vectorProperties["Force"][1].y==5,
+        "standalone formal charge editing preserves unselected imported charge, partial charge, geometry and measured science");
+    requireH(!chemistry::prepare(settings,{0},1,std::nullopt).changed,"same setting is a no-op");
+    Options chemicalScope;chemicalScope.all=false;chemicalScope.selection={0};auto ion=prepare(settings,chemicalScope);
+    requireH(ion.added.size()==4,"direct N+ formal charge supports ammonium hydrogen count");
+    chemistry::apply(settings,chemistry::prepare(settings,{0,1},std::nullopt,7));
+    requireH(chemistry::hybrid(settings,0)==7 && chemistry::hybrid(settings,1)==7 && !prepare(settings,chemicalScope).changes(),
+        "higher coordination metadata is stored without guessing hydrogen geometry");
+    rejected=false;try{chemistry::prepare(settings,{0,99},0,3);}catch(const std::invalid_argument&){rejected=true;}
+    requireH(rejected && chemistry::charge(settings,0)==1,"invalid selection rejected before mutating chemical fields");
+    settings.scalarProperties["AtomX.Hybridization"]={};rejected=false;
+    try{chemistry::apply(settings,chemistry::Edit{{0},0,3});}catch(const std::invalid_argument&){rejected=true;}
+    requireH(rejected && chemistry::charge(settings,0)==1,"malformed requested rows cannot partially change formal charge");
     for(size_t i=0;i<large.atoms.size();++i){large.atoms[i].x=float(i*5);if(i%2)large.bonds.push_back({uint32_t(i-1),uint32_t(i),{},3});}
     large.sourceCount=large.atoms.size();large.bounds();const auto start=std::chrono::steady_clock::now();auto bulk=prepare(large,all);
     const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();

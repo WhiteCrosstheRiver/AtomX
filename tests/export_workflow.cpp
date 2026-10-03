@@ -173,9 +173,9 @@ int main() {
             };
             auto click=[&](const std::string &name,float xFraction=.5f) {
                 auto found=app.uiTestItems.find(name);
-                requireExport(found!=app.uiTestItems.end(),"required interactive UI control was not recorded");
+                requireExport(found!=app.uiTestItems.end(),("required interactive UI control was not recorded: "+name).c_str());
                 const auto item=found->second;
-                requireExport(item.id!=0,"interactive control must expose a stable nonzero ImGui ID");
+                requireExport(item.id!=0,("interactive control must expose a stable nonzero ImGui ID: "+name).c_str());
                 requireExport(item.max.x>item.min.x && item.max.y>item.min.y,
                               ("interactive UI control has an empty rectangle: "+name).c_str());
                 requireExport(item.min.x>=0 && item.min.y>=0 &&
@@ -1046,6 +1046,72 @@ int main() {
                 requireExport(huge.atoms.size()==100001 && huge.bonds.empty() && app.creationAutoHydrogenMessage.find("后台预览")!=std::string::npos,
                     "large automatic edits defer chemistry to the explicit background preview");
                 app.creationAutoHydrogens=false;
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
+                app.editStructure("chemical settings fixture",[](Dataset &data) {
+                    data={};data.species={"N","O"};data.atoms={{2,2,2,0},{8,2,2,1}};
+                    data.cell={12,0,0,0,12,0,0,0,12};data.scalarProperties["FormalCharge"]={0,-1};
+                    data.scalarProperties["Charge"]={-.2,.4};data.vectorProperties["Force"]={{1,2,3},{4,5,6}};
+                });settlePipeline();app.creationDisplay={};app.creationAutoHydrogens=false;
+                app.chooseCreationTool(App::CreationTool::Select);app.selectCreationAtom(0,false);frame();
+                const size_t editBaseline=app.authorUndo.size();
+                auto typeCharge=[&](const char *value) {
+                    click("creation.chemistry-charge-enable");click("creation.chemistry-charge",.12f);
+                    guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,true);guiIO.AddKeyEvent(ImGuiKey_A,true);frame();
+                    guiIO.AddKeyEvent(ImGuiKey_A,false);guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,false);
+                    guiIO.AddInputCharactersUTF8(value);frame();
+                    guiIO.AddKeyEvent(ImGuiKey_Enter,true);frame();guiIO.AddKeyEvent(ImGuiKey_Enter,false);frame();
+                };
+                click("creation.edit-chemistry");frame();typeCharge("1");
+                click("creation.chemistry-apply");settlePipeline();frame();
+                requireExport(app.source.atoms.size()==2 && app.source.bonds.empty() && chemistry::charge(app.source,0)==1 &&
+                    chemistry::charge(app.source,1)==-1 && app.source.scalarProperties.at("Charge")[0]==-.2 &&
+                    app.source.vectorProperties.at("Force")[1].y==5 && app.authorUndo.size()==editBaseline+1,
+                    "direct formal charge UI preserves imported partial charge, unrelated atoms and science with automatic H off");
+                click("creation.edit-chemistry");frame();typeCharge("1");click("creation.chemistry-apply");frame();
+                requireExport(app.authorUndo.size()==editBaseline+1,"same chemistry settings add no undo entry");
+                click("creation.edit-chemistry");frame();typeCharge("-1");click("creation.chemistry-cancel");frame();
+                requireExport(chemistry::charge(app.source,0)==1 && app.authorUndo.size()==editBaseline+1,"cancel preserves chemical settings");
+                click("creation.tool-auto-hydrogen");frame();
+                click("creation.edit-chemistry");frame();typeCharge("0");click("creation.chemistry-apply");settlePipeline();frame();
+                requireExport(app.source.atoms.size()==5 && app.source.bonds.size()==3 && app.source.atoms[0].x==2 &&
+                    app.source.atoms[1].x==8 && std::isnan(app.source.scalarProperties.at("Charge")[2]),
+                    "neutral nitrogen direct settings create NH3 locally while keeping heavy coordinates and missing new science");
+                click("creation.edit-chemistry");frame();typeCharge("1");click("creation.chemistry-apply");settlePipeline();frame();
+                requireExport(app.source.atoms.size()==6 && app.source.bonds.size()==4 && app.authorUndo.size()==editBaseline+3,
+                    "N+ and four hydrogens are one chemistry edit");
+                app.history(false);settlePipeline();frame();
+                requireExport(app.source.atoms.size()==5 && chemistry::charge(app.source,0)==0,"undo restores formal charge and hydrogen count together");
+                app.history(true);settlePipeline();frame();
+                requireExport(app.source.atoms.size()==6 && chemistry::charge(app.source,0)==1,"redo restores ammonium together");
+                app.selectCreationAtom(0,false);frame();
+                click("creation.edit-chemistry");frame();typeCharge("0");
+                click("creation.chemistry-hybrid");frame();click("creation.chemistry-hybrid-3");frame();
+                click("creation.chemistry-apply");settlePipeline();frame();
+                requireExport(chemistry::hybrid(app.source,0)==2 && app.source.atoms.size()==5 && app.source.bonds.size()==3,
+                    "direct SP2 hybridization and neutral charge update local H in one operation");
+                const auto &center=app.source.atoms[0];const auto &h0=app.source.atoms[2],&h1=app.source.atoms[3],&h2=app.source.atoms[4];
+                const auto normal=authoring::cross({h0.x-center.x,h0.y-center.y,h0.z-center.z},{h1.x-center.x,h1.y-center.y,h1.z-center.z});
+                requireExport(std::abs(authoring::dot(normal,{h2.x-center.x,h2.y-center.y,h2.z-center.z}))<1e-4,
+                    "SP2 hydrogen positions are coplanar around unchanged nitrogen");
+                app.creationSelection={0,1};app.creationPick=0;frame();
+                click("creation.edit-chemistry");frame();requireExport(app.chemistrySummary.find("混合")!=std::string::npos,"batch dialog identifies mixed imported charges");
+                click("creation.chemistry-hybrid");frame();click("creation.chemistry-hybrid-8");frame();
+                click("creation.chemistry-apply");settlePipeline();frame();
+                requireExport(chemistry::hybrid(app.source,0)==7 && chemistry::hybrid(app.source,1)==7 &&
+                    chemistry::charge(app.source,0)==0 && chemistry::charge(app.source,1)==-1 && app.source.atoms.size()==5,
+                    "batch octahedral metadata preserves distinct formal charges and skips unsupported H geometry");
+                const auto native=dir/"chemical-settings.atomx";io::ExportOptions options;options.documentView=app.captureDocumentView();
+                io::write(native,io::Format::AtomX,app.source,options);const auto saved=document::read(native);
+                requireExport(saved.view.autoHydrogens && chemistry::hybrid(saved.data,0)==7 && chemistry::charge(saved.data,1)==-1 &&
+                    saved.data.scalarProperties.at("Charge")[1]==.4 && saved.data.bonds==app.source.bonds,"native save preserves chemical settings and science");
+                click("creation.edit-chemistry");frame();app.chemistrySetCharge=true;app.chemistryCharge=4;
+                app.editStructure("invalidate chemical selection",[](Dataset &data){data.atoms[1].x+=1;});settlePipeline();frame();
+                const auto staleHistory=app.authorUndo.size();requireExport(!app.applyCreationChemistry() && app.authorUndo.size()==staleHistory &&
+                    chemistry::charge(app.source,0)==0,"changed document rejects stale chemical dialog before history or mutation");
+                frame();click("creation.chemistry-cancel");frame();app.creationAutoHydrogens=false;
                 while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();frame();
             }
             {

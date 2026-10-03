@@ -4,6 +4,7 @@
 #include "fragment_library.hpp"
 #include "fragment_fusion.hpp"
 #include "hydrogen_adjust.hpp"
+#include "chemical_settings.hpp"
 #include "motion_groups.hpp"
 #include "layer_builder.hpp"
 #include "creation_display.hpp"
@@ -950,6 +951,11 @@ struct App {
     bool showHydrogenAdjust=false,hydrogenBusy=false;
     uint64_t hydrogenTabId=0;
     hydrogens::Options hydrogenOptions;
+    bool openCreationChemistry=false,chemistrySetCharge=false;
+    int chemistryCharge=0,chemistryHybridChoice=0;
+    uint64_t chemistryTabId=0,chemistryGeneration=0;
+    std::vector<int> chemistrySelection;
+    std::string chemistrySummary,chemistryMessage;
     std::optional<hydrogens::Plan> hydrogenPlan;
     std::future<hydrogens::Plan> hydrogenJob;
     std::string hydrogenMessage;
@@ -2020,6 +2026,70 @@ struct App {
         });
         creationSelection.clear();
         creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+    }
+    void requestCreationChemistry() {
+        if(!creationMode || documentsBusy() || !sameAtomCount() || creationSelection.empty())return;
+        chemistrySelection=creationSelection;
+        chemistryTabId=tabs[size_t(activeTab)].id;chemistryGeneration=pipelineGeneration;
+        chemistrySetCharge=false;chemistryHybridChoice=0;chemistryCharge=0;chemistryMessage.clear();
+        try {
+            const auto first=chemistrySelection.front();
+            const double q=chemistry::charge(source,size_t(first)),h=chemistry::hybrid(source,size_t(first));
+            bool sameQ=true,sameH=true;
+            for(int i:chemistrySelection) {sameQ&=chemistry::charge(source,size_t(i))==q;sameH&=chemistry::hybrid(source,size_t(i))==h;}
+            if(std::isfinite(q) && q==std::floor(q) && q>=INT_MIN && q<=INT_MAX)chemistryCharge=int(q);
+            const auto qText=sameQ && std::isfinite(q)?std::to_string(q):std::string("混合 / 缺失");
+            const auto hText=sameH && std::isfinite(h) && h>=0 && h<=7 && h==std::floor(h)?chemistry::hybridNames[int(h)]:"混合 / 缺失";
+            chemistrySummary="当前形式电荷："+qText+" · 杂化："+hText;
+            openCreationChemistry=true;
+        }catch(const std::exception &e){status=e.what();}
+    }
+    bool applyCreationChemistry() {
+        if(!creationMode || activeTab<0 || activeTab>=int(tabs.size()) || tabs[size_t(activeTab)].id!=chemistryTabId ||
+           pipelineGeneration!=chemistryGeneration || documentsBusy()) {chemistryMessage="体系已改变，请关闭后重新选择原子";return false;}
+        try {
+            const auto edit=chemistry::prepare(source,chemistrySelection,
+                chemistrySetCharge?std::optional<int>(chemistryCharge):std::nullopt,
+                chemistryHybridChoice?std::optional<int>(chemistryHybridChoice-1):std::nullopt);
+            if(!edit.changed){status="化学设置没有变化";return true;}
+            auto selected=edit.selection;
+            editStructure("修改原子化学设置 · "+std::to_string(selected.size())+" 个原子",[&](Dataset &data) {
+                chemistry::apply(data,edit);updateAutomaticHydrogens(data,selected);
+            });
+            creationSelection=std::move(selected);creationPick=creationSelection.empty()?-1:creationSelection.back();
+            return true;
+        }catch(const std::exception &e){chemistryMessage=e.what();return false;}
+    }
+    void chemistryDialog() {
+        if(openCreationChemistry){ImGui::OpenPopup("原子化学设置##chemistry");openCreationChemistry=false;}
+        const auto *vp=ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->GetWorkCenter(),ImGuiCond_Appearing,{.5f,.5f});
+        ImGui::SetNextWindowSizeConstraints({U(360),0},{std::max(U(360),vp->WorkSize.x-U(24)),vp->WorkSize.y-U(24)});
+        if(!ImGui::BeginPopupModal("原子化学设置##chemistry",nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
+        ImGui::Text("打开时选中 %zu 个原子",chemistrySelection.size());
+        ImGui::TextWrapped("%s",chemistrySummary.c_str());
+        ImGui::Checkbox("修改形式电荷",&chemistrySetCharge);recordUiTestItem("creation.chemistry-charge-enable");
+        ImGui::BeginDisabled(!chemistrySetCharge);ImGui::SetNextItemWidth(U(150));
+        ImGui::InputInt("整数形式电荷",&chemistryCharge,0,0);recordUiTestItem("creation.chemistry-charge");ImGui::EndDisabled();
+        const char *preview=chemistryHybridChoice?chemistry::hybridNames[chemistryHybridChoice-1]:"保持原设置";
+        ImGui::SetNextItemWidth(U(230));
+        const bool hybridOpen=ImGui::BeginCombo("杂化",preview,ImGuiComboFlags_HeightLarge);recordUiTestItem("creation.chemistry-hybrid");
+        if(hybridOpen) {
+            for(int choice=0;choice<=8;++choice) {
+                if(ImGui::Selectable(choice?chemistry::hybridNames[choice-1]:"保持原设置",chemistryHybridChoice==choice))chemistryHybridChoice=choice;
+                recordUiTestItem("creation.chemistry-hybrid-"+std::to_string(choice));
+            }ImGui::EndCombo();
+        }
+        ImGui::TextWrapped("形式电荷用于化学价态判断；文件中的部分电荷 Charge 保留原值。\n自动杂化由已有键判断；高配位设置只记录属性，当前不自动补氢。\n应用后按本标签的自动氢开关调整；重原子固定。大体系可用 H+ 后台预览。");
+        if(!chemistryMessage.empty())ImGui::TextWrapped("%s",chemistryMessage.c_str());
+        const bool valid=creationMode && activeTab>=0 && activeTab<int(tabs.size()) && tabs[size_t(activeTab)].id==chemistryTabId &&
+            pipelineGeneration==chemistryGeneration;
+        if(!valid)ImGui::TextWrapped("体系已改变，请关闭后重新选择原子。");
+        ImGui::BeginDisabled(!valid || documentsBusy() || (!chemistrySetCharge && !chemistryHybridChoice));
+        if(ImGui::Button("应用",{U(110),U(30)}) && applyCreationChemistry())ImGui::CloseCurrentPopup();
+        recordUiTestItem("creation.chemistry-apply");ImGui::EndDisabled();ImGui::SameLine();
+        if(ImGui::Button("取消",{U(110),U(30)}) || ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
+        recordUiTestItem("creation.chemistry-cancel");ImGui::EndPopup();
     }
     void replacePickedElement() {
         std::vector<int> selected=creationSelection;
@@ -3678,6 +3748,7 @@ struct App {
             if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
         });
         menu("修改", "##create-modify", [&] {
+            if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
             if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
             if (ImGui::MenuItem("替换元素")) replacePickedElement();
             if (ImGui::MenuItem("删除 / 空位")) deletePickedAtom();
@@ -6304,6 +6375,7 @@ struct App {
                 if (ImGui::MenuItem("选中连接片段",nullptr,false,creationPick>=0))
                     selectCreationFragment(creationPick);
                 if (ImGui::MenuItem("编辑坐标...",nullptr,false,creationPick>=0)) requestCreationPosition();
+                if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
                 if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty()))
                     requestCreationMovement();
                 if (ImGui::MenuItem("隐藏选中",nullptr,false,!creationSelection.empty())) creationVisibility(0);
@@ -8044,6 +8116,8 @@ struct App {
             if (ImGui::Button("Delete / make vacancy", {-1, U(34)})) deletePickedAtom();
         }
         if (!creationSelection.empty()) {
+            if(ImGui::Button("原子化学设置...",{-1,U(30)}))requestCreationChemistry();
+            recordUiTestItem("creation.edit-chemistry");
             if (ImGui::Button("精准移动 / 旋转...",{-1,U(32)})) requestCreationMovement();
             recordUiTestItem("creation.edit-movement");
             if (ImGui::Button("隐藏选中",{rightW*.43f,U(28)})) creationVisibility(0);
@@ -10427,6 +10501,7 @@ struct App {
         statusStrip(w, h);
         creationDialogs();
         fragmentBrowser();
+        chemistryDialog();
         hydrogenDialog();
         motionGroupsDialog();
         creationStylesDialog();
