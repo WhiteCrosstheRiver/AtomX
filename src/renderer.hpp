@@ -348,7 +348,9 @@ struct V {
 };
 V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
  float2 q[6]={float2(-1,-1),float2(-1,1),float2(1,-1),float2(1,-1),float2(-1,1),float2(1,1)};
- Atom a=atoms[instance];Style s=styles[a.type&0x3fffffff];V o;
+ Atom a=atoms[instance];
+ if(a.type&0x20000000) { V hidden=(V)0;hidden.pos=float4(2,2,2,1);return hidden; }
+ Style s=styles[a.type&0x1fffffff];V o;
  o.overrideColor=colors[1].w>.5?particleColors[instance]:float3(-1,-1,-1);
  o.center=mul(float4(a.pos,1),view).xyz;o.world=a.pos;o.uv=q[id];o.type=a.type;
  float rad=s.visual.x>0?s.visual.x:s.visual.w>0?s.visual.w:radius;float kind=s.visual.y<0?shape:s.visual.y;
@@ -555,7 +557,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         check(device->CreateRenderTargetView(t.Get(), nullptr, &back), "Backbuffer view");
     }
     void upload(const atomx::Dataset &d, const std::vector<uint8_t> &selected,
-                const std::vector<uint8_t> &colorSelected = {}) {
+                const std::vector<uint8_t> &colorSelected = {},
+                const std::vector<uint8_t> &hidden = {}) {
         std::vector<BondVertex> bondVertices;
         bondDisplayOmitted = d.bonds.size() > atomx::interactiveBondBudget;
         if (!bondDisplayOmitted && d.bondStyle.visible)
@@ -577,6 +580,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         if (!bondDisplayOmitted && d.bondStyle.visible)
         for (const auto &bond : d.bonds) {
             if (bond.a >= d.atoms.size() || bond.b >= d.atoms.size()) continue;
+            if ((bond.a<hidden.size() && hidden[bond.a]) || (bond.b<hidden.size() && hidden[bond.b])) continue;
             if (!d.bondStyle.showPeriodicImages &&
                 (bond.image[0] || bond.image[1] || bond.image[2])) continue;
             const auto &a=d.atoms[bond.a], &b=d.atoms[bond.b];
@@ -621,6 +625,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             std::vector<atomx::Atom> tmp(d.atoms.begin() + start,
                                          d.atoms.begin() + start + c.count);
             for (size_t j = 0; j < tmp.size(); j++) {
+                if (start+j<hidden.size() && hidden[start+j]) tmp[j].type |= 0x20000000;
                 if (start + j < selected.size() && selected[start + j])
                     tmp[j].type |= 0x80000000;
                 if ((colorSelected.empty() && start + j < selected.size() && selected[start + j]) ||

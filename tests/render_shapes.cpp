@@ -170,6 +170,28 @@ int main(int argc, char **argv) {
             renderer.context->Unmap(readback.Get(), 0);
             return std::pair{lo, hi};
         };
+        {
+            atomx::Dataset masked;
+            masked.species={"X"}; masked.atoms={{-1,0,0,0},{0,0,0,0},{1,0,0,0}};
+            masked.bonds={{0,1,{}},{1,2,{}}}; masked.bounds();
+            renderer.upload(masked,{}, {}, {1,0,0});
+            renderer.draw(t,masked,cam,.3f,0,0,0,0,0,1,false,false,false,bg);
+            const auto hiddenEndpoint=imageHash(t);
+            auto explicitFiltered=masked; explicitFiltered.bonds={{1,2,{}}};
+            renderer.upload(explicitFiltered,{}, {}, {1,0,0});
+            renderer.draw(t,explicitFiltered,cam,.3f,0,0,0,0,0,1,false,false,false,bg);
+            if (imageHash(t)!=hiddenEndpoint) throw std::runtime_error("Bonds attached to hidden atoms must be omitted");
+            renderer.upload(masked,{1,1,1}, {1,1,1}, {1,1,1});
+            if (renderer.bondsUploaded()) throw std::runtime_error("All hidden atoms omit all bonds");
+            renderer.draw(t,masked,cam,.3f,0,0,0,0,0,1,false,false,false,bg);
+            const auto allHidden=imageHash(t);
+            renderer.draw(t,masked,cam,.3f,0,0,0,0,0,1,false,false,false,bg,false);
+            if (imageHash(t)!=allHidden) throw std::runtime_error("Hidden GPU atoms must write no color fragments");
+            renderer.upload(masked,{},{});
+            renderer.draw(t,masked,cam,.3f,0,0,0,0,0,1,false,false,false,bg);
+            if (imageHash(t)==allHidden || masked.atoms[0].type!=0)
+                throw std::runtime_error("Show all restores particles without changing source type bits");
+        }
         atomx::Dataset fitData;
         fitData.species={"X"}; fitData.atoms={{0,0,0,0},{100,0,0,0}}; fitData.bounds();
         renderer.upload(fitData,{});

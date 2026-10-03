@@ -1,5 +1,6 @@
 #include "../src/analysis.hpp"
 #include "../src/authoring.hpp"
+#include "../src/creation_display.hpp"
 #include "../src/elements.hpp"
 #include <iostream>
 using namespace atomx;
@@ -2852,6 +2853,34 @@ int main() {
             molecule.cell={};
             require(!authoring::setAtomPosition(molecule,0,{.2f,.3f,.4f},true),
                     "singular cell rejects fractional atom editing");
+        }
+        {
+            creation::Display display;
+            require(display.hidden.empty() && display.labels.empty() && display.candidates(1000000).empty(),
+                    "default creation display has no per atom label allocation or drawing work");
+            display.visibility(5,{1,3},0);
+            require(display.hiddenCount==2 && display.isHidden(1) && !display.isHidden(2),"hide selection keeps other atoms visible");
+            display.setLabels(5,{1,3},{creation::LabelKind::Custom,"site"},false);
+            display.eraseAtoms(5,{0,2});
+            require(display.hiddenCount==2 && display.isHidden(0) && display.isHidden(1) && !display.isHidden(2) &&
+                    display.labelAt(0).text=="site" && display.labelAt(1).text=="site" &&
+                    display.labelAt(2).kind==creation::LabelKind::None,
+                    "deletion remaps visibility and labels onto the original surviving atoms");
+            display.visibility(3,{2},1);
+            require(display.isHidden(0) && display.isHidden(1) && !display.isHidden(2),"show only preserves atom indexing");
+            display.visibility(3,{},2);
+            require(display.hiddenCount==0 && display.hidden.empty(),"show all releases the hidden mask");
+            display.setLabels(1000000,{}, {creation::LabelKind::ElementIndex,{}},true);
+            require(display.labels.empty() && display.candidates(1000000).size()==500,
+                    "global million atom labeling stores one rule and samples at most the configured budget");
+            Dataset molecule; molecule.species={"Na"}; molecule.atoms={{1,2,3,0}};
+            molecule.cell={4,0,0,0,4,0,0,0,4};
+            require(creation::labelText(molecule,0,display.labelAt(0))=="Na #0" &&
+                    creation::labelText(molecule,0,{creation::LabelKind::Fractional,{}})=="(0.250, 0.500, 0.750)",
+                    "labels use live element identity, zero based atom ids and cell based fractional positions");
+            display.setLabels(1000000,{0},{},false);
+            require(display.labelAt(0).kind==creation::LabelKind::None && display.labelAt(1).kind==creation::LabelKind::ElementIndex,
+                    "selected label removal overrides the global rule without removing other labels");
         }
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "

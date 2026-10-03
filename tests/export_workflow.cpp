@@ -419,6 +419,74 @@ int main() {
                 app.history(false); settlePipeline();
                 requireExport(app.source.atoms.size()==originalAtomCount,"movement fixture cleanup restores original structure");
             }
+            {
+                const size_t baseline=app.authorUndo.size();
+                app.editStructure("display fixture",[](Dataset &data) {
+                    auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
+                    atom.x+=2; data.atoms.push_back(atom);
+                }); settlePipeline();
+                app.selectCreationAtom(0,false); frame();
+                const auto sourceBefore=app.source.atoms;
+                const auto viewport=app.uiTestItems.at("creation.viewport");
+                const ImVec2 size{viewport.max.x-viewport.min.x,viewport.max.y-viewport.min.y};
+                const auto projection=app.creationProjection(app.result.data,app.cameras[3],size);
+                const auto &firstAtom=app.source.atoms[0];
+                DirectX::XMFLOAT4 q;
+                DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                    DirectX::XMVectorSet(firstAtom.x,firstAtom.y,firstAtom.z,1),projection.combined));
+                const ImVec2 point{viewport.min.x+(q.x/q.w+1)*size.x*.5f,
+                                   viewport.min.y+(1-q.y/q.w)*size.y*.5f};
+                requireExport(app.creationHit(viewport.min,size,app.cameras[3],point)==0,
+                              "visibility fixture atom is pickable before hiding");
+                click("creation.hide-selected");
+                requireExport(app.creationDisplay.hiddenCount==1 && app.creationSelection.empty() &&
+                              !app.authorUndo.back().data && !app.pipelineBusy &&
+                              app.source.atoms.size()==sourceBefore.size() &&
+                              app.source.atoms[0].x==sourceBefore[0].x,
+                              "hide uses display-only history without copying or evaluating structure");
+                requireExport(app.creationHit(viewport.min,size,app.cameras[3],point)!=0,
+                              "hidden atoms cannot be picked by the creation viewport");
+                // Hiding clears selection; observe the resulting smaller right panel.
+                frame();
+                click("creation.show-all");
+                app.history(false); frame();
+                requireExport(app.creationDisplay.isHidden(0),"undo show all restores the prior visibility mask");
+                app.history(true); frame();
+                requireExport(app.creationDisplay.hiddenCount==0,"redo show all restores display without altering geometry");
+                app.selectCreationAtom(1,false); frame();
+                click("creation.show-only");
+                requireExport(app.creationDisplay.hiddenCount==2 && !app.creationDisplay.isHidden(1),
+                              "show only retains just the selected atom");
+                frame();
+                click("creation.edit-labels"); frame();
+                app.creationLabelKind=int(creation::LabelKind::Custom);
+                strcpy_s(app.creationLabelText,"site A"); frame();
+                click("creation.label-apply");
+                click("creation.label-close");
+                requireExport(app.creationDisplay.labelAt(1).text=="site A" &&
+                              app.creationDisplay.labelAt(0).kind==creation::LabelKind::None,
+                              "label dialog applies custom text to the captured selection only");
+                app.saveCreationSnapshot("display state");
+                const int snapshot=int(app.creationSnapshots.size())-1;
+                app.selectCreationAtom(1,false); app.deletePickedAtom(); settlePipeline();
+                requireExport(app.source.atoms.size()==2 && app.creationDisplay.hiddenCount==2 &&
+                              app.creationDisplay.labels.empty(),"deleting the labeled atom remaps surviving visibility");
+                app.history(false); settlePipeline();
+                requireExport(app.source.atoms.size()==3 && app.creationDisplay.labelAt(1).text=="site A" &&
+                              !app.creationDisplay.isHidden(1),"undo deletion restores atom identity and annotations");
+                frame(); click("creation.show-all"); frame();
+                click("creation.edit-labels"); frame();
+                click("creation.label-remove-all"); click("creation.label-close");
+                app.restoreCreationSnapshot(snapshot); settlePipeline();
+                requireExport(app.creationDisplay.hiddenCount==2 && app.creationDisplay.labelAt(1).text=="site A",
+                              "workspace snapshot restores labels and visibility alongside structure");
+                app.history(false); settlePipeline();
+                requireExport(app.creationDisplay.hiddenCount==0 && app.creationDisplay.labels.empty(),
+                              "undo snapshot restore recovers the intervening display settings");
+                while (app.authorUndo.size()>baseline) { app.history(false); settlePipeline(); }
+                requireExport(app.source.atoms.size()==originalAtomCount && app.creationDisplay.hiddenCount==0 &&
+                              app.creationDisplay.labels.empty(),"display test restores its original creation document");
+            }
             click("creation.properties-toggle");
             requireExport(!app.creationPropertiesOpen,"creation file properties can collapse");
             frame();
@@ -915,17 +983,25 @@ int main() {
             requireExport(tabs.source.atoms.size()==3 && tabs.creationSnapshotSelected==1,
                           "restoring a snapshot stays in the same tab and records history");
             tabs.creationPropertiesOpen=false;
+            tabs.selectCreationAtom(1,false);
+            tabs.creationVisibility(1);
+            auto annotated=tabs.creationDisplay;
+            annotated.setLabels(tabs.source.atoms.size(),{1},{creation::LabelKind::Custom,"isolated site"},false);
+            tabs.editCreationDisplay(std::move(annotated),"label isolation");
             tabs.switchTab(view); ready();
-            requireExport(!tabs.creationMode && tabs.source.atoms.size()==2,
+            requireExport(!tabs.creationMode && tabs.source.atoms.size()==2 && tabs.creationDisplay.hiddenCount==0 &&
+                          tabs.creationDisplay.labels.empty(),
                           "creation edit leaves view document intact");
             tabs.openCreationTab(); ready();
             requireExport(tabs.activeTab!=first && tabs.tabs.size()==4 &&
                           tabs.source.atoms.size()==2 && tabs.authorUndo.empty() &&
-                          tabs.creationSnapshots.size()==1 && tabs.creationPropertiesOpen,
+                          tabs.creationSnapshots.size()==1 && tabs.creationPropertiesOpen &&
+                          tabs.creationDisplay.hiddenCount==0 && tabs.creationDisplay.labels.empty(),
                           "reopening creates an independent creation copy");
             tabs.switchTab(first); ready();
             requireExport(tabs.source.atoms.size()==3 && !tabs.authorUndo.empty() &&
-                          tabs.creationSnapshots.size()==2 && !tabs.creationPropertiesOpen,
+                          tabs.creationSnapshots.size()==2 && !tabs.creationPropertiesOpen &&
+                          tabs.creationDisplay.hiddenCount==2 && tabs.creationDisplay.labelAt(1).text=="isolated site",
                           "creation copy restores its own structure, workspace and panel state");
         }
         ImGui::DestroyContext();

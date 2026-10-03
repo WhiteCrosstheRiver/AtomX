@@ -1,6 +1,7 @@
 #include "renderer.hpp"
 #include "analysis.hpp"
 #include "authoring.hpp"
+#include "creation_display.hpp"
 #include "symmetry.hpp"
 #include "structure_io.hpp"
 #include "desktop.hpp"
@@ -795,9 +796,15 @@ struct App {
     // fields above; a tab is only a snapshot taken when leaving it.
     enum class CreationTool { Select, Rotate, Pan, Move, Sketch };
     enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch };
+    struct CreationHistoryState {
+        std::optional<Dataset> data; // Display-only history does not copy a large structure.
+        creation::Display display;
+        std::string action;
+    };
     struct CreationSnapshot {
         std::shared_ptr<const Dataset> data;
         std::string name, time;
+        creation::Display display;
     };
     struct StructureTab {
         uint64_t id = 0, sourceTabId = 0;
@@ -824,7 +831,8 @@ struct App {
         int measure = -1;
         int angleAtom = -1;
         int dihedralAtom = -1;
-        std::vector<Dataset> authorUndo, authorRedo;
+        std::vector<CreationHistoryState> authorUndo, authorRedo;
+        creation::Display display;
         std::vector<CreationSnapshot> snapshots;
         int selectedSnapshot = -1, propertyPage = 0;
         bool propertiesOpen = true;
@@ -877,11 +885,18 @@ struct App {
     float creationMovementScreenSpan = 0;
     ImVec2 creationViewportSize{};
     std::string creationMovementMessage;
+    creation::Display creationDisplay;
+    bool openCreationLabels = false, creationLabelAll = false;
+    uint64_t creationLabelTabId = 0;
+    int creationLabelKind = int(creation::LabelKind::ElementIndex);
+    char creationLabelText[128]{};
+    creation::Display creationLabelDraft;
+    std::vector<int> creationLabelSelection;
     int creationPick = -1;
     int creationMeasure = -1;
     int creationAngle = -1;
     int creationDihedral = -1;
-    std::vector<Dataset> authorUndo, authorRedo;
+    std::vector<CreationHistoryState> authorUndo, authorRedo;
     char creationElement[16] = "O";
     bool showLatticePanel = false;
     bool openNewCell = false;
@@ -1014,7 +1029,7 @@ struct App {
                     colorMin = float(lo); colorMax = float(hi);
                 }
             }
-            gpu.upload(next.data, next.selected, next.colorSelected);
+            uploadCreationDisplay(next.data, next.selected, next.colorSelected);
             syncAppearance(next.data.species);
             result = std::move(next);
             updateSlicePlaneVisual();
@@ -1471,6 +1486,7 @@ struct App {
         tab.dihedralAtom = creationDihedral;
         tab.authorUndo = authorUndo;
         tab.authorRedo = authorRedo;
+        tab.display = creationDisplay;
         tab.snapshots = creationSnapshots;
         tab.selectedSnapshot = creationSnapshotSelected;
         tab.propertyPage = creationPropertyPage;
@@ -1511,6 +1527,8 @@ struct App {
         creationDihedral = tab.dihedralAtom;
         authorUndo = tab.authorUndo;
         authorRedo = tab.authorRedo;
+        creationDisplay = tab.display;
+        creationDisplay.normalize(source.atoms.size());
         creationSnapshots = tab.snapshots;
         creationSnapshotSelected = tab.selectedSnapshot;
         creationPropertyPage = tab.propertyPage;
@@ -1529,6 +1547,7 @@ struct App {
             gpu.styles[i] = tab.styles[i];
         for (size_t i = 0; i < appearanceNames.size() && i < gpu.styles.size(); ++i)
             appearanceMemory[appearanceNames[i]] = gpu.styles[i];
+        queueCreationLabelFont();
         update();
     }
     bool documentsBusy() const { return busy || pipelineBusy || indexing; }
@@ -1586,7 +1605,7 @@ struct App {
         GetLocalTime(&now);
         char time[16];
         snprintf(time,sizeof(time),"%02u:%02u",now.wHour,now.wMinute);
-        creationSnapshots.push_back({std::make_shared<const Dataset>(source),std::move(name),time});
+        creationSnapshots.push_back({std::make_shared<const Dataset>(source),std::move(name),time,creationDisplay});
         creationSnapshotSelected=int(creationSnapshots.size())-1;
         status="已暂存当前结构到工作区";
     }
@@ -1595,6 +1614,9 @@ struct App {
             return;
         const auto snapshot=creationSnapshots[size_t(index)];
         adoptStructure(*snapshot.data,"已载入工作区快照："+snapshot.name);
+        creationDisplay=snapshot.display;
+        creationDisplay.normalize(source.atoms.size());
+        queueCreationLabelFont();
         creationSnapshotSelected=index;
     }
     void configureCrystalPreset(int preset) {
@@ -1767,14 +1789,15 @@ struct App {
         status = "Closed structure tab";
     }
     bool sameAtomCount() const { return source.atoms.size() == result.data.atoms.size(); }
-    void rememberStructure() {
+    void rememberStructure(const std::string &action = {}) {
         if (authorUndo.size() >= 64) authorUndo.erase(authorUndo.begin());
-        authorUndo.push_back(source);
+        authorUndo.push_back({source,creationDisplay,action});
         authorRedo.clear();
         structureEditIsLatest = true;
     }
     void adoptStructure(Dataset data, const std::string &message) {
-        rememberStructure();
+        rememberStructure(message);
+        creationDisplay={};
         creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
         source = std::move(data);
@@ -1794,10 +1817,11 @@ struct App {
             status = "Clear modifiers first: the pipeline changed the atom count";
             return;
         }
-        rememberStructure();
+        rememberStructure(message);
         creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
         edit(source);
+        creationDisplay.normalize(source.atoms.size());
         source.sourceCount = source.atoms.size();
         source.bounds();
         if (!mods.empty()) {
@@ -1821,8 +1845,13 @@ struct App {
         std::sort(selected.begin(),selected.end());
         selected.erase(std::unique(selected.begin(),selected.end()),selected.end());
         editStructure("删除 " + std::to_string(selected.size()) + " 个原子", [&](Dataset &data) {
-            for (auto it=selected.rbegin();it!=selected.rend();++it)
-                data.atoms.erase(data.atoms.begin()+*it);
+            creationDisplay.eraseAtoms(data.atoms.size(),selected);
+            size_t removed=0,out=0;
+            for (size_t index=0;index<data.atoms.size();++index) {
+                if (removed<selected.size() && size_t(selected[removed])==index) { ++removed; continue; }
+                data.atoms[out++]=data.atoms[index];
+            }
+            data.atoms.resize(out);
             data.bonds.clear();
         });
         creationSelection.clear();
@@ -1909,30 +1938,38 @@ struct App {
     void history(bool forward) {
         if (creationMode || structureEditIsLatest || !authorRedo.empty()) {
             if (!forward && !authorUndo.empty()) {
-                creationSymmetry.reset(); creationSymmetryChecked=false;
-                authorRedo.push_back(source);
-                source = authorUndo.back();
+                auto previous=std::move(authorUndo.back());
+                const bool visibilityChanged=previous.display.hidden!=creationDisplay.hidden;
+                authorRedo.push_back({previous.data?std::optional<Dataset>(source):std::nullopt,creationDisplay,previous.action});
+                if (previous.data) source = std::move(*previous.data);
+                creationDisplay = std::move(previous.display);
+                queueCreationLabelFont();
+                if (previous.data) { creationSymmetry.reset(); creationSymmetryChecked=false; }
                 authorUndo.pop_back();
                 creationSnapshotSelected=-1;
                 if (authorUndo.empty()) structureEditIsLatest = false;
                 creationPick = creationMeasure = creationAngle = creationDihedral = -1;
                 creationSelection.clear();
                 syncAppearance(source.species);
-                update();
-                status = "Undid structure edit";
+                if (previous.data) update(); else refreshCreationDisplay(visibilityChanged);
+                status = "撤销："+previous.action;
                 return;
             }
             if (forward && !authorRedo.empty()) {
-                creationSymmetry.reset(); creationSymmetryChecked=false;
-                authorUndo.push_back(source);
-                source = authorRedo.back();
+                auto next=std::move(authorRedo.back());
+                const bool visibilityChanged=next.display.hidden!=creationDisplay.hidden;
+                authorUndo.push_back({next.data?std::optional<Dataset>(source):std::nullopt,creationDisplay,next.action});
+                if (next.data) source = std::move(*next.data);
+                creationDisplay = std::move(next.display);
+                queueCreationLabelFont();
+                if (next.data) { creationSymmetry.reset(); creationSymmetryChecked=false; }
                 authorRedo.pop_back();
                 creationSnapshotSelected=-1;
                 creationPick = creationMeasure = creationAngle = creationDihedral = -1;
                 creationSelection.clear();
                 syncAppearance(source.species);
-                update();
-                status = "Redid structure edit";
+                if (next.data) update(); else refreshCreationDisplay(visibilityChanged);
+                status = "重做："+next.action;
                 return;
             }
         }
@@ -3781,6 +3818,7 @@ struct App {
                  tool == CreationTool::Move ? "拖动选中原子" : "点击空白处绘制原子";
     }
     void selectCreationAtom(int index, bool shift, bool toggle = false) {
+        if (index>=0 && !creationAtomVisible(index)) return;
         if (index < 0) { if (!shift) creationSelection.clear(); }
         else if (!shift) creationSelection = {index};
         else {
@@ -3792,8 +3830,81 @@ struct App {
     }
     void selectCreationFragment(int index) {
         creationSelection=authoring::fragment(source,index);
+        creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
+            [&](int atom){return !creationAtomVisible(atom);}),creationSelection.end());
         creationPick=creationSelection.empty()?-1:index;
         status="选中连接片段 · "+std::to_string(creationSelection.size())+" 个原子";
+    }
+    bool creationAtomVisible(int index) const {
+        if (!particles || index<0 || size_t(index)>=source.atoms.size() || creationDisplay.isHidden(size_t(index)))
+            return false;
+        const auto type=source.atoms[size_t(index)].type;
+        return type>=gpu.styles.size() || gpu.styles[type].visual[2]>.5f;
+    }
+    void uploadCreationDisplay(const Dataset &data,const std::vector<uint8_t> &selected,
+                               const std::vector<uint8_t> &colorSelected) {
+        static const std::vector<uint8_t> empty;
+        gpu.upload(data,selected,colorSelected,
+            creationMode && data.atoms.size()==source.atoms.size()?creationDisplay.hidden:empty);
+    }
+    void queueCreationLabelFont() {
+        auto missingGlyph=[&](const std::string &text) {
+            const char *cursor=text.c_str();
+            while (*cursor) {
+                unsigned character=0;
+                const int length=ImTextCharFromUtf8(&character,cursor,nullptr);
+                if (length<=0) break;
+                if (!ImGui::GetFont()->FindGlyphNoFallback(ImWchar(character))) refreshFont=true;
+                cursor+=length;
+            }
+        };
+        missingGlyph(creationDisplay.defaultLabel.text);
+        for (const auto &[index,label]:creationDisplay.labels) { (void)index; missingGlyph(label.text); }
+    }
+    void refreshCreationDisplay(bool visibilityChanged=true) {
+        creationDisplay.normalize(source.atoms.size());
+        creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
+            [&](int index){return !creationAtomVisible(index);}),creationSelection.end());
+        creationPick=creationSelection.empty()?-1:creationSelection.back();
+        creationHover=-1; creationLastHoverMouse={-1,-1};
+        queueCreationLabelFont();
+        if (visibilityChanged && !documentsBusy() && sameAtomCount())
+            uploadCreationDisplay(result.data,result.selected,result.colorSelected);
+    }
+    void editCreationDisplay(creation::Display next,const std::string &message) {
+        if (!creationMode || documentsBusy()) return;
+        next.normalize(source.atoms.size());
+        if (next==creationDisplay) return;
+        const bool visibilityChanged=next.hidden!=creationDisplay.hidden;
+        if (authorUndo.size()>=64) authorUndo.erase(authorUndo.begin());
+        authorUndo.push_back({std::nullopt,creationDisplay,message});
+        authorRedo.clear(); structureEditIsLatest=true;
+        creationSnapshotSelected=-1;
+        creationDisplay=std::move(next);
+        refreshCreationDisplay(visibilityChanged);
+        status=message;
+    }
+    void creationVisibility(int mode) {
+        if (mode!=2 && creationSelection.empty()) return;
+        auto next=creationDisplay;
+        next.visibility(source.atoms.size(),creationSelection,mode);
+        editCreationDisplay(std::move(next),mode==0?"隐藏选中原子":mode==1?"仅显示选中原子":"显示全部原子");
+    }
+    void requestCreationLabels() {
+        if (!creationMode || documentsBusy()) return;
+        creationLabelTabId=tabs[size_t(activeTab)].id;
+        creationLabelSelection=creationSelection;
+        creationLabelAll=creationLabelSelection.empty();
+        creationLabelDraft={};
+        creationLabelDraft.fontSize=creationDisplay.fontSize;
+        creationLabelDraft.color=creationDisplay.color;
+        creationLabelDraft.bold=creationDisplay.bold;
+        creationLabelDraft.labelsVisible=creationDisplay.labelsVisible;
+        creationLabelDraft.labelBudget=creationDisplay.labelBudget;
+        const auto label=creationPick>=0?creationDisplay.labelAt(creationPick):creationDisplay.defaultLabel;
+        creationLabelKind=int(label.kind==creation::LabelKind::None?creation::LabelKind::ElementIndex:label.kind);
+        snprintf(creationLabelText,sizeof(creationLabelText),"%s",label.text.c_str());
+        openCreationLabels=true;
     }
     void requestCreationPosition() {
         if (creationPick<0 || size_t(creationPick)>=source.atoms.size()) return;
@@ -3906,6 +4017,7 @@ struct App {
         int hit=-1;
         float bestDepth=FLT_MAX, bestPixel=FLT_MAX;
         for (size_t index=0; index<result.data.atoms.size(); ++index) {
+            if (!creationAtomVisible(int(index))) continue;
             const auto &atom=result.data.atoms[index];
             DirectX::XMFLOAT4 q;
             DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
@@ -3951,7 +4063,7 @@ struct App {
                 auto &a=result.data.atoms[size_t(index)];
                 a.x=original.x; a.y=original.y; a.z=original.z;
             }
-            if (!creationDragAtoms.empty()) gpu.upload(result.data,result.selected,result.colorSelected);
+            if (!creationDragAtoms.empty()) uploadCreationDisplay(result.data,result.selected,result.colorSelected);
             creationDragAtoms.clear(); creationDrag=CreationDrag::None;
             creationLastHoverMouse={-1,-1};
             return false;
@@ -4060,7 +4172,7 @@ struct App {
                         atom.y=original.y+creationMoveDelta.y;
                         atom.z=original.z+creationMoveDelta.z;
                     }
-                    if (dx!=0 || dy!=0) gpu.upload(result.data,result.selected,result.colorSelected);
+                    if (dx!=0 || dy!=0) uploadCreationDisplay(result.data,result.selected,result.colorSelected);
                 }
             } else if (creationDrag==CreationDrag::Spin && creationDragMoved && !creationDragAtoms.empty()) {
                 const auto projected=creationProjection(source,cam,size);
@@ -4086,7 +4198,7 @@ struct App {
                     auto &atom=result.data.atoms[size_t(index)];
                     atom.x=at.x; atom.y=at.y; atom.z=at.z;
                 }
-                if (dx!=0 || dy!=0) gpu.upload(result.data,result.selected,result.colorSelected);
+                if (dx!=0 || dy!=0) uploadCreationDisplay(result.data,result.selected,result.colorSelected);
             }
             creationDragPrevious=mouse;
         }
@@ -4103,6 +4215,7 @@ struct App {
                 for (int selected:creationSelection)
                     if (selected>=0 && size_t(selected)<already.size()) already[size_t(selected)]=1;
                 for (size_t index=0;index<result.data.atoms.size();++index) {
+                    if (!creationAtomVisible(int(index))) continue;
                     const auto &atom=result.data.atoms[index];
                     DirectX::XMFLOAT4 q;
                     DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
@@ -4417,8 +4530,35 @@ struct App {
             const auto projection=creationProjection(result.data,cam,avail);
             auto mvp=projection.combined;
             draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
+            if (sameAtomCount() && creationDisplay.labelsVisible &&
+                (creationDisplay.defaultLabel.kind!=creation::LabelKind::None || !creationDisplay.explicitLabels.empty())) {
+                const auto candidates=creationDisplay.candidates(source.atoms.size());
+                std::unordered_set<int> drawn;
+                const size_t budget=size_t(std::max(0,creationDisplay.labelBudget));
+                ImFont *font=creationDisplay.bold && headingFont?headingFont:ImGui::GetFont();
+                const float fontSize=U(creationDisplay.fontSize);
+                const ImU32 color=ImGui::ColorConvertFloat4ToU32({creationDisplay.color[0],creationDisplay.color[1],
+                    creationDisplay.color[2],creationDisplay.color[3]});
+                auto label=[&](int index) {
+                    if (drawn.size()>=budget || !creationAtomVisible(index) || drawn.contains(index)) return;
+                    const auto text=creation::labelText(result.data,index,creationDisplay.labelAt(index));
+                    if (text.empty()) return;
+                    const auto &atom=result.data.atoms[size_t(index)];
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                        DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),mvp));
+                    if (q.w<=0 || q.z<=0 || q.z>=q.w || std::abs(q.x)>q.w || std::abs(q.y)>q.w) return;
+                    const float offset=creationScreenRadius(atom,projection,avail)+U(3);
+                    const ImVec2 at{p.x+(q.x/q.w+1)*avail.x*.5f+offset,p.y+(1-q.y/q.w)*avail.y*.5f-fontSize*.5f};
+                    draw->AddText(font,fontSize,{at.x+U(1),at.y+U(1)},IM_COL32(0,0,0,230),text.c_str());
+                    draw->AddText(font,fontSize,at,color,text.c_str());
+                    drawn.insert(index);
+                };
+                for (size_t item=0;item<std::min(creationSelection.size(),budget);++item) label(creationSelection[item]);
+                for (int index:candidates) label(index);
+            }
             auto ring=[&](int index,ImU32 color,float width) {
-                if (index<0||size_t(index)>=result.data.atoms.size()) return;
+                if (!creationAtomVisible(index)||size_t(index)>=result.data.atoms.size()) return;
                 const auto &atom=result.data.atoms[size_t(index)];
                 DirectX::XMFLOAT4 q;
                 DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
@@ -4457,7 +4597,7 @@ struct App {
                     const uint32_t type=source.atoms[size_t(creationPick)].type;
                     creationSelection.clear();
                     for (size_t index=0;index<source.atoms.size();++index)
-                        if (source.atoms[index].type==type) creationSelection.push_back(int(index));
+                        if (source.atoms[index].type==type && creationAtomVisible(int(index))) creationSelection.push_back(int(index));
                     creationPick=creationSelection.empty()?-1:creationSelection.back();
                 }
                 if (ImGui::MenuItem("选中连接片段",nullptr,false,creationPick>=0))
@@ -4465,13 +4605,17 @@ struct App {
                 if (ImGui::MenuItem("编辑坐标...",nullptr,false,creationPick>=0)) requestCreationPosition();
                 if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty()))
                     requestCreationMovement();
+                if (ImGui::MenuItem("隐藏选中",nullptr,false,!creationSelection.empty())) creationVisibility(0);
+                if (ImGui::MenuItem("仅显示选中",nullptr,false,!creationSelection.empty())) creationVisibility(1);
+                if (ImGui::MenuItem("显示全部",nullptr,false,creationDisplay.hiddenCount>0)) creationVisibility(2);
+                if (ImGui::MenuItem("原子标签...")) requestCreationLabels();
                 if (ImGui::MenuItem("反选")) {
                     std::vector<uint8_t> selected(source.atoms.size(),0);
                     for (int index:creationSelection)
                         if (index>=0 && size_t(index)<selected.size()) selected[size_t(index)]=1;
                     creationSelection.clear();
                     for (size_t index=0;index<selected.size();++index)
-                        if (!selected[index]) creationSelection.push_back(int(index));
+                        if (!selected[index] && creationAtomVisible(int(index))) creationSelection.push_back(int(index));
                     creationPick=creationSelection.empty()?-1:creationSelection.back();
                 }
                 ImGui::Separator();
@@ -5478,6 +5622,62 @@ struct App {
         ImGui::End();
     }
     void creationDialogs() {
+        if (openCreationLabels) { ImGui::OpenPopup("原子标签"); openCreationLabels=false; }
+        if (ImGui::BeginPopupModal("原子标签",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            const bool valid=creationMode && activeTab>=0 && activeTab<int(tabs.size()) &&
+                tabs[size_t(activeTab)].id==creationLabelTabId;
+            ImGui::TextDisabled("对象：原子 · 默认显示元素和编号");
+            ImGui::Checkbox("整个体系",&creationLabelAll);
+            recordUiTestItem("creation.label-all");
+            if (!creationLabelAll) ImGui::Text("选中 %zu 个原子",creationLabelSelection.size());
+            ImGui::SetNextItemWidth(U(280));
+            ImGui::Combo("内容",&creationLabelKind,"无标签\0元素\0原子编号\0元素 + 编号\0笛卡尔坐标\0分数坐标\0自定义文字\0");
+            if (creationLabelKind==int(creation::LabelKind::Custom)) {
+                ImGui::SetNextItemWidth(U(280));
+                ImGui::InputText("文字",creationLabelText,sizeof(creationLabelText));
+            }
+            ImGui::SliderFloat("字号",&creationLabelDraft.fontSize,10,32,"%.0f");
+            ImGui::Checkbox("粗体",&creationLabelDraft.bold);
+            ImGui::ColorEdit4("颜色",creationLabelDraft.color.data(),ImGuiColorEditFlags_NoInputs);
+            ImGui::Checkbox("显示标签",&creationLabelDraft.labelsVisible);
+            ImGui::SetNextItemWidth(U(160));
+            ImGui::InputInt("屏幕标签上限",&creationLabelDraft.labelBudget);
+            ImGui::TextDisabled("大体系自动抽样，优先显示选中原子的标签");
+            ImGui::TextDisabled("隐藏原子不显示标签；上限 1-2000，默认 500");
+            const bool validText=creationLabelKind!=int(creation::LabelKind::Custom) || creationLabelText[0];
+            const bool validBudget=creationLabelDraft.labelBudget>0 && creationLabelDraft.labelBudget<=2000;
+            ImGui::BeginDisabled(!valid || documentsBusy() || (!creationLabelAll && creationLabelSelection.empty()));
+            ImGui::BeginDisabled(!validText || !validBudget);
+            if (ImGui::Button("应用",{U(110),U(30)})) {
+                auto next=creationDisplay;
+                next.fontSize=creationLabelDraft.fontSize; next.color=creationLabelDraft.color;
+                next.bold=creationLabelDraft.bold; next.labelsVisible=creationLabelDraft.labelsVisible;
+                next.labelBudget=creationLabelDraft.labelBudget;
+                next.setLabels(source.atoms.size(),creationLabelSelection,
+                    {creation::LabelKind(creationLabelKind),creationLabelKind==int(creation::LabelKind::Custom)?creationLabelText:""},creationLabelAll);
+                editCreationDisplay(std::move(next),"编辑原子标签");
+            }
+            recordUiTestItem("creation.label-apply");
+            ImGui::EndDisabled(); ImGui::SameLine();
+            if (ImGui::Button("移除",{U(110),U(30)})) {
+                auto next=creationDisplay;
+                next.setLabels(source.atoms.size(),creationLabelSelection,{},creationLabelAll);
+                editCreationDisplay(std::move(next),"移除原子标签");
+            }
+            recordUiTestItem("creation.label-remove");
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(!valid || documentsBusy());
+            if (ImGui::Button("移除全部",{U(110),U(30)})) {
+                auto next=creationDisplay; next.setLabels(source.atoms.size(),{}, {},true);
+                editCreationDisplay(std::move(next),"移除全部原子标签");
+            }
+            recordUiTestItem("creation.label-remove-all");
+            ImGui::EndDisabled(); ImGui::SameLine();
+            if (ImGui::Button("关闭",{U(110),U(30)}) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+                ImGui::CloseCurrentPopup();
+            recordUiTestItem("creation.label-close");
+            ImGui::EndPopup();
+        }
         if (openCreationMovement) {
             ImGui::OpenPopup("精准移动 / 旋转"); openCreationMovement=false;
         }
@@ -5869,7 +6069,7 @@ struct App {
                     if (ImGui::Selectable(row.c_str())) {
                         creationSelection.clear();
                         for (size_t i=0;i<source.atoms.size();++i)
-                            if (source.atoms[i].type==type) creationSelection.push_back(int(i));
+                            if (source.atoms[i].type==type && creationAtomVisible(int(i))) creationSelection.push_back(int(i));
                         creationPick=creationSelection.empty()?-1:creationSelection.back();
                     }
                     ImGui::PopID();
@@ -6010,7 +6210,18 @@ struct App {
         if (!creationSelection.empty()) {
             if (ImGui::Button("精准移动 / 旋转...",{-1,U(32)})) requestCreationMovement();
             recordUiTestItem("creation.edit-movement");
+            if (ImGui::Button("隐藏选中",{rightW*.43f,U(28)})) creationVisibility(0);
+            recordUiTestItem("creation.hide-selected"); ImGui::SameLine();
+            if (ImGui::Button("仅显示选中",{rightW*.43f,U(28)})) creationVisibility(1);
+            recordUiTestItem("creation.show-only");
         }
+        if (creationDisplay.hiddenCount) {
+            ImGui::TextDisabled("已隐藏 %zu / %zu 原子",creationDisplay.hiddenCount,source.atoms.size());
+            if (ImGui::Button("显示全部",{-1,U(28)})) creationVisibility(2);
+            recordUiTestItem("creation.show-all");
+        }
+        if (ImGui::Button("原子标签...",{-1,U(28)})) requestCreationLabels();
+        recordUiTestItem("creation.edit-labels");
         ImGui::Separator();
         if (headingFont) ImGui::PushFont(headingFont);
         ImGui::TextUnformatted("历史");
@@ -6029,7 +6240,8 @@ struct App {
         ImGui::Unindent(U(13));
         const size_t historyCount=authorUndo.size()+authorRedo.size();
         for (size_t step=1;step<=historyCount;++step) {
-            const std::string label=std::to_string(step)+"  编辑结构";
+            const auto &entry=step<=authorUndo.size()?authorUndo[step-1]:authorRedo[historyCount-step];
+            const std::string label=std::to_string(step)+"  "+(entry.action.empty()?"编辑结构":entry.action);
             if (ImGui::Selectable(label.c_str(),step==authorUndo.size()))
                 jumpCreationHistory(step);
         }
@@ -7397,7 +7609,7 @@ struct App {
                     ImGui::ColorEdit3("Type color", style.color.data());
                     if (ImGui::IsItemDeactivatedAfterEdit() && result.data.bondStyle.colorByType &&
                         !result.data.bonds.empty())
-                        gpu.upload(result.data, result.selected, result.colorSelected);
+                        uploadCreationDisplay(result.data, result.selected, result.colorSelected);
                     bool inheritRadius = style.visual[0] == 0;
                     if (ImGui::Checkbox("Use default radius", &inheritRadius))
                         setDefaultRadius(result.data.species[appearanceType], style, inheritRadius);
@@ -7658,6 +7870,9 @@ struct App {
         chineseBuilder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
         chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位转换原胞对称操作识别失败三维周期晶面重排沿法向添加关闭边界编号须标准设置参数相容基元无效");
         chineseBuilder.AddText("精准移动旋转选中原子的几何中心不移动晶胞屏幕轴体系轴距离视图比例步长角度以打开窗口时视图的较短边为选中中心所在深度上下左右向里向外右手方向反向使用负角度坐标未改变已记录一步历史原标签已改变请关闭并重新打开位移与角度必须为有限数值旋转轴不能为零选中原子已改变请重新选择原子坐标无效位移超出坐标范围连接片段分数坐标切换添加约束←→↑↓−°Å");
+        chineseBuilder.AddText("隐藏选中仅显示选中显示全部已隐藏原子标签对象默认显示元素和编号整个体系内容无标签笛卡尔坐标分数坐标自定义文字字号粗体颜色显示标签屏幕标签上限大体系自动抽样优先显示选中原子的标签隐藏原子不显示标签上限默认应用移除移除全部编辑原子标签撤销重做");
+        chineseBuilder.AddText(creationDisplay.defaultLabel.text.c_str());
+        for (const auto &[index,label]:creationDisplay.labels) { (void)index; chineseBuilder.AddText(label.text.c_str()); }
         static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
         chineseBuilder.AddRanges(extraRanges);
         ImVector<ImWchar> chineseRanges;
@@ -8241,7 +8456,7 @@ struct App {
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A)) {
                 creationSelection.clear();
                 for (size_t index=0;index<source.atoms.size();++index)
-                    creationSelection.push_back(int(index));
+                    if (creationAtomVisible(int(index))) creationSelection.push_back(int(index));
                 creationPick=creationSelection.empty()?-1:creationSelection.back();
             }
             if (!io.KeyCtrl && !io.KeyAlt) {
