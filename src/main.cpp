@@ -3,6 +3,7 @@
 #include "authoring.hpp"
 #include "fragment_library.hpp"
 #include "motion_groups.hpp"
+#include "layer_builder.hpp"
 #include "creation_display.hpp"
 #include "symmetry.hpp"
 #include "structure_io.hpp"
@@ -254,8 +255,14 @@ static std::filesystem::path dialog(HWND window, bool save, const wchar_t *filte
     of.lpstrDefExt = ext;
     of.Flags =
         OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
-    return (save ? GetSaveFileNameW(&of) : GetOpenFileNameW(&of)) ? std::filesystem::path(path)
-                                                                  : std::filesystem::path();
+    const bool accepted=save ? GetSaveFileNameW(&of)!=FALSE : GetOpenFileNameW(&of)!=FALSE;
+    // The native modal receives the shortcut's key-up and the closing click.
+    // ImGui must not retain them as held keys/buttons after the dialog returns.
+    if (ImGui::GetCurrentContext()) {
+        auto &io=ImGui::GetIO();
+        io.ClearEventsQueue(); io.ClearInputKeys(); io.ClearInputMouse();
+    }
+    return accepted ? std::filesystem::path(path) : std::filesystem::path();
 }
 static std::string number(uint64_t n) {
     auto s = std::to_string(n);
@@ -564,7 +571,7 @@ static const char *opCategory(Op op) {
 // toolbar buttons and the modifier catalog use.
 enum class CommandAction {
     Modifier, OpenFile, ExportFile, SaveSessionState, Snapshot, Render, Settings,
-    ToggleQuad, FitAll, ToolZoom, ToolPan, ToolOrbit, ToolFov,
+    ToggleQuad, FitAll, ToolZoom, ToolPan, ToolOrbit, ToolFov, LayerBuilder,
     ViewTop, ViewBottom, ViewFront, ViewBack, ViewLeft, ViewRight, ViewOrtho, ViewPerspective
 };
 struct Command {
@@ -593,6 +600,7 @@ static const std::vector<Command> &commandRegistry() {
         list.push_back({CommandAction::Snapshot, "Tools", "Snapshot"});
         list.push_back({CommandAction::Render, "Tools", "Render"});
         list.push_back({CommandAction::Settings, "Tools", "Application Settings"});
+        list.push_back({CommandAction::LayerBuilder, "Build", "Build Layers"});
         list.push_back({CommandAction::ToggleQuad, "Tools", "Toggle single / four views"});
         list.push_back({CommandAction::FitAll, "Tools", "Fit all viewports"});
         list.push_back({CommandAction::ToolZoom, "Tools", "Zoom tool"});
@@ -964,6 +972,15 @@ struct App {
     float crystalA = 5.64f, crystalB = 5.64f, crystalC = 5.64f;
     float crystalAlpha = 90.f, crystalBeta = 90.f, crystalGamma = 90.f;
     float surfaceVacuum = 15.f;
+    bool openLayerBuilder=false,layerBuildBusy=false,layerBuildCompleted=false;
+    uint64_t layerBuilderTabId=0;
+    int layerCount=2;
+    uint64_t layerSourceIds[3]{};
+    char layerNames[3][128]{"Layer 1","Layer 2","Layer 3"};
+    double layerGaps[3]{3,3,3},layerOffsets[3][2]{};
+    layers::Options layerOptions;
+    std::future<layers::Built> layerBuildJob;
+    std::string layerBuilderMessage;
     bool crystalReplaceCurrent = true;
     struct CrystalBasis { char element[8] = "Na"; float fractional[3]{}; };
     std::vector<CrystalBasis> crystalBasis;
@@ -1618,7 +1635,7 @@ struct App {
         queueCreationLabelFont();
         update();
     }
-    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy; }
+    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy || layerBuildBusy; }
     void switchTab(int index) {
         if (index < 0 || index >= int(tabs.size()) || index == activeTab) return;
         if (documentsBusy()) {
@@ -2438,6 +2455,20 @@ struct App {
             });
     }
     void poll() {
+        if (layerBuildBusy && layerBuildJob.valid() && layerBuildJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            layerBuildBusy=false;
+            try {
+                auto built=layerBuildJob.get();
+                if (!creationMode || tabs[size_t(activeTab)].id!=layerBuilderTabId)
+                    throw std::runtime_error("创作标签已改变，叠层结果未替换当前体系");
+                const size_t count=built.data.atoms.size(),cut=built.cutBonds;
+                adoptStructure(std::move(built.data),"构建叠层 · "+std::to_string(layerCount)+" 层");
+                fitCamera(3,false);
+                layerBuilderMessage="已构建 "+number(count)+" 原子 · 切断 "+number(cut)+" 条法向边界键 · 已记录一步历史";
+                layerBuildCompleted=true;
+                refreshFont=true;
+            } catch (const std::exception &e) { layerBuilderMessage=e.what(); }
+        }
         if (motionGroupBusy && motionGroupJob.valid() && motionGroupJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             motionGroupBusy=false;
             try {
@@ -3437,6 +3468,8 @@ struct App {
             if (ImGui::MenuItem("建晶体...")) openCrystalDialog = true;
             if (ImGui::MenuItem("超胞...")) openSupercellDialog = true;
             if (ImGui::MenuItem("切面·真空...")) openSurfaceDialog = true;
+            if (ImGui::MenuItem("构建叠层...")) requestLayerBuilder();
+            recordUiTestItem("creation.layers-open");
         });
         menu("工具", "##create-tools", [&] {
             if(ImGui::MenuItem("测量 / 修改距离")) chooseCreationTool(CreationTool::Distance);
@@ -3688,9 +3721,7 @@ struct App {
                                    "Cleaved the cell along c and added 15 A of vacuum");
                 if (enabledItem("Add 15 A Vacuum Along C", "menu.build.vacuum"))
                     adoptStructure(authoring::addVacuum(source, 2, 15), "Added 15 A of vacuum along c");
-                if (enabledItem("Stack a Second Layer", "menu.build.layer"))
-                    adoptStructure(authoring::stackLayers(source, 15),
-                                   "Stacked a second layer with a 15 A gap");
+                if (enabledItem("Build Layers...", "menu.build.layer")) requestLayerBuilder();
                 if (enabledItem("Graphene Sheet", "menu.build.graphene"))
                     newStructureTab(authoring::grapheneSheet(6, 4), "Graphene sheet");
                 if (enabledItem("Zigzag Nanotube (8,0)", "menu.build.nanotube"))
@@ -4712,6 +4743,160 @@ struct App {
         }
         ImGui::End();
     }
+    const Dataset *layerSource(uint64_t id) const {
+        for (size_t i=0;i<tabs.size();++i) if (tabs[i].id==id && !tabs[i].home)
+            return int(i)==activeTab?&source:&tabs[i].source;
+        return nullptr;
+    }
+    void requestLayerBuilder() {
+        if (documentsBusy()) return;
+        if (!creationMode) { openCreationTab(); if (!creationMode) return; }
+        chooseCreationTool(CreationTool::Select);
+        layerBuilderTabId=tabs[size_t(activeTab)].id;
+        layerSourceIds[0]=layerSourceIds[1]=layerSourceIds[2]=layerBuilderTabId;
+        for (const auto &tab:tabs) if (tab.id!=layerBuilderTabId && !tab.home) {
+            try { (void)layers::frame(*layerSource(tab.id)); layerSourceIds[1]=tab.id; break; }
+            catch (const std::exception &) {}
+        }
+        layerCount=2; layerOptions={}; layerBuilderMessage.clear(); layerBuildCompleted=false;
+        for (int i=0;i<3;++i) { layerGaps[i]=3; layerOffsets[i][0]=layerOffsets[i][1]=0; }
+        openLayerBuilder=true;
+    }
+    std::vector<const Dataset *> selectedLayerSources() const {
+        std::vector<const Dataset *> inputs;
+        for (int i=0;i<layerCount;++i) inputs.push_back(layerSource(layerSourceIds[i]));
+        return inputs;
+    }
+    void startLayerBuild() {
+        if (documentsBusy() || !creationMode || tabs[size_t(activeTab)].id!=layerBuilderTabId) return;
+        try {
+            const auto inputs=selectedLayerSources(); (void)layers::match(inputs,layerOptions);
+            std::vector<Dataset> snapshots; std::vector<layers::Detail> details;
+            size_t total=0;
+            for (int i=0;i<layerCount;++i) {
+                const auto *input=inputs[size_t(i)];
+                if (input->atoms.size()>size_t(budget) || total>size_t(budget)-input->atoms.size())
+                    throw std::invalid_argument("叠层原子数超过当前完整载入上限");
+                total+=input->atoms.size(); snapshots.push_back(*input);
+                details.push_back({layerNames[i],layerGaps[i],layerOffsets[i][0],layerOffsets[i][1]});
+            }
+            auto options=layerOptions; options.atomLimit=size_t(budget);
+            layerBuildJob=std::async(std::launch::async,[inputs=std::move(snapshots),details=std::move(details),options]() {
+                std::vector<const Dataset *> sources; for (const auto &input:inputs) sources.push_back(&input);
+                return layers::build(sources,details,options);
+            });
+            layerBuildBusy=true; layerBuilderMessage="正在构建叠层...";
+        } catch (const std::exception &e) { layerBuilderMessage=e.what(); }
+    }
+    void layerBuilderDialog() {
+        if (openLayerBuilder) { ImGui::OpenPopup("构建叠层##layer-builder"); openLayerBuilder=false; }
+        ImGui::SetNextWindowSize({U(630),U(545)},ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal("构建叠层##layer-builder",nullptr,ImGuiWindowFlags_NoSavedSettings)) return;
+        if (layerBuildCompleted) {
+            layerBuildCompleted=false; ImGui::CloseCurrentPopup(); ImGui::EndPopup(); return;
+        }
+        ImGui::TextWrapped("从已打开的标签选择 2–3 层。来源使用当前帧的源体系；需要修改器结果时，先创建其创作副本。");
+        ImGui::BeginDisabled(layerBuildBusy);
+        bool valid=creationMode && activeTab>=0 && tabs[size_t(activeTab)].id==layerBuilderTabId;
+        std::string validation;
+        layers::Match preview;
+        size_t count=0;
+        try {
+            auto inputs=selectedLayerSources(); preview=layers::match(inputs,layerOptions);
+            for (const auto *input:inputs) count+=input->atoms.size();
+            if (count>size_t(budget)) throw std::invalid_argument("叠层原子数超过当前完整载入上限");
+            for (int i=0;i<layerCount;++i) if (!layerNames[i][0] || !std::isfinite(layerGaps[i]) || layerGaps[i]<0 ||
+                !std::isfinite(layerOffsets[i][0]) || !std::isfinite(layerOffsets[i][1]) ||
+                std::abs(layerOffsets[i][0])>1000000 || std::abs(layerOffsets[i][1])>1000000)
+                throw std::invalid_argument("请填写名称、非负真空和有限的面内偏移");
+        } catch (const std::exception &e) { valid=false; validation=e.what(); }
+        if (ImGui::BeginTabBar("##layer-pages")) {
+            if (ImGui::BeginTabItem("定义层")) {
+                if (ImGui::RadioButton("两层",layerCount==2)) { layerCount=2; if(layerOptions.matching==2)layerOptions.matching=-1; if(layerOptions.orientation==2)layerOptions.orientation=0; }
+                recordUiTestItem("creation.layers-two"); ImGui::SameLine();
+                if (ImGui::RadioButton("三层",layerCount==3)) layerCount=3;
+                recordUiTestItem("creation.layers-three");
+                for (int i=0;i<layerCount;++i) {
+                    ImGui::PushID(i); ImGui::Separator();
+                    ImGui::Text("层 %d",i+1);
+                    std::string title="选择来源标签";
+                    for (const auto &tab:tabs) if (tab.id==layerSourceIds[i]) title=tab.title;
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::BeginCombo("##source",title.c_str())) {
+                        for (const auto &tab:tabs) if (!tab.home && layerSource(tab.id)) {
+                            ImGui::PushID(int(tab.id));
+                            if (ImGui::Selectable(tab.title.c_str(),tab.id==layerSourceIds[i])) layerSourceIds[i]=tab.id;
+                            recordUiTestItem("creation.layers-source-"+std::to_string(i)+"-"+std::to_string(tab.id));
+                            ImGui::PopID();
+                        } ImGui::EndCombo();
+                    } recordUiTestItem("creation.layers-source-"+std::to_string(i));
+                    ImGui::SetNextItemWidth(-1); ImGui::InputText("##name",layerNames[i],sizeof(layerNames[i]));
+                    recordUiTestItem("creation.layers-name-"+std::to_string(i)); ImGui::PopID();
+                }
+                ImGui::Separator();
+                if (ImGui::RadioButton("3D 周期晶体",!layerOptions.surface)) layerOptions.surface=false;
+                recordUiTestItem("creation.layers-crystal"); ImGui::SameLine();
+                if (ImGui::RadioButton("2D 表面",layerOptions.surface)) layerOptions.surface=true;
+                recordUiTestItem("creation.layers-surface"); ImGui::EndTabItem();
+            } recordUiTestItem("creation.layers-define-tab");
+            if (ImGui::BeginTabItem("层参数")) {
+                ImGui::TextWrapped("真空加在该层上方。偏移使用匹配后 a、b 的分数坐标；表面输出不加末层真空。");
+                for (int i=0;i<layerCount;++i) {
+                    ImGui::PushID(i); ImGui::Separator(); ImGui::Text("层 %d · %s",i+1,layerNames[i]);
+                    ImGui::BeginDisabled(layerOptions.surface && i==layerCount-1);
+                    ImGui::InputDouble("上方真空 (Å)",&layerGaps[i],0,0,"%.4f");
+                    recordUiTestItem("creation.layers-gap-"+std::to_string(i)); ImGui::EndDisabled();
+                    ImGui::InputDouble("面内偏移 a",&layerOffsets[i][0],0,0,"%.4f");
+                    recordUiTestItem("creation.layers-offset-a-"+std::to_string(i));
+                    ImGui::InputDouble("面内偏移 b",&layerOffsets[i][1],0,0,"%.4f");
+                    recordUiTestItem("creation.layers-offset-b-"+std::to_string(i)); ImGui::PopID();
+                }
+                ImGui::EndTabItem();
+            } recordUiTestItem("creation.layers-details-tab");
+            if (ImGui::BeginTabItem("晶格匹配")) {
+                if (ImGui::RadioButton("a、b、γ 取各层平均",layerOptions.matching<0)) layerOptions.matching=-1;
+                recordUiTestItem("creation.layers-average");
+                for (int i=0;i<layerCount;++i) {
+                    const auto label="采用层 "+std::to_string(i+1)+" 的 a、b、γ";
+                    if (ImGui::RadioButton(label.c_str(),layerOptions.matching==i)) layerOptions.matching=i;
+                    recordUiTestItem("creation.layers-match-"+std::to_string(i));
+                }
+                ImGui::Separator();
+                if (ImGui::RadioButton("保持体积（调整晶体层厚度）",layerOptions.constantVolume)) layerOptions.constantVolume=true;
+                recordUiTestItem("creation.layers-volume");
+                if (ImGui::RadioButton("保持厚度（允许体积改变）",!layerOptions.constantVolume)) layerOptions.constantVolume=false;
+                recordUiTestItem("creation.layers-thickness");
+                ImGui::TextWrapped("晶体原子的分数坐标保持不变。表面来源保持原子法向跨度，并去掉来源晶胞中的外部真空。");
+                ImGui::EndTabItem();
+            } recordUiTestItem("creation.layers-matching-tab");
+            if (ImGui::BeginTabItem("选项")) {
+                for (int i=0;i<layerCount;++i) {
+                    const auto label="采用层 "+std::to_string(i+1)+" 的空间朝向";
+                    if (ImGui::RadioButton(label.c_str(),layerOptions.orientation==i)) layerOptions.orientation=i;
+                    recordUiTestItem("creation.layers-orient-"+std::to_string(i));
+                }
+                ImGui::InputDouble("晶格变形提示 (%)",&layerOptions.warningPercent,0,0,"%.2f");
+                ImGui::TextWrapped("使用原子切割：晶体按 c 分数坐标 0–1 取层，切断法向边界键。输出 P1 / p1，不自动重建跨层键或对称性。");
+                ImGui::TextWrapped("原子属性值保留；各层矢量属性仍按来源坐标系解释。来源坐标系记录在 LayerBases 数据表。");
+                ImGui::EndTabItem();
+            } recordUiTestItem("creation.layers-options-tab");
+            ImGui::EndTabBar();
+        }
+        ImGui::Separator();
+        if (!validation.empty()) ImGui::TextWrapped("%s",validation.c_str());
+        else {
+            ImGui::Text("%s 原子 · a %.4f Å · b %.4f Å · γ %.3f°",number(count).c_str(),preview.al,preview.bl,preview.gamma);
+            for (size_t i=0;i<preview.mismatch.size();++i) if (preview.mismatch[i]>layerOptions.warningPercent)
+                ImGui::TextColored({1.f,.68f,.2f,1.f},"层 %zu 晶格变形 %.2f%%，超过提示阈值",i+1,preview.mismatch[i]);
+        }
+        ImGui::BeginDisabled(!valid || documentsBusy());
+        if (ImGui::Button("构建",{U(110),U(32)})) startLayerBuild();
+        recordUiTestItem("creation.layers-build"); ImGui::EndDisabled(); ImGui::SameLine();
+        if (ImGui::Button("关闭",{U(110),U(32)})) ImGui::CloseCurrentPopup();
+        recordUiTestItem("creation.layers-close"); ImGui::EndDisabled();
+        if (!layerBuilderMessage.empty()) ImGui::TextWrapped("%s",layerBuilderMessage.c_str());
+        ImGui::EndPopup();
+    }
     void requestCreationMovement() {
         if (!creationMode || creationSelection.empty() || documentsBusy()) return;
         creationMovementSelection=creationSelection;
@@ -4901,7 +5086,7 @@ struct App {
             creationDrag=CreationDrag::None; creationDragAtoms.clear();
             return false;
         }
-        if (pipelineBusy || staleResult || !sameAtomCount()) {
+        if (documentsBusy() || staleResult || !sameAtomCount()) {
             // A history/tab/data change can finish while a button is held.
             // Discard the old gesture rather than miss its single release
             // event and retain atom indexes from an outdated document.
@@ -9499,6 +9684,7 @@ struct App {
         case CommandAction::Snapshot:
         case CommandAction::Render: exportImage(); break;
         case CommandAction::Settings: showSettings = true; break;
+        case CommandAction::LayerBuilder: requestLayerBuilder(); break;
         case CommandAction::ToggleQuad: quad = !quad; break;
         case CommandAction::FitAll:
             for (int i = 0; i < 4; ++i) fitCamera(i, false);
@@ -9636,7 +9822,7 @@ struct App {
             for (int index=0;index<9 && index<int(tabs.size());++index)
                 if (ImGui::IsKeyPressed(numbers[index])) switchTab(index);
         }
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) open();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O,false)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W)) closeTab(activeTab);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E)) showDataExport = true;
@@ -9763,6 +9949,7 @@ struct App {
         fragmentBrowser();
         motionGroupsDialog();
         creationStylesDialog();
+        layerBuilderDialog();
         catalog();
         settings();
         commandPalette();

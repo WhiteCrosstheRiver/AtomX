@@ -8,6 +8,7 @@ void require(bool b, const char *s) {
     if (!b)
         throw std::runtime_error(s);
 }
+#include "layer_builder_tests.hpp"
 // P1 parity fixture matching the OVITO ground-truth dataset: FCC cells with
 // lattice constant 3.6, so a 3x3x3 block fills a 10.8^3 box with 108 atoms in
 // six z-layers of 18 (z = 0, 1.8, 3.6, 5.4, 7.2, 9).
@@ -3021,6 +3022,7 @@ int main() {
             display.eraseAtoms(6,{0});
             require(display.monitors.size()==1 && display.monitors[0].atoms==std::array<int32_t,4>{0,1,-1,-1} && display.activeMonitor==-1,"deleted endpoint removes monitor and surviving monitor remaps");
         }
+        testLayerBuilder();
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "
                      "semantics, three-axis replication, stack composition, wrap, "

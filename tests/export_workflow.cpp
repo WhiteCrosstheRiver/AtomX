@@ -1390,6 +1390,56 @@ int main() {
                           "failed evaluation retains the prior result and keeps its stale marker");
         }
         {
+            App layerApp(window,testRenderer);
+            auto layerReady=[&] {
+                if(layerApp.layerBuildJob.valid()) layerApp.layerBuildJob.wait();
+                for(int i=0;i<3000 && layerApp.documentsBusy();++i) {layerApp.poll(); Sleep(1);}
+                requireExport(!layerApp.documentsBusy(),"layer worker and pipeline finish");
+            };
+            layerReady();
+            Dataset cu=authoring::orthogonalCell(4,4,4,"Cu"); cu.pbc={true,true,true};
+            cu.scalarProperties["Charge"]={2};
+            auto ni=cu; ni.species={"Ni"}; ni.cell[0]=ni.cell[4]=6;
+            layerApp.newStructureTab(cu,"Cu layer"); layerReady(); const uint64_t cuId=layerApp.tabs[size_t(layerApp.activeTab)].id;
+            layerApp.newStructureTab(ni,"Ni layer"); layerReady(); const uint64_t niId=layerApp.tabs[size_t(layerApp.activeTab)].id;
+            layerApp.openCreationTab(); layerReady(); const int edit=layerApp.activeTab;
+            layerApp.captureUiTestItems=true; layerApp.refreshFont=false;
+            auto layerFrame=[&] {layerApp.uiTestItems.clear(); ImGui::NewFrame(); layerApp.ui(); ImGui::Render();};
+            auto layerClick=[&](const char *name) {
+                const auto item=layerApp.uiTestItems.at(name); const ImVec2 pos{(item.min.x+item.max.x)/2,(item.min.y+item.max.y)/2};
+                guiIO.AddMousePosEvent(pos.x,pos.y); layerFrame();
+                guiIO.AddMouseButtonEvent(0,true); layerFrame(); guiIO.AddMouseButtonEvent(0,false); layerFrame();
+            };
+            layerApp.requestLayerBuilder(); layerFrame(); layerFrame();
+            layerApp.layerSourceIds[0]=cuId; layerApp.layerSourceIds[1]=niId;
+            layerApp.layerOptions.matching=0; layerApp.layerOptions.constantVolume=false; layerFrame();
+            requireExport(layerApp.uiTestItems.contains("creation.layers-source-0") && layerApp.uiTestItems.contains("creation.layers-build"),"actual layer dialog exposes sources and build action");
+            const auto undo=layerApp.authorUndo.size(); layerClick("creation.layers-build"); layerReady(); layerFrame();
+            requireExport(layerApp.activeTab==edit && layerApp.creationMode && layerApp.source.atoms.size()==2 &&
+                layerApp.source.species==std::vector<std::string>{"Cu","Ni"} && layerApp.source.cell[8]==14 &&
+                layerApp.authorUndo.size()==undo+1 && layerApp.source.scalarProperties.at("AtomX.Layer")==std::vector<double>{1,2},
+                "real button builds independent heterostructure in same creation tab with one history step");
+            requireExport(!ImGui::GetTopMostPopupModal(),"successful build dismisses modal so changed current-source cannot be accidentally stacked again"); layerFrame();
+            const auto native=dir/"layers.atomx"; layerApp.exportFormat=int(io::Format::AtomX); layerApp.exportRange=false;
+            layerApp.startDataExport(native); layerApp.exportJob.wait(); layerApp.poll();
+            const auto savedLayers=document::read(native);
+            requireExport(savedLayers.data.scalarProperties.at("AtomX.Layer")==std::vector<double>{1,2} &&
+                savedLayers.data.tables.size()==2 && savedLayers.data.tables[0].name=="AtomX.Layers","application native save retains layer names, sources and numeric properties");
+            layerApp.history(false); layerReady();
+            requireExport(layerApp.source.atoms.size()==1 && layerApp.source.species==ni.species,"layer build undo restores original creation structure");
+            layerApp.history(true); layerReady();
+            requireExport(layerApp.source.atoms.size()==2 && layerApp.source.tables.size()==2,"layer redo restores metadata and geometry");
+            requireExport(layerApp.layerSource(cuId)->atoms.size()==1 && layerApp.layerSource(niId)->atoms.size()==1 &&
+                layerApp.layerSource(niId)->cell[0]==6,"layer source tabs remain untouched");
+            layerApp.requestLayerBuilder(); layerFrame(); layerFrame();
+            layerApp.layerGaps[0]=-1; layerFrame(); const auto beforeInvalid=layerApp.authorUndo.size();
+            layerClick("creation.layers-build");
+            requireExport(!layerApp.layerBuildBusy && layerApp.authorUndo.size()==beforeInvalid,"invalid vacuum disables real build action");
+            layerApp.startLayerBuild(); layerReady();
+            requireExport(layerApp.authorUndo.size()==beforeInvalid && layerApp.source.atoms.size()==2,"worker validation failure never mutates geometry/history");
+            layerFrame(); layerClick("creation.layers-close"); layerFrame();
+        }
+        {
             App tabs(window, testRenderer);
             tabs.configureCrystalPreset(1);
             const auto nacl=tabs.crystalFromDialog();
