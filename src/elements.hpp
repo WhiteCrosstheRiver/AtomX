@@ -58,6 +58,23 @@ inline constexpr Element table[] = {
     {"Pb", 82, "Lead", 0x575961, 1.46f, 0},         {"Bi", 83, "Bismuth", 0x9E4FB5, 1.48f, 0},
     {"U", 92, "Uranium", 0x008FFF, 1.96f, 0},       {"Pu", 94, "Plutonium", 0x006BFF, 1.87f, 0},
 };
+// Conventional atomic weights (u), verified against the installed MS periodic
+// table. Explicit per-atom Mass values take precedence for isotopes/custom types.
+inline double atomicMass(const Element &e) {
+    static constexpr double weights[]={0,1.00794,4.002602,6.941,9.012182,10.811,12.0107,
+        14.0067,15.9994,18.9984032,20.1797,22.98977,24.305,26.981538,28.0855,30.973761,
+        32.065,35.453,39.948,39.0983,40.078,44.95591,47.867,50.9415,51.9961,54.938049,
+        55.845,58.9332,58.6934,63.546,65.409,69.723,72.64,74.9216,78.96,79.904,83.798,
+        85.4678,87.62,88.90585,91.224,92.90638,95.94,98,101.07,102.9055,106.42,107.8682,
+        112.411,114.818,118.71,121.76,127.6,126.90447,131.293,132.90545,137.327};
+    if (e.z>0 && e.z<int(std::size(weights))) return weights[e.z];
+    switch (e.z) {
+    case 74:return 183.84; case 78:return 195.078; case 79:return 196.96655;
+    case 80:return 200.59; case 82:return 207.2; case 83:return 208.98038;
+    case 92:return 238.02891; case 94:return 244;
+    default:return 0;
+    }
+}
 inline const Element *find(std::string_view type) {
     while (!type.empty() && (type.back() == '+' || type.back() == '-' ||
                              (type.back() >= '0' && type.back() <= '9')))

@@ -1438,6 +1438,30 @@ int main() {
             layerApp.startLayerBuild(); layerReady();
             requireExport(layerApp.authorUndo.size()==beforeInvalid && layerApp.source.atoms.size()==2,"worker validation failure never mutates geometry/history");
             layerFrame(); layerClick("creation.layers-close"); layerFrame();
+            Dataset mol=authoring::orthogonalCell(10,10,10,"C");
+            mol.species={"C","H"}; mol.pbc={true,true,true}; mol.atoms={{2,3,9.8f,0},{2,3,.4f,1}};
+            mol.bonds={{0,1,{0,0,1},1}}; mol.sourceCount=2; mol.bounds();
+            layerApp.newStructureTab(mol,"periodic molecule"); layerReady(); layerApp.openCreationTab(); layerReady();
+            layerApp.requestLayerBuilder(); layerFrame(); layerFrame();
+            layerApp.layerSourceIds[1]=layerApp.layerSourceIds[0]; layerApp.layerOptions.matching=0;
+            layerFrame(); layerClick("creation.layers-details-tab"); layerFrame();
+            requireExport(layerApp.uiTestItems.contains("creation.layers-cleave-0") && layerApp.uiTestItems.contains("creation.layers-flip-0"),"actual layer detail controls expose molecule cleave and flip");
+            layerClick("creation.layers-cleave-0"); layerFrame(); layerClick("creation.layers-cleave-0-1"); layerFrame();
+            layerClick("creation.layers-flip-0"); layerFrame(); layerClick("creation.layers-flip-0-1"); layerFrame();
+            requireExport(layerApp.layerCleaves[0]==1 && layerApp.layerFlips[0]==1,"real dropdown choices configure whole molecules and A flip");
+            const auto molUndo=layerApp.authorUndo.size(); layerClick("creation.layers-build"); layerReady(); layerFrame();
+            requireExport(layerApp.source.atoms.size()==4 && layerApp.source.bonds.size()==1 && layerApp.authorUndo.size()==molUndo+1 &&
+                std::abs(bondVector(layerApp.source,layerApp.source.bonds[0])[2]+.6)<2e-5,
+                "UI-driven molecular flip preserves crossing molecule while atomic second layer cuts boundary bond");
+            layerApp.startDataExport(dir/"layers-molecular.atomx"); layerApp.exportJob.wait(); layerApp.poll();
+            const auto savedMol=document::read(dir/"layers-molecular.atomx");
+            const auto &layerTable=savedMol.data.tables[0];
+            requireExport(layerTable.columns.back()=="Flip" && layerTable.rows[0][9]=="Molecular" && layerTable.rows[0][10]=="A" &&
+                savedMol.data.bonds.size()==1,"native save restores molecular cleave, flip and preserved topology");
+            layerApp.history(false); layerReady();
+            requireExport(layerApp.source.atoms.size()==2 && layerApp.source.bonds[0].image[2]==1,"molecular layer undo restores original periodic source bond");
+            layerApp.history(true); layerReady();
+            requireExport(layerApp.source.atoms.size()==4 && layerApp.source.bonds.size()==1,"molecular layer redo restores flipped topology");
         }
         {
             App tabs(window, testRenderer);

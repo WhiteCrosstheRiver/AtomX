@@ -63,4 +63,56 @@ inline void testLayerBuilder() {
     for(size_t i=0;i<large.atoms.size();++i) large.atoms[i]={float(i%100),float((i/100)%100),float(i/10000),0};
     o={}; const auto many=layers::build({&large,&large},{{"one",3,0,0},{"two",3,0,0}},o);
     require(many.data.atoms.size()==140000 && many.data.bonds.empty(),"large layers exceed old 60000 cap without generating neighbors or topology");
+    // A finite molecule crosses c through an explicit image. Unequal masses
+    // place its COM below c=1 even though its geometric center is above it.
+    Dataset molecule; molecule.species={"C","H"}; molecule.pbc={true,true,true}; molecule.cell={10,0,0,0,10,0,0,0,10};
+    molecule.atoms={{2,3,9.8f,0},{2,3,.4f,1}}; molecule.bonds={{0,1,{0,0,1},1}};
+    molecule.scalarProperties["Mass"]={12,1}; molecule.scalarProperties["Charge"]={.5,-.5};
+    molecule.sourceCount=2; molecule.bounds();
+    o={}; o.matching=0;
+    std::vector<layers::Detail> whole{{"molecule",3,0,0,layers::Cleave::Molecular},{"molecule2",2,0,0,layers::Cleave::Molecular}};
+    const auto unwrapped=layers::molecularImages(molecule,layers::frame(molecule),layers::Flip::No);
+    require(unwrapped[0][2]==0 && unwrapped[1][2]==1,"mass-weighted COM retains the crossing molecule near its original c face");
+    auto molBuilt=layers::build({&molecule,&molecule},whole,o);
+    require(molBuilt.data.bonds.size()==2 && molBuilt.cutBonds==0 && molBuilt.data.bonds[0].image==std::array<int32_t,3>{},"complete molecules preserve c-crossing bonds as finite topology");
+    auto molVector=bondVector(molBuilt.data,molBuilt.data.bonds[0]);
+    require(close(molVector[2],.6) && close(molBuilt.data.atoms[0].z,1.7) && close(molBuilt.data.cell[8],12),"vdW envelopes define molecular layer thickness and leave the requested vacuum");
+    require(molBuilt.data.scalarProperties.at("Charge")==std::vector<double>{.5,-.5,.5,-.5},"molecule image unwrapping preserves scientific row alignment");
+    auto isotope=molecule; isotope.scalarProperties["Mass"]={1,12};
+    const auto reversedMass=layers::molecularImages(isotope,layers::frame(isotope),layers::Flip::No);
+    require(reversedMass[0][2]==-1 && reversedMass[1][2]==0,"isotope Mass controls COM face membership rather than geometric center");
+    auto standard=molecule; standard.scalarProperties.erase("Mass");
+    require(layers::molecularImages(standard,layers::frame(standard),layers::Flip::No)==unwrapped,"registered atomic weights support ordinary molecular files without Mass");
+    auto ring=standard; ring.atoms={{1,1,9,0},{1,1,0,1},{1,1,1,0},{1,1,2,1}};
+    ring.bonds={{1,2,{},1},{2,3,{},1},{0,1,{0,0,1},1},{0,3,{0,0,1},1}};
+    const auto finiteRing=layers::molecularImages(ring,layers::frame(ring),layers::Flip::No);
+    require(finiteRing[0][2]==-1 && finiteRing[1][2]==0 && finiteRing[2][2]==0 && finiteRing[3][2]==0,
+        "finite rings survive reordered periodic bonds and merging into an existing molecule root");
+    auto network=molecule; network.bonds.push_back({1,0,{},1});
+    require(fail([&]{(void)layers::build({&network,&molecule},whole,o);}),"periodic winding networks fail complete-molecule mode without cutting topology");
+    whole[0].cleave=layers::Cleave::Atomic;
+    const auto cutNetwork=layers::build({&network,&molecule},whole,o);
+    require(cutNetwork.cutBonds==1,"atomic cleave remains available for infinite periodic networks");
+    auto unknown=molecule; unknown.species[0]="Xx";
+    whole[0].cleave=layers::Cleave::Molecular;
+    require(fail([&]{(void)layers::build({&unknown,&molecule},whole,o);}),"missing vdW radius is rejected instead of invented");
+    isotope.scalarProperties["Mass"][0]=0;
+    require(fail([&]{(void)layers::build({&isotope,&molecule},whole,o);}),"invalid explicit isotope mass rejected");
+    // Skew matching must include the supplementary angle, not distort a flip
+    // back into the original acute lattice. Check physical bond length too.
+    Dataset skew=molecule; skew.cell={10,0,0,5,8.660254037844386,0,1,2,10};
+    skew.atoms={{2,3,2,0},{3,4,3,1}}; skew.bonds={{0,1,{},2}};
+    std::vector<layers::Detail> flippedDetails{{"A",3,0,0,layers::Cleave::Atomic,layers::Flip::A},{"B",2,0,0,layers::Cleave::Atomic,layers::Flip::B}};
+    const auto flippedMatch=layers::match({&skew,&skew},o,flippedDetails);
+    require(close(flippedMatch.gamma,120) && close(flippedMatch.mismatch[0],0),"A and B flips use supplementary matching gamma without introducing strain");
+    const auto flippedBuild=layers::build({&skew,&skew},flippedDetails,o);
+    const auto vA=bondVector(flippedBuild.data,flippedBuild.data.bonds[0]),vB=bondVector(flippedBuild.data,flippedBuild.data.bonds[1]);
+    require(close(vA[0],1) && close(vA[1],-1) && close(vA[2],-1) && close(vB[0],-1) && close(vB[1],1) && close(vB[2],-1),"both layer flips preserve lengths and reverse normal orientation in skew cells");
+    whole[0].flip=layers::Flip::A; whole[1].flip=layers::Flip::B;
+    auto flippedMolecules=layers::build({&molecule,&molecule},whole,o);
+    require(flippedMolecules.data.bonds.size()==2 && close(bondVector(flippedMolecules.data,flippedMolecules.data.bonds[0])[2],-.6),"molecular flips retain whole bond vectors and topology");
+    auto twoDimensional=molecule; twoDimensional.pbc[2]=false; twoDimensional.atoms[0].z=2; twoDimensional.atoms[1].z=3;
+    twoDimensional.bonds[0].image={}; o.surface=true;
+    const auto flippedSurface=layers::build({&twoDimensional,&twoDimensional},whole,o);
+    require(close(flippedSurface.data.atoms[0].z,1) && close(flippedSurface.data.atoms[1].z,0) && close(flippedSurface.data.cell[8],5),"surface flips reverse normal coordinates and disable molecular cleaving");
 }

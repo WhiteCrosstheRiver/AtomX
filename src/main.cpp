@@ -978,6 +978,7 @@ struct App {
     uint64_t layerSourceIds[3]{};
     char layerNames[3][128]{"Layer 1","Layer 2","Layer 3"};
     double layerGaps[3]{3,3,3},layerOffsets[3][2]{};
+    int layerCleaves[3]{},layerFlips[3]{};
     layers::Options layerOptions;
     std::future<layers::Built> layerBuildJob;
     std::string layerBuilderMessage;
@@ -4759,7 +4760,7 @@ struct App {
             catch (const std::exception &) {}
         }
         layerCount=2; layerOptions={}; layerBuilderMessage.clear(); layerBuildCompleted=false;
-        for (int i=0;i<3;++i) { layerGaps[i]=3; layerOffsets[i][0]=layerOffsets[i][1]=0; }
+        for (int i=0;i<3;++i) { layerGaps[i]=3; layerOffsets[i][0]=layerOffsets[i][1]=0; layerCleaves[i]=layerFlips[i]=0; }
         openLayerBuilder=true;
     }
     std::vector<const Dataset *> selectedLayerSources() const {
@@ -4767,18 +4768,23 @@ struct App {
         for (int i=0;i<layerCount;++i) inputs.push_back(layerSource(layerSourceIds[i]));
         return inputs;
     }
+    std::vector<layers::Detail> selectedLayerDetails() const {
+        std::vector<layers::Detail> details;
+        for (int i=0;i<layerCount;++i) details.push_back({layerNames[i],layerGaps[i],layerOffsets[i][0],layerOffsets[i][1],
+            layers::Cleave(layerCleaves[i]),layers::Flip(layerFlips[i])});
+        return details;
+    }
     void startLayerBuild() {
         if (documentsBusy() || !creationMode || tabs[size_t(activeTab)].id!=layerBuilderTabId) return;
         try {
-            const auto inputs=selectedLayerSources(); (void)layers::match(inputs,layerOptions);
-            std::vector<Dataset> snapshots; std::vector<layers::Detail> details;
+            const auto inputs=selectedLayerSources(); auto details=selectedLayerDetails(); (void)layers::match(inputs,layerOptions,details);
+            std::vector<Dataset> snapshots;
             size_t total=0;
             for (int i=0;i<layerCount;++i) {
                 const auto *input=inputs[size_t(i)];
                 if (input->atoms.size()>size_t(budget) || total>size_t(budget)-input->atoms.size())
                     throw std::invalid_argument("叠层原子数超过当前完整载入上限");
                 total+=input->atoms.size(); snapshots.push_back(*input);
-                details.push_back({layerNames[i],layerGaps[i],layerOffsets[i][0],layerOffsets[i][1]});
             }
             auto options=layerOptions; options.atomLimit=size_t(budget);
             layerBuildJob=std::async(std::launch::async,[inputs=std::move(snapshots),details=std::move(details),options]() {
@@ -4802,7 +4808,7 @@ struct App {
         layers::Match preview;
         size_t count=0;
         try {
-            auto inputs=selectedLayerSources(); preview=layers::match(inputs,layerOptions);
+            auto inputs=selectedLayerSources(); preview=layers::match(inputs,layerOptions,selectedLayerDetails());
             for (const auto *input:inputs) count+=input->atoms.size();
             if (count>size_t(budget)) throw std::invalid_argument("叠层原子数超过当前完整载入上限");
             for (int i=0;i<layerCount;++i) if (!layerNames[i][0] || !std::isfinite(layerGaps[i]) || layerGaps[i]<0 ||
@@ -4841,6 +4847,7 @@ struct App {
             } recordUiTestItem("creation.layers-define-tab");
             if (ImGui::BeginTabItem("层参数")) {
                 ImGui::TextWrapped("真空加在该层上方。偏移使用匹配后 a、b 的分数坐标；表面输出不加末层真空。");
+                ImGui::BeginChild("##layer-detail-scroll",{0,U(290)});
                 for (int i=0;i<layerCount;++i) {
                     ImGui::PushID(i); ImGui::Separator(); ImGui::Text("层 %d · %s",i+1,layerNames[i]);
                     ImGui::BeginDisabled(layerOptions.surface && i==layerCount-1);
@@ -4849,8 +4856,27 @@ struct App {
                     ImGui::InputDouble("面内偏移 a",&layerOffsets[i][0],0,0,"%.4f");
                     recordUiTestItem("creation.layers-offset-a-"+std::to_string(i));
                     ImGui::InputDouble("面内偏移 b",&layerOffsets[i][1],0,0,"%.4f");
-                    recordUiTestItem("creation.layers-offset-b-"+std::to_string(i)); ImGui::PopID();
+                    recordUiTestItem("creation.layers-offset-b-"+std::to_string(i));
+                    const auto *input=layerSource(layerSourceIds[i]);
+                    ImGui::BeginDisabled(!input || !input->pbc[2]);
+                    const char *cleaves[]={"原子切割","完整分子（质心归属）"};
+                    if (ImGui::BeginCombo("切割规则",cleaves[layerCleaves[i]])) {
+                        for (int choice=0;choice<2;++choice) {
+                            if (ImGui::Selectable(cleaves[choice],layerCleaves[i]==choice)) layerCleaves[i]=choice;
+                            recordUiTestItem("creation.layers-cleave-"+std::to_string(i)+"-"+std::to_string(choice));
+                        } ImGui::EndCombo();
+                    }
+                    recordUiTestItem("creation.layers-cleave-"+std::to_string(i)); ImGui::EndDisabled();
+                    const char *flips[]={"不翻转","A / u","B / v"};
+                    if (ImGui::BeginCombo("翻转",flips[layerFlips[i]])) {
+                        for (int choice=0;choice<3;++choice) {
+                            if (ImGui::Selectable(flips[choice],layerFlips[i]==choice)) layerFlips[i]=choice;
+                            recordUiTestItem("creation.layers-flip-"+std::to_string(i)+"-"+std::to_string(choice));
+                        } ImGui::EndCombo();
+                    }
+                    recordUiTestItem("creation.layers-flip-"+std::to_string(i)); ImGui::PopID();
                 }
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             } recordUiTestItem("creation.layers-details-tab");
             if (ImGui::BeginTabItem("晶格匹配")) {
@@ -4870,14 +4896,17 @@ struct App {
                 ImGui::EndTabItem();
             } recordUiTestItem("creation.layers-matching-tab");
             if (ImGui::BeginTabItem("选项")) {
+                ImGui::BeginChild("##layer-options-scroll",{0,U(290)});
                 for (int i=0;i<layerCount;++i) {
                     const auto label="采用层 "+std::to_string(i+1)+" 的空间朝向";
                     if (ImGui::RadioButton(label.c_str(),layerOptions.orientation==i)) layerOptions.orientation=i;
                     recordUiTestItem("creation.layers-orient-"+std::to_string(i));
                 }
                 ImGui::InputDouble("晶格变形提示 (%)",&layerOptions.warningPercent,0,0,"%.2f");
-                ImGui::TextWrapped("使用原子切割：晶体按 c 分数坐标 0–1 取层，切断法向边界键。输出 P1 / p1，不自动重建跨层键或对称性。");
+                ImGui::TextWrapped("原子切割按 c 分数坐标 0–1 取层。完整分子仅按已有显式键识别，无键的原子视为独立原子；以质心归属保留整分子，厚度计入范德华半径。无限周期键网络需用原子切割。表面来源不再切割。");
+                ImGui::TextWrapped("A / B 翻转反转层的上下方向与另一面内轴，γ 变为 180°−γ，再参与匹配。输出 P1 / p1，不自动重建跨层键或对称性。");
                 ImGui::TextWrapped("原子属性值保留；各层矢量属性仍按来源坐标系解释。来源坐标系记录在 LayerBases 数据表。");
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             } recordUiTestItem("creation.layers-options-tab");
             ImGui::EndTabBar();
