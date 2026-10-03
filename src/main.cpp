@@ -432,6 +432,7 @@ struct Loaded {
     std::vector<Frame> frames;
     std::filesystem::path path;
     int frame;
+    std::optional<document::View> documentView;
 };
 struct HistogramPlotView {
     int firstBin = 0;
@@ -768,6 +769,8 @@ struct App {
     int exportFormat = 0, exportFirst = 0, exportLast = 0, exportStep = 1;
     io::ExportOptions exportOptions;
     std::future<std::string> exportJob;
+    std::filesystem::path exportedDocumentPath;
+    uint64_t exportedDocumentTab = 0;
     std::atomic<bool> exportCancel{false};
     std::atomic<float> exportProgress{0};
     std::string filter;
@@ -815,6 +818,7 @@ struct App {
         PipelineGraph graph;
         std::vector<std::vector<ModifierNode>> undo, redo;
         std::filesystem::path path;
+        std::filesystem::path documentPath;
         std::vector<Frame> frames;
         int current = 0;
         std::string readerName = "Generated crystal";
@@ -1462,6 +1466,7 @@ struct App {
         if (activeTab >= 0 && activeTab < int(tabs.size())) {
             tab.id = tabs[size_t(activeTab)].id;
             tab.sourceTabId = tabs[size_t(activeTab)].sourceTabId;
+            tab.documentPath = tabs[size_t(activeTab)].documentPath;
         }
         tab.title = tabTitle();
         tab.home = homeMode;
@@ -2097,9 +2102,14 @@ struct App {
                     known = io::index(p, &progress, &cancel);
                 if (frame < 0 || frame >= int(known.size()))
                     throw std::runtime_error("Frame out of range");
-                auto d = io::read(p, known[frame], b, &progress, &cancel);
+                Dataset d;
+                std::optional<document::View> view;
+                if (io::detect(p)==io::Format::AtomX) {
+                    auto content=document::read(p,b,&cancel);
+                    d=std::move(content.data); view=std::move(content.view); progress=1;
+                } else d=io::read(p,known[frame],b,&progress,&cancel);
                 known[frame].count = d.sourceCount;
-                return Loaded{std::move(d), std::move(known), p, frame};
+                return Loaded{std::move(d), std::move(known), p, frame,std::move(view)};
             });
     }
     void computeColorRangeAllFrames(size_t nodeIndex) {
@@ -2226,6 +2236,12 @@ struct App {
             exporting = false;
             try {
                 status = exportJob.get();
+                if (!exportedDocumentPath.empty())
+                    for (auto &tab : tabs) if (tab.id == exportedDocumentTab) {
+                        tab.documentPath = exportedDocumentPath;
+                        pushRecent(exportedDocumentPath);
+                        break;
+                    }
             } catch (const std::exception &e) {
                 error = e.what();
             }
@@ -2303,6 +2319,7 @@ struct App {
                     for (auto &c : cameras)
                         c.zoom = 1;
                 }
+                if (l.documentView) restoreDocumentView(*l.documentView);
                 update(SIZE_MAX, true);
                 status = "Opened " + utf8(path.filename().wstring()) + ": " +
                          number(source.sourceCount) + " atoms" + dropNotice;
@@ -2335,7 +2352,7 @@ struct App {
         openFileTab(dialog(window, false,
                     L"Atom "
                     L"structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*."
-                    L"data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro\0All files\0*.*\0",
+                    L"data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro;*.atomx\0All files\0*.*\0",
                     L"xyz"));
     }
     // Remember a successfully opened file for File > Recent Files (newest
@@ -2354,17 +2371,70 @@ struct App {
         } catch (const std::exception &) {
         }
     }
-    // Quick-save / Save As for the session data. The quick path derives a
-    // sibling "-session.xyz" destination from the input; without a loaded
-    // file (or with Save As) the standard export dialog opens instead.
+    // Native documents preserve the evaluated result and creation display.
+    document::View captureDocumentView() const {
+        document::View v;
+        v.creation=creationMode; v.cell=cell; v.particles=particles;
+        const auto &camera=cameras[creationMode?3:active];
+        v.camera={camera.yaw,camera.pitch,camera.zoom,camera.panX,camera.panY};
+        v.cameraMode=camera.mode; v.fitSelected=camera.fitSelected; v.fitLo=camera.fitLo; v.fitHi=camera.fitHi;
+        v.radius=radius; v.shape=particleShape;
+        v.title=tabs[size_t(activeTab)].title; v.basedOn=creationBasedOn;
+        if (creationMode) {
+            v.display=creationDisplay; v.selection.assign(creationSelection.begin(),creationSelection.end());
+            v.element=creationElement; v.tool=int(creationTool); v.order=creationSketchOrder;
+            v.continuous=creationSketchContinuous; v.propertyPage=creationPropertyPage;
+            v.propertiesOpen=creationPropertiesOpen;
+        }
+        for (size_t i=0;i<result.data.species.size() && i<gpu.styles.size();++i) {
+            const auto &style=gpu.styles[i]; v.styles.push_back({style.color,style.visual,style.axes});
+        }
+        return v;
+    }
+    void restoreDocumentView(const document::View &v) {
+        creationMode=v.creation; homeMode=false; quad=false; active=3;
+        auto &camera=cameras[3];
+        camera.yaw=v.camera[0]; camera.pitch=v.camera[1]; camera.zoom=v.camera[2];
+        camera.panX=v.camera[3]; camera.panY=v.camera[4]; camera.mode=v.cameraMode;
+        camera.fitSelected=v.fitSelected; camera.fitLo=v.fitLo; camera.fitHi=v.fitHi;
+        cell=v.cell; particles=v.particles; radius=v.radius; particleShape=v.shape;
+        syncAppearance(source.species);
+        if (!v.styles.empty()) for (size_t i=0;i<v.styles.size();++i)
+            gpu.styles[i]={v.styles[i].color,v.styles[i].visual,v.styles[i].axes};
+        creationDisplay=v.display; creationSelection.assign(v.selection.begin(),v.selection.end());
+        creationPick=creationSelection.empty()?-1:creationSelection.back();
+        creationTool=CreationTool(v.tool); creationSketch=creationTool==CreationTool::Sketch;
+        creationSketchOrder=v.order; creationSketchContinuous=v.continuous;
+        snprintf(creationElement,sizeof(creationElement),"%s",v.element.c_str());
+        creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
+        creationPropertiesOpen=v.propertiesOpen; creationPropertyPage=v.propertyPage;
+        creationBasedOn=v.basedOn; creationReturnTab=-1;
+        auto &tab=tabs[size_t(activeTab)]; tab.sourceTabId=0; tab.basedOn=v.basedOn; tab.documentPath=path;
+        if (!v.title.empty()) tab.title=v.title;
+        authorUndo.clear(); authorRedo.clear(); creationSnapshots.clear();
+        creationSnapshotSelected=-1; creationSymmetry.reset(); creationSymmetryChecked=false;
+        if (creationMode) saveCreationSnapshot("打开 · "+utf8(path.filename().wstring()));
+        queueCreationLabelFont();
+    }
+    // Each tab remembers its native save destination without changing the
+    // pipeline input path. First save / Save As uses the export dialog.
     void saveSessionState(bool askLocation) {
-        if (askLocation || path.empty()) {
+        const bool native=creationMode || lowerExtension(path)==".atomx";
+        if (native) {
+            exportFormat=int(io::Format::AtomX); exportRange=false; exportSequence=false;
+        }
+        const auto &documentPath=tabs[size_t(activeTab)].documentPath;
+        if (askLocation || (path.empty() && documentPath.empty())) {
             showDataExport = true;
             return;
         }
         try {
-            exportFormat = 0; // Extended XYZ quick save
-            startDataExport(path.parent_path() / (path.stem().wstring() + L"-session.xyz"));
+            if (!native) exportFormat=0;
+            const auto suffix=native?L"-creation.atomx":L"-session.xyz";
+            const auto destination=native && !documentPath.empty()?documentPath:
+                native && lowerExtension(path)==".atomx"?path:
+                path.parent_path()/(path.stem().wstring()+suffix);
+            startDataExport(destination);
             status = "Saving session state...";
         } catch (const std::exception &e) {
             error = e.what();
@@ -8127,14 +8197,22 @@ struct App {
         ImGui_ImplDX11_CreateDeviceObjects();
     }
     void startDataExport(const std::filesystem::path &destination) {
+        if (documentsBusy() || exporting) throw std::runtime_error("Wait for the current operation before saving");
         auto fmt = io::formats[exportFormat].id;
+        auto options=exportOptions;
+        if (fmt==io::Format::AtomX) {
+            if (exportRange && frames.size()>1) throw std::runtime_error("AtomX documents save the current result; use a trajectory format for frame ranges");
+            if (creationMode && !sameAtomCount()) throw std::runtime_error("Clear modifiers that change the atom count before saving a creation document");
+            options.documentView=captureDocumentView();
+        }
         bool range = exportRange && frames.size() > 1;
         int first = range ? exportFirst : current, last = range ? exportLast : current,
             step = range ? exportStep : 1;
         if (first < 0 || last < first || (range && last >= int(frames.size())) || step < 1)
             throw std::runtime_error("Invalid export frame range");
         bool sequence = range && (exportSequence || !io::info(fmt).trajectory);
-        if (!path.empty() && std::filesystem::exists(destination) &&
+        if (!(fmt==io::Format::AtomX && lowerExtension(path)==".atomx") &&
+            !path.empty() && std::filesystem::exists(destination) &&
             std::filesystem::equivalent(destination, path))
             throw std::runtime_error("Choose a destination different from the input file");
         auto ext = lowerExtension(destination);
@@ -8152,10 +8230,12 @@ struct App {
                 "Filename extension does not match the selected export format");
         exportCancel = false;
         exportProgress = 0;
+        exportedDocumentPath = fmt==io::Format::AtomX?destination:std::filesystem::path{};
+        exportedDocumentTab = tabs[size_t(activeTab)].id;
         exportJob = std::async(std::launch::async, [this, destination, fmt, range, sequence, first,
                                                     last, step, snapshot = result.data,
                                                     sourcePath = path, frameIndex = frames,
-                                                    pipeline = modifierGraph, options = exportOptions,
+                                                    pipeline = modifierGraph, options = std::move(options),
                                                     atomBudget = budget,
                                                     allowPreview = exportPreview]() {
             std::vector<std::pair<std::filesystem::path, std::filesystem::path>> staged;
@@ -8208,12 +8288,13 @@ struct App {
                         std::ofstream file(staged[i].first, std::ios::binary);
                         if (!file)
                             throw std::runtime_error("Cannot create sequence file");
-                        io::writeFrame(file, fmt, data, options, frame);
+                        if (fmt==io::Format::AtomX) document::write(file,data,options.documentView,&exportCancel);
+                        else io::writeFrame(file,fmt,data,options,frame);
                         file.flush();
                         if (!file)
                             throw std::runtime_error("Sequence write failed");
-                    } else
-                        io::writeFrame(single, fmt, data, options, frame);
+                    } else if (fmt==io::Format::AtomX) document::write(single,data,options.documentView,&exportCancel);
+                    else io::writeFrame(single,fmt,data,options,frame);
                     exportProgress = float(i + 1) / total;
                 }
                 if (!sequence) {
@@ -8271,7 +8352,9 @@ struct App {
         } else
             ImGui::Text("Current frame: %d", current);
         ImGui::SeparatorText("Format options");
-        if (fmt != io::Format::GRO)
+        if (fmt==io::Format::AtomX)
+            ImGui::TextWrapped("Saves the current result with cell/PBC, explicit bonds and orders, all particle properties, atom labels/visibility, particle styles and camera. Undo history, workspace snapshots and modifier steps are not stored. Open the .atomx file to continue editing.");
+        else if (fmt != io::Format::GRO)
             ImGui::SliderInt("Numeric precision", &exportOptions.precision, 1, 17);
         else
             ImGui::TextWrapped("GRO uses nm, fixed-width 3 decimal coordinates, and at most 99999 "

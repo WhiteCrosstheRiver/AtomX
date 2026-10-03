@@ -38,6 +38,60 @@ int main() {
                     "all-frame color range scans a complete static structure");
         };
         io::ExportOptions opt;
+        {
+            auto native=d;
+            native.bonds={{0,1,{1,0,0},3}}; native.bondStyle.radius=.12f;
+            native.comment="原子结构\n二进制\r\n";
+            native.scalarProperties["Unknown"]={NAN,3};
+            native.particleColors={{.2f,.3f,.4f},{-1,-1,-1}};
+            native.globalAttributes["Energy"]=-5;
+            native.propertyComponents["Force"]="X,Y,Z";
+            native.tables={{"科学分析",{"r","g(r)"},{{"1.0","2.0"}}}};
+            io::ExportOptions nativeOptions;
+            auto &view=nativeOptions.documentView;
+            view.creation=true; view.camera={.8f,.3f,.5f,.1f,-.1f}; view.title="晶体 · 创作";
+            view.display.visibility(2,{0},0);
+            view.display.setLabels(2,{1},{creation::LabelKind::Custom,"测试原子\n换行"},false);
+            view.selection={1}; view.order=3; view.continuous=false;
+            const auto nativePath=dir/"model.atomx";
+            io::write(nativePath,io::Format::AtomX,native,nativeOptions);
+            auto decoded=document::read(nativePath);
+            require(decoded.data.bonds==native.bonds && decoded.data.cell==native.cell && decoded.data.pbc==native.pbc &&
+                    decoded.data.atoms[1].x==native.atoms[1].x && decoded.data.comment==native.comment,
+                    "native document preserves explicit bond orders, images, cell and binary-safe strings");
+            require(decoded.view.display==view.display && decoded.view.selection==view.selection &&
+                    decoded.view.camera==view.camera && decoded.view.title==view.title && !decoded.view.continuous,
+                    "native document preserves UTF-8 labels, visibility, selection and camera");
+            require(decoded.data.tables[0].name==native.tables[0].name &&
+                    decoded.data.scalarProperties.at("Energy")==native.scalarProperties.at("Energy") &&
+                    std::isnan(decoded.data.scalarProperties.at("Unknown")[0]) && decoded.data.vectorProperties.at("Force")[1].z==6 &&
+                    decoded.data.propertyComponents==native.propertyComponents && decoded.data.globalAttributes==native.globalAttributes &&
+                    decoded.data.particleColors[0].y==.3f,"native document preserves scientific properties, tables and missing values");
+            require(io::detect(nativePath)==io::Format::AtomX && io::read(nativePath,io::index(nativePath)[0]).bonds==native.bonds,
+                    "ordinary structure loading recognizes native documents and preserves topology");
+            bool rejected=false;
+            try { (void)document::read(nativePath,1); } catch (...) { rejected=true; }
+            require(rejected,"native document refuses a sampled import that would lose topology and annotations");
+            std::ifstream bytesIn(nativePath,std::ios::binary);
+            const std::string bytes((std::istreambuf_iterator<char>(bytesIn)),{}); bytesIn.close();
+            auto rejectBytes=[&](std::string corrupted) {
+                const auto badPath=dir/"bad.atomx";
+                { std::ofstream output(badPath,std::ios::binary); output.write(corrupted.data(),std::streamsize(corrupted.size())); }
+                bool invalid=false; try { (void)document::read(badPath); } catch (...) { invalid=true; }
+                require(invalid,"malformed document rejected before publication");
+            };
+            rejectBytes(bytes.substr(0,bytes.size()-1));
+            auto version=bytes; version[8]=2; rejectBytes(version);
+            auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(0xff); rejectBytes(block);
+            rejectBytes(bytes+"trailing data");
+            auto invalid=native; invalid.bonds[0].a=999;
+            rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }
+            require(rejected && document::read(nativePath).data.bonds==native.bonds,
+                    "invalid native export preserves an existing destination");
+            std::atomic<bool> cancel{true}; rejected=false;
+            try { (void)document::read(nativePath,2,&cancel); } catch (...) { rejected=true; }
+            require(rejected,"native binary reads honor cancellation");
+        }
         opt.scalarProperties = {"Energy"};
         opt.vectorProperties = {"Force"};
         auto p = dir / "sample.xyz";

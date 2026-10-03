@@ -1,11 +1,12 @@
 #pragma once
 #include "core.hpp"
+#include "creation_document.hpp"
 #include <cctype>
 #include <locale>
 #include <optional>
 
 namespace atomx::io {
-enum class Format { XYZ, POSCAR, CIF, LammpsData, LammpsDump, PDB, GRO };
+enum class Format { XYZ, POSCAR, CIF, LammpsData, LammpsDump, PDB, GRO, AtomX };
 struct FormatInfo {
     Format id;
     const char *name;
@@ -20,7 +21,8 @@ inline constexpr FormatInfo formats[] = {
     {Format::LammpsData, "LAMMPS data (atomic)", "data", false, true},
     {Format::LammpsDump, "LAMMPS text dump", "dump", true, true},
     {Format::PDB, "PDB coordinates", "pdb", false, false},
-    {Format::GRO, "GROMACS GRO", "gro", false, true}};
+    {Format::GRO, "GROMACS GRO", "gro", false, true},
+    {Format::AtomX, "AtomX document (structure + display)", "atomx", false, true}};
 inline std::string trim(std::string s) {
     auto a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
     return a == std::string::npos ? "" : s.substr(a, b - a + 1);
@@ -107,6 +109,7 @@ inline std::array<double, 9> cellFromParameters(double a, double b, double c, do
 }
 inline Format detect(const std::filesystem::path &path) {
     auto ext = lowerExtension(path);
+    if (ext==".atomx") return Format::AtomX;
     if (ext == ".gz" || ext == ".zst")
         throw std::runtime_error(
             "Compressed input is not supported yet; decompress the file first");
@@ -595,6 +598,12 @@ inline Dataset read(const std::filesystem::path &path, const Frame &frame,
                     std::atomic<bool> *cancel = nullptr) {
     checkpoint(cancel);
     auto fmt = detect(path);
+    if (fmt==Format::AtomX) {
+        if (!budget) throw std::runtime_error("Budget must be positive");
+        auto content=document::read(path,budget,cancel);
+        if (progress) *progress=1;
+        return std::move(content.data);
+    }
     if (fmt == Format::XYZ)
         return readXYZ(path, frame, budget, progress, cancel);
     if (fmt == Format::LammpsDump)
@@ -635,6 +644,7 @@ struct ExportOptions {
     bool fractionalPOSCAR = false;
     bool constraints = true;
     std::vector<std::string> scalarProperties, vectorProperties;
+    document::View documentView;
 };
 inline void validate(const Dataset &d, const ExportOptions &o) {
     if (o.precision < 1 || o.precision > 17)
@@ -673,6 +683,7 @@ inline void validate(const Dataset &d, const ExportOptions &o) {
 }
 inline void writeFrame(std::ostream &f, Format fmt, const Dataset &d, const ExportOptions &o,
                        int frame = 0) {
+    if (fmt==Format::AtomX) { document::write(f,d,o.documentView); return; }
     auto applicableOptions = o;
     if (fmt != Format::XYZ || !o.extendedXYZ) {
         applicableOptions.scalarProperties.clear();

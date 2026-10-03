@@ -28,6 +28,8 @@ int main() {
         guiIO.Fonts->Build();
         {
             App app(window, testRenderer);
+            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            app.poll();
             // Appearance follows element identity across reordered/missing trajectory types.
             app.syncAppearance({"Si", "Ge"});
             testRenderer.styles[0].color = {.1f,.2f,.3f,1};
@@ -572,6 +574,46 @@ int main() {
                               app.creationDisplay.labelAt(0).kind==creation::LabelKind::None,
                               "label dialog applies custom text to the captured selection only");
                 app.saveCreationSnapshot("display state");
+                {
+                    const int originalCreationTab=app.activeTab;
+                    const auto currentCamera=app.cameras[3];
+                    const auto currentStyles=app.gpu.styles;
+                    app.creationSketchOrder=3; app.creationSketchContinuous=false;
+                    app.exportFormat=int(io::Format::AtomX); app.exportRange=false;
+                    const auto nativePath=dir/"creation.atomx";
+                    auto finishNative=[&]() {
+                        app.exportJob.wait(); app.poll();
+                        requireExport(!app.exporting && app.status.find("Exported")!=std::string::npos,
+                                      "native export finishes through application polling");
+                    };
+                    app.startDataExport(nativePath); finishNative();
+                    requireExport(app.tabs[size_t(app.activeTab)].documentPath==nativePath,
+                                  "first native save remembers this creation tab's document path");
+                    app.saveSessionState(false); finishNative();
+                    const auto saved=document::read(nativePath);
+                    requireExport(saved.view.creation && saved.view.display.hiddenCount==2 &&
+                                  saved.view.display.labelAt(1).text=="site A",
+                                  "application native save captures creation annotations");
+                    app.openFileTab(nativePath);
+                    app.job.wait(); app.poll(); settlePipeline();
+                    requireExport(app.creationMode && app.activeTab!=originalCreationTab && app.source.atoms.size()==3 &&
+                                  app.creationDisplay.hiddenCount==2 && app.creationDisplay.labelAt(1).text=="site A" &&
+                                  app.gpu.styles==currentStyles && app.cameras[3].zoom==currentCamera.zoom &&
+                                  app.authorUndo.empty() && app.creationSnapshots.size()==1 &&
+                                  app.creationSketchOrder==3 && !app.creationSketchContinuous,
+                                  "opening native file restores an independent creation tab with camera, styles and display");
+                    app.editCreationBond(0,1,3); settlePipeline();
+                    app.saveSessionState(false); finishNative();
+                    requireExport(document::read(nativePath).data.bonds.size()==1 &&
+                                  document::read(nativePath).data.bonds[0].order==3,
+                                  "Ctrl S native save atomically updates the reopened file with manual topology");
+                    app.closeTab(app.activeTab); settlePipeline();
+                    requireExport(app.activeTab==originalCreationTab && app.source.bonds.empty() &&
+                                  app.creationDisplay.hiddenCount==2 &&
+                                  app.tabs[size_t(app.activeTab)].documentPath==nativePath,
+                                  "editing and saving the reopened document leaves the original creation tab independent");
+                    app.creationSketchOrder=1; app.creationSketchContinuous=true; app.exportFormat=0;
+                }
                 const int snapshot=int(app.creationSnapshots.size())-1;
                 app.selectCreationAtom(1,false); app.deletePickedAtom(); settlePipeline();
                 requireExport(app.source.atoms.size()==2 && app.creationDisplay.hiddenCount==2 &&
