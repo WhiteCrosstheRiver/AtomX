@@ -238,6 +238,38 @@ int main(int argc, char **argv) {
         if (litInXRange(portrait, 0, portrait.w / 2) == 0 ||
             litInXRange(portrait, portrait.w / 2, portrait.w) == 0)
             throw std::runtime_error("Orthographic Fit must include particle extents at portrait aspect ratios");
+        {
+            using namespace DirectX;
+            Camera rolled=orthographicFit;rolled.roll=XM_PIDIV2;
+            renderer.draw(landscape,fitData,rolled,.3f,0,0,0,0,0,1,false,false,false,bg);
+            const auto [lo,hi]=litXBounds(landscape);
+            if(hi<lo || hi-lo>int(landscape.w*.1f))
+                throw std::runtime_error("Screen roll must rotate the elongated GPU image vertically");
+            for(int mode:{2,7}) for(float aspect:{.5f,2.f}) for(float roll:{-.7f,.7f,XM_PIDIV2}) {
+                rolled.mode=mode;rolled.roll=roll;
+                const auto matrix=renderer.matrix(fitData,rolled,aspect,false,.3f);
+                const auto inverse=XMMatrixInverse(nullptr,matrix);
+                for(const auto &atom:fitData.atoms) {
+                    XMFLOAT3 screen,restored;
+                    const auto at=XMVectorSet(atom.x,atom.y,atom.z,1);
+                    const auto projected=XMVector3TransformCoord(at,matrix);
+                    XMStoreFloat3(&screen,projected);
+                    XMStoreFloat3(&restored,XMVector3TransformCoord(projected,inverse));
+                    if(std::abs(screen.x)>.96f || std::abs(screen.y)>.96f || screen.z<0 || screen.z>1 ||
+                       std::abs(restored.x-atom.x)>.02f || std::abs(restored.y-atom.y)>.02f || std::abs(restored.z-atom.z)>.02f)
+                        throw std::runtime_error("Rolled cameras must fit both ends and support screen-to-world editing");
+                }
+            }
+            Camera panRoll=orthographicFit;panRoll.roll=.7f;
+            XMMATRIX beforeView,afterView;
+            renderer.matrix(fitData,panRoll,2,false,.3f,&beforeView);
+            panRoll.panX=.1f;renderer.matrix(fitData,panRoll,2,false,.3f,&afterView);
+            XMFLOAT3 before,after;
+            XMStoreFloat3(&before,XMVector3TransformCoord(XMVectorZero(),beforeView));
+            XMStoreFloat3(&after,XMVector3TransformCoord(XMVectorZero(),afterView));
+            if(after.x<=before.x || std::abs(after.y-before.y)>1e-5f)
+                throw std::runtime_error("Pan must remain horizontal in screen space after rolling");
+        }
         atomx::Dataset coded;
         coded.species = {"X"};
         coded.atoms = {{-.5f, 0, 0, 0}, {.5f, 0, 0, 0}};

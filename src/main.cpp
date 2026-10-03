@@ -934,6 +934,9 @@ struct App {
     ImVec2 creationLastHoverMouse{-1,-1};
     CreationDrag creationDrag = CreationDrag::None;
     ImVec2 creationDragStart{}, creationDragPrevious{};
+    Camera creationDragCamera{};
+    bool creationDragEdgeRoll=false;
+    double creationDragRollAngle=0;
     bool creationDragMoved = false, creationDragShift = false;
     int creationDragButton = ImGuiMouseButton_Left;
     bool creationDragToggle = false;
@@ -2476,6 +2479,7 @@ struct App {
             camera.pitch = .48f;
             camera.zoom = 1.f;
             camera.panX = camera.panY = 0;
+            camera.roll = 0;
         }
         cameras[0].mode = 0;
         cameras[1].mode = 2;
@@ -3034,6 +3038,7 @@ struct App {
         v.creation=creationMode; v.cell=cell; v.particles=particles;
         const auto &camera=cameras[creationMode?3:active];
         v.camera={camera.yaw,camera.pitch,camera.zoom,camera.panX,camera.panY};
+        v.cameraRoll=camera.roll;
         v.cameraMode=camera.mode; v.fitSelected=camera.fitSelected; v.fitLo=camera.fitLo; v.fitHi=camera.fitHi;
         v.radius=radius; v.shape=particleShape;
         v.title=tabs[size_t(activeTab)].title; v.basedOn=creationBasedOn;
@@ -3056,6 +3061,7 @@ struct App {
         auto &camera=cameras[3];
         camera.yaw=v.camera[0]; camera.pitch=v.camera[1]; camera.zoom=v.camera[2];
         camera.panX=v.camera[3]; camera.panY=v.camera[4]; camera.mode=v.cameraMode;
+        camera.roll=std::remainder(v.cameraRoll,DirectX::XM_2PI);
         camera.fitSelected=v.fitSelected; camera.fitLo=v.fitLo; camera.fitHi=v.fitHi;
         cell=v.cell; particles=v.particles; radius=v.radius; particleShape=v.shape;
         syncAppearance(source.species);
@@ -3853,7 +3859,7 @@ struct App {
         icon("undo",0xE7A7,"<","Undo",gray,false,[&]{history(false);});
         icon("redo",0xE7A6,">","Redo",gray,false,[&]{history(true);}); divider();
         icon("select",0xE7C9,"S","Select atoms",cyan,creationTool==CreationTool::Select,[&]{chooseCreationTool(CreationTool::Select);});
-        icon("rotate",0xE7AD,"R","Rotate view",cyan,creationTool==CreationTool::Rotate,[&]{chooseCreationTool(CreationTool::Rotate);});
+        icon("rotate",0xE7AD,"R","Rotate view (X/Y/Z constrain axis; right drag near edge rolls screen)",cyan,creationTool==CreationTool::Rotate,[&]{chooseCreationTool(CreationTool::Rotate);});
         icon("pan",0xE72A,"P","Pan view",green,creationTool==CreationTool::Pan,[&]{chooseCreationTool(CreationTool::Pan);});
         icon("move",0xE8AB,"M","Move selected atoms",orange,creationTool==CreationTool::Move,[&]{chooseCreationTool(CreationTool::Move);});
         icon("draw",0xE70F,"+","Draw atoms",green,creationTool==CreationTool::Sketch,[&]{chooseCreationTool(CreationTool::Sketch);});
@@ -5608,6 +5614,7 @@ struct App {
         const ImVec2 mouse=io.MousePos;
         bool contextRequested=false;
         if (creationDrag!=CreationDrag::None && (ImGui::IsKeyPressed(ImGuiKey_Escape) || io.AppFocusLost)) {
+            if(creationDrag==CreationDrag::Rotate || creationDrag==CreationDrag::Pan) cam=creationDragCamera;
             for (const auto &[index,original]:creationDragAtoms) {
                 auto &a=result.data.atoms[size_t(index)];
                 a.x=original.x; a.y=original.y; a.z=original.z;
@@ -5723,6 +5730,14 @@ struct App {
                 ? ImGuiMouseButton_Right : ImGuiMouseButton_Middle;
             creationDragStart=creationDragPrevious=mouse;
             creationDragMoved=false;
+            creationDragCamera=cam;
+            creationDragAtoms.clear();
+            creationDragRollAngle=0;
+            // Capture the edge region at mouse down. Crossing the boundary
+            // during a drag must not suddenly change the rotation axis.
+            creationDragEdgeRoll=creationDragButton==ImGuiMouseButton_Right &&
+                std::max(std::abs((mouse.x-p.x)/std::max(size.x,1.f)*2-1),
+                         std::abs((mouse.y-p.y)/std::max(size.y,1.f)*2-1))>.8f;
             if (io.KeyShift && (io.KeyAlt || creationDragButton==ImGuiMouseButton_Middle)) {
                 creationDrag=CreationDrag::Move; captureAtoms();
             } else if (io.KeyShift) {
@@ -5733,6 +5748,10 @@ struct App {
             creationDragButton=ImGuiMouseButton_Left;
             creationDragStart=creationDragPrevious=mouse;
             creationDragMoved=false;
+            creationDragCamera=cam;
+            creationDragAtoms.clear();
+            creationDragEdgeRoll=false;
+            creationDragRollAngle=0;
             creationDragShift=io.KeyShift||io.KeyCtrl;
             creationDragToggle=io.KeyCtrl;
             const int hit=creationHit(p,size,cam,mouse);
@@ -5862,9 +5881,19 @@ struct App {
                 } else if (creationSketchAnchor<0) creationDrag=CreationDrag::Rotate;
             }
             if (creationDrag==CreationDrag::Rotate && creationDragMoved) {
-                cam.yaw-=dx*.008f;
-                cam.pitch=std::clamp(cam.pitch+dy*.008f,-1.55f,1.55f);
-                if (cam.mode<6) cam.mode=6;
+                if(ImGui::IsKeyDown(ImGuiKey_Z) || (creationDragEdgeRoll &&
+                    !ImGui::IsKeyDown(ImGuiKey_X) && !ImGui::IsKeyDown(ImGuiKey_Y))) {
+                    const ImVec2 center{p.x+size.x*.5f,p.y+size.y*.5f};
+                    const double angle=creationDragEdgeRoll && !ImGui::IsKeyDown(ImGuiKey_Z)
+                        ? std::remainder(std::atan2(mouse.y-center.y,mouse.x-center.x)-
+                            std::atan2(creationDragPrevious.y-center.y,creationDragPrevious.x-center.x),double(DirectX::XM_2PI))
+                        : dx*.008;
+                    cam.roll=std::remainder(cam.roll-float(angle),DirectX::XM_2PI);
+                } else {
+                    if(!ImGui::IsKeyDown(ImGuiKey_X)) cam.yaw-=dx*.008f;
+                    if(!ImGui::IsKeyDown(ImGuiKey_Y)) cam.pitch=std::clamp(cam.pitch+dy*.008f,-1.55f,1.55f);
+                    if (cam.mode<6) cam.mode=6;
+                }
             } else if (creationDrag==CreationDrag::Pan && creationDragMoved) {
                 cam.panX+=dx/std::max(size.x,1.f)*cam.zoom;
                 cam.panY-=dy/std::max(size.y,1.f)*cam.zoom;
@@ -5910,10 +5939,15 @@ struct App {
                 };
                 const double ax=(mouse.y-creationDragStart.y)*.008;
                 const double ay=(mouse.x-creationDragStart.x)*.008;
+                const ImVec2 center{p.x+size.x*.5f,p.y+size.y*.5f};
+                creationDragRollAngle-=std::remainder(std::atan2(mouse.y-center.y,mouse.x-center.x)-
+                    std::atan2(creationDragPrevious.y-center.y,creationDragPrevious.x-center.x),double(DirectX::XM_2PI));
                 for (const auto &[index,original]:creationDragAtoms) {
                     Vec3 at=original;
-                    if (ImGui::IsKeyDown(ImGuiKey_Z))
-                        at=authoring::rotatedPoint(at,creationDragCenter,worldAxis(0,0,1),ay);
+                    if (ImGui::IsKeyDown(ImGuiKey_Z) || (creationDragEdgeRoll &&
+                        !ImGui::IsKeyDown(ImGuiKey_X) && !ImGui::IsKeyDown(ImGuiKey_Y)))
+                        at=authoring::rotatedPoint(at,creationDragCenter,worldAxis(0,0,1),
+                            ImGui::IsKeyDown(ImGuiKey_Z)?ay:creationDragRollAngle);
                     else {
                         if (!ImGui::IsKeyDown(ImGuiKey_Y))
                             at=authoring::rotatedPoint(at,creationDragCenter,worldAxis(1,0,0),ax);
@@ -6164,13 +6198,29 @@ struct App {
             draw->PopClipRect();
         }
         if (creationMode) {
-            const ImVec2 o{p.x+U(34),p.y+avail.y-U(39)};
-            draw->AddLine(o,{o.x+U(22),o.y-U(5)},IM_COL32(231,58,62,255),U(2));
-            draw->AddLine(o,{o.x+U(17),o.y+U(10)},IM_COL32(37,209,89,255),U(2));
-            draw->AddLine(o,{o.x,o.y-U(26)},IM_COL32(34,172,237,255),U(2));
-            draw->AddText({o.x+U(24),o.y-U(12)},IM_COL32(231,58,62,255),"x");
-            draw->AddText({o.x+U(18),o.y+U(7)},IM_COL32(37,209,89,255),"y");
-            draw->AddText({o.x-U(4),o.y-U(38)},IM_COL32(34,172,237,255),"z");
+            using namespace DirectX;
+            const ImVec2 o{p.x+U(44),p.y+avail.y-U(44)};
+            const auto view=creationProjection(result.data,cam,avail).view;
+            const ImU32 colors[]={IM_COL32(231,58,62,255),IM_COL32(37,209,89,255),IM_COL32(34,172,237,255)};
+            const char *names[]={"x","y","z"};
+            XMFLOAT3 axes[3];
+            for(int axis=0;axis<3;++axis) XMStoreFloat3(&axes[axis],XMVector3TransformNormal(
+                XMVectorSet(axis==0?1.f:0.f,axis==1?1.f:0.f,axis==2?1.f:0.f,0),view));
+            std::array<int,3> order{0,1,2};
+            std::sort(order.begin(),order.end(),[&](int a,int b){return axes[a].z<axes[b].z;});
+            for(int axis:order) {
+                const auto v=axes[axis];const float length=std::hypot(v.x,v.y);
+                const ImVec2 end{o.x+v.x*U(26),o.y-v.y*U(26)};
+                if(length<.1f) {
+                    draw->AddCircle(o,U(3),colors[axis],12,U(1.5f));
+                    draw->AddText({o.x+U(7),o.y+U(7)},colors[axis],names[axis]);
+                } else {
+                    draw->AddLine(o,end,colors[axis],U(2));
+                    const auto text=ImGui::CalcTextSize(names[axis]);
+                    draw->AddText({end.x+v.x/length*U(8)-text.x*.5f,
+                                   end.y-v.y/length*U(8)-text.y*.5f},colors[axis],names[axis]);
+                }
+            }
         }
         const auto &creationColor=creationDisplay.defaultColor;
         const bool creationLegend=creationMode && creationColor.kind==creation::ColorKind::Property && creationColor.legend;
@@ -10472,6 +10522,7 @@ struct App {
         case CommandAction::ViewOrtho:
         case CommandAction::ViewPerspective:
             cameras[active].mode = int(command.action) - int(CommandAction::ViewTop);
+            cameras[active].roll = 0;
             break;
         }
         closePalette();

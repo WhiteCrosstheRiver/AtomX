@@ -50,6 +50,7 @@ int main() {
             io::ExportOptions nativeOptions;
             auto &view=nativeOptions.documentView;
             view.creation=true; view.camera={.8f,.3f,.5f,.1f,-.1f}; view.title="晶体 · 创作";
+            view.cameraRoll=.7f;
             view.display.visibility(2,{0},0);
             view.display.setLabels(2,{1},{creation::LabelKind::Custom,"测试原子\n换行"},false);
             view.display.defaultPreset=3; view.display.presets[1]=4; view.display.ballRadius=.55f; view.display.cpkScale=.8f;
@@ -62,7 +63,7 @@ int main() {
                     decoded.data.atoms[1].x==native.atoms[1].x && decoded.data.comment==native.comment,
                     "native document preserves explicit bond orders, images, cell and binary-safe strings");
             require(decoded.view.display==view.display && decoded.view.selection==view.selection &&
-                    decoded.view.camera==view.camera && decoded.view.title==view.title && !decoded.view.continuous && decoded.view.ringSize==5 && decoded.view.autoHydrogens,
+                    decoded.view.camera==view.camera && decoded.view.cameraRoll==view.cameraRoll && decoded.view.title==view.title && !decoded.view.continuous && decoded.view.ringSize==5 && decoded.view.autoHydrogens,
                     "native document preserves UTF-8 labels, visibility, selection and camera");
             require(decoded.data.tables[0].name==native.tables[0].name &&
                     decoded.data.scalarProperties.at("Energy")==native.scalarProperties.at("Energy") &&
@@ -83,10 +84,19 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=10; rejectBytes(version);
+            auto version=bytes; version[8]=11; rejectBytes(version);
+            auto badRoll=bytes; const float nanRoll=std::numeric_limits<float>::quiet_NaN();
+            std::memcpy(badRoll.data()+badRoll.size()-8,&nanRoll,4);rejectBytes(badRoll);
+            auto invalidRollOptions=nativeOptions;invalidRollOptions.documentView.cameraRoll=nanRoll;
+            bool rollRejected=false;try {io::write(nativePath,io::Format::AtomX,native,invalidRollOptions);}catch(...) {rollRejected=true;}
+            require(rollRejected && document::read(nativePath).view.cameraRoll==view.cameraRoll,"nonfinite roll is rejected without replacing a saved document");
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
             std::ostringstream bondBlock(std::ios::binary); document::Writer bondWriter{bondBlock}; document::writeBondLabels(bondWriter,view.display.bondLabels); const size_t bondLabelBytes=bondBlock.str().size();
-            auto version8=bytes;version8[8]=8;version8.erase(version8.size()-4-bondLabelBytes,bondLabelBytes);
+            auto version9=bytes;version9[8]=9;version9.erase(version9.size()-8,4);
+            const auto v9Path=dir/"v9.atomx";
+            {std::ofstream out(v9Path,std::ios::binary);out.write(version9.data(),std::streamsize(version9.size()));}
+            require(document::read(v9Path).view.cameraRoll==0 && document::read(v9Path).view.camera==view.camera,"v9 documents retain prior cameras with zero screen roll");
+            auto version8=version9;version8[8]=8;version8.erase(version8.size()-4-bondLabelBytes,bondLabelBytes);
             auto invalidAuto=version8; invalidAuto[invalidAuto.size()-5]=2; rejectBytes(invalidAuto);
             auto version7=version8; version7[8]=7; version7.erase(version7.size()-5,1);
             const auto v8Path=dir/"v8.atomx";
@@ -108,8 +118,8 @@ int main() {
             bool invalidLabels=false;try {io::write(blPath,io::Format::AtomX,native,invalidOptions);}catch(...) {invalidLabels=true;}
             require(invalidLabels && document::read(blPath).view.display.bondLabels==bl,"invalid bond settings preserve existing destination");
             std::ifstream blIn(blPath,std::ios::binary);std::string blBytes((std::istreambuf_iterator<char>(blIn)),{});blIn.close();
-            auto badBondFlag=blBytes;badBondFlag[badBondFlag.size()-9]=2;rejectBytes(badBondFlag);
-            auto badBondBudget=blBytes;for(size_t i=blBytes.size()-8;i<blBytes.size()-4;++i)badBondBudget[i]=char(-1);rejectBytes(badBondBudget);
+            auto badBondFlag=blBytes;badBondFlag[badBondFlag.size()-13]=2;rejectBytes(badBondFlag);
+            auto badBondBudget=blBytes;for(size_t i=blBytes.size()-12;i<blBytes.size()-8;++i)badBondBudget[i]=char(-1);rejectBytes(badBondBudget);
             const auto version7Path=dir/"v7.atomx";
             { std::ofstream out(version7Path,std::ios::binary); out.write(version7.data(),std::streamsize(version7.size())); }
             require(!document::read(version7Path).view.autoHydrogens && document::read(version7Path).view.display==view.display,
@@ -177,7 +187,7 @@ int main() {
             require(compositeRead.view.display==composite && creation::labelText(compositeRead.data,0,compositeRead.view.display.labelAt(0)).find("Energy = -2.5")!=std::string::npos,
                 "v6 restores composite property names, order, prefix, precision and sparse selected overrides");
             std::ifstream compositeIn(compositePath,std::ios::binary); std::string compositeBytes((std::istreambuf_iterator<char>(compositeIn)),{});
-            compositeBytes.erase(compositeBytes.size()-4-bondLabelBytes,bondLabelBytes);compositeBytes.erase(compositeBytes.size()-5,1); compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
+            compositeBytes.erase(compositeBytes.size()-8,4);compositeBytes.erase(compositeBytes.size()-4-bondLabelBytes,bondLabelBytes);compositeBytes.erase(compositeBytes.size()-5,1); compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
             auto badField=compositeBytes; badField[badField.size()-4-9]=char(255); rejectBytes(badField);
             auto badPrecision=compositeBytes; badPrecision[badPrecision.size()-4-21]=0; rejectBytes(badPrecision);
             creation::ColorRule color; color.kind=creation::ColorKind::Property; color.property="Energy";color.low=-4;color.high=2;color.gradient=8;color.reverse=true;
@@ -186,7 +196,7 @@ int main() {
             io::write(compositePath,io::Format::AtomX,native,compositeOptions);
             require(document::read(compositePath).view.display==composite,"v7 restores global color range and sparse custom overrides");
             std::ifstream colorIn(compositePath,std::ios::binary); std::string colorData((std::istreambuf_iterator<char>(colorIn)),{});
-            colorData.erase(colorData.size()-4-bondLabelBytes,bondLabelBytes);colorData.erase(colorData.size()-5,1);colorData[8]=7;auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);
+            colorData.erase(colorData.size()-8,4);colorData.erase(colorData.size()-4-bondLabelBytes,bondLabelBytes);colorData.erase(colorData.size()-5,1);colorData[8]=7;auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }
             require(rejected && document::read(nativePath).data.bonds==native.bonds,

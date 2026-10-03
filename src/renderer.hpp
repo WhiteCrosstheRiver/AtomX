@@ -20,7 +20,7 @@ inline void check(HRESULT hr, const char *message) {
                                  std::to_string(uint32_t(hr)) + ")");
 }
 struct Camera {
-    float yaw = .65f, pitch = .48f, zoom = 1.0f, panX = 0, panY = 0;
+    float yaw = .65f, pitch = .48f, zoom = 1.0f, panX = 0, panY = 0, roll = 0;
     int mode = 7;
     bool fitSelected = false;
     atomx::Vec3 fitLo{}, fitHi{};
@@ -761,7 +761,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         }
         aspect = std::isfinite(aspect) ? std::clamp(aspect, 1e-4f, 1e4f) : 1.f;
         float dist = span * 2.8f * cam.zoom;
-        auto baseView = XMMatrixLookAtRH(center + dir * dist, center, up);
+        const auto screenRotation = XMMatrixRotationZ(cam.roll);
+        auto baseView = XMMatrixLookAtRH(center + dir * dist, center, up) * screenRotation;
         if (cam.mode == 7) {
             const float tanHalfY = std::tan(.65f * .5f);
             const float tanHalfX = tanHalfY * aspect;
@@ -785,7 +786,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             // fitted distance so zoom>1 pulls back and zoom<1 moves in —
             // matching the orthographic path's `width * cam.zoom` semantics.
             dist = std::max(fittedDistance, minDepth) * cam.zoom;
-            baseView = XMMatrixLookAtRH(center + dir * dist, center, up);
+            baseView = XMMatrixLookAtRH(center + dir * dist, center, up) * screenRotation;
         }
         auto v = baseView * XMMatrixTranslation(cam.panX * span, cam.panY * span, 0);
         XMMATRIX p;

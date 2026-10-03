@@ -275,14 +275,15 @@ int main() {
                 const auto viewport=app.uiTestItems.at("creation.viewport");
                 const float x=(viewport.min.x+viewport.max.x)*.5f;
                 const float y=(viewport.min.y+viewport.max.y)*.5f;
-                auto rightDrag=[&](bool alt,bool shift,bool releaseWithMove=false) {
+                auto rightDrag=[&](bool alt,bool shift,bool releaseWithMove=false,bool edge=false) {
+                    const float startX=edge?viewport.max.x-15:x;
                     guiIO.AddKeyEvent(ImGuiMod_Alt,alt);
                     guiIO.AddKeyEvent(ImGuiMod_Shift,shift);
-                    guiIO.AddMousePosEvent(x,y); frame();
+                    guiIO.AddMousePosEvent(startX,y); frame();
                     guiIO.AddMouseButtonEvent(1,true); frame();
                     requireExport(ImGui::GetCurrentContext()->OpenPopupStack.empty(),
                                   "right mouse down must not open a menu and interrupt dragging");
-                    guiIO.AddMousePosEvent(x+40,y+25);
+                    guiIO.AddMousePosEvent(startX+(edge?-10:40),y+25);
                     if(!releaseWithMove) frame();
                     guiIO.AddMouseButtonEvent(1,false); frame();
                     requireExport(ImGui::GetCurrentContext()->OpenPopupStack.empty(),
@@ -296,6 +297,32 @@ int main() {
                 const float fastYaw=app.cameras[3].yaw;
                 rightDrag(false,false,true);
                 requireExport(std::abs(app.cameras[3].yaw-fastYaw)>.1f,"quick right drag rotates when move and release share one frame");
+                const Camera beforeRoll=app.cameras[3];
+                const size_t cameraHistory=app.authorUndo.size();
+                rightDrag(false,false,true,true);
+                requireExport(std::abs(app.cameras[3].roll-beforeRoll.roll)>.01f &&
+                    app.cameras[3].yaw==beforeRoll.yaw && app.cameras[3].pitch==beforeRoll.pitch &&
+                    app.authorUndo.size()==cameraHistory && !app.pipelineBusy,
+                    "edge right drag rolls only the camera without evaluating structure or creating undo history");
+                const float edgeRoll=app.cameras[3].roll;
+                guiIO.AddKeyEvent(ImGuiKey_Z,true);frame();rightDrag(false,false);
+                guiIO.AddKeyEvent(ImGuiKey_Z,false);frame();
+                requireExport(std::abs(app.cameras[3].roll-edgeRoll)>.1f && app.cameras[3].yaw==beforeRoll.yaw,
+                    "Z right drag constrains rotation to the screen normal at viewport center");
+                const Camera cancelCamera=app.cameras[3];
+                guiIO.AddMousePosEvent(viewport.max.x-15,y);frame();guiIO.AddMouseButtonEvent(1,true);frame();
+                guiIO.AddMousePosEvent(viewport.max.x-20,y+80);frame();
+                requireExport(app.cameras[3].roll!=cancelCamera.roll,"roll previews while mouse is held");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true);frame();
+                guiIO.AddKeyEvent(ImGuiKey_Escape,false);guiIO.AddMouseButtonEvent(1,false);frame();
+                requireExport(app.cameras[3].roll==cancelCamera.roll && app.authorUndo.size()==cameraHistory,
+                    "Escape restores the camera from the start of an edge roll");
+                app.cameras[3].mode=2;
+                rightDrag(false,false,true,true);
+                requireExport(app.cameras[3].mode==2,"edge roll preserves an orthographic axis view");
+                app.resetView();frame();
+                requireExport(app.cameras[3].roll==0,"Home resets screen roll alongside orbit and pan");
+                app.cameras[3]=beforeRoll;
                 const float pan=app.cameras[3].panX;
                 rightDrag(true,false);
                 requireExport(std::abs(app.cameras[3].panX-pan)>.001f,"Alt right drag pans the camera");
@@ -327,6 +354,13 @@ int main() {
                                std::abs(app.source.atoms[1].z-spinStart.z)>.001),
                               "Shift right drag rotates a group rigidly in one history step");
                 app.history(false); settlePipeline();
+                const Camera beforeEdgeSpin=app.cameras[3];
+                app.creationSelection={0,1};app.creationPick=0;
+                rightDrag(false,true,true,true);settlePipeline();
+                requireExport(app.authorUndo.size()==spinUndo+1 &&
+                    std::abs(authoring::distance(app.source,0,1)-separation)<1e-5 && app.cameras[3].roll==beforeEdgeSpin.roll,
+                    "Shift edge right drag rotates selected atoms rigidly while preserving camera roll");
+                app.history(false);settlePipeline();
                 app.history(false); settlePipeline();
                 app.selectCreationAtom(0,false); frame();
                 click("creation.edit-position");
@@ -1318,6 +1352,8 @@ int main() {
                 app.history(false);frame();requireExport(!app.creationDisplay.hasColors(),"undo selection coloring restores source appearance");
                 {
                     const int originalCreationTab=app.activeTab;
+                    const float oldRoll=app.cameras[3].roll;
+                    app.cameras[3].roll=.7f;
                     const auto currentCamera=app.cameras[3];
                     const auto currentStyles=app.gpu.styles;
                     app.creationSketchOrder=3; app.creationSketchContinuous=false;
@@ -1346,7 +1382,7 @@ int main() {
                     settlePipeline();
                     requireExport(app.creationMode && app.activeTab!=originalCreationTab && app.source.atoms.size()==3 &&
                                   app.creationDisplay.hiddenCount==2 && app.creationDisplay.labelAt(1).text=="site A" &&
-                                  app.gpu.styles==currentStyles && app.cameras[3].zoom==currentCamera.zoom &&
+                                  app.gpu.styles==currentStyles && app.cameras[3].zoom==currentCamera.zoom && app.cameras[3].roll==currentCamera.roll &&
                                   app.authorUndo.empty() && app.creationSnapshots.size()==1 &&
                                   app.creationSketchOrder==3 && !app.creationSketchContinuous,
                                   "opening native file restores an independent creation tab with camera, styles and display");
@@ -1358,9 +1394,11 @@ int main() {
                     app.closeTab(app.activeTab); settlePipeline();
                     requireExport(app.activeTab==originalCreationTab && app.source.bonds.empty() &&
                                   app.creationDisplay.hiddenCount==2 &&
+                                  app.cameras[3].roll==currentCamera.roll &&
                                   app.tabs[size_t(app.activeTab)].documentPath==nativePath,
                                   "editing and saving the reopened document leaves the original creation tab independent");
                     app.creationSketchOrder=1; app.creationSketchContinuous=true; app.exportFormat=0;
+                    app.cameras[3].roll=oldRoll;
                 }
                 const int snapshot=int(app.creationSnapshots.size())-1;
                 app.selectCreationAtom(1,false); app.deletePickedAtom(); settlePipeline();
