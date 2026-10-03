@@ -706,64 +706,6 @@ inline float covalentOf(const Dataset &data, uint32_t type) {
         if (const auto *e = elements::find(data.species[type])) return e->covalent;
     return 0.75f;
 }
-inline int valenceOf(const Dataset &data, uint32_t type) {
-    if (type >= data.species.size()) return 0;
-    const auto *e = elements::find(data.species[type]);
-    if (!e) return 0;
-    switch (e->z) {
-    case 1: return 1;
-    case 6: return 4;
-    case 7: return 3;
-    case 8: return 2;
-    case 9: return 1;
-    case 14: return 4;
-    case 15: return 3;
-    case 16: return 2;
-    default: return 0;
-    }
-}
-
-inline int addHydrogens(Dataset &data) {
-    if (data.atoms.size() > 2500) return -1;
-    const uint32_t hydrogen = speciesIndex(data, "H");
-    const size_t original = data.atoms.size();
-    std::vector<Atom> extra;
-    for (size_t i = 0; i < original; ++i) {
-        int valence = valenceOf(data, data.atoms[i].type);
-        if (valence <= 0 || data.atoms[i].type == hydrogen) continue;
-        float ri = covalentOf(data, data.atoms[i].type);
-        int neighbors = 0;
-        Vec3 away{};
-        for (size_t j = 0; j < original; ++j) {
-            if (i == j) continue;
-            Vec3 d = sub({data.atoms[j].x, data.atoms[j].y, data.atoms[j].z},
-                         {data.atoms[i].x, data.atoms[i].y, data.atoms[i].z});
-            double dist = length(d);
-            float rj = covalentOf(data, data.atoms[j].type);
-            if (dist < 1.25 * (ri + rj) && dist > 0.3) {
-                ++neighbors;
-                away = sub(away, scale(d, 1.0 / std::max(dist, 1e-3)));
-            }
-        }
-        int missing = valence - neighbors;
-        if (missing <= 0) continue;
-        if (length(away) < 1e-3) away = {0, 0, 1};
-        double norm = length(away);
-        away = scale(away, 1.1 / norm);
-        for (int h = 0; h < missing && h < 4; ++h) {
-            Vec3 offset = away;
-            if (h == 1) offset = {away.y, away.z, away.x};
-            if (h == 2) offset = {away.z, away.x, away.y};
-            if (h == 3) offset = scale(away, -1);
-            extra.push_back({data.atoms[i].x + offset.x, data.atoms[i].y + offset.y,
-                             data.atoms[i].z + offset.z, hydrogen});
-        }
-    }
-    data.atoms.insert(data.atoms.end(), extra.begin(), extra.end());
-    finish(data, data.comment.empty() ? "Hydrogens added" : data.comment);
-    return int(extra.size());
-}
-
 inline bool cleanGeometry(Dataset &data) {
     const int passes = 8;
     const size_t n = data.atoms.size();

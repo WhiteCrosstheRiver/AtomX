@@ -3,6 +3,7 @@
 #include "authoring.hpp"
 #include "fragment_library.hpp"
 #include "fragment_fusion.hpp"
+#include "hydrogen_adjust.hpp"
 #include "motion_groups.hpp"
 #include "layer_builder.hpp"
 #include "creation_display.hpp"
@@ -943,6 +944,12 @@ struct App {
     bool creationColorBusy=false;
     std::future<std::pair<double,double>> creationColorRangeJob;
     std::string creationColorMessage;
+    bool showHydrogenAdjust=false,hydrogenBusy=false;
+    uint64_t hydrogenTabId=0;
+    hydrogens::Options hydrogenOptions;
+    std::optional<hydrogens::Plan> hydrogenPlan;
+    std::future<hydrogens::Plan> hydrogenJob;
+    std::string hydrogenMessage;
     uint64_t motionRevision=0,motionCacheRevision=UINT64_MAX;
     std::vector<motion::Group> motionGroupCache;
     std::future<motion::Assignment> motionGroupJob;
@@ -1036,6 +1043,7 @@ struct App {
         colorRangeCancel = true;
         if (colorRangeJob.valid()) colorRangeJob.wait();
         if (creationColorRangeJob.valid()) creationColorRangeJob.wait();
+        if (hydrogenJob.valid()) hydrogenJob.wait();
         exportCancel = true;
         if (exportJob.valid())
             exportJob.wait();
@@ -1648,7 +1656,7 @@ struct App {
         queueCreationLabelFont();
         update();
     }
-    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy || layerBuildBusy || creationColorBusy; }
+    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy || layerBuildBusy || creationColorBusy || hydrogenBusy; }
     void switchTab(int index) {
         if (index < 0 || index >= int(tabs.size()) || index == activeTab) return;
         if (documentsBusy()) {
@@ -1894,6 +1902,8 @@ struct App {
         structureEditIsLatest = true;
     }
     void adoptStructure(Dataset data, const std::string &message) {
+        if(hydrogenBusy) return;
+        hydrogenPlan.reset();
         chooseCreationTool(creationTool);
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         rememberStructure(message);
@@ -1913,6 +1923,8 @@ struct App {
         status = message;
     }
     void editStructure(const std::string &message, const std::function<void(Dataset &)> &edit) {
+        if(hydrogenBusy) return;
+        hydrogenPlan.reset();
         if (!sameAtomCount() && !mods.empty()) {
             status = "Clear modifiers first: the pipeline changed the atom count";
             return;
@@ -2309,13 +2321,99 @@ struct App {
         status = "Reset the camera on every viewport";
     }
     void addHydrogensCommand() {
-        if (source.atoms.size() > 2500) {
-            status = "Add Hydrogens is limited to 2500 atoms";
-            return;
+        if(documentsBusy()) return;
+        if(!creationMode) { openCreationTab(); if(!creationMode) return; }
+        chooseCreationTool(CreationTool::Select);
+        hydrogenTabId=tabs[size_t(activeTab)].id;
+        hydrogenOptions={}; hydrogenOptions.selection=creationSelection;
+        hydrogenOptions.all=creationSelection.empty();
+        hydrogenPlan.reset();hydrogenMessage.clear();showHydrogenAdjust=true;
+    }
+    std::vector<uint8_t> hydrogenVisibility() const {
+        auto hidden=creationDisplay.hidden;
+        if(!particles) {hidden.assign(source.atoms.size(),1);return hidden;}
+        if(std::any_of(gpu.styles.begin(),gpu.styles.end(),[](const auto &style){return style.visual[2]<=.5f;})) {
+            hidden.resize(source.atoms.size());
+            for(size_t i=0;i<source.atoms.size();++i) {
+                const auto type=source.atoms[i].type;
+                if(type<gpu.styles.size() && gpu.styles[type].visual[2]<=.5f)hidden[i]=1;
+            }
         }
-        int added = 0;
-        editStructure("Added hydrogens", [&](Dataset &data) { added = authoring::addHydrogens(data); });
-        if (added >= 0) status = "Added " + std::to_string(added) + " hydrogen atoms";
+        return hidden;
+    }
+    void previewHydrogens() {
+        if(documentsBusy() || !creationMode || !sameAtomCount() || !mods.empty() ||
+           tabs[size_t(activeTab)].id!=hydrogenTabId) return;
+        const auto options=hydrogenOptions; const auto hidden=hydrogenVisibility();
+        hydrogenPlan.reset();hydrogenMessage="正在后台计算显式键与局部几何…";
+        hydrogenBusy=true;
+        try {hydrogenJob=std::async(std::launch::async,[this,options,hidden] {return hydrogens::prepare(source,options,hidden);});}
+        catch(const std::exception &e){hydrogenBusy=false;hydrogenMessage=e.what();}
+    }
+    void applyHydrogens() {
+        if(documentsBusy() || !hydrogenPlan || !hydrogenPlan->changes() || !creationMode ||
+           tabs[size_t(activeTab)].id!=hydrogenTabId || !mods.empty()) return;
+        try {
+            hydrogens::preflight(source,*hydrogenPlan,hydrogenVisibility());
+            auto plan=std::move(*hydrogenPlan);
+            const auto message="调整氢 · +"+number(plan.added.size())+" / −"+number(plan.removed.size())+" / 移动 "+number(plan.moved.size());
+            editStructure(message,[&](Dataset &data) {
+                creationDisplay.eraseAtoms(data.atoms.size(),plan.removed);
+                creationSelection=hydrogens::apply(data,plan);
+                creationPick=creationSelection.empty()?-1:creationSelection.back();
+            });
+            hydrogenMessage=message+" · 已记录一步历史";
+        } catch(const std::exception &e) {hydrogenPlan.reset();hydrogenMessage=e.what();}
+    }
+    void hydrogenDialog() {
+        if(!showHydrogenAdjust)return;
+        if(!creationMode || tabs[size_t(activeTab)].id!=hydrogenTabId) {showHydrogenAdjust=false;hydrogenPlan.reset();return;}
+        const auto *viewport=ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->GetCenter(),ImGuiCond_Appearing,{.5f,.5f});
+        ImGui::SetNextWindowSize({U(550),std::min(U(560),viewport->WorkSize.y-U(50))},ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({U(430),U(300)},{viewport->WorkSize.x-U(30),viewport->WorkSize.y-U(30)});
+        if(ImGui::Begin("调整氢原子##hydrogen-adjust",&showHydrogenAdjust,ImGuiWindowFlags_NoCollapse)) {
+            ImGui::BeginChild("##hydrogen-body",{0,-U(78)});
+            ImGui::TextUnformatted("按显式键级调整数量与局部 SP / SP2 / SP3 几何");
+            ImGui::TextDisabled("重原子坐标不变；形式电荷与文件中的部分电荷分开处理");
+            ImGui::Separator();
+            ImGui::BeginDisabled(documentsBusy());
+            bool changed=ImGui::Checkbox("整个可见体系",&hydrogenOptions.all);recordUiTestItem("creation.hydrogen-all");
+            if(!hydrogenOptions.all) ImGui::Text("打开时的选择：%zu 原子；末端 H 对应其相连重原子",hydrogenOptions.selection.size());
+            changed|=ImGui::Checkbox("只补缺少的氢（保留已有氢的位置与数量）",&hydrogenOptions.onlyAdd);recordUiTestItem("creation.hydrogen-only-add");
+            const char *hybrids[]={"沿用已有设置 / 自动","SP · 直线","SP2 · 三角平面","SP3 · 四面体","重置为自动判断"};
+            ImGui::SetNextItemWidth(U(260));changed|=ImGui::Combo("局部杂化",&hydrogenOptions.hybridization,hybrids,5);
+            recordUiTestItem("creation.hydrogen-hybrid");
+            changed|=ImGui::Checkbox("指定形式电荷",&hydrogenOptions.setCharge);recordUiTestItem("creation.hydrogen-charge-override");
+            if(hydrogenOptions.setCharge) {ImGui::SetNextItemWidth(U(150));changed|=ImGui::InputInt("整数电荷",&hydrogenOptions.charge);recordUiTestItem("creation.hydrogen-charge");}
+            if(changed) {hydrogenPlan.reset();hydrogenMessage.clear();}
+            ImGui::EndDisabled();
+            ImGui::Spacing();
+            ImGui::TextWrapped("先确认键级。支持常见主族低价态；金属、芳香 N、跨周期连接和退化位点跳过。不会自动识别隐式键或优化整个分子，也不会更新对称等价原子。");
+            if(!mods.empty())ImGui::TextWrapped("当前有修改器。请先从其最终结果新建创作副本，再调整氢。");
+            ImGui::Separator();
+            if(hydrogenPlan) {
+                const auto &p=*hydrogenPlan;
+                ImGui::Text("已检查 %zu 个可处理位点",p.sites);
+                ImGui::Text("新增 %zu · 删除多余末端氢 %zu · 移动已有氢 %zu",p.added.size(),p.removed.size(),p.moved.size());
+                ImGui::Text("形式电荷 / 杂化设置更新：%zu 个位点",p.settings.size());
+                ImGui::TextWrapped("跳过：不支持 %zu · 价态不明确 %zu · 坐标/拓扑无效 %zu · 跨周期 %zu · 隐藏 %zu",p.unsupported,p.ambiguous,p.invalid,p.periodic,p.hidden);
+                if(!p.changes())ImGui::TextUnformatted("没有需要应用的更改");
+            }
+            if(!hydrogenMessage.empty())ImGui::TextWrapped("%s",hydrogenMessage.c_str());
+            ImGui::EndChild();ImGui::Separator();
+            ImGui::BeginDisabled(documentsBusy() || !sameAtomCount() || !mods.empty() ||
+                (!hydrogenOptions.all && hydrogenOptions.selection.empty()) ||
+                (hydrogenOptions.setCharge && (hydrogenOptions.charge < -4 || hydrogenOptions.charge > 4)));
+            if(ImGui::Button("计算调整预览",{U(155),U(32)}))previewHydrogens();recordUiTestItem("creation.hydrogen-preview");
+            ImGui::SameLine();ImGui::BeginDisabled(!hydrogenPlan || !hydrogenPlan->changes());
+            if(ImGui::Button("应用",{U(100),U(32)}))applyHydrogens();recordUiTestItem("creation.hydrogen-apply");
+            ImGui::EndDisabled();ImGui::EndDisabled();ImGui::SameLine();
+            if(ImGui::Button("关闭",{U(100),U(32)})){showHydrogenAdjust=false;hydrogenPlan.reset();}
+            recordUiTestItem("creation.hydrogen-close");
+            ImGui::TextDisabled("预览在后台完成；应用后可撤销、暂存并保存为 .atomx");
+        }
+        ImGui::End();
     }
     void cleanGeometryCommand() {
         if (source.atoms.size() > 2500) {
@@ -2343,7 +2441,8 @@ struct App {
                               : "Display style: Ball and stick";
     }
     void history(bool forward) {
-        if(creationColorBusy) return;
+        if(creationColorBusy || hydrogenBusy) return;
+        hydrogenPlan.reset();
         chooseCreationTool(creationTool);
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         if (creationMode || structureEditIsLatest || !authorRedo.empty()) {
@@ -2391,14 +2490,14 @@ struct App {
         update();
     }
     void jumpCreationHistory(size_t position) {
-        if(creationColorBusy) return;
+        if(creationColorBusy || hydrogenBusy) return;
         const size_t end=authorUndo.size()+authorRedo.size();
         if (position>end) return;
         while (authorUndo.size()>position) history(false);
         while (authorUndo.size()<position && !authorRedo.empty()) history(true);
     }
     void load(const std::filesystem::path &p, int frame = 0) {
-        if (busy || creationColorBusy || p.empty())
+        if (busy || creationColorBusy || hydrogenBusy || p.empty())
             return;
         if (inspectorBusy) {
             inspectorCancel = true;
@@ -2499,6 +2598,15 @@ struct App {
             });
     }
     void poll() {
+        if(hydrogenBusy && hydrogenJob.valid() && hydrogenJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            hydrogenBusy=false;
+            try {
+                auto plan=hydrogenJob.get();
+                if(showHydrogenAdjust && creationMode && tabs[size_t(activeTab)].id==hydrogenTabId) {
+                    hydrogenPlan=std::move(plan);hydrogenMessage="预览完成，确认增删数量后应用";
+                }
+            } catch(const std::exception &e) {hydrogenMessage=e.what();}
+        }
         if(creationColorBusy && creationColorRangeJob.valid() && creationColorRangeJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             creationColorBusy=false;
             try { const auto r=creationColorRangeJob.get(); creationColorDraft.low=r.first; creationColorDraft.high=r.second;
@@ -3504,7 +3612,7 @@ struct App {
             if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
             if (ImGui::MenuItem("替换元素")) replacePickedElement();
             if (ImGui::MenuItem("删除 / 空位")) deletePickedAtom();
-            if (ImGui::MenuItem("自动加氢")) addHydrogensCommand();
+            if (ImGui::MenuItem("调整氢原子…")) addHydrogensCommand();
             if (ImGui::MenuItem("几何优化")) cleanGeometryCommand();
         });
         menu("构建", "##create-build", [&] {
@@ -3581,7 +3689,7 @@ struct App {
             requestFragmentLibrary(); chooseCreationTool(CreationTool::Fragment); showFragmentBrowser=true;
         }); divider();
         icon("delete",0xE74D,"X","Delete selected atom",red,false,[&]{deletePickedAtom();});
-        icon("hydrogen",0xE8FA,"H+","Add hydrogens",violet,false,[&]{addHydrogensCommand();});
+        icon("hydrogen",0xE8FA,"H+","调整氢原子 / Adjust Hydrogen",violet,false,[&]{addHydrogensCommand();});
         icon("clean",0xE734,"*","Clean geometry",violet,false,[&]{cleanGeometryCommand();}); divider();
         icon("distance",0xE8A0,"D","测量 / 修改距离",gold,creationTool==CreationTool::Distance,[&]{chooseCreationTool(CreationTool::Distance);});
         icon("angle",0xE8B1,"A","测量 / 修改角度",gold,creationTool==CreationTool::Angle,[&]{chooseCreationTool(CreationTool::Angle);});
@@ -3757,7 +3865,7 @@ struct App {
                 if (enabledItem("Create Vacancy at Picked Atom", "menu.modify.vacancy")) deletePickedAtom();
                 if (enabledItem("Replace Picked Atom", "menu.modify.replace-atom")) replacePickedElement();
                 if (enabledItem("Dope Picked Atom with Element", "menu.modify.dope")) replacePickedElement();
-                if (enabledItem("Add Hydrogens", "menu.modify.add-hydrogens")) addHydrogensCommand();
+                if (enabledItem("Adjust Hydrogens...", "menu.modify.add-hydrogens")) addHydrogensCommand();
                 if (enabledItem("Clean Geometry", "menu.modify.clean")) cleanGeometryCommand();
                 ImGui::EndMenu();
             }
@@ -3923,7 +4031,7 @@ struct App {
             ImGui::InputText("##creation-element-toolbar", creationElement, sizeof(creationElement));
             ImGui::SameLine();
             tool("Replace", "Replace the selected atom with this element", [&] { replacePickedElement(); });
-            tool("Hydrogens", "Add hydrogens", [&] { addHydrogensCommand(); });
+            tool("Hydrogens", "Adjust hydrogens", [&] { addHydrogensCommand(); });
             tool("Clean", "Clean geometry", [&] { cleanGeometryCommand(); });
             tool("Ball + stick", "Ball and stick display", [&] { setDisplayStyle(0); });
             tool("Space fill", "Space filling display", [&] { setDisplayStyle(1); });
@@ -6459,7 +6567,7 @@ struct App {
         action("model.replace-element", "Replace Element",
                "Change the picked atom to the element symbol in the box", [&] { replacePickedElement(); });
         action("model.add-hydrogens", "Add Hydrogens",
-               "Attach hydrogens to under-coordinated C, N, O, and similar atoms", [&] { addHydrogensCommand(); });
+               "Preview hydrogen count and geometry from explicit bond orders", [&] { addHydrogensCommand(); });
         action("model.clean", "Clean Geometry",
                "Nudge close pairs toward the sum of their covalent radii", [&] { cleanGeometryCommand(); });
         action("model.ball-and-stick", "Ball and Stick", "Normal sphere radius", [&] { setDisplayStyle(0); });
@@ -10245,6 +10353,7 @@ struct App {
         statusStrip(w, h);
         creationDialogs();
         fragmentBrowser();
+        hydrogenDialog();
         motionGroupsDialog();
         creationStylesDialog();
         layerBuilderDialog();

@@ -928,6 +928,55 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("hydrogen UI fixture",[](Dataset &data) {
+                    data={};data.species={"O","C"};data.atoms={{0,0,0,0},{6,0,0,1}};
+                    data.scalarProperties["Charge"]={-.5,.25};data.vectorProperties["Force"]={{1,2,3},{4,5,6}};
+                    data.cell={12,0,0,0,12,0,0,0,12};
+                });settlePipeline();app.creationDisplay={};app.selectCreationAtom(0,false);frame();
+                click("creation.tool-hydrogen");frame();
+                requireExport(app.showHydrogenAdjust && !app.hydrogenOptions.all && app.hydrogenOptions.selection==std::vector<int>{0},
+                              "H toolbar opens preview with captured selection scope");
+                const size_t historyStart=app.authorUndo.size();
+                click("creation.hydrogen-preview");if(app.hydrogenJob.valid())app.hydrogenJob.wait();app.poll();frame();
+                requireExport(app.hydrogenPlan && app.hydrogenPlan->added.size()==2 && app.source.atoms.size()==2 && app.authorUndo.size()==historyStart,
+                              "background scoped hydrogen preview has no structural side effects");
+                click("creation.hydrogen-apply");settlePipeline();
+                requireExport(app.source.atoms.size()==4 && app.source.bonds.size()==2 && app.source.atoms[1].x==6 &&
+                              app.authorUndo.size()==historyStart+1 && app.source.scalarProperties.at("Charge")[1]==.25 &&
+                              std::isnan(app.source.scalarProperties.at("Charge")[2]),"apply adds scoped H in one history step without losing science");
+                app.history(false);settlePipeline();requireExport(app.source.atoms.size()==2 && app.source.bonds.empty(),"hydrogen adjustment undo restores graph");
+                app.history(true);settlePipeline();requireExport(app.source.atoms.size()==4 && app.source.bonds.size()==2,"hydrogen adjustment redo restores graph");
+                frame();click("creation.hydrogen-all");frame();click("creation.hydrogen-preview");
+                if(app.hydrogenJob.valid())app.hydrogenJob.wait();app.poll();frame();
+                requireExport(app.hydrogenPlan && app.hydrogenPlan->added.size()==4,"whole visible scope previews untouched carbon");
+                click("creation.hydrogen-apply");settlePipeline();requireExport(app.source.atoms.size()==8 && app.source.bonds.size()==6,"whole scope applies independently");
+                const auto file=dir/"gui-hydrogen.atomx";io::ExportOptions options;options.documentView=app.captureDocumentView();
+                io::write(file,io::Format::AtomX,app.source,options);const auto saved=document::read(file);
+                requireExport(saved.view.creation && saved.data.atoms.size()==8 && saved.data.bonds==app.source.bonds &&
+                              saved.data.scalarProperties.at("Charge")[0]==-.5,"native hydrogen document round trip");
+                click("creation.hydrogen-preview");if(app.hydrogenJob.valid())app.hydrogenJob.wait();app.poll();frame();
+                requireExport(app.hydrogenPlan && !app.hydrogenPlan->changes(),"repeated UI preview no-op");
+                // Type visibility participates in scope and stale-preview checks.
+                const size_t visibilityHistory=app.authorUndo.size();const auto carbonType=app.source.atoms[1].type;
+                app.gpu.styles[carbonType].visual[2]=0;
+                app.applyHydrogens();requireExport(app.authorUndo.size()==visibilityHistory,"no-op preview never adds history");
+                app.previewHydrogens();app.hydrogenJob.wait();app.poll();frame();
+                requireExport(app.hydrogenPlan && app.hydrogenPlan->hidden==1,"hidden element type is excluded from whole visible scope");
+                app.gpu.styles[carbonType].visual[2]=1;
+                click("creation.hydrogen-close");frame();
+                // Even a finished worker stays protected until poll collects it.
+                app.addHydrogensCommand();app.previewHydrogens();
+                requireExport(app.hydrogenBusy && app.documentsBusy(),"worker protects borrowed source");
+                const int tabBefore=app.activeTab;const size_t atomsBefore=app.source.atoms.size(),undoBefore=app.authorUndo.size();
+                app.history(false);app.editStructure("must not edit while hydrogen busy",[](Dataset &data){data.atoms.clear();});app.newHomeTab();app.load(dir/"missing.xyz");
+                requireExport(app.activeTab==tabBefore && app.source.atoms.size()==atomsBefore && app.authorUndo.size()==undoBefore && !app.busy,
+                              "inflight hydrogen preview blocks source edits, undo, tabs and load");
+                app.hydrogenJob.wait();app.poll();frame();click("creation.hydrogen-close");frame();
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}
+                app.authorRedo.clear();frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
                     atom.x+=2; data.atoms.push_back(atom);
