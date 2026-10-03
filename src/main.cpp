@@ -2,6 +2,7 @@
 #include "analysis.hpp"
 #include "authoring.hpp"
 #include "fragment_library.hpp"
+#include "fragment_fusion.hpp"
 #include "motion_groups.hpp"
 #include "layer_builder.hpp"
 #include "creation_display.hpp"
@@ -812,7 +813,7 @@ struct App {
     // One structure per browser-style tab. The live document stays in the
     // fields above; a tab is only a snapshot taken when leaving it.
     enum class CreationTool { Select, Rotate, Pan, Move, Sketch, Ring, Fragment, Distance, Angle, Torsion };
-    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring, Fragment, Geometry };
+    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring, Fragment, Fusion, Geometry };
     std::vector<int> geometryPending;
     std::optional<geometry::Plan> geometryDragPlans[2];
     double geometryTarget=0,geometryDragTarget=0;
@@ -891,6 +892,10 @@ struct App {
     int creationFragmentConnector=1;
     bool creationFragmentPreviewValid=false,showFragmentBrowser=false,openFragmentDefine=false;
     fragments::Placement creationFragmentPreview,creationFragmentStart;
+    std::shared_ptr<const fragments::FusionSeed> creationFusionSeed;
+    std::optional<fragments::Fusion> creationFusionPreview,creationFusionStart;
+    int creationFusionTarget=-2;
+    bool creationFusionPick=false;
     ImVec2 creationFragmentMouse{-1,-1};
     float fragmentPreviewYaw=.5f,fragmentPreviewPitch=.3f,fragmentPreviewZoom=1.f;
     ImVec2 fragmentPreviewPan{};
@@ -1605,7 +1610,7 @@ struct App {
         creationSketchContinuous=tab.sketchContinuous; creationSketchOrder=tab.sketchOrder;
         creationRingSize=tab.ringSize; creationRingPreviewValid=false;
         creationFragmentKey=tab.fragmentKey; creationFragmentConnector=tab.fragmentConnector;
-        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; showFragmentBrowser=false;
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion(); showFragmentBrowser=false;
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationTool = tab.creationTool;
         creationSelection = tab.selection;
@@ -1915,7 +1920,7 @@ struct App {
         geometryPanelMonitor=-1; geometryPending.clear();
         rememberStructure(message);
         creationRingPreviewValid=false;
-        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion();
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
@@ -2081,7 +2086,7 @@ struct App {
     }
     void selectFragment(const fragments::Template &t) {
         creationFragmentKey=t.key; creationFragmentConnector=t.connector;
-        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion();
         fragmentPreviewYaw=.5f; fragmentPreviewPitch=.3f; fragmentPreviewZoom=1.f; fragmentPreviewPan={};
         chooseCreationTool(CreationTool::Fragment);
     }
@@ -2173,7 +2178,7 @@ struct App {
                         draw->PopClipRect();
                         if (hoveredAtom>=0 && ImGui::IsMouseDoubleClicked(0)) {
                             if (fragments::terminalNeighbor(t->data,hoveredAtom)>=0) {
-                                creationFragmentConnector=hoveredAtom; creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+                                creationFragmentConnector=hoveredAtom; creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion();
                             } else fragmentLibraryMessage="连接点必须是只有一条直接键的末端原子";
                         }
                         ImGui::TextDisabled("红圈：连接点 · 双击末端原子更换");
@@ -2222,6 +2227,35 @@ struct App {
             }
             ImGui::EndPopup();
         }
+    }
+    void clearCreationFusion() {
+        creationFusionSeed.reset(); creationFusionPreview.reset(); creationFusionStart.reset();
+        creationFusionTarget=-2; creationFusionPick=false; creationFragmentMouse={-1,-1};
+    }
+    void beginCreationFusion(int connector) {
+        if (documentsBusy() || !creationMode || !sameAtomCount()) return;
+        try {
+            if (!creationAtomVisible(connector)) throw std::invalid_argument("请指定可见的末端原子");
+            auto seed=std::make_shared<fragments::FusionSeed>(fragments::prepareFusion(source,connector));
+            clearCreationFusion(); creationFusionSeed=std::move(seed);
+            creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+            status="已指定移动片段 · 点击另一片段的末端原子 · 拖动转向 · Esc 取消";
+        } catch (const std::exception &e) { status=e.what(); }
+    }
+    void commitCreationFusion(fragments::Fusion fusion) {
+        if (documentsBusy() || !creationMode || !sameAtomCount()) return;
+        try {
+            fragments::preflight(source,fusion,creationDisplay.hidden);
+            const auto removed=fragments::fusionRemoved(fusion); std::vector<int> moved;
+            editStructure("连接已有片段",[&](Dataset &data) {
+                moved=fragments::apply(data,fusion);
+                creationDisplay.eraseAtoms(fusion.seed->atomCount,removed);
+                data.bondStyle.visible=true;
+            });
+            creationSelection=std::move(moved); creationPick=creationSelection.empty()?-1:creationSelection.back();
+            creationMeasure=creationAngle=creationDihedral=-1;
+            clearCreationFusion();
+        } catch (const std::exception &e) { status=e.what(); clearCreationFusion(); }
     }
     void commitCreationFragment(const fragments::Placement &placement) {
         if (documentsBusy() || !creationMode || !sameAtomCount()) return;
@@ -2761,7 +2795,7 @@ struct App {
         creationSketchOrder=v.order; creationSketchContinuous=v.continuous;
         creationRingSize=v.ringSize; creationRingPreviewValid=false;
         creationFragmentKey=v.fragmentKey; creationFragmentConnector=v.fragmentConnector;
-        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; showFragmentBrowser=false;
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion(); showFragmentBrowser=false;
         if (creationTool==CreationTool::Fragment) requestFragmentLibrary();
         creationDrag=CreationDrag::None; creationDragAtoms.clear();
         snprintf(creationElement,sizeof(creationElement),"%s",v.element.c_str());
@@ -4518,7 +4552,7 @@ struct App {
             }
             uploadCreationDisplay(result.data,result.selected,result.colorSelected);
         }
-        creationRingPreviewValid=false; creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; creationDrag=CreationDrag::None; creationDragAtoms.clear();
+        creationRingPreviewValid=false; creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion(); creationDrag=CreationDrag::None; creationDragAtoms.clear();
         creationTool = tool;
         creationSketch = tool == CreationTool::Sketch;
         status = tool == CreationTool::Select ? "选择原子或拖动框选" :
@@ -4526,7 +4560,7 @@ struct App {
                  tool == CreationTool::Rotate ? "拖动旋转" :
                  tool == CreationTool::Pan ? "拖动平移" :
                  tool == CreationTool::Move ? "拖动选中原子" :
-                 tool == CreationTool::Fragment ? "点击放置片段 · 末端原子上接枝 · 拖动调整朝向 · Esc 取消" :
+                 tool == CreationTool::Fragment ? "点击放置片段 · Alt 点击连接已有片段 · 拖动调整朝向 · Esc 取消" :
                  tool == CreationTool::Ring ? "点击放置碳环 · 原子或键上接环 · 拖动调整朝向 · Alt 芳香环" : "点击绘制或连键 · 双击结束 · Esc 取消";
     }
     void selectCreationAtom(int index, bool shift, bool toggle = false) {
@@ -4580,7 +4614,7 @@ struct App {
     void refreshCreationDisplay(bool visibilityChanged=true) {
         geometryPanelMonitor=-1; geometryPending.clear();
         creationRingPreviewValid=false;
-        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion();
         creationDisplay.normalize(source.atoms.size());
         creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
             [&](int index){return !creationAtomVisible(index);}),creationSelection.end());
@@ -5185,6 +5219,16 @@ struct App {
     bool creationPointer(ImVec2 p, ImVec2 size, Camera &cam, bool hovered) {
         auto &io=ImGui::GetIO();
         if(io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape)) { geometryPending.clear(); geometryPanelMonitor=-1; }
+        if (creationTool!=CreationTool::Fragment) clearCreationFusion();
+        if ((io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape)) &&
+            (creationFusionSeed || creationFusionPick)) {
+            const bool previewOnly=creationDrag==CreationDrag::None || creationDrag==CreationDrag::Fusion;
+            clearCreationFusion(); creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+            if (previewOnly) { creationDrag=CreationDrag::None; return false; }
+        }
+        if (!hovered || io.MouseWheel!=0 || (creationDrag!=CreationDrag::None && creationDrag!=CreationDrag::Fusion)) {
+            creationFusionPreview.reset(); creationFusionTarget=-2;
+        }
         creationSketchPreviewValid=false;
         if (creationTool!=CreationTool::Fragment || !hovered || io.AppFocusLost || io.MouseWheel!=0 ||
             (creationDrag!=CreationDrag::None && creationDrag!=CreationDrag::Fragment)) {
@@ -5214,7 +5258,7 @@ struct App {
             creationDrag=CreationDrag::None; creationDragAtoms.clear();
             creationRingPreviewValid=false;
             creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
-            creationLastHoverMouse={-1,-1};
+            creationLastHoverMouse={-1,-1}; clearCreationFusion();
             return false;
         }
         const ImVec2 mouse=io.MousePos;
@@ -5266,7 +5310,21 @@ struct App {
             try { creationRingPreview=ringAt(mouse); creationRingPreviewValid=true; creationRingMouse=mouse; }
             catch (const std::exception &) { creationRingPreviewValid=false; }
         }
-        if (creationTool==CreationTool::Fragment && creationDrag==CreationDrag::None && hovered && !io.AppFocusLost &&
+        if (creationTool==CreationTool::Fragment && (creationFusionSeed || creationFusionPick || io.KeyAlt)) {
+            creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+        }
+        if (creationTool==CreationTool::Fragment && creationFusionSeed && creationDrag==CreationDrag::None &&
+            hovered && creationFusionTarget!=creationHover) {
+            creationFusionTarget=creationHover; creationFusionPreview.reset();
+            if (creationHover>=0) try {
+                const auto projection=creationProjection(result.data,cam,size); DirectX::XMFLOAT3 normal;
+                DirectX::XMStoreFloat3(&normal,DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0,0,-1,0),
+                    DirectX::XMMatrixInverse(nullptr,projection.view)));
+                creationFusionPreview=fragments::alignFusion(source,creationFusionSeed,creationHover,{normal.x,normal.y,normal.z});
+            } catch (const std::exception &e) { status=e.what(); }
+        }
+        if (creationTool==CreationTool::Fragment && !creationFusionSeed && !creationFusionPick && !io.KeyAlt &&
+            creationDrag==CreationDrag::None && hovered && !io.AppFocusLost &&
             (mouse.x!=creationFragmentMouse.x || mouse.y!=creationFragmentMouse.y)) {
             creationFragmentMouse=mouse;
             try {
@@ -5373,7 +5431,12 @@ struct App {
                 }
             }
             else if (creationTool==CreationTool::Fragment) {
-                if (creationFragmentPreviewValid) {
+                if (io.KeyAlt || creationFusionPick) beginCreationFusion(hit);
+                else if (creationFusionSeed) {
+                    if (creationFusionPreview && creationFusionPreview->target==hit) {
+                        creationFusionStart=creationFusionPreview; creationDrag=CreationDrag::Fusion;
+                    } else status="请点击另一独立片段的末端原子 · Esc 取消";
+                } else if (creationFragmentPreviewValid) {
                     creationFragmentStart=creationFragmentPreview; creationDrag=CreationDrag::Fragment;
                 } else status="请点击空白处、孤立原子或末端原子放置片段";
             }
@@ -5423,6 +5486,12 @@ struct App {
                 const double angle=(double(mouse.x-creationDragStart.x)+double(mouse.y-creationDragStart.y))*.012;
                 creationRingPreview=authoring::rotatedRing(creationRingStart,angle);
                 creationRingPreviewValid=hovered;
+            }
+            if (creationDrag==CreationDrag::Fusion && creationFusionStart) {
+                if (dx!=0 || dy!=0 || !creationFusionPreview) {
+                    const double angle=(double(mouse.x-creationDragStart.x)+double(mouse.y-creationDragStart.y))*.012;
+                    creationFusionPreview=fragments::rotated(*creationFusionStart,angle);
+                }
             }
             if (creationDrag==CreationDrag::Fragment) {
                 const double angle=(double(mouse.x-creationDragStart.x)+double(mouse.y-creationDragStart.y))*.012;
@@ -5592,6 +5661,9 @@ struct App {
             } else if (creationDrag==CreationDrag::Ring && hovered && creationRingPreviewValid) {
                 const auto ring=creationRingPreview;
                 commitCreationRing(ring); creationRingPreviewValid=false;
+            } else if (creationDrag==CreationDrag::Fusion) {
+                if (hovered && creationFusionPreview) commitCreationFusion(*creationFusionPreview);
+                else clearCreationFusion();
             } else if (creationDrag==CreationDrag::Fragment && hovered && creationFragmentPreviewValid) {
                 const auto placement=creationFragmentPreview;
                 commitCreationFragment(placement); creationFragmentPreviewValid=false;
@@ -5885,6 +5957,33 @@ struct App {
             auto mvp=projection.combined;
             draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
             geometryOverlay(p,avail,cam,draw);
+            if (creationFusionSeed && !pipelineBusy) {
+                auto screen=[&](Vec3 at,ImVec2 &point) {
+                    DirectX::XMFLOAT4 q; DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                        DirectX::XMVectorSet(at.x,at.y,at.z,1),mvp));
+                    if (q.w<=0 || q.z<=0 || q.z>=q.w) return false;
+                    point={p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f}; return true;
+                };
+                ImVec2 marker;
+                if (screen(fragments::at(source,creationFusionSeed->connector),marker)) {
+                    draw->AddRect({marker.x-U(9),marker.y-U(9)},{marker.x+U(9),marker.y+U(9)},IM_COL32(255,80,80,255),0,0,U(2));
+                    draw->AddText({marker.x+U(14),marker.y-U(12)},IM_COL32(255,110,110,255),"移动片段连接点");
+                }
+                if (creationFusionPreview) {
+                    const auto &fusion=*creationFusionPreview; ImVec2 a,b;
+                    for (const auto &edge:creationFusionSeed->previewEdges)
+                        if (screen(fragments::fusionPoint(fusion,size_t(edge[0])),a) && screen(fragments::fusionPoint(fusion,size_t(edge[1])),b))
+                            draw->AddLine(a,b,IM_COL32(255,218,103,210),U(2));
+                    const size_t step=std::max(size_t(1),(creationFusionSeed->indices.size()+2047)/2048);
+                    for (size_t local=0;local<creationFusionSeed->indices.size();local+=step)
+                        if (creationFusionSeed->indices[local]!=creationFusionSeed->removed && screen(fragments::fusionPoint(fusion,local),a))
+                            draw->AddCircle(a,U(5),IM_COL32(255,218,103,210),12,U(1.5f));
+                    if (screen(fusion.anchorPosition,a) && screen(fusion.pivot,b)) {
+                        draw->AddLine(a,b,IM_COL32(255,218,103,255),U(3));
+                        draw->AddText({b.x+U(12),b.y-U(24)},IM_COL32(255,218,103,255),"松开连接 · 拖动转向");
+                    }
+                }
+            }
             if (creationFragmentPreviewValid && !pipelineBusy) {
                 if (const auto *t=currentFragment()) {
                     const auto &placement=creationFragmentPreview;
@@ -7644,6 +7743,20 @@ struct App {
             ImGui::TextDisabled("空白处放置 · 末端原子接枝");
             ImGui::TextDisabled("按住拖动调整朝向 · Esc 取消");
             ImGui::TextDisabled("末端氢会被替换 · 其他原子保留");
+            ImGui::BeginDisabled(documentsBusy());
+            if (ImGui::Button("连接已有片段...")) {
+                clearCreationFusion(); creationFusionPick=true; creationFragmentPreviewValid=false;
+                status="点击移动片段的末端原子，再点击目标片段末端";
+            }
+            recordUiTestItem("creation.fragment-fuse");
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("Alt 点击也可指定移动片段连接点");
+            if (creationFusionSeed || creationFusionPick) {
+                ImGui::TextWrapped("%s",creationFusionSeed?"已指定移动片段；点击另一片段的末端":"请选择移动片段的末端原子");
+                if (creationFusionSeed) ImGui::TextDisabled("移动 %zu 个原子",creationFusionSeed->indices.size());
+                if (ImGui::Button("取消连接")) clearCreationFusion();
+                recordUiTestItem("creation.fragment-fuse-cancel");
+            }
             ImGui::Separator();
         }
         if (creationTool==CreationTool::Ring) {

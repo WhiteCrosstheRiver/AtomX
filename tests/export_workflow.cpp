@@ -845,6 +845,89 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("fusion fixture",[&](Dataset &data) {
+                    const auto &methyl=app.fragmentLibrary[0]; data=methyl.data;
+                    for (auto &a:data.atoms) { a.x+=2; a.y+=2; a.z+=2; }
+                    fragments::apply(data,methyl,fragments::place(data,methyl,1,{6,2,2},{1,0,0},{0,0,1}));
+                    data.cell={10,0,0,0,10,0,0,0,10}; data.scalarProperties["Charge"]={0,1,2,3,4,5,6,7,8,9};
+                    data.vectorProperties["Force"]=std::vector<Vec3>(10,{1,2,3});
+                }); settlePipeline();
+                app.creationDisplay={}; app.creationDisplay.labels[4]={creation::LabelKind::Custom,"moving survivor"};
+                app.creationDisplay.colors[8]={creation::ColorKind::Custom,{.2f,.4f,.8f}};
+                app.cameras[3].mode=2; app.fitCamera(3,false); app.selectFragment(app.fragmentLibrary[0]); frame();
+                const auto original=app.source; const size_t start=app.authorUndo.size();
+                auto pointOf=[&](int index) {
+                    const auto vp=app.uiTestItems.at("creation.viewport"); const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};
+                    const auto matrix=app.creationProjection(app.result.data,app.cameras[3],size).combined;
+                    const auto at=fragments::at(app.source,index); DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),matrix));
+                    return ImVec2{vp.min.x+(q.x/q.w+1)*size.x*.5f,vp.min.y+(1-q.y/q.w)*size.y*.5f};
+                };
+                auto pointerClick=[&](ImVec2 at) {
+                    guiIO.AddMousePosEvent(at.x,at.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                    guiIO.AddMouseButtonEvent(0,false); frame(); settlePipeline();
+                };
+                const auto first=pointOf(1),target=pointOf(6);
+                guiIO.AddKeyEvent(ImGuiMod_Alt,true); frame(); pointerClick(first);
+                guiIO.AddKeyEvent(ImGuiMod_Alt,false); frame();
+                requireExport(app.creationFusionSeed && app.creationFusionSeed->connector==1 &&
+                              app.source.atoms.size()==10 && app.authorUndo.size()==start,
+                              "Alt click marks existing fragment without placing a template or recording history");
+                guiIO.AddMousePosEvent(target.x,target.y); frame();
+                requireExport(app.creationFusionPreview && app.creationFusionPreview->target==6,"second fragment has aligned ghost");
+                const auto initial=fragments::fusionPoint(*app.creationFusionPreview,2);
+                guiIO.AddMouseButtonEvent(0,true); frame(); guiIO.AddMousePosEvent(target.x+40,target.y+20); frame();
+                requireExport(app.creationDrag==App::CreationDrag::Fusion &&
+                              authoring::length(authoring::sub(initial,fragments::fusionPoint(*app.creationFusionPreview,2)))>.01 &&
+                              app.source.atoms[0].x==original.atoms[0].x && app.source.atoms.size()==10,
+                              "held existing-fragment fusion rotates cached ghost while source is unchanged");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true); frame(); guiIO.AddKeyEvent(ImGuiKey_Escape,false);
+                guiIO.AddMouseButtonEvent(0,false); frame();
+                requireExport(!app.creationFusionSeed && !app.creationFusionPreview && app.authorUndo.size()==start,
+                              "Esc cancels existing-fragment fusion including held rotation");
+                click("creation.fragment-fuse"); frame(); pointerClick(first);
+                requireExport(app.creationFusionSeed && app.creationFusionSeed->connector==1,"button arms same two-click fusion gesture");
+                const auto cached=app.creationFusionSeed; frame(); frame();
+                requireExport(app.creationFusionSeed==cached,"idle fusion reuses component topology");
+                pointerClick(target);
+                requireExport(app.source.atoms.size()==8 && app.source.bonds.size()==7 && app.authorUndo.size()==start+1 &&
+                              app.creationSelection.size()==4 && app.creationDisplay.labels.contains(3) &&
+                              app.creationDisplay.colors.contains(6) && app.source.scalarProperties.at("Charge")[4]==5 &&
+                              app.source.atoms[4].x==original.atoms[5].x && !app.creationFusionSeed,
+                              "fusion commits one history step, compacts display/scientific identities and keeps fixed fragment");
+                app.history(false); settlePipeline();
+                requireExport(app.source.atoms.size()==10 && app.source.bonds.size()==8 && app.creationDisplay.labels.contains(4) &&
+                              app.source.atoms[0].x==original.atoms[0].x,"fusion undo restores geometry, topology and display identity");
+                app.history(true); settlePipeline();
+                const auto saved=dir/"fusion.atomx";
+                app.exportFormat=int(io::Format::AtomX); app.exportRange=false;
+                app.startDataExport(saved); app.exportJob.wait(); app.poll();
+                const auto reopened=document::read(saved);
+                requireExport(reopened.data.atoms.size()==8 && reopened.data.bonds.size()==7 &&
+                              reopened.data.scalarProperties.at("Charge")[4]==5 && reopened.view.display.labels.contains(3),
+                              "fused geometry, scientific properties and display identity survive native save");
+                app.history(false); settlePipeline();
+                app.beginCreationFusion(1); auto tab=app.captureTab(); app.restoreTab(tab); settlePipeline();
+                requireExport(!app.creationFusionSeed && !app.creationFusionPick,"tab restore never carries a pending connection");
+                app.beginCreationFusion(1); app.chooseCreationTool(App::CreationTool::Select);
+                requireExport(!app.creationFusionSeed,"tool switching cancels pending connection");
+                app.selectFragment(app.fragmentLibrary[0]); app.selectCreationAtom(0,false); app.beginCreationFusion(1); frame();
+                const auto carbon=pointOf(0);
+                guiIO.AddKeyEvent(ImGuiMod_Alt,true); guiIO.AddKeyEvent(ImGuiMod_Shift,true);
+                guiIO.AddMousePosEvent(carbon.x,carbon.y); frame(); guiIO.AddMouseButtonEvent(1,true); frame();
+                guiIO.AddMousePosEvent(carbon.x+30,carbon.y+20); frame();
+                requireExport(app.creationDrag==App::CreationDrag::Move && app.result.data.atoms[0].x!=app.source.atoms[0].x,
+                              "pending connection can coexist with a temporary right-button move");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true); frame(); guiIO.AddKeyEvent(ImGuiKey_Escape,false);
+                guiIO.AddMouseButtonEvent(1,false); guiIO.AddKeyEvent(ImGuiMod_Alt,false); guiIO.AddKeyEvent(ImGuiMod_Shift,false); frame();
+                requireExport(!app.creationFusionSeed && app.creationDrag==App::CreationDrag::None &&
+                              app.result.data.atoms[0].x==app.source.atoms[0].x && app.result.data.atoms[0].y==app.source.atoms[0].y,
+                              "Esc cancels pending connection and restores a simultaneous coordinate preview");
+                while (app.authorUndo.size()>baseline) { app.history(false); settlePipeline(); }
+                app.authorRedo.clear(); app.cameras[3].mode=7; frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
                     atom.x+=2; data.atoms.push_back(atom);

@@ -1,4 +1,5 @@
 #include "../src/fragment_library.hpp"
+#include "../src/fragment_fusion.hpp"
 #include <chrono>
 #include <iostream>
 using namespace atomx;
@@ -63,7 +64,61 @@ int main() {
         fragments::preflight(target,directional,rotated); fragments::apply(target,directional,rotated);
         const auto force=target.vectorProperties.at("Force")[0];
         check(std::abs(force.x+std::sin(.6))<1e-5 && std::abs(force.y-std::cos(.6))<1e-5,"fragment vector properties rotate with geometry");
-        std::filesystem::remove_all(directory); std::cout<<"fragment library tests: PASS\n"; return 0;
+        // Joining existing fragments is independent of the template library.
+        Dataset pair=methyl.data;
+        fragments::apply(pair,methyl,fragments::place(pair,methyl,1,{6,2,1},{1,0,0},{0,0,1}));
+        pair.atoms.push_back({20,20,20,authoring::speciesIndex(pair,"O")});
+        pair.scalarProperties["Charge"]=std::vector<double>(11);
+        pair.scalarProperties["AtomX.MotionGroup"]=std::vector<double>(11,2);
+        pair.vectorProperties["Force"]=std::vector<Vec3>(11,{1,2,3});
+        pair.particleColors=std::vector<Vec3>(11,{.2f,.3f,.4f});
+        for (size_t i=0;i<11;++i) pair.scalarProperties["Charge"][i]=double(i);
+        const auto untouched=pair;
+        auto seed=std::make_shared<fragments::FusionSeed>(fragments::prepareFusion(pair,1));
+        auto fusion=fragments::rotated(fragments::alignFusion(pair,seed,6,{0,0,1}),.72);
+        fragments::preflight(pair,fusion); const auto moved=fragments::apply(pair,fusion);
+        check(formula(pair)==std::map<std::string,int>{{"C",2},{"H",6},{"O",1}} && pair.bonds.size()==7 && moved.size()==4,
+              "two existing capped fragments lose only their terminal hydrogens and gain one bond");
+        check(authoring::fragment(pair,0).size()==8 && pair.atoms[8].x==20 &&
+              pair.scalarProperties.at("Charge")==std::vector<double>{0,2,3,4,5,7,8,9,10} &&
+              pair.scalarProperties.at("AtomX.MotionGroup")[0]==2 && pair.particleColors.size()==9,
+              "fusion preserves unrelated atoms, scalar rows, colors and motion groups with identity compaction");
+        check(pair.atoms[4].x==untouched.atoms[5].x && pair.atoms[4].y==untouched.atoms[5].y &&
+              pair.vectorProperties.at("Force")[4].x==1 && pair.vectorProperties.at("Force")[8].z==3,
+              "fixed target and unrelated vectors are unchanged");
+        const auto transformed=fragments::fusionVector(fusion,{1,2,3});
+        check(authoring::length(authoring::sub(pair.vectorProperties.at("Force")[0],transformed))<1e-6 &&
+              std::abs(authoring::length(authoring::sub(fragments::at(pair,0),fragments::at(pair,1)))-1.09)<1e-4,
+              "moving scientific vectors follow rigid rotation and internal bond lengths are retained");
+        pair=untouched; rejected=false;
+        try { fragments::alignFusion(pair,seed,2,{0,0,1}); } catch (...) { rejected=true; }
+        check(rejected,"same connected component cannot be fused with itself");
+        pair.bonds[0].order=2; rejected=false;
+        try { fragments::apply(pair,fusion); } catch (...) { rejected=true; }
+        check(rejected && pair.atoms.size()==11,"changed topology is rejected before mutation");
+        pair=untouched; pair.bonds[1].image={1,0,0}; rejected=false;
+        try { fragments::prepareFusion(pair,1); } catch (...) { rejected=true; }
+        check(rejected,"moving fragments containing any periodic edge are rejected");
+        pair=untouched; std::vector<uint8_t> hidden(11); hidden[6]=1; rejected=false;
+        try { fragments::preflight(pair,fusion,hidden); } catch (...) { rejected=true; }
+        check(rejected,"hidden target connector is rejected");
+        pair.atoms[5].y+=1; rejected=false;
+        try { fragments::apply(pair,fusion); } catch (...) { rejected=true; }
+        check(rejected && pair.atoms.size()==11,"changed fixed neighbor invalidates the pending gesture");
+        Dataset retained; retained.species={"C"}; retained.atoms={{0,0,0,0},{1.5,0,0,0},{8,0,0,0},{9.5,0,0,0}};
+        retained.bonds={{0,1,{},1},{2,3,{},2}};
+        auto retainedSeed=std::make_shared<fragments::FusionSeed>(fragments::prepareFusion(retained,1));
+        fragments::apply(retained,fragments::alignFusion(retained,retainedSeed,2,{0,0,1}));
+        check(retained.atoms.size()==4 && retained.bonds.size()==3 && retained.bonds[1].order==2,
+              "nonhydrogen terminal atoms are both retained with existing bond orders");
+        Dataset large; large.species={"C"};
+        for (int i=0;i<600;++i) { large.atoms.push_back({float(i)*1.5f,0,0,0}); if(i) large.bonds.push_back({uint32_t(i-1),uint32_t(i),{},1}); }
+        large.atoms.push_back({1000,0,0,0}); large.atoms.push_back({1001.5f,0,0,0}); large.bonds.push_back({600,601,{},1});
+        auto largeSeed=std::make_shared<fragments::FusionSeed>(fragments::prepareFusion(large,0));
+        auto largeFusion=fragments::alignFusion(large,largeSeed,600,{0,0,1});
+        check(fragments::rotated(largeFusion,.3).seed==largeSeed && fragments::apply(large,largeFusion).size()==600,
+              "existing-fragment fusion has no library size cap and drag previews share cached topology");
+        std::filesystem::remove_all(directory); std::cout<<"fragment library and fusion tests: PASS\n"; return 0;
     } catch (const std::exception &e) {
         std::filesystem::remove_all(directory); std::cerr<<e.what()<<'\n'; return 1;
     }
