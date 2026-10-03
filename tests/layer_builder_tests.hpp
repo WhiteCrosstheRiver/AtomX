@@ -7,10 +7,12 @@ inline void testLayerBuilder() {
     a.atoms={{10.25f,20.125f,31,0},{11.25f,20.125f,31,0}};
     a.bonds={{0,1,{},2},{1,0,{1,0,0},1},{0,0,{0,0,1},1}};
     a.scalarProperties["Charge"]={1,2}; a.vectorProperties["Force"]={{1,2,3},{4,5,6}};
+    a.scalarProperties["AtomX.FixedCartesian"]={1,0};
     a.globalAttributes["TotalEnergy"]=12; a.tables.push_back({"Reference",{"Name"},{{"source"}}});
     motion::create(a,{0},"site",1); a.bounds(); a.sourceCount=2;
     Dataset b=a; b.origin={}; b.species={"Ni"}; b.cell={4,0,0,0,4,0,0,0,2};
     b.atoms={{1,1,.5f,0},{3,1,.5f,0}}; b.bonds={{0,1,{},3}}; b.scalarProperties.erase("Charge");
+    b.scalarProperties.erase("AtomX.FixedCartesian");
     const auto originalA=a.atoms,originalB=b.atoms;
     layers::Options o; o.matching=1;
     std::vector<layers::Detail> details{{"Copper",3,.75,0},{"Nickel",2,0,0}};
@@ -24,6 +26,9 @@ inline void testLayerBuilder() {
     const auto v=bondVector(out,out.bonds[0]); require(close(v[0],2) && close(v[1],0) && close(v[2],0),"wrapped bond is the transformed physical bond");
     require(out.scalarProperties.at("Charge")[1]==2 && std::isnan(out.scalarProperties.at("Charge")[2]) &&
             out.vectorProperties.at("Force")[0].x==1,"property rows preserve source values and missing values are NaN");
+    require(out.scalarProperties.at("AtomX.FixedCartesian")==std::vector<double>{1,0,0,0},"unconstrained layer has free Cartesian defaults");
+    auto constrained=a;constrained.vectorProperties["MoveMask"]={{1,0,1},{1,1,1}};
+    require(fail([&]{layers::build({&constrained,&b},details,o);}),"layer rebuilding refuses ambiguous fractional constraint transfer across lattice bases");
     require(out.scalarProperties.at("AtomX.Layer")==std::vector<double>{1,1,2,2} && motion::catalog(out).size()==2 &&
             motion::members(out,1)==std::vector<int>{0} && motion::members(out,2)==std::vector<int>{2},"layer labels and remapped independent motion groups");
     require(out.globalAttributes.at("Layer1.TotalEnergy")==12 && !out.globalAttributes.contains("TotalEnergy"),"aggregate source attributes are namespaced");

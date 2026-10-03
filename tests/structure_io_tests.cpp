@@ -354,6 +354,20 @@ int main() {
         require(r.vectorProperties.at("MoveMask")[0].y == 1 &&
                     r.vectorProperties.at("MoveMask")[1].y == 0,
                 "selective dynamics follows grouped particle rows");
+        opt.fractionalPOSCAR=false;io::write(p,io::Format::POSCAR,d,opt);r=io::read(p,io::index(p)[0]);
+        require(r.vectorProperties.at("MoveMask")[0].y==1 && r.vectorProperties.at("MoveMask")[1].y==0,
+            "Cartesian positions keep direct-lattice selective dynamics on a skew cell");
+        d.scalarProperties[constraints::cartesianProperty]={1,0};
+        const auto beforeCartesian=std::filesystem::file_size(p);bool cartRejected=false;
+        try{io::write(p,io::Format::POSCAR,d,opt);}catch(...){cartRejected=true;}
+        require(cartRejected && std::filesystem::file_size(p)==beforeCartesian,"inexpressible Cartesian constraint rejected before output overwrite");
+        const auto constraintDoc=dir/"constraints.atomx";io::write(constraintDoc,io::Format::AtomX,d,opt);
+        auto restoredConstraints=document::read(constraintDoc);
+        require(constraints::cartesian(restoredConstraints.data,0) && constraints::mask(restoredConstraints.data,0).y==0,
+            "native document retains independent Cartesian and fractional constraint metadata");
+        opt.constraints=false;io::write(p,io::Format::POSCAR,d,opt);r=io::read(p,io::index(p)[0]);
+        require(!r.vectorProperties.contains("MoveMask"),"explicit omission exports positions without pretending to preserve constraints");
+        d.scalarProperties.erase(constraints::cartesianProperty);opt={};
         bool failed = false;
         try {
             io::detect(dir / "sample.xyz.gz");

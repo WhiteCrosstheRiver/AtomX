@@ -29,6 +29,7 @@ inline void validate(const Template &t) {
         terminalNeighbor(t.data,t.connector)<0)
         throw std::invalid_argument("片段需要 2–512 个原子和一个末端连接点");
     document::validate(t.data,{});
+    if(constraints::anyFractional(t.data))throw std::invalid_argument("片段库不保留来源晶格方向，请先解除晶格方向约束");
     for (const auto &[name,rows]:t.data.scalarProperties) { (void)name;
         if (rows.size()!=t.data.atoms.size()) throw std::invalid_argument("片段标量属性长度不匹配");
     }
@@ -206,9 +207,9 @@ inline std::vector<int> apply(Dataset &source,const Template &t,const Placement 
     if (p.removed>=0) { eraseAtoms(source,{p.removed}); if (anchor>p.removed) --anchor; }
     const size_t old=source.atoms.size();
     for (const auto &[name,rows]:t.data.scalarProperties) if (name!="AtomX.MotionGroup" && rows.size()==t.data.atoms.size() && !source.scalarProperties.contains(name))
-        source.scalarProperties[name]=std::vector<double>(old,NAN);
+        source.scalarProperties[name]=std::vector<double>(old,constraintScalarDefault(name));
     for (const auto &[name,rows]:t.data.vectorProperties) if (rows.size()==t.data.atoms.size() && !source.vectorProperties.contains(name))
-        source.vectorProperties[name]=std::vector<Vec3>(old,{NAN,NAN,NAN});
+        source.vectorProperties[name]=std::vector<Vec3>(old,constraintVectorDefault(name));
     for (const auto &[name,value]:t.data.propertyComponents) source.propertyComponents.try_emplace(name,value);
     if (source.particleColors.empty() && t.data.particleColors.size()==t.data.atoms.size())
         source.particleColors.resize(old,{-1,-1,-1});
@@ -230,15 +231,15 @@ inline std::vector<int> apply(Dataset &source,const Template &t,const Placement 
     for (auto &[name,rows]:source.scalarProperties) if (rows.size()==old) {
         auto found=t.data.scalarProperties.find(name);
         for (size_t i=0;i<remap.size();++i) if (remap[i]>=0)
-            rows.push_back(name=="AtomX.MotionGroup"?0:found!=t.data.scalarProperties.end()?found->second[i]:NAN);
+            rows.push_back(name=="AtomX.MotionGroup"?0:found!=t.data.scalarProperties.end()?found->second[i]:constraintScalarDefault(name));
     }
     for (auto &[name,rows]:source.vectorProperties) if (rows.size()==old) {
         auto found=t.data.vectorProperties.find(name);
         for (size_t i=0;i<remap.size();++i) if (remap[i]>=0) {
-            Vec3 value{NAN,NAN,NAN};
+            Vec3 value=constraintVectorDefault(name);
             if (found!=t.data.vectorProperties.end()) {
                 const auto v=found->second[i];
-                value=add(scale(p.vectorAxes[0],v.x),add(scale(p.vectorAxes[1],v.y),scale(p.vectorAxes[2],v.z)));
+                value=spatialVectorProperty(name)?add(scale(p.vectorAxes[0],v.x),add(scale(p.vectorAxes[1],v.y),scale(p.vectorAxes[2],v.z))):v;
             }
             rows.push_back(value);
         }

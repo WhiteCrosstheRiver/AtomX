@@ -107,7 +107,7 @@ inline void apply(Dataset &d,const Plan &p,double target) {
     for(const auto &[index,at]:edits) {
         auto &a=d.atoms.at(size_t(index)); a.x=at.x; a.y=at.y; a.z=at.z;
         if(p.monitor.count>2) for(auto &[name,values]:d.vectorProperties) {
-            (void)name;
+            if(!spatialVectorProperty(name))continue;
             if(values.size()!=d.atoms.size()) continue;
             auto &v=values[size_t(index)];
             if(std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z)) v=authoring::rotatedPoint(v,{},p.axis,angle);

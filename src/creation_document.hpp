@@ -1,5 +1,6 @@
 #pragma once
 #include "creation_display.hpp"
+#include "atom_constraints.hpp"
 #include <bit>
 
 // AtomX document v12 (reads v1..v11): little-endian IEEE floats; explicit field order and
@@ -98,6 +99,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
     validRows(d.particleColors.size());
     for (const auto &[name,values]:d.scalarProperties) { (void)name; validRows(values.size()); }
     for (const auto &[name,values]:d.vectorProperties) { (void)name; validRows(values.size()); }
+    constraints::validate(d);
     validRows(v.display.hidden.size());
     valid(v.display.defaultPreset<=4 && std::isfinite(v.display.ballRadius) && v.display.ballRadius>=.02f && v.display.ballRadius<=5 &&
         std::isfinite(v.display.stickRadius) && v.display.stickRadius>=.01f && v.display.stickRadius<=v.display.ballRadius &&

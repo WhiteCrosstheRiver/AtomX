@@ -30,6 +30,14 @@ namespace atomx {
 struct Vec3 {
     float x = 0, y = 0, z = 0;
 };
+// Constraint metadata has free defaults, rather than missing measured values.
+inline double constraintScalarDefault(std::string_view name,double fallback=NAN) {
+    return name=="AtomX.FixedCartesian"?0:fallback;
+}
+inline Vec3 constraintVectorDefault(std::string_view name) {
+    return name=="MoveMask"?Vec3{1,1,1}:Vec3{NAN,NAN,NAN};
+}
+inline bool spatialVectorProperty(std::string_view name) {return name!="MoveMask";}
 struct Atom {
     float x, y, z;
     uint32_t type;
@@ -2563,6 +2571,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 }
                 if (m.transformVectorProperties) {
                     for (auto &[name, values] : r.data.vectorProperties) {
+                        if(!spatialVectorProperty(name))continue;
                         if (values.size() != r.data.atoms.size())
                             throw std::runtime_error(
                                 "Vector property length does not match particle count: " + name);

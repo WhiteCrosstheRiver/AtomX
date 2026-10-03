@@ -739,6 +739,13 @@ inline void writeFrame(std::ostream &f, Format fmt, const Dataset &d, const Expo
             f << std::count_if(d.atoms.begin(), d.atoms.end(), [&](const Atom &a) {
                 return a.type == t;
             }) << ' ';
+        // Cartesian fixed-position metadata cannot be expressed faithfully by
+        // fractional POSCAR flags when the lattice changes during a run.
+        if(o.constraints) {
+            atomx::constraints::validate(d);
+            if(atomx::constraints::anyCartesian(d))
+                throw std::runtime_error("POSCAR cannot preserve Cartesian fixed positions; save .atomx or explicitly disable selective-dynamics preservation");
+        }
         bool constraints = o.constraints && d.vectorProperties.count("MoveMask");
         if (constraints && d.vectorProperties.at("MoveMask").size() != d.atoms.size())
             throw std::runtime_error("Selective dynamics property length mismatch");

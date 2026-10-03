@@ -190,11 +190,13 @@ inline Built build(const std::vector<const Dataset *> &inputs,const std::vector<
         allColors=allColors && d->particleColors.size()==d->atoms.size();
         for (const auto &[name,values]:d->scalarProperties) {
             if (values.size()!=d->atoms.size()) throw std::invalid_argument("层来源的原子属性长度不匹配");
-            if (name!="AtomX.Layer" && name!=motion::property) out.scalarProperties.try_emplace(name,count,nan);
+            if (name!="AtomX.Layer" && name!=motion::property) out.scalarProperties.try_emplace(name,count,constraintScalarDefault(name,nan));
         }
         for (const auto &[name,values]:d->vectorProperties) {
             if (values.size()!=d->atoms.size()) throw std::invalid_argument("层来源的矢量属性长度不匹配");
-            out.vectorProperties.try_emplace(name,count,Vec3{fnan,fnan,fnan});
+            if(name=="MoveMask" && std::any_of(values.begin(),values.end(),[](Vec3 v){return v.x!=1 || v.y!=1 || v.z!=1;}))
+                throw std::invalid_argument("层构建会重设晶格基矢，请先解除来源的晶格方向约束");
+            out.vectorProperties.try_emplace(name,count,name=="MoveMask"?Vec3{1,1,1}:Vec3{fnan,fnan,fnan});
         }
     }
     // Values retain their source semantics. The per-layer source/target basis

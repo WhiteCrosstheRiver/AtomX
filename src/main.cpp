@@ -6,6 +6,7 @@
 #include "hydrogen_adjust.hpp"
 #include "chemical_settings.hpp"
 #include "atom_properties.hpp"
+#include "atom_constraints.hpp"
 #include "bond_insertion.hpp"
 #include "creation_bonds.hpp"
 #include "motion_groups.hpp"
@@ -973,6 +974,12 @@ struct App {
     std::vector<std::string> atomPropertyNames;
     std::string atomPropertyName,atomPropertySummary,atomPropertyMessage;
     double atomPropertyValue=0;
+    bool openAtomConstraints=false;
+    uint64_t constraintTabId=0,constraintGeneration=0;
+    std::vector<int> constraintSelection;
+    constraints::Draft constraintDraft;
+    constraints::Summary constraintSummary;
+    std::string constraintMessage;
     std::optional<hydrogens::Plan> hydrogenPlan;
     std::future<hydrogens::Plan> hydrogenJob;
     std::string hydrogenMessage;
@@ -2135,6 +2142,76 @@ struct App {
         recordUiTestItem("creation.property-apply");ImGui::EndDisabled();ImGui::SameLine();
         if(ImGui::Button("取消",{U(110),U(30)}) || ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
         recordUiTestItem("creation.property-cancel");ImGui::EndPopup();
+    }
+    void requestAtomConstraints() {
+        if(!creationMode || documentsBusy() || !sameAtomCount() || creationSelection.empty())return;
+        try {
+            constraintSelection=constraints::selected(source,creationSelection);
+            constraintSummary=constraints::summarize(source,constraintSelection);
+            constraintTabId=tabs[size_t(activeTab)].id;constraintGeneration=pipelineGeneration;
+            constraintDraft={};constraintMessage.clear();openAtomConstraints=true;
+        }catch(const std::exception &e){status=e.what();}
+    }
+    bool validAtomConstraints() const {
+        return creationMode && activeTab>=0 && activeTab<int(tabs.size()) && tabs[size_t(activeTab)].id==constraintTabId &&
+            pipelineGeneration==constraintGeneration && !documentsBusy();
+    }
+    bool applyAtomConstraints() {
+        if(!validAtomConstraints()){constraintMessage="体系已改变，请关闭后重新选择原子";return false;}
+        try {
+            const auto edit=constraints::prepare(source,constraintSelection,constraintDraft);
+            if(!edit.changed){status="约束没有变化";return true;}
+            const auto bonds=creationBondSelection;
+            editStructure("修改原子模拟约束 · "+std::to_string(edit.rows.size())+" 个原子",
+                [&](Dataset &d){constraints::apply(d,edit);});
+            creationSelection=edit.rows;creationPick=creationSelection.back();creationBondSelection=bonds;return true;
+        }catch(const std::exception &e){constraintMessage=e.what();return false;}
+    }
+    void atomConstraintsDialog() {
+        if(openAtomConstraints){ImGui::OpenPopup("原子模拟约束##atom-constraints");openAtomConstraints=false;}
+        const auto *vp=ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->GetWorkCenter(),ImGuiCond_Appearing,{.5f,.5f});
+        ImGui::SetNextWindowSizeConstraints({U(480),0},{std::max(U(480),vp->WorkSize.x-U(24)),vp->WorkSize.y-U(24)});
+        if(!ImGui::BeginPopupModal("原子模拟约束##atom-constraints",nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+U(480));
+        ImGui::Text("打开时选中 %zu 个原子",constraintSelection.size());
+        auto state=[](int s){return s<0?"混合":s?"固定":"自由";};
+        ImGui::Text("当前整原子固定：%s",state(constraintSummary.cartesian));
+        ImGui::Text("当前晶格方向：a %s · b %s · c %s",state(constraintSummary.fractional[0]),
+            state(constraintSummary.fractional[1]),state(constraintSummary.fractional[2]));
+        const bool valid=validAtomConstraints();ImGui::BeginDisabled(!valid);
+        auto choice=[&](const char *label,int &value,const char *key) {
+            ImGui::SetNextItemWidth(U(155));
+            const char *labels[]{"保持当前值","解除固定","固定"};
+            const bool open=ImGui::BeginCombo(label,labels[std::clamp(value,0,2)]);recordUiTestItem(key);
+            if(open) {
+                for(int i=0;i<3;++i) {if(ImGui::Selectable(labels[i],value==i))value=i;recordUiTestItem(std::string(key)+"-"+std::to_string(i));}
+                ImGui::EndCombo();
+            }
+        };
+        ImGui::SeparatorText("整原子固定");
+        choice("笛卡尔 XYZ",constraintDraft.cartesian,"creation.constraint-cartesian");
+        ImGui::TextWrapped("笛卡尔 XYZ 同时固定；部分轴及其旋转后的方向约束尚未支持。");
+        ImGui::SeparatorText("晶格方向约束");
+        const bool periodic=constraints::periodic(source);ImGui::BeginDisabled(!periodic);
+        choice("a 分数分量",constraintDraft.fractional[0],"creation.constraint-a");
+        choice("b 分数分量",constraintDraft.fractional[1],"creation.constraint-b");
+        choice("c 分数分量",constraintDraft.fractional[2],"creation.constraint-c");
+        if(ImGui::Button("固定全部晶格方向"))constraintDraft.fractional.fill(constraints::Fixed);
+        recordUiTestItem("creation.constraint-fractional-all");ImGui::EndDisabled();
+        if(!periodic)ImGui::TextWrapped("晶格方向固定需要有效的三维周期晶胞。");
+        if(ImGui::Button("解除全部晶格方向"))constraintDraft.fractional.fill(constraints::Free);
+        recordUiTestItem("creation.constraint-fractional-clear");
+        ImGui::TextWrapped("这些是模拟约束属性，手工移动与旋转仍可使用；AtomX 不执行模拟求解。保持当前值可保留多选中的不同约束。");
+        ImGui::TextWrapped(".atomx 保存两类约束。POSCAR 保存晶格方向 T/F；整原子笛卡尔固定需保存在 .atomx 中，导出 POSCAR 时须显式取消约束保留。");
+        ImGui::EndDisabled();
+        if(!valid)ImGui::TextWrapped("体系已改变，请关闭后重新选择原子。");
+        if(!constraintMessage.empty())ImGui::TextWrapped("%s",constraintMessage.c_str());
+        ImGui::BeginDisabled(!valid);
+        if(ImGui::Button("应用",{U(110),U(30)}) && applyAtomConstraints())ImGui::CloseCurrentPopup();
+        recordUiTestItem("creation.constraint-apply");ImGui::EndDisabled();ImGui::SameLine();
+        if(ImGui::Button("取消",{U(110),U(30)}) || ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
+        recordUiTestItem("creation.constraint-cancel");ImGui::PopTextWrapPos();ImGui::EndPopup();
     }
     void requestCreationChemistry() {
         if(!creationMode || documentsBusy() || !sameAtomCount() || creationSelection.empty())return;
@@ -3880,6 +3957,7 @@ struct App {
         });
         menu("修改", "##create-modify", [&] {
             if(ImGui::MenuItem("原子数值属性...",nullptr,false,!creationSelection.empty()))requestAtomProperties();
+            if(ImGui::MenuItem("原子模拟约束...",nullptr,false,!creationSelection.empty()))requestAtomConstraints();
             if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
             if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
             if (ImGui::MenuItem("替换元素")) replacePickedElement();
@@ -6850,6 +6928,7 @@ struct App {
                 recordUiTestItem("creation.context-fragments");
                 if (ImGui::MenuItem("编辑坐标...",nullptr,false,creationPick>=0)) requestCreationPosition();
                 if(ImGui::MenuItem("原子数值属性...",nullptr,false,!creationSelection.empty()))requestAtomProperties();
+                if(ImGui::MenuItem("原子模拟约束...",nullptr,false,!creationSelection.empty()))requestAtomConstraints();
                 if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
                 if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty()))
                     requestCreationMovement();
@@ -8688,6 +8767,8 @@ struct App {
         if (!creationSelection.empty()) {
             if(ImGui::Button("原子数值属性...",{-1,U(30)}))requestAtomProperties();
             recordUiTestItem("creation.edit-properties");
+            if(ImGui::Button("原子模拟约束...",{-1,U(30)}))requestAtomConstraints();
+            recordUiTestItem("creation.edit-constraints");
             if(ImGui::Button("原子化学设置...",{-1,U(30)}))requestCreationChemistry();
             recordUiTestItem("creation.edit-chemistry");
             if (ImGui::Button("精准移动 / 旋转...",{-1,U(32)})) requestCreationMovement();
@@ -10360,6 +10441,7 @@ struct App {
         // the atlas's active destination. The heading font is added later.
         ImFontGlyphRangesBuilder chineseBuilder;
         chineseBuilder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+        chineseBuilder.AddText("原子模拟约束整原子固定当前晶格方向保持各原子当前值解除固定笛卡尔同时部分轴及其旋转后的方向约束尚未支持分数分量固定全部解除全部晶格方向需要有效的三维周期晶胞这些是属性手工移动与旋转仍可使用不执行模拟求解保持当前值可保留多选中的不同约束保存两类保存晶格方向整原子笛卡尔固定需保存在中导出时须显式取消约束保留没有变化标志必须为零或一属性类型不正确层构建会重设晶格基矢请先解除来源的晶格方向约束片段库不保留来源晶格方向");
         chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位转换原胞对称操作识别失败三维周期晶面重排沿法向添加关闭边界编号须标准设置参数相容基元无效");
         chineseBuilder.AddText("精准移动旋转选中原子的几何中心不移动晶胞屏幕轴体系轴距离视图比例步长角度以打开窗口时视图的较短边为选中中心所在深度上下左右向里向外右手方向反向使用负角度坐标未改变已记录一步历史原标签已改变请关闭并重新打开位移与角度必须为有限数值旋转轴不能为零选中原子已改变请重新选择原子坐标无效位移超出坐标范围连接片段分数坐标切换添加约束←→↑↓−°Å");
         chineseBuilder.AddText("隐藏选中仅显示选中显示全部已隐藏原子标签对象默认显示元素和编号整个体系内容无标签笛卡尔坐标分数坐标自定义文字字号粗体颜色显示标签屏幕标签上限大体系自动抽样优先显示选中原子的标签隐藏原子不显示标签上限默认应用移除移除全部编辑原子标签撤销重做");
@@ -10569,8 +10651,9 @@ struct App {
                                "atoms. Residues are exported as MOL; topology is not retained.");
         if (fmt == io::Format::POSCAR) {
             ImGui::Checkbox("Fractional coordinates (Direct)", &exportOptions.fractionalPOSCAR);
-            if (result.data.vectorProperties.count("MoveMask"))
+            if (result.data.vectorProperties.count("MoveMask") || result.data.scalarProperties.count(constraints::cartesianProperty))
                 ImGui::Checkbox("Preserve selective dynamics", &exportOptions.constraints);
+            if(constraints::anyCartesian(result.data))ImGui::TextWrapped("Cartesian fixed positions cannot be preserved by POSCAR. Save .atomx or explicitly disable constraint preservation.");
             ImGui::TextWrapped("Particle positions are grouped by type. POSCAR does not preserve "
                                "arbitrary properties or non-periodic flags.");
         }
@@ -11088,6 +11171,7 @@ struct App {
         fragmentBrowser();
         chemistryDialog();
         atomPropertiesDialog();
+        atomConstraintsDialog();
         hydrogenDialog();
         motionGroupsDialog();
         creationStylesDialog();

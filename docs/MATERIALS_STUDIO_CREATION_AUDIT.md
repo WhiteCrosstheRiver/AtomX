@@ -1,5 +1,17 @@
 # Materials Studio 创作功能现场核对
 
+### 原子模拟约束与方向标志（2026-10-04）
+
+- 本机 MS、本任务自己的 `3D Atomistic (4).xsd`：在已有 Cartesian X 固定状态下，实际打开 3D Movement，使用默认 Screen 2% 的右移按钮，选中的下方 C 移动，C—C 长度由 1.540 变为 1.424。再点击左移，长度恢复 1.540，三条 C—H 长度恢复 1.140；随后重新打开 Constraints，解除本任务的 Cartesian 标志。验证了模拟约束不会阻止手工移动。没有操作用户结构或 MS Calc。
+- 实际打开本任务的倾斜二维周期结构 `ms-layer-skew.xsd`、选择 O 并进入 Modify → Constraints：Fix fractional position 可用；此前非周期碳结构中该控件禁用。此处仅查看，没有设置分数约束。安装帮助 `core/tools/dlgeditconstraintsatom.htm` 说明部分 Cartesian 轴、旋转后方向与 Atom / Measurement / Lattice 页；本次没有实测右键组合拖动，也没有宣称整个约束工具已对齐。
+- AtomX 新增“原子模拟约束”，可从右侧选中面板、修改菜单和原子右键打开。整原子 Cartesian XYZ 固定使用独立的 `AtomX.FixedCartesian` 标志；晶格 a/b/c 分数分量使用现有 `MoveMask`（1 自由、0 固定）。单选、多选显示共同或混合状态；默认“保持当前值”不覆盖未修改的混合分量。整原子固定不是部分 Cartesian 轴约束，界面明确标出此限制；有效可逆三维晶格且存在周期方向时启用分数约束，奇异二维基矢尚未支持。
+- 约束是模拟元数据，不禁止手工移动或旋转，也不执行求解。修改前校验选中行、全部约束列类型/长度/二进制值和捕获的标签/源版本；同值不写历史，有变化只记录一步结构历史。保留未选行、坐标、键级和 Charge/Force 等科学属性，不自动补氢。撤销/重做、独立标签与 `.atomx` 保存重开沿用现有结构机制。
+- `MoveMask` 是晶格分量标志，不是空间矢量，Affine、角度/二面角修改、补氢和片段旋转不再旋转它。新增环、氢、片段和层中缺失约束行默认自由；超胞复制和删除压缩保留原有标志。片段库不保留来源晶格、层匹配会重建基矢，因此存在非自由分数约束时明确拒绝这两类操作，避免把来源约束错误套到新晶格。
+- POSCAR 的 Selective dynamics T/F 对应直接晶格方向，与坐标行选 Cartesian 或 Direct 无关，依据 [VASP 官方 POSCAR 说明](https://vasp.at/wiki/index.php/POSCAR)。保留分数标志；整原子 Cartesian 固定在晶格变化时不能由这些标志忠实表达，默认导出在覆盖文件前拒绝，用户可保存 `.atomx` 或显式取消约束保留。没有静默转换为 F F F。
+- 核心测试覆盖混合多选、同值、非法列、自由新行、手工移动、Force 旋转与 MoveMask 不旋转、补氢/环/片段、超胞、删除、层默认及基矢重建拒绝。格式测试覆盖倾斜晶胞的 Cartesian POSCAR 坐标与分数标志、导出拒绝和原生双类标志；真实 ImGui 事件覆盖选择组件、取消/无操作、历史、失效源、保存重开及带固定标志的精准移动按钮。核心、格式、应用事件测试与原生构建均通过。
+- 原生 AtomX 实际对自建三原子夹具的中间 C 设置整原子固定、解除 c 分量固定，保存独立读回得到 Cartesian=1、MoveMask=(0,1,1)，其他行、坐标、Charge、Force 和单键/三键保留。Ctrl+Z 后保存确认恢复 Cartesian=0、MoveMask=(0,1,0)；点击重做并再次保存，读回恢复编辑结果。修复验收中发现的下拉文字截断，最终构建重新打开文件核对状态。`AtomX.exe` 和 `AtomX-next.exe` 的 SHA256 均为 `ECD59AEF36CA32C1712857E2AFCA4F60A2094794EA5FFC7352CA22B415B3B23F`。
+- 约束统计在打开时读取，不为静止渲染增加全量扫描；提交仍有现有 Dataset 历史和管线更新成本。没有新增运行依赖或改变 D3D11 GPU 渲染。部分 Cartesian 方向约束、Measurement / Lattice 约束、完整 Properties Explorer 与周期几何编辑仍待继续现场核对，持续目标保持，MS Calc 排除。
+
 ### 选中原子的数值属性编辑（2026-10-04）
 
 - 在本机 MS、本任务自建的 `3D Atomistic (4).xsd` 打开 View → Explorers → Properties Explorer。未选择对象时 Filter 为 Physical System；点击下方 C 后变为 Atom，显示 Charge、Composition、ElementName、ElementSymbol、ForcefieldType、FormalCharge、FormalSpin 等。实际双击 Charge 的值，输入 `-0.125` 并按 Enter，读到新值；最后通过相同入口恢复为 `0`，重新选择该 C 确认 `0.00000`。滚动还看到 FormalSpinDirection / State / Vector、Hybridization、IsBackboneAtom、IsHidden。没有操作 MS Calc。

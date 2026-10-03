@@ -142,7 +142,7 @@ inline std::vector<int> apply(Dataset &d,const Fusion &f) {
         if (index==f.seed->removed) continue;
         const auto point=fusionPoint(f,i); auto &a=d.atoms[size_t(index)]; a.x=point.x; a.y=point.y; a.z=point.z;
         for (auto &[name,rows]:d.vectorProperties) {
-            (void)name;
+            if(!spatialVectorProperty(name))continue;
             if (rows.size()==d.atoms.size() && document::finite(rows[size_t(index)]))
                 rows[size_t(index)]=fusionVector(f,rows[size_t(index)]);
         }

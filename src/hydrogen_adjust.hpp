@@ -72,12 +72,12 @@ inline void validateRows(const Dataset &d) {
 inline void extendRows(Dataset &d,size_t oldCount) {
     for(auto &[name,rows]:d.scalarProperties) {
         if(rows.size()!=oldCount)throw std::invalid_argument("标量属性行数不一致");
-        rows.resize(d.atoms.size(),name=="AtomX.FormalCharge" || name=="FormalCharge" ||
-            name=="AtomX.Hybridization" || name=="AtomX.MotionGroup"?0:NAN);
+        rows.resize(d.atoms.size(),constraintScalarDefault(name,name=="AtomX.FormalCharge" || name=="FormalCharge" ||
+            name=="AtomX.Hybridization" || name=="AtomX.MotionGroup"?0:NAN));
     }
     for(auto &[name,rows]:d.vectorProperties) {
         (void)name;if(rows.size()!=oldCount)throw std::invalid_argument("向量属性行数不一致");
-        rows.resize(d.atoms.size(),{NAN,NAN,NAN});
+        rows.resize(d.atoms.size(),constraintVectorDefault(name));
     }
     if(!d.particleColors.empty()) {
         if(d.particleColors.size()!=oldCount)throw std::invalid_argument("原子颜色行数不一致");
@@ -296,7 +296,7 @@ inline std::vector<int> apply(Dataset &d,const Plan &p) {
     }
     for(const auto &m:p.moved) {
         auto &a=d.atoms[size_t(m.index)];a.x=m.position.x;a.y=m.position.y;a.z=m.position.z;
-        for(auto &[name,rows]:d.vectorProperties) { (void)name;if(finite(rows[size_t(m.index)]))rows[size_t(m.index)]=rotatedVector(rows[size_t(m.index)],m.from,m.to); }
+        for(auto &[name,rows]:d.vectorProperties) { if(spatialVectorProperty(name) && finite(rows[size_t(m.index)]))rows[size_t(m.index)]=rotatedVector(rows[size_t(m.index)],m.from,m.to); }
     }
     auto remap=[&](int i){return i-int(std::lower_bound(p.removed.begin(),p.removed.end(),i)-p.removed.begin());};
     if(!p.removed.empty())eraseAtoms(d,p.removed);
@@ -308,9 +308,9 @@ inline std::vector<int> apply(Dataset &d,const Plan &p) {
             const int index=int(d.atoms.size());d.atoms.push_back({a.position.x,a.position.y,a.position.z,type});
             d.bonds.push_back({uint32_t(remap(a.parent)),uint32_t(index),{},1});changed.push_back(index);
         }
-        for(auto &[name,rows]:d.scalarProperties) rows.resize(count,
-            name=="AtomX.MotionGroup"||name=="AtomX.FormalCharge"||name=="AtomX.Hybridization"?0:NAN);
-        for(auto &[name,rows]:d.vectorProperties){(void)name;rows.resize(count,{NAN,NAN,NAN});}
+        for(auto &[name,rows]:d.scalarProperties) rows.resize(count,constraintScalarDefault(name,
+            name=="AtomX.MotionGroup"||name=="AtomX.FormalCharge"||name=="AtomX.Hybridization"?0:NAN));
+        for(auto &[name,rows]:d.vectorProperties)rows.resize(count,constraintVectorDefault(name));
         if(!d.particleColors.empty())d.particleColors.resize(count,{-1,-1,-1});
     }
     d.sourceCount=d.atoms.size();d.bounds();return changed;

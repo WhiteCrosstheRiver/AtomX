@@ -1086,6 +1086,50 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                const auto tab=app.captureTab();
+                app.editStructure("atom constraints fixture",[](Dataset &data) {
+                    data={};data.species={"C","O"};data.atoms={{-4,0,0,0},{0,0,0,0},{4,2,0,1}};
+                    data.bonds={{0,1,{},1},{1,2,{},3}};data.pbc={true,true,true};data.cell={12,0,0,3,12,0,1,2,12};
+                    data.vectorProperties["MoveMask"]={{1,0,1},{0,1,0},{1,1,1}};
+                    data.scalarProperties["Charge"]={-.2,.4,-.2};data.vectorProperties["Force"]={{1,2,3},{4,5,6},{7,8,9}};
+                });settlePipeline();app.creationDisplay={};app.creationAutoHydrogens=true;
+                app.creationSelection={0,1};app.creationPick=1;frame();const auto editBaseline=app.authorUndo.size();
+                click("creation.edit-constraints");frame();
+                requireExport(app.constraintSummary.fractional==std::array<int,3>{-1,-1,-1},"constraint UI exposes mixed axes without assigning defaults");
+                click("creation.constraint-apply");frame();requireExport(app.authorUndo.size()==editBaseline,"keep constraints is history-free");
+                click("creation.edit-constraints");frame();click("creation.constraint-a");frame();click("creation.constraint-a-2");frame();
+                click("creation.constraint-apply");settlePipeline();frame();
+                requireExport(constraints::mask(app.source,0).x==0 && constraints::mask(app.source,0).y==0 && constraints::mask(app.source,0).z==1 &&
+                    constraints::mask(app.source,1).y==1 && constraints::mask(app.source,1).z==0 && constraints::mask(app.source,2).x==1 &&
+                    app.authorUndo.size()==editBaseline+1 && app.source.bonds[1].order==3 && app.source.atoms.size()==3 &&
+                    app.source.scalarProperties.at("Charge")[1]==.4,"actual combo edit affects chosen axis only without auto H or topology changes");
+                app.history(false);settlePipeline();frame();requireExport(constraints::mask(app.source,0).x==1,"undo fractional constraints");
+                app.history(true);settlePipeline();frame();requireExport(constraints::mask(app.source,0).x==0,"redo fractional constraints");
+                app.creationSelection={1};app.creationPick=1;frame();click("creation.edit-constraints");frame();
+                click("creation.constraint-cartesian");frame();click("creation.constraint-cartesian-2");frame();click("creation.constraint-apply");settlePipeline();frame();
+                requireExport(constraints::cartesian(app.source,1) && !constraints::cartesian(app.source,0),"whole-atom fixed editor retains separate Cartesian semantics");
+                click("creation.edit-movement");frame();click("creation.movement-world-axes");app.creationMovementDistance=1;app.creationMovementPercent=false;frame();
+                click("creation.movement-right");settlePipeline();frame();
+                requireExport(app.source.atoms[1].x==1 && constraints::cartesian(app.source,1) && constraints::mask(app.source,1).z==0,
+                    "manual movement remains available with simulation constraints");
+                click("creation.movement-close");frame();
+                const auto native=dir/"atom-constraints.atomx";io::ExportOptions options;options.documentView=app.captureDocumentView();
+                io::write(native,io::Format::AtomX,app.source,options);const auto saved=document::read(native);
+                requireExport(constraints::cartesian(saved.data,1) && constraints::mask(saved.data,1).z==0 && saved.data.atoms[1].x==1,
+                    "native save retains constraints alongside edited geometry");
+                app.restoreDocumentView(saved.view);settlePipeline();frame();app.creationSelection={1};app.creationPick=1;
+                app.requestAtomConstraints();frame();requireExport(app.constraintSummary.cartesian==1,"reopened editor shows saved constraint state");
+                app.constraintDraft.cartesian=constraints::Free;
+                app.editStructure("invalidate constraint source",[](Dataset &data){data.atoms[0].x+=1;});settlePipeline();frame();
+                const auto stale=app.authorUndo.size();requireExport(!app.applyAtomConstraints() && app.authorUndo.size()==stale && constraints::cartesian(app.source,1),
+                    "stale constraint dialog rejects mutation and history");
+                frame();click("creation.constraint-cancel");frame();
+                // restoreDocumentView starts a new history baseline, as for a native reopen.
+                app.tabs[size_t(app.activeTab)]=tab;app.restoreTab(tab);settlePipeline();app.creationAutoHydrogens=false;
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("atom properties fixture",[](Dataset &data) {
                     data={};data.species={"C","O"};data.atoms={{-4,0,0,0},{0,0,0,0},{4,2,0,1}};
                     data.bonds={{0,1,{},1},{1,2,{},3}};data.pbc={false,false,false};

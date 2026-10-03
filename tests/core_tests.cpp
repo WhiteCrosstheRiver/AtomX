@@ -3,6 +3,9 @@
 #include "../src/creation_display.hpp"
 #include "../src/creation_bonds.hpp"
 #include "../src/atom_properties.hpp"
+#include "../src/atom_constraints.hpp"
+#include "../src/hydrogen_adjust.hpp"
+#include "../src/fragment_library.hpp"
 #include "../src/elements.hpp"
 #include <iostream>
 using namespace atomx;
@@ -190,6 +193,66 @@ static Dataset referenceSliceFilter(const Dataset &data, const Modifier &m) {
     return d;
 }
 int main() {
+    {
+        Dataset d;d.species={"C"};d.atoms={{0,0,0,0},{1,0,0,0},{2,1,0,0}};
+        d.cell={4,0,0,1,5,0,.5,1,6};d.pbc={true,true,true};d.bonds={{0,1,{},1}};
+        d.vectorProperties["MoveMask"]={{1,0,1},{0,1,0},{1,1,1}};
+        d.vectorProperties["Force"]={{1,2,3},{4,5,6},{7,8,9}};d.scalarProperties["Charge"]={-.1,.2,-.1};
+        constraints::Draft draft;draft.fractional[0]=constraints::Fixed;
+        auto summary=constraints::summarize(d,{0,1});
+        require(summary.fractional==std::array<int,3>{-1,-1,-1},"mixed constraints report each component independently");
+        constraints::apply(d,constraints::prepare(d,{0,1,1},draft));
+        require(constraints::mask(d,0).x==0 && constraints::mask(d,0).y==0 && constraints::mask(d,0).z==1 &&
+            constraints::mask(d,1).y==1 && constraints::mask(d,1).z==0 && constraints::mask(d,2).x==1,
+            "partial batch edits keep other axes and unselected atom masks");
+        require(!constraints::prepare(d,{0,1},draft).changed,"same constraints add no edit");
+        draft={};draft.cartesian=constraints::Fixed;
+        constraints::apply(d,constraints::prepare(d,{1},draft));
+        require(constraints::cartesian(d,1) && !constraints::cartesian(d,0) && d.bonds[0].order==1 && d.scalarProperties.at("Charge")[1]==.2,
+            "Cartesian all-axis constraint has distinct metadata without chemistry changes");
+        const auto positions=authoring::transformedSelection(d,{1},{2,0,0},{},0);
+        require(positions[0].second.x==3,"simulation constraint does not lock manual geometry editing");
+        Modifier rotate{Op::AffineTransform};rotate.transformVectorProperties=true;
+        rotate.affineTransform={0,-1,0,0,1,0,0,0,0,0,1,0};
+        const auto rotated=evaluate(d,{rotate}).data;
+        require(rotated.vectorProperties.at("Force")[0].x==-2 && rotated.vectorProperties.at("Force")[0].y==1 &&
+            constraints::mask(rotated,0).y==0 && constraints::mask(rotated,0).z==1 && constraints::cartesian(rotated,1),
+            "affine rotation transforms spatial vectors but not fractional flags or whole-atom fixed state");
+        Modifier rep{Op::Replicate};rep.replicateN[0]=2;auto copies=evaluate(d,{rep}).data;
+        require(copies.atoms.size()==6 && constraints::cartesian(copies,4) && constraints::mask(copies,3).y==0,
+            "supercell copies preserve constraint row identity");
+        authoring::eraseAtoms(copies,{0,3});
+        require(copies.atoms.size()==4 && constraints::cartesian(copies,0) && constraints::cartesian(copies,2),
+            "deletion compacts constraint rows with surviving atoms");
+        const auto old=d.atoms.size();d.atoms.push_back({5,5,5,0});hydrogens::extendRows(d,old);
+        require(!constraints::cartesian(d,old) && constraints::mask(d,old).x==1 && constraints::mask(d,old).y==1 &&
+            std::isnan(d.scalarProperties.at("Charge")[old]),"new atoms are unconstrained while measured science stays missing");
+        const auto ring=authoring::ringSketch(d,6,{12,12,0},{1,0,0},{0,0,1},-1,-1,false);
+        authoring::applyRing(d,authoring::prepareRing(d,ring));constraints::validate(d);
+        require(!constraints::cartesian(d,d.atoms.size()-1) && constraints::mask(d,d.atoms.size()-1).z==1,"ring atoms use free constraint defaults");
+        bool rejected=false;draft={};draft.fractional[1]=constraints::Fixed;d.pbc={};
+        try{constraints::prepare(d,{0},draft);}catch(...){rejected=true;}
+        require(rejected,"nonperiodic fractional fix rejected before mutation");
+        draft.fractional[1]=constraints::Free;constraints::apply(d,constraints::prepare(d,{0},draft));
+        require(constraints::mask(d,0).y==1,"existing fractional flags can be cleared after PBC disabled");
+        d.vectorProperties["MoveMask"][0].x=NAN;rejected=false;
+        try{constraints::prepare(d,{1},{});}catch(...){rejected=true;}
+        require(rejected,"invalid flags rejected even outside edited selection");
+        Dataset atom;atom.species={"C"};atom.atoms={{0,0,0,0}};atom.vectorProperties["MoveMask"]={{1,1,1}};
+        draft={};draft.cartesian=constraints::Fixed;constraints::apply(atom,constraints::prepare(atom,{0},draft));
+        hydrogens::Options options;const auto hydrogenPlan=hydrogens::prepare(atom,options);hydrogens::apply(atom,hydrogenPlan);
+        constraints::validate(atom);require(atom.atoms.size()==5 && constraints::cartesian(atom,0) && !constraints::cartesian(atom,4) &&
+            constraints::mask(atom,4).z==1,"hydrogen adjustment keeps parent constraint and adds unconstrained H");
+        auto methyl=fragments::builtins().front();methyl.data.vectorProperties["MoveMask"].resize(methyl.data.atoms.size(),{1,1,1});
+        methyl.data.scalarProperties[constraints::cartesianProperty].resize(methyl.data.atoms.size(),0);methyl.data.scalarProperties[constraints::cartesianProperty][0]=1;
+        Dataset empty;const auto placement=fragments::place(empty,methyl,methyl.connector,{5,5,0},{0,1,0},{0,0,1});
+        fragments::apply(empty,methyl,placement);constraints::validate(empty);
+        require(constraints::mask(empty,0).x==1 && constraints::mask(empty,0).y==1 && constraints::cartesian(empty,0),
+            "fragment insertion preserves free masks without rotating flags and retains invariant all-axis fixing");
+        methyl.data.vectorProperties["MoveMask"][0].x=0;rejected=false;
+        try{fragments::validate(methyl);}catch(...){rejected=true;}
+        require(rejected,"fragment library rejects lattice-dependent constraints without a source basis");
+    }
     {
         Dataset d;d.species={"C"};d.atoms={{0,0,0,0},{1,0,0,0},{2,0,0,0}};
         d.bonds={{0,1,{},2}};d.vectorProperties["Force"]={{1,2,3},{4,5,6},{7,8,9}};
@@ -3075,6 +3138,7 @@ int main() {
             molecule.atoms={{0,1,0,0},{0,0,0,0},{1,0,0,0},{1,1,1,0},{2,1,1,0},{8,8,8,0}};
             molecule.sourceCount=molecule.atoms.size(); molecule.bonds={{0,1},{1,2},{2,3},{3,4}};
             molecule.vectorProperties["Force"]={{0,1,0},{0,1,0},{0,1,0},{0,1,0},{0,1,0},{0,1,0}};
+            molecule.vectorProperties["MoveMask"].resize(molecule.atoms.size(),{1,0,1});
             const geometry::Monitor distance{2,{1,2,-1,-1}},angle{3,{0,1,2,-1}},torsion{4,{0,1,2,3}};
             for(bool inverse:{false,true}) for(const auto &m:{distance,angle,torsion}) {
                 auto edited=molecule; const auto plan=geometry::prepare(molecule,m,inverse);
@@ -3085,6 +3149,8 @@ int main() {
                 const int fixed=inverse?m.atoms[m.count-1]:m.atoms[0];
                 require(geometry::at(edited,fixed).x==geometry::at(molecule,fixed).x && geometry::at(edited,fixed).y==geometry::at(molecule,fixed).y,"anchored side unchanged");
                 require(std::abs(authoring::length(edited.vectorProperties["Force"][3])-1)<1e-5,"rigid rotation retains vector magnitude");
+                require(constraints::mask(edited,3).x==1 && constraints::mask(edited,3).y==0 && constraints::mask(edited,3).z==1,
+                    "angle and torsion editing must not rotate fractional constraint flags");
             }
             auto ring=molecule; ring.bonds.push_back({0,3});
             bool blocked=false; try { (void)geometry::prepare(ring,torsion); } catch(...) { blocked=true; }
