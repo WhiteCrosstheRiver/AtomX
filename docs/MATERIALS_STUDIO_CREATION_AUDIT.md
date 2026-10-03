@@ -1,5 +1,16 @@
 # Materials Studio 创作功能现场核对
 
+### 选中原子的数值属性编辑（2026-10-04）
+
+- 在本机 MS、本任务自建的 `3D Atomistic (4).xsd` 打开 View → Explorers → Properties Explorer。未选择对象时 Filter 为 Physical System；点击下方 C 后变为 Atom，显示 Charge、Composition、ElementName、ElementSymbol、ForcefieldType、FormalCharge、FormalSpin 等。实际双击 Charge 的值，输入 `-0.125` 并按 Enter，读到新值；最后通过相同入口恢复为 `0`，重新选择该 C 确认 `0.00000`。滚动还看到 FormalSpinDirection / State / Vector、Hybridization、IsBackboneAtom、IsHidden。没有操作 MS Calc。
+- 安装帮助 `core/interface/propertiesexplorer.htm` 说明多选仅显示共同属性，值不一致时不显示共同值，编辑属性不自动 Adjust Hydrogen；`core/tools/dlgeditconstraintsatom.htm` 明确 Cartesian/Fractional 固定位置是模拟约束，不能把它当作手工编辑锁。没有把未实测的 Mass 编辑或全部 MS 属性宣称为此次对齐依据。
+- AtomX 的右侧选中面板、修改菜单和原子右键菜单新增“原子数值属性”。支持单选/多选的 Charge 和文件已有、行数匹配的数值列，显示共同值或“混合 / 缺失”，统一赋值或把选中行设为缺失。原子身份、内部 AtomX 元数据及形式电荷/杂化使用各自专用入口，向量列不在此数值编辑器中修改；文件已有 Mass 列可修改为正值，不自动创建或推断缺失质量。
+- 新建 Charge 时，未选原子的行保持 NaN；保留未选行、坐标、晶胞、真实键拓扑、形式电荷和其他标量/向量。数值属性编辑不自动补氢，即使当前标签开启自动氢。捕获打开时的原子行、标签身份和源版本；体系改变后禁止应用。非法数值、失效行、无效 Mass 或列长度不匹配均在历史和变更之前拒绝；相同值不增加历史。真实变更为一步结构历史，沿用现有撤销/重做、标签副本和工作区保存路径。
+- 属性列表和多选统计只在打开或切换属性时读取，不在静止帧扫描所有数值列。提交仍沿用 Dataset 历史和管线更新，会有原有的结构复制/缓冲更新成本；没有将其描述为轻量显示历史。没有增加运行依赖，D3D11 GPU 渲染路径保留。
+- 核心测试通过新列的缺失行保留、批量去重、混合值、同值/重复清除无操作、保留科学数据、非法行的原子性和内部属性/向量/不完整列拒绝。真实 ImGui 点击通过赋值、取消、撤销/重做、批量缺失、已有 Mass 校验和修改、源版本失效；`.atomx` 保存/读取保留数值和缺失，明确选择 Charge/Mass 的 Extended XYZ 导出保留有限数值，并拒绝所选列中的缺失行。
+- 原生 AtomX 实际打开本任务新建的三原子验收文件，通过右侧入口将中间 C 的 Charge 从 `0.4` 改为 `-0.125`。画面中的 Charge 标签同步更新，历史新增一条；Ctrl+S 后独立读取确认其他 Charge、Mass、FormalCharge、Force、坐标和单键/三键全部保留。Ctrl+Z 恢复 `0.4`，重新选中该 C 保存并独立确认；点击重做恢复 `-0.125`，保存再次验证。原生 `AtomX.exe` 和构建 `AtomX-next.exe` 的 SHA256 均为 `68813BEC2611133D2EEE16F3382454AA200455C4ABBCF1ADF35D1E374235A677`。
+- 这次补齐的是选中行的数值属性编辑，完整 Properties Explorer（字符串、向量、体系属性、力场类型等）、完整模拟约束与周期分子的几何修改仍需继续实测和实现。持续核对目标保持，MS Calc 排除。
+
 ### 独立键可见性（2026-10-04）
 
 - 本机 MS、本任务自建的 `3D Atomistic (4).xsd`：只选中心 C—C 键时，Display Style 显示 “No display style properties available”。没有据此添加或宣称 MS 支持独立键的 Line/Stick/颜色属性。右键 Hide 实际使中心键和它的长度标注消失，六条 C—H 连接保留；Ctrl+Z 恢复。重新只选中心键后执行 Show Only，其他原子被隐藏，画面只剩 1.540 长度标注；再次 Ctrl+Z 恢复完整夹具。安装帮助 `core/viewers/structurevisibility.htm` 补充 Hide / Unhide / Show Only 的对象可见性规则。没有删除 MS 对象，没有操作 MS Calc。

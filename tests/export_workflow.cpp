@@ -1086,6 +1086,64 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("atom properties fixture",[](Dataset &data) {
+                    data={};data.species={"C","O"};data.atoms={{-4,0,0,0},{0,0,0,0},{4,2,0,1}};
+                    data.bonds={{0,1,{},1},{1,2,{},3}};data.pbc={false,false,false};
+                    data.scalarProperties["Charge"]={-.2,.4,-.2};data.scalarProperties["Mass"]={12,12,16};
+                    data.scalarProperties["FormalCharge"]={0,1,-1};data.vectorProperties["Force"]={{1,2,3},{4,5,6},{7,8,9}};
+                });settlePipeline();app.creationDisplay={};app.creationAutoHydrogens=true;
+                app.chooseCreationTool(App::CreationTool::Select);app.selectCreationAtom(1,false);frame();
+                const size_t editBaseline=app.authorUndo.size();const auto topology=app.source.bonds;
+                auto inputProperty=[&](const char *value) {
+                    click("creation.property-value",.12f);
+                    guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,true);guiIO.AddKeyEvent(ImGuiKey_A,true);frame();
+                    guiIO.AddKeyEvent(ImGuiKey_A,false);guiIO.AddKeyEvent(ImGuiKey_LeftCtrl,false);
+                    guiIO.AddInputCharactersUTF8(value);frame();
+                    guiIO.AddKeyEvent(ImGuiKey_Enter,true);frame();guiIO.AddKeyEvent(ImGuiKey_Enter,false);frame();
+                };
+                click("creation.edit-properties");frame();inputProperty("-0.125");click("creation.property-apply");settlePipeline();frame();
+                requireExport(app.source.scalarProperties.at("Charge")==std::vector<double>({-.2,-.125,-.2}) &&
+                    app.source.scalarProperties.at("FormalCharge")[1]==1 && app.source.vectorProperties.at("Force")[2].z==9 &&
+                    app.source.bonds==topology && app.source.atoms.size()==3 && app.authorUndo.size()==editBaseline+1,
+                    "property UI edits captured row and retains topology chemistry and vectors even with auto H on");
+                click("creation.edit-properties");frame();click("creation.property-apply");frame();
+                requireExport(app.authorUndo.size()==editBaseline+1,"same property value adds no history");
+                click("creation.edit-properties");frame();inputProperty("2");click("creation.property-cancel");frame();
+                requireExport(app.source.scalarProperties.at("Charge")[1]==-.125,"cancel preserves scientific value");
+                app.history(false);settlePipeline();frame();requireExport(app.source.scalarProperties.at("Charge")[1]==.4,"undo science edit");
+                app.history(true);settlePipeline();frame();requireExport(app.source.scalarProperties.at("Charge")[1]==-.125,"redo science edit");
+                const auto native=dir/"atom-properties.atomx";io::ExportOptions options;options.documentView=app.captureDocumentView();
+                io::write(native,io::Format::AtomX,app.source,options);
+                requireExport(document::read(native).data.scalarProperties.at("Charge")[1]==-.125,"edited properties survive native save");
+                options.extendedXYZ=true;options.scalarProperties={"Charge","Mass"};const auto xyz=dir/"atom-properties.xyz";
+                io::write(xyz,io::Format::XYZ,app.source,options);const auto external=io::read(xyz,io::index(xyz)[0]);
+                requireExport(external.scalarProperties.at("Charge")[1]==-.125 && external.scalarProperties.at("Mass")[2]==16,
+                    "explicit Extended XYZ export retains edited numeric properties");
+                app.creationSelection={0,1};app.creationPick=0;frame();click("creation.edit-properties");frame();
+                requireExport(app.atomPropertySummary.find("混合")!=std::string::npos,"batch property editor reports mixed values");
+                click("creation.property-missing");click("creation.property-apply");settlePipeline();frame();
+                requireExport(std::isnan(app.source.scalarProperties.at("Charge")[0]) && std::isnan(app.source.scalarProperties.at("Charge")[1]) &&
+                    app.source.scalarProperties.at("Charge")[2]==-.2,"missing edit applies only selected rows");
+                io::write(native,io::Format::AtomX,app.source,options);
+                requireExport(std::isnan(document::read(native).data.scalarProperties.at("Charge")[0]),"native format retains intentional missing value");
+                bool rejected=false;try{io::write(xyz,io::Format::XYZ,app.source,options);}catch(...){rejected=true;}
+                requireExport(rejected,"Extended XYZ refuses incomplete selected science column");
+                app.history(false);settlePipeline();frame();app.selectCreationAtom(1,false);frame();click("creation.edit-properties");frame();
+                click("creation.property-name");frame();click("creation.property-name-Mass");frame();inputProperty("0");
+                const auto badHistory=app.authorUndo.size();click("creation.property-apply");frame();
+                requireExport(app.authorUndo.size()==badHistory && app.source.scalarProperties.at("Mass")[1]==12 && !app.atomPropertyMessage.empty(),
+                    "invalid mass rejected before mutation and history");
+                inputProperty("13");click("creation.property-apply");settlePipeline();frame();
+                requireExport(app.source.scalarProperties.at("Mass")==std::vector<double>({12,13,16}),"selected isotope mass override");
+                click("creation.edit-properties");frame();inputProperty("9");
+                app.editStructure("invalidate property selection",[](Dataset &data){data.atoms[0].x+=1;});settlePipeline();frame();
+                const auto staleHistory=app.authorUndo.size();requireExport(!app.applyAtomProperties() && app.authorUndo.size()==staleHistory &&
+                    app.source.scalarProperties.at("Charge")[1]==-.125,"stale property editor rejects changed source");
+                frame();click("creation.property-cancel");frame();app.creationAutoHydrogens=false;
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("chemical settings fixture",[](Dataset &data) {
                     data={};data.species={"N","O"};data.atoms={{2,2,2,0},{8,2,2,1}};
                     data.cell={12,0,0,0,12,0,0,0,12};data.scalarProperties["FormalCharge"]={0,-1};

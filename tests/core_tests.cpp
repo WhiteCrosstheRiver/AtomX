@@ -2,6 +2,7 @@
 #include "../src/authoring.hpp"
 #include "../src/creation_display.hpp"
 #include "../src/creation_bonds.hpp"
+#include "../src/atom_properties.hpp"
 #include "../src/elements.hpp"
 #include <iostream>
 using namespace atomx;
@@ -189,6 +190,36 @@ static Dataset referenceSliceFilter(const Dataset &data, const Modifier &m) {
     return d;
 }
 int main() {
+    {
+        Dataset d;d.species={"C"};d.atoms={{0,0,0,0},{1,0,0,0},{2,0,0,0}};
+        d.bonds={{0,1,{},2}};d.vectorProperties["Force"]={{1,2,3},{4,5,6},{7,8,9}};
+        d.scalarProperties["FormalCharge"]={1,0,-1};d.scalarProperties["Mass"]={12,13,12};
+        const auto edit=properties::prepare(d,"Charge",{1,1},-.125);properties::apply(d,edit);
+        require(edit.selection==std::vector<int>{1} && std::isnan(d.scalarProperties.at("Charge")[0]) &&
+            d.scalarProperties.at("Charge")[1]==-.125 && std::isnan(d.scalarProperties.at("Charge")[2]),
+            "new partial charge column preserves missing unselected rows");
+        require(d.scalarProperties.at("FormalCharge")[0]==1 && d.bonds[0].order==2 && d.vectorProperties.at("Force")[2].z==9,
+            "property editing preserves chemistry, topology and vectors");
+        require(!properties::prepare(d,"Charge",{1},-.125).changed &&
+            properties::summarize(d,"Charge",{1}).common==-.125 && !properties::summarize(d,"Charge",{0,1}).common,
+            "exact no-op and mixed/missing summaries");
+        const auto before=d.scalarProperties;
+        for(const auto &name:std::vector<std::string>{"AtomX.Layer","FormalCharge","Force","Unknown"}) {
+            bool rejected=false;try{properties::apply(d,properties::prepare(d,name,{1},2));}catch(...){rejected=true;}
+            require(rejected,"reject internal chemistry vector and absent property columns");
+        }
+        bool rejected=false;try{properties::prepare(d,"Mass",{0},0);}catch(...){rejected=true;}
+        require(rejected,"mass override must be positive");
+        rejected=false;try{properties::prepare(d,"Charge",{0},INFINITY);}catch(...){rejected=true;}
+        require(rejected,"nonfinite new property values rejected");
+        rejected=false;try{properties::apply(d,properties::prepare(d,"Mass",{0,999},14));}catch(...){rejected=true;}
+        require(rejected && d.scalarProperties.at("Mass")==before.at("Mass"),"invalid batch cannot partially mutate");
+        properties::apply(d,properties::prepare(d,"Charge",{1},std::nullopt));
+        require(std::isnan(d.scalarProperties.at("Charge")[1]) && !properties::prepare(d,"Charge",{0,1},std::nullopt).changed,
+            "clearing values records missing and repeated clear is a no-op");
+        d.scalarProperties["Broken"]={1};rejected=false;try{properties::prepare(d,"Broken",{0},2);}catch(...){rejected=true;}
+        require(rejected,"malformed science rows rejected");
+    }
     try {
         Dataset edited;
         edited.cell={2,0,0,0,2,0,0,0,2};

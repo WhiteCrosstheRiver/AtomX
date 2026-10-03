@@ -5,6 +5,7 @@
 #include "fragment_fusion.hpp"
 #include "hydrogen_adjust.hpp"
 #include "chemical_settings.hpp"
+#include "atom_properties.hpp"
 #include "bond_insertion.hpp"
 #include "creation_bonds.hpp"
 #include "motion_groups.hpp"
@@ -966,6 +967,12 @@ struct App {
     uint64_t chemistryTabId=0,chemistryGeneration=0;
     std::vector<int> chemistrySelection;
     std::string chemistrySummary,chemistryMessage;
+    bool openAtomProperties=false,atomPropertyMissing=false;
+    uint64_t atomPropertyTabId=0,atomPropertyGeneration=0;
+    std::vector<int> atomPropertySelection;
+    std::vector<std::string> atomPropertyNames;
+    std::string atomPropertyName,atomPropertySummary,atomPropertyMessage;
+    double atomPropertyValue=0;
     std::optional<hydrogens::Plan> hydrogenPlan;
     std::future<hydrogens::Plan> hydrogenJob;
     std::string hydrogenMessage;
@@ -2062,6 +2069,72 @@ struct App {
         });
         creationSelection.clear();
         creationPick = creationMeasure = creationAngle = creationDihedral = -1;
+    }
+    void refreshAtomProperty() {
+        const auto s=properties::summarize(source,atomPropertyName,atomPropertySelection);
+        atomPropertyValue=s.common.value_or(0);atomPropertyMissing=false;atomPropertyMessage.clear();
+        std::ostringstream value;value<<std::setprecision(12)<<atomPropertyValue;
+        atomPropertySummary=s.common?"当前值："+value.str():"当前值：混合 / 缺失";
+        atomPropertySummary+=" · 有值 "+std::to_string(s.present)+" · 缺失 "+std::to_string(s.missing);
+    }
+    void requestAtomProperties() {
+        if(!creationMode || documentsBusy() || !sameAtomCount() || creationSelection.empty())return;
+        try {
+            atomPropertySelection=properties::selected(source,creationSelection);
+            atomPropertyTabId=tabs[size_t(activeTab)].id;atomPropertyGeneration=pipelineGeneration;
+            atomPropertyNames.clear();
+            if(!source.vectorProperties.contains("Charge"))atomPropertyNames.push_back("Charge");
+            for(const auto &[name,rows]:source.scalarProperties)
+                if(name!="Charge" && properties::editable(name) && rows.size()==source.atoms.size() && !source.vectorProperties.contains(name))
+                    atomPropertyNames.push_back(name);
+            if(atomPropertyNames.empty()){status="没有可编辑的数值属性";return;}
+            atomPropertyName=atomPropertyNames.front();refreshAtomProperty();openAtomProperties=true;
+        }catch(const std::exception &e){status=e.what();}
+    }
+    bool validAtomProperties() const {
+        return creationMode && activeTab>=0 && activeTab<int(tabs.size()) && tabs[size_t(activeTab)].id==atomPropertyTabId &&
+            pipelineGeneration==atomPropertyGeneration && !documentsBusy();
+    }
+    bool applyAtomProperties() {
+        if(!validAtomProperties()){atomPropertyMessage="体系已改变，请关闭后重新选择原子";return false;}
+        try {
+            const auto edit=properties::prepare(source,atomPropertyName,atomPropertySelection,
+                atomPropertyMissing?std::nullopt:std::optional<double>(atomPropertyValue));
+            if(!edit.changed){status="属性没有变化";return true;}
+            const auto bonds=creationBondSelection;
+            editStructure("修改 "+edit.name+" · "+std::to_string(edit.selection.size())+" 个原子",
+                [&](Dataset &data){properties::apply(data,edit);});
+            creationSelection=edit.selection;creationPick=creationSelection.back();creationBondSelection=bonds;return true;
+        }catch(const std::exception &e){atomPropertyMessage=e.what();return false;}
+    }
+    void atomPropertiesDialog() {
+        if(openAtomProperties){ImGui::OpenPopup("原子数值属性##atom-properties");openAtomProperties=false;}
+        const auto *vp=ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->GetWorkCenter(),ImGuiCond_Appearing,{.5f,.5f});
+        ImGui::SetNextWindowSizeConstraints({U(440),0},{std::max(U(440),vp->WorkSize.x-U(24)),vp->WorkSize.y-U(24)});
+        if(!ImGui::BeginPopupModal("原子数值属性##atom-properties",nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
+        ImGui::Text("打开时选中 %zu 个原子",atomPropertySelection.size());
+        const bool valid=validAtomProperties();ImGui::BeginDisabled(!valid);
+        ImGui::SetNextItemWidth(U(260));
+        const bool combo=ImGui::BeginCombo("属性",atomPropertyName.c_str());recordUiTestItem("creation.property-name");
+        if(combo){for(const auto &name:atomPropertyNames) {
+            if(ImGui::Selectable(name.c_str(),name==atomPropertyName)){atomPropertyName=name;refreshAtomProperty();}
+            recordUiTestItem("creation.property-name-"+name);
+        }ImGui::EndCombo();}
+        ImGui::TextWrapped("%s",atomPropertySummary.c_str());
+        ImGui::Checkbox("将选中行设为缺失值",&atomPropertyMissing);recordUiTestItem("creation.property-missing");
+        ImGui::BeginDisabled(atomPropertyMissing);ImGui::SetNextItemWidth(U(260));
+        ImGui::InputDouble("新值",&atomPropertyValue,0,0,"%.12g");recordUiTestItem("creation.property-value");ImGui::EndDisabled();
+        ImGui::TextWrapped("应用到打开时选中的原子；其他行保留。Charge 是部分电荷，不改变形式电荷，也不自动补氢。\n新建 Charge 列时，未赋值原子保持缺失。缺失值可保存在 .atomx 中；导出包含该列的 Extended XYZ 需先补齐数值。");
+        if(atomPropertyName=="Mass")ImGui::TextWrapped("Mass 使用 amu，必须大于零；这里只修改文件中已有的质量列。");
+        ImGui::EndDisabled();
+        if(!valid)ImGui::TextWrapped("体系已改变，请关闭后重新选择原子。");
+        if(!atomPropertyMessage.empty())ImGui::TextWrapped("%s",atomPropertyMessage.c_str());
+        ImGui::BeginDisabled(!valid);
+        if(ImGui::Button("应用",{U(110),U(30)}) && applyAtomProperties())ImGui::CloseCurrentPopup();
+        recordUiTestItem("creation.property-apply");ImGui::EndDisabled();ImGui::SameLine();
+        if(ImGui::Button("取消",{U(110),U(30)}) || ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
+        recordUiTestItem("creation.property-cancel");ImGui::EndPopup();
     }
     void requestCreationChemistry() {
         if(!creationMode || documentsBusy() || !sameAtomCount() || creationSelection.empty())return;
@@ -3806,6 +3879,7 @@ struct App {
             if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
         });
         menu("修改", "##create-modify", [&] {
+            if(ImGui::MenuItem("原子数值属性...",nullptr,false,!creationSelection.empty()))requestAtomProperties();
             if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
             if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
             if (ImGui::MenuItem("替换元素")) replacePickedElement();
@@ -6775,6 +6849,7 @@ struct App {
                     selectCreationFragments();
                 recordUiTestItem("creation.context-fragments");
                 if (ImGui::MenuItem("编辑坐标...",nullptr,false,creationPick>=0)) requestCreationPosition();
+                if(ImGui::MenuItem("原子数值属性...",nullptr,false,!creationSelection.empty()))requestAtomProperties();
                 if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
                 if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty()))
                     requestCreationMovement();
@@ -8611,6 +8686,8 @@ struct App {
             if (ImGui::Button("Delete / make vacancy", {-1, U(34)})) deletePickedAtom();
         }
         if (!creationSelection.empty()) {
+            if(ImGui::Button("原子数值属性...",{-1,U(30)}))requestAtomProperties();
+            recordUiTestItem("creation.edit-properties");
             if(ImGui::Button("原子化学设置...",{-1,U(30)}))requestCreationChemistry();
             recordUiTestItem("creation.edit-chemistry");
             if (ImGui::Button("精准移动 / 旋转...",{-1,U(32)})) requestCreationMovement();
@@ -11010,6 +11087,7 @@ struct App {
         creationDialogs();
         fragmentBrowser();
         chemistryDialog();
+        atomPropertiesDialog();
         hydrogenDialog();
         motionGroupsDialog();
         creationStylesDialog();
