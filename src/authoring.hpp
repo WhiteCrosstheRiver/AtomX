@@ -30,6 +30,42 @@ inline Vec3 scale(Vec3 v, double s) { return {float(v.x * s), float(v.y * s), fl
 inline Vec3 add(Vec3 u, Vec3 v) { return {u.x + v.x, u.y + v.y, u.z + v.z}; }
 inline Vec3 sub(Vec3 u, Vec3 v) { return {u.x - v.x, u.y - v.y, u.z - v.z}; }
 
+// Connected component of explicit bond topology. No distance guessing or
+// all-pairs search: large structures take O(atoms + bonds) on demand only.
+inline std::vector<int> fragment(const Dataset &data, int seed) {
+    if (seed < 0 || size_t(seed) >= data.atoms.size()) return {};
+    std::vector<size_t> offsets(data.atoms.size()+1,0);
+    for (const auto &bond:data.bonds)
+        if (bond.a<data.atoms.size() && bond.b<data.atoms.size()) {
+            ++offsets[bond.a+1]; ++offsets[bond.b+1];
+        }
+    std::partial_sum(offsets.begin(),offsets.end(),offsets.begin());
+    auto cursor=offsets;
+    std::vector<uint32_t> neighbors(offsets.back());
+    for (const auto &bond:data.bonds)
+        if (bond.a<data.atoms.size() && bond.b<data.atoms.size()) {
+            neighbors[cursor[bond.a]++]=bond.b;
+            neighbors[cursor[bond.b]++]=bond.a;
+        }
+    std::vector<uint8_t> visited(data.atoms.size(),0);
+    std::vector<int> found{seed}; visited[size_t(seed)]=1;
+    for (size_t i=0;i<found.size();++i)
+        for (size_t j=offsets[size_t(found[i])];j<offsets[size_t(found[i])+1];++j)
+            if (!visited[neighbors[j]]) {
+                visited[neighbors[j]]=1; found.push_back(int(neighbors[j]));
+            }
+    return found;
+}
+inline Vec3 rotatedPoint(Vec3 point, Vec3 center, Vec3 axis, double radians) {
+    const double norm=length(axis);
+    if (norm<1e-10) return point;
+    axis=scale(axis,1/norm);
+    const Vec3 v=sub(point,center);
+    return add(center,add(add(scale(v,std::cos(radians)),
+        scale(cross(axis,v),std::sin(radians))),
+        scale(axis,dot(axis,v)*(1-std::cos(radians)))));
+}
+
 struct LatticeParameters {
     double a = 0, b = 0, c = 0;
     double alpha = 90, beta = 90, gamma = 90;
@@ -86,6 +122,21 @@ inline bool fractional(const Dataset &data, Vec3 cartesian, double &fa, double &
 inline Vec3 cartesian(const Dataset &data, double fa, double fb, double fc) {
     auto cell = axes(data.cell);
     return add(data.origin, add(scale(cell.a, fa), add(scale(cell.b, fb), scale(cell.c, fc))));
+}
+inline bool setAtomPosition(Dataset &data, int index, Vec3 position, bool useFractional) {
+    if (index<0 || size_t(index)>=data.atoms.size() || !std::isfinite(position.x) ||
+        !std::isfinite(position.y) || !std::isfinite(position.z)) return false;
+    if (useFractional) {
+        double a,b,c;
+        if (!fractional(data,{},a,b,c)) return false;
+        position=cartesian(data,position.x,position.y,position.z);
+    }
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))
+        return false;
+    auto &atom=data.atoms[size_t(index)];
+    atom.x=position.x; atom.y=position.y; atom.z=position.z;
+    data.bounds();
+    return true;
 }
 
 inline void finish(Dataset &data, const std::string &comment) {

@@ -268,6 +268,82 @@ int main() {
                               app.source.atoms.size() == originalAtomCount &&
                               app.uiTestItems.contains("creation.return-view"),
                           "Creation Mode opens an editable copy in a separate workspace tab");
+            settlePipeline();
+            {
+                const auto viewport=app.uiTestItems.at("creation.viewport");
+                const float x=(viewport.min.x+viewport.max.x)*.5f;
+                const float y=(viewport.min.y+viewport.max.y)*.5f;
+                auto rightDrag=[&](bool alt,bool shift) {
+                    guiIO.AddKeyEvent(ImGuiMod_Alt,alt);
+                    guiIO.AddKeyEvent(ImGuiMod_Shift,shift);
+                    guiIO.AddMousePosEvent(x,y); frame();
+                    guiIO.AddMouseButtonEvent(1,true); frame();
+                    requireExport(ImGui::GetCurrentContext()->OpenPopupStack.empty(),
+                                  "right mouse down must not open a menu and interrupt dragging");
+                    guiIO.AddMousePosEvent(x+40,y+25); frame();
+                    guiIO.AddMouseButtonEvent(1,false); frame();
+                    requireExport(ImGui::GetCurrentContext()->OpenPopupStack.empty(),
+                                  "right drag release must not open a context menu");
+                    guiIO.AddKeyEvent(ImGuiMod_Alt,false);
+                    guiIO.AddKeyEvent(ImGuiMod_Shift,false); frame();
+                };
+                const float yaw=app.cameras[3].yaw;
+                rightDrag(false,false);
+                requireExport(std::abs(app.cameras[3].yaw-yaw)>.1f,"right drag rotates the creation camera");
+                const float pan=app.cameras[3].panX;
+                rightDrag(true,false);
+                requireExport(std::abs(app.cameras[3].panX-pan)>.001f,"Alt right drag pans the camera");
+                app.selectCreationAtom(0,false);
+                const Atom original=app.source.atoms[0];
+                const size_t undoCount=app.authorUndo.size();
+                rightDrag(true,true); settlePipeline();
+                requireExport(app.authorUndo.size()==undoCount+1 &&
+                              (std::abs(app.source.atoms[0].x-original.x)>.001f ||
+                               std::abs(app.source.atoms[0].y-original.y)>.001f),
+                              "Shift Alt right drag moves selected atoms in one undo step");
+                app.history(false); settlePipeline();
+                requireExport(app.source.atoms[0].x==original.x && app.source.atoms[0].y==original.y &&
+                              app.source.atoms[0].z==original.z,"undo restores the dragged position exactly");
+                app.editStructure("rotation fixture",[](Dataset &data) {
+                    auto atom=data.atoms[0]; atom.x+=1; data.atoms.push_back(atom);
+                }); settlePipeline();
+                app.creationSelection={0,1}; app.creationPick=0;
+                const double separation=authoring::distance(app.source,0,1);
+                const auto spinStart=app.source.atoms[1];
+                const size_t spinUndo=app.authorUndo.size();
+                rightDrag(false,true); settlePipeline();
+                requireExport(app.authorUndo.size()==spinUndo+1 &&
+                              std::abs(authoring::distance(app.source,0,1)-separation)<1e-5 &&
+                              (std::abs(app.source.atoms[1].y-spinStart.y)>.001 ||
+                               std::abs(app.source.atoms[1].z-spinStart.z)>.001),
+                              "Shift right drag rotates a group rigidly in one history step");
+                app.history(false); settlePipeline();
+                app.history(false); settlePipeline();
+                app.selectCreationAtom(0,false); frame();
+                click("creation.edit-position");
+                app.creationPositionFractional=true;
+                app.creationPositionDraft[0]=.25f; app.creationPositionDraft[1]=.5f;
+                app.creationPositionDraft[2]=.75f; frame();
+                const size_t positionUndo=app.authorUndo.size();
+                click("creation.position-apply"); settlePipeline();
+                requireExport(app.authorUndo.size()==positionUndo+1 &&
+                              app.source.atoms[0].x==1 && app.source.atoms[0].y==2 &&
+                              app.source.atoms[0].z==3,
+                              "coordinate dialog applies fractional coordinates as one undo step");
+                app.history(false); settlePipeline();
+                app.selectCreationAtom(0,false);
+                app.selectCreationAtom(0,true);
+                requireExport(app.creationSelection.size()==1,"Shift adds without deselecting an existing atom");
+                app.selectCreationAtom(0,true,true);
+                requireExport(app.creationSelection.empty(),"Ctrl toggles an existing atom off");
+                guiIO.AddMousePosEvent(x,y); frame();
+                guiIO.AddMouseButtonEvent(1,true); frame();
+                guiIO.AddMouseButtonEvent(1,false); frame();
+                requireExport(!ImGui::GetCurrentContext()->OpenPopupStack.empty(),
+                              "stationary right click opens the context menu on release");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true); frame();
+                guiIO.AddKeyEvent(ImGuiKey_Escape,false); frame();
+            }
             click("creation.properties-toggle");
             requireExport(!app.creationPropertiesOpen,"creation file properties can collapse");
             frame();

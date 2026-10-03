@@ -2808,6 +2808,33 @@ int main() {
                         unknown[1].visual[3] == 0,
                     "non-element type names keep the palette color and global radius default");
         }
+        {
+            Dataset molecule;
+            molecule.species={"C"};
+            molecule.atoms={{1,0,0,0},{0,0,0,0},{0,1,0,0},{8,8,8,0}};
+            molecule.bonds={{0,1,{}},{1,2,{}},{1,2,{}},{999,0,{}}};
+            const auto connected=authoring::fragment(molecule,0);
+            require(connected.size()==3 && std::find(connected.begin(),connected.end(),3)==connected.end(),
+                    "fragment selection traverses topology without selecting a disconnected molecule");
+            require(authoring::fragment(molecule,3)==std::vector<int>{3} &&
+                    authoring::fragment(molecule,-1).empty(),"isolated and invalid fragment seeds");
+            const auto rotated=authoring::rotatedPoint({1,0,0},{0,0,0},{0,0,2},authoring::kPi/2);
+            require(std::abs(rotated.x)<1e-6 && std::abs(rotated.y-1)<1e-6,
+                    "rigid rotation normalizes its axis and rotates about the chosen center");
+            molecule.cell={4,1,0,0,5,1,1,0,6}; molecule.origin={2,3,4};
+            const auto untouched=molecule.atoms[1];
+            require(authoring::setAtomPosition(molecule,0,{.25f,.5f,.75f},true),
+                    "fractional atom position accepts a tilted cell with an origin");
+            double a,b,c;
+            require(authoring::fractional(molecule,{molecule.atoms[0].x,molecule.atoms[0].y,molecule.atoms[0].z},a,b,c) &&
+                    std::abs(a-.25)<1e-6 && std::abs(b-.5)<1e-6 && std::abs(c-.75)<1e-6 &&
+                    molecule.atoms[1].x==untouched.x && molecule.atoms[1].y==untouched.y,
+                    "fractional edits preserve the unselected atoms");
+            require(!authoring::setAtomPosition(molecule,0,{NAN,0,0},false),"NaN position rejected");
+            molecule.cell={};
+            require(!authoring::setAtomPosition(molecule,0,{.2f,.3f,.4f},true),
+                    "singular cell rejects fractional atom editing");
+        }
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "
                      "semantics, three-axis replication, stack composition, wrap, "

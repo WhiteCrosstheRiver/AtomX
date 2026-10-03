@@ -794,7 +794,7 @@ struct App {
     // One structure per browser-style tab. The live document stays in the
     // fields above; a tab is only a snapshot taken when leaving it.
     enum class CreationTool { Select, Rotate, Pan, Move, Sketch };
-    enum class CreationDrag { None, Box, Move, Rotate, Pan, Sketch };
+    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch };
     struct CreationSnapshot {
         std::shared_ptr<const Dataset> data;
         std::string name, time;
@@ -858,8 +858,16 @@ struct App {
     CreationDrag creationDrag = CreationDrag::None;
     ImVec2 creationDragStart{}, creationDragPrevious{};
     bool creationDragMoved = false, creationDragShift = false;
+    int creationDragButton = ImGuiMouseButton_Left;
+    bool creationDragToggle = false;
     std::vector<std::pair<int,Vec3>> creationDragAtoms;
     Vec3 creationMoveDelta{};
+    Vec3 creationDragCenter{};
+    DirectX::XMMATRIX creationDragMatrix{};
+    bool creationPositionFractional = false, openCreationPosition = false;
+    int creationPositionIndex = -1;
+    uint64_t creationPositionTabId = 0;
+    float creationPositionDraft[3]{};
     int creationPick = -1;
     int creationMeasure = -1;
     int creationAngle = -1;
@@ -3763,15 +3771,30 @@ struct App {
                  tool == CreationTool::Pan ? "拖动平移" :
                  tool == CreationTool::Move ? "拖动选中原子" : "点击空白处绘制原子";
     }
-    void selectCreationAtom(int index, bool shift) {
+    void selectCreationAtom(int index, bool shift, bool toggle = false) {
         if (index < 0) { if (!shift) creationSelection.clear(); }
         else if (!shift) creationSelection = {index};
         else {
             auto found = std::find(creationSelection.begin(), creationSelection.end(), index);
             if (found == creationSelection.end()) creationSelection.push_back(index);
-            else creationSelection.erase(found);
+            else if (toggle) creationSelection.erase(found);
         }
         creationPick = creationSelection.empty() ? -1 : creationSelection.back();
+    }
+    void selectCreationFragment(int index) {
+        creationSelection=authoring::fragment(source,index);
+        creationPick=creationSelection.empty()?-1:index;
+        status="选中连接片段 · "+std::to_string(creationSelection.size())+" 个原子";
+    }
+    void requestCreationPosition() {
+        if (creationPick<0 || size_t(creationPick)>=source.atoms.size()) return;
+        creationPositionIndex=creationPick;
+        creationPositionTabId=tabs[size_t(activeTab)].id;
+        const auto &atom=source.atoms[size_t(creationPick)];
+        creationPositionDraft[0]=atom.x; creationPositionDraft[1]=atom.y;
+        creationPositionDraft[2]=atom.z;
+        creationPositionFractional=false;
+        openCreationPosition=true;
     }
     struct CreationProjection {
         DirectX::XMMATRIX view, projection, combined;
@@ -3847,10 +3870,30 @@ struct App {
         const float w=std::abs(q.w)>1e-6f?q.w:1.f;
         return {q.x/w,q.y/w,q.z/w};
     }
-    void creationPointer(ImVec2 p, ImVec2 size, Camera &cam, bool hovered) {
+    bool creationPointer(ImVec2 p, ImVec2 size, Camera &cam, bool hovered) {
         auto &io=ImGui::GetIO();
+        if (pipelineBusy || staleResult || !sameAtomCount()) {
+            // A history/tab/data change can finish while a button is held.
+            // Discard the old gesture rather than miss its single release
+            // event and retain atom indexes from an outdated document.
+            creationDrag=CreationDrag::None; creationDragAtoms.clear();
+            creationLastHoverMouse={-1,-1};
+            return false;
+        }
         const ImVec2 mouse=io.MousePos;
-        if (hovered && (mouse.x!=creationLastHoverMouse.x || mouse.y!=creationLastHoverMouse.y)) {
+        bool contextRequested=false;
+        if (creationDrag!=CreationDrag::None && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            for (const auto &[index,original]:creationDragAtoms) {
+                auto &a=result.data.atoms[size_t(index)];
+                a.x=original.x; a.y=original.y; a.z=original.z;
+            }
+            if (!creationDragAtoms.empty()) gpu.upload(result.data,result.selected,result.colorSelected);
+            creationDragAtoms.clear(); creationDrag=CreationDrag::None;
+            creationLastHoverMouse={-1,-1};
+            return false;
+        }
+        if (creationDrag==CreationDrag::None && hovered &&
+            (mouse.x!=creationLastHoverMouse.x || mouse.y!=creationLastHoverMouse.y)) {
             creationHover=creationHit(p,size,cam,mouse);
             creationLastHoverMouse=mouse;
         }
@@ -3858,15 +3901,41 @@ struct App {
             creationHover=-1;
             creationLastHoverMouse={-1,-1};
         }
-        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+        auto captureAtoms=[&]() {
+            creationDragAtoms.clear(); creationDragCenter={};
+            for (int index:creationSelection)
+                if (index>=0 && size_t(index)<source.atoms.size()) {
+                    const auto &a=source.atoms[size_t(index)];
+                    const Vec3 at{a.x,a.y,a.z};
+                    creationDragAtoms.push_back({index,at});
+                    creationDragCenter=authoring::add(creationDragCenter,at);
+                }
+            if (!creationDragAtoms.empty())
+                creationDragCenter=authoring::scale(creationDragCenter,1.0/creationDragAtoms.size());
+            creationDragMatrix=creationProjection(result.data,cam,size).combined;
+            creationMoveDelta={};
+        };
+        // MS 2020 installed Help: mouseandkeyboardactions.htm. Keep the v2
+        // middle-button orbit, and add the documented right-button gestures.
+        if (hovered && creationDrag==CreationDrag::None &&
+            (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) ||
+             ImGui::IsMouseClicked(ImGuiMouseButton_Right))) {
+            creationDragButton=ImGui::IsMouseClicked(ImGuiMouseButton_Right)
+                ? ImGuiMouseButton_Right : ImGuiMouseButton_Middle;
             creationDragStart=creationDragPrevious=mouse;
             creationDragMoved=false;
-            creationDrag=CreationDrag::Rotate;
+            if (io.KeyShift && (io.KeyAlt || creationDragButton==ImGuiMouseButton_Middle)) {
+                creationDrag=CreationDrag::Move; captureAtoms();
+            } else if (io.KeyShift) {
+                creationDrag=CreationDrag::Spin; captureAtoms();
+            } else creationDrag=io.KeyAlt?CreationDrag::Pan:CreationDrag::Rotate;
         }
-        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        if (hovered && creationDrag==CreationDrag::None && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            creationDragButton=ImGuiMouseButton_Left;
             creationDragStart=creationDragPrevious=mouse;
             creationDragMoved=false;
-            creationDragShift=io.KeyShift;
+            creationDragShift=io.KeyShift||io.KeyCtrl;
+            creationDragToggle=io.KeyCtrl;
             const int hit=creationHit(p,size,cam,mouse);
             if (creationTool==CreationTool::Rotate) creationDrag=CreationDrag::Rotate;
             else if (creationTool==CreationTool::Pan) creationDrag=CreationDrag::Pan;
@@ -3874,20 +3943,18 @@ struct App {
                 if (std::find(creationSelection.begin(),creationSelection.end(),hit)==creationSelection.end())
                     selectCreationAtom(hit,false);
                 creationDrag=CreationDrag::Move;
-                creationDragAtoms.clear();
-                for (int selected : creationSelection)
-                    if (selected>=0 && size_t(selected)<source.atoms.size()) {
-                        const auto &a=source.atoms[size_t(selected)];
-                        creationDragAtoms.push_back({selected,{a.x,a.y,a.z}});
-                    }
-                creationMoveDelta={};
+                captureAtoms();
             } else if (creationTool==CreationTool::Move) creationDrag=CreationDrag::Rotate;
             else if (creationTool==CreationTool::Sketch && hit<0) creationDrag=CreationDrag::Sketch;
-            else if (hit>=0) { selectCreationAtom(hit,io.KeyShift); creationDrag=CreationDrag::None; }
-            else { if (!io.KeyShift) selectCreationAtom(-1,false); creationDrag=CreationDrag::Box; }
+            else if (hit>=0) {
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) selectCreationFragment(hit);
+                else selectCreationAtom(hit,io.KeyShift||io.KeyCtrl,io.KeyCtrl);
+                creationDrag=CreationDrag::None;
+            }
+            else { if (!creationDragShift) selectCreationAtom(-1,false); creationDrag=CreationDrag::Box; }
         }
         if (creationDrag!=CreationDrag::None &&
-            (ImGui::IsMouseDown(ImGuiMouseButton_Left)||ImGui::IsMouseDown(ImGuiMouseButton_Middle))) {
+            ImGui::IsMouseDown(creationDragButton)) {
             if (std::abs(mouse.x-creationDragStart.x)+std::abs(mouse.y-creationDragStart.y)>U(3))
                 creationDragMoved=true;
             const float dx=mouse.x-creationDragPrevious.x,dy=mouse.y-creationDragPrevious.y;
@@ -3901,14 +3968,27 @@ struct App {
                 cam.panX+=dx/std::max(size.x,1.f)*cam.zoom;
                 cam.panY-=dy/std::max(size.y,1.f)*cam.zoom;
             } else if (creationDrag==CreationDrag::Move && creationDragMoved && !creationDragAtoms.empty()) {
-                const auto matrix=creationProjection(result.data,cam,size).combined;
+                const auto matrix=creationDragMatrix;
                 const auto &anchor=creationDragAtoms.front().second;
                 DirectX::XMFLOAT4 q;
                 DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
                     DirectX::XMVectorSet(anchor.x,anchor.y,anchor.z,1),matrix));
                 if (q.w>0) {
                     const auto a=creationWorldAt(creationDragStart,q.z/q.w,p,size,matrix);
-                    const auto b=creationWorldAt(mouse,q.z/q.w,p,size,matrix);
+                    ImVec2 constrained=mouse;
+                    if (ImGui::IsKeyDown(ImGuiKey_X)) constrained.y=creationDragStart.y;
+                    if (ImGui::IsKeyDown(ImGuiKey_Y)) constrained.x=creationDragStart.x;
+                    auto b=creationWorldAt(constrained,q.z/q.w,p,size,matrix);
+                    if (ImGui::IsKeyDown(ImGuiKey_Z)) {
+                        const auto projected=creationProjection(source,cam,size);
+                        DirectX::XMFLOAT3 axis;
+                        DirectX::XMStoreFloat3(&axis,DirectX::XMVector3TransformNormal(
+                            DirectX::XMVectorSet(0,0,1,0),DirectX::XMMatrixInverse(nullptr,projected.view)));
+                        const auto extent=creationWorldAt({creationDragStart.x+U(100),creationDragStart.y},q.z/q.w,p,size,matrix);
+                        const auto delta=authoring::scale({axis.x,axis.y,axis.z},
+                            (mouse.y-creationDragStart.y)/U(100)*authoring::length(authoring::sub(extent,a)));
+                        b=authoring::add(a,delta);
+                    }
                     creationMoveDelta={b.x-a.x,b.y-a.y,b.z-a.z};
                     for (const auto &[index,original]:creationDragAtoms) {
                         auto &atom=result.data.atoms[size_t(index)];
@@ -3916,13 +3996,40 @@ struct App {
                         atom.y=original.y+creationMoveDelta.y;
                         atom.z=original.z+creationMoveDelta.z;
                     }
-                    gpu.upload(result.data,result.selected,result.colorSelected);
+                    if (dx!=0 || dy!=0) gpu.upload(result.data,result.selected,result.colorSelected);
                 }
+            } else if (creationDrag==CreationDrag::Spin && creationDragMoved && !creationDragAtoms.empty()) {
+                const auto projected=creationProjection(source,cam,size);
+                const auto inverseView=DirectX::XMMatrixInverse(nullptr,projected.view);
+                auto worldAxis=[&](float x,float y,float z) {
+                    DirectX::XMFLOAT3 axis;
+                    DirectX::XMStoreFloat3(&axis,DirectX::XMVector3TransformNormal(
+                        DirectX::XMVectorSet(x,y,z,0),inverseView));
+                    return Vec3{axis.x,axis.y,axis.z};
+                };
+                const double ax=(mouse.y-creationDragStart.y)*.008;
+                const double ay=(mouse.x-creationDragStart.x)*.008;
+                for (const auto &[index,original]:creationDragAtoms) {
+                    Vec3 at=original;
+                    if (ImGui::IsKeyDown(ImGuiKey_Z))
+                        at=authoring::rotatedPoint(at,creationDragCenter,worldAxis(0,0,1),ay);
+                    else {
+                        if (!ImGui::IsKeyDown(ImGuiKey_Y))
+                            at=authoring::rotatedPoint(at,creationDragCenter,worldAxis(1,0,0),ax);
+                        if (!ImGui::IsKeyDown(ImGuiKey_X))
+                            at=authoring::rotatedPoint(at,creationDragCenter,worldAxis(0,1,0),ay);
+                    }
+                    auto &atom=result.data.atoms[size_t(index)];
+                    atom.x=at.x; atom.y=at.y; atom.z=at.z;
+                }
+                if (dx!=0 || dy!=0) gpu.upload(result.data,result.selected,result.colorSelected);
             }
             creationDragPrevious=mouse;
         }
         if (creationDrag!=CreationDrag::None &&
-            (ImGui::IsMouseReleased(ImGuiMouseButton_Left)||ImGui::IsMouseReleased(ImGuiMouseButton_Middle))) {
+            ImGui::IsMouseReleased(creationDragButton)) {
+            contextRequested=creationDragButton==ImGuiMouseButton_Right &&
+                !creationDragMoved && !io.KeyAlt && !io.KeyShift;
             if (creationDrag==CreationDrag::Box && creationDragMoved) {
                 const auto matrix=creationProjection(result.data,cam,size).combined;
                 const float x0=std::min(creationDragStart.x,mouse.x),x1=std::max(creationDragStart.x,mouse.x);
@@ -3938,19 +4045,32 @@ struct App {
                         DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),matrix));
                     if (q.w<=0||q.z<=0) continue;
                     const float x=p.x+(q.x/q.w+1)*size.x*.5f,y=p.y+(1-q.y/q.w)*size.y*.5f;
-                    if (x>=x0&&x<=x1&&y>=y0&&y<=y1 && !already[index]) {
-                        creationSelection.push_back(int(index));
-                        already[index]=1;
-                    }
+                    if (x>=x0&&x<=x1&&y>=y0&&y<=y1)
+                        already[index]=creationDragToggle?!already[index]:1;
                 }
+                creationSelection.clear();
+                for (size_t index=0;index<already.size();++index)
+                    if (already[index]) creationSelection.push_back(int(index));
                 creationPick=creationSelection.empty()?-1:creationSelection.back();
-            } else if (creationDrag==CreationDrag::Move && creationDragMoved) {
+            } else if (creationDrag==CreationDrag::Move && creationDragMoved && !creationDragAtoms.empty()) {
                 const auto edits=creationDragAtoms;
                 const auto delta=creationMoveDelta;
                 editStructure("移动 " + std::to_string(edits.size()) + " 个原子",[&](Dataset &data) {
                     for (const auto &[index,original]:edits) {
                         auto &atom=data.atoms[size_t(index)];
                         atom.x=original.x+delta.x; atom.y=original.y+delta.y; atom.z=original.z+delta.z;
+                    }
+                });
+            } else if (creationDrag==CreationDrag::Spin && creationDragMoved && !creationDragAtoms.empty()) {
+                std::vector<std::pair<int,Vec3>> positions;
+                for (const auto &[index,original]:creationDragAtoms) {
+                    (void)original;
+                    const auto &a=result.data.atoms[size_t(index)];
+                    positions.push_back({index,{a.x,a.y,a.z}});
+                }
+                editStructure("旋转 "+std::to_string(positions.size())+" 个原子",[&](Dataset &data) {
+                    for (const auto &[index,at]:positions) {
+                        auto &a=data.atoms[size_t(index)]; a.x=at.x; a.y=at.y; a.z=at.z;
                     }
                 });
             } else if (creationDrag==CreationDrag::Sketch && !creationDragMoved) {
@@ -3963,6 +4083,7 @@ struct App {
             }
             creationDrag=CreationDrag::None;
             creationDragAtoms.clear();
+            creationLastHoverMouse={-1,-1};
         }
         if (hovered) {
             if (creationHover>=0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -3973,6 +4094,7 @@ struct App {
             else if (creationTool==CreationTool::Sketch)
                 g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
         }
+        return contextRequested;
     }
     void viewport(int i, float w, float h) {
         ImGui::PushID(i);
@@ -4003,11 +4125,19 @@ struct App {
                 gpu.styles[type].visual[0] = originalRadii[type];
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         const bool viewportHovered = ImGui::IsItemHovered();
-        if (creationMode) creationPointer(p,avail,cam,viewportHovered);
+        if (creationMode) recordUiTestItem("creation.viewport","creation.viewport");
+        const bool creationContextRequested=creationMode && creationPointer(p,avail,cam,viewportHovered);
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
                 active = i;
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            const auto &io=ImGui::GetIO();
+            const auto rightStart=io.MouseClickedPos[ImGuiMouseButton_Right];
+            const bool viewContextRequested=!creationMode &&
+                ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+                io.MouseDragMaxDistanceSqr[ImGuiMouseButton_Right]<U(3)*U(3) &&
+                rightStart.x>=p.x && rightStart.x<=p.x+avail.x &&
+                rightStart.y>=p.y && rightStart.y<=p.y+avail.y;
+            if (creationContextRequested || viewContextRequested) {
                 if (creationMode && creationHover>=0 &&
                     std::find(creationSelection.begin(),creationSelection.end(),creationHover)==creationSelection.end())
                     selectCreationAtom(creationHover,false);
@@ -4265,6 +4395,23 @@ struct App {
                         if (source.atoms[index].type==type) creationSelection.push_back(int(index));
                     creationPick=creationSelection.empty()?-1:creationSelection.back();
                 }
+                if (ImGui::MenuItem("选中连接片段",nullptr,false,creationPick>=0))
+                    selectCreationFragment(creationPick);
+                if (ImGui::MenuItem("编辑坐标...",nullptr,false,creationPick>=0)) requestCreationPosition();
+                if (ImGui::MenuItem("反选")) {
+                    std::vector<uint8_t> selected(source.atoms.size(),0);
+                    for (int index:creationSelection)
+                        if (index>=0 && size_t(index)<selected.size()) selected[size_t(index)]=1;
+                    creationSelection.clear();
+                    for (size_t index=0;index<selected.size();++index)
+                        if (!selected[index]) creationSelection.push_back(int(index));
+                    creationPick=creationSelection.empty()?-1:creationSelection.back();
+                }
+                ImGui::Separator();
+                ImGui::TextDisabled("右键拖动旋转 · Alt+右键平移");
+                ImGui::TextDisabled("Shift+Alt+右键移动选中原子");
+                ImGui::TextDisabled("Shift+右键旋转选中原子 · X/Y/Z 约束");
+                ImGui::Separator();
                 if (ImGui::MenuItem("在此添加原子")) {
                     chooseCreationTool(CreationTool::Sketch);
                     status="在空白处点击以添加原子";
@@ -5264,6 +5411,53 @@ struct App {
         ImGui::End();
     }
     void creationDialogs() {
+        if (openCreationPosition) {
+            ImGui::OpenPopup("编辑原子坐标"); openCreationPosition=false;
+        }
+        if (ImGui::BeginPopupModal("编辑原子坐标",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            const bool validDocument=creationMode && activeTab>=0 && activeTab<int(tabs.size()) &&
+                tabs[size_t(activeTab)].id==creationPositionTabId && creationPositionIndex>=0 &&
+                size_t(creationPositionIndex)<source.atoms.size();
+            ImGui::Text("Atom #%d",creationPositionIndex);
+            double a=0,b=0,c=0;
+            const bool hasCell=validDocument && authoring::fractional(source,{},a,b,c);
+            ImGui::BeginDisabled(!hasCell);
+            if (ImGui::Checkbox("分数坐标",&creationPositionFractional)) {
+                const Vec3 draft{creationPositionDraft[0],creationPositionDraft[1],creationPositionDraft[2]};
+                Vec3 converted;
+                if (creationPositionFractional) {
+                    authoring::fractional(source,draft,a,b,c);
+                    converted={float(a),float(b),float(c)};
+                } else converted=authoring::cartesian(source,draft.x,draft.y,draft.z);
+                creationPositionDraft[0]=converted.x; creationPositionDraft[1]=converted.y;
+                creationPositionDraft[2]=converted.z;
+            }
+            ImGui::EndDisabled();
+            ImGui::SetNextItemWidth(U(340));
+            ImGui::InputFloat3(creationPositionFractional?"a / b / c":"X / Y / Z (Å)",
+                creationPositionDraft,"%.6f");
+            recordUiTestItem("creation.position-values");
+            ImGui::TextDisabled("应用后记录一步历史 · 撤销可恢复");
+            const Vec3 position{creationPositionDraft[0],creationPositionDraft[1],creationPositionDraft[2]};
+            const bool finite=std::isfinite(position.x)&&std::isfinite(position.y)&&std::isfinite(position.z);
+            if (!finite) ImGui::TextUnformatted("请输入有限数值");
+            const Vec3 cart=creationPositionFractional?
+                authoring::cartesian(source,position.x,position.y,position.z):position;
+            const bool finiteCartesian=std::isfinite(cart.x)&&std::isfinite(cart.y)&&std::isfinite(cart.z);
+            ImGui::BeginDisabled(!validDocument || !finite || !finiteCartesian || documentsBusy());
+            if (ImGui::Button("应用",{U(100),0})) {
+                const int index=creationPositionIndex;
+                editStructure("编辑原子坐标",[&](Dataset &data) {
+                    authoring::setAtomPosition(data,index,position,creationPositionFractional);
+                });
+                creationPick=index;
+                ImGui::CloseCurrentPopup();
+            }
+            recordUiTestItem("creation.position-apply");
+            ImGui::EndDisabled(); ImGui::SameLine();
+            if (ImGui::Button("取消",{U(100),0})) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
         if (openCrystalDialog) {
             if (crystalBasis.empty()) configureCrystalPreset(crystalPreset);
             crystalReplaceCurrent=creationMode;
@@ -5670,17 +5864,12 @@ struct App {
             colorSwatch(typeColor(atom.type));
             ImGui::SameLine();
             ImGui::Text("%s  Atom #%d", symbol, creationPick);
-            float position[3] = {atom.x, atom.y, atom.z};
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::InputFloat3("Position (A)", position, "%.4f")) {
-                const int index = creationPick;
-                editStructure("Moved atom " + std::to_string(index), [&](Dataset &data) {
-                    data.atoms[size_t(index)].x = position[0];
-                    data.atoms[size_t(index)].y = position[1];
-                    data.atoms[size_t(index)].z = position[2];
-                });
-                creationPick = index;
-            }
+            ImGui::Text("Position (Å)  %.4f  %.4f  %.4f",atom.x,atom.y,atom.z);
+            double fa=0,fb=0,fc=0;
+            if (authoring::fractional(source,{atom.x,atom.y,atom.z},fa,fb,fc))
+                ImGui::TextDisabled("Fractional  %.4f  %.4f  %.4f",fa,fb,fc);
+            if (ImGui::Button("编辑坐标...",{-1,U(28)})) requestCreationPosition();
+            recordUiTestItem("creation.edit-position");
             ImGui::TextDisabled("Replace element");
             int elementIndex=0;
             for (const char *element : {"H", "C", "N", "O", "Si", "Fe", "Cu", "Ni"}) {
@@ -7842,7 +8031,7 @@ struct App {
         if (creationMode) {
             ImGui::TextColored({0.29f,0.87f,0.51f,1},"创作");
             ImGui::SameLine();
-            ImGui::TextDisabled("点击选择 · Shift 多选 · 拖动框选 · 中键旋转 · 滚轮缩放 · Del 删除");
+            ImGui::TextDisabled("点击选择 · Shift 添加 · Ctrl 切换 · 双击片段 · 右键/中键旋转 · Alt+右键平移 · 滚轮缩放");
             ImGui::SameLine(std::max(U(900),w-U(370)));
             ImGui::TextDisabled("%zu 原子 · 选中 %zu  单位 Å (1 Å = 0.1 nm)",
                 source.atoms.size(),creationSelection.size());
@@ -7915,6 +8104,7 @@ struct App {
         if (creationMode && ImGui::IsKeyPressed(ImGuiKey_Delete) && !io.WantTextInput)
             deletePickedAtom();
         if (creationMode && !io.WantTextInput) {
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) selectCreationAtom(-1,false);
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A)) {
                 creationSelection.clear();
                 for (size_t index=0;index<source.atoms.size();++index)
