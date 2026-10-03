@@ -275,14 +275,15 @@ int main() {
                 const auto viewport=app.uiTestItems.at("creation.viewport");
                 const float x=(viewport.min.x+viewport.max.x)*.5f;
                 const float y=(viewport.min.y+viewport.max.y)*.5f;
-                auto rightDrag=[&](bool alt,bool shift) {
+                auto rightDrag=[&](bool alt,bool shift,bool releaseWithMove=false) {
                     guiIO.AddKeyEvent(ImGuiMod_Alt,alt);
                     guiIO.AddKeyEvent(ImGuiMod_Shift,shift);
                     guiIO.AddMousePosEvent(x,y); frame();
                     guiIO.AddMouseButtonEvent(1,true); frame();
                     requireExport(ImGui::GetCurrentContext()->OpenPopupStack.empty(),
                                   "right mouse down must not open a menu and interrupt dragging");
-                    guiIO.AddMousePosEvent(x+40,y+25); frame();
+                    guiIO.AddMousePosEvent(x+40,y+25);
+                    if(!releaseWithMove) frame();
                     guiIO.AddMouseButtonEvent(1,false); frame();
                     requireExport(ImGui::GetCurrentContext()->OpenPopupStack.empty(),
                                   "right drag release must not open a context menu");
@@ -292,9 +293,15 @@ int main() {
                 const float yaw=app.cameras[3].yaw;
                 rightDrag(false,false);
                 requireExport(std::abs(app.cameras[3].yaw-yaw)>.1f,"right drag rotates the creation camera");
+                const float fastYaw=app.cameras[3].yaw;
+                rightDrag(false,false,true);
+                requireExport(std::abs(app.cameras[3].yaw-fastYaw)>.1f,"quick right drag rotates when move and release share one frame");
                 const float pan=app.cameras[3].panX;
                 rightDrag(true,false);
                 requireExport(std::abs(app.cameras[3].panX-pan)>.001f,"Alt right drag pans the camera");
+                const float fastPan=app.cameras[3].panX;
+                rightDrag(true,false,true);
+                requireExport(std::abs(app.cameras[3].panX-fastPan)>.001f,"quick Alt right drag pans when move and release share one frame");
                 app.selectCreationAtom(0,false);
                 const Atom original=app.source.atoms[0];
                 const size_t undoCount=app.authorUndo.size();
@@ -677,8 +684,17 @@ int main() {
                 guiIO.AddMousePosEvent(blank.x,blank.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
                 guiIO.AddMousePosEvent(blank.x+30,blank.y-40); frame();
                 requireExport(app.creationDrag==App::CreationDrag::Geometry && app.source.atoms[2].x==4 && app.result.data.atoms[2].x>4,"drag previews in result while source remains unchanged");
+                guiIO.AddMousePosEvent(blank.x+50,blank.y-40);
                 guiIO.AddMouseButtonEvent(0,false); frame(); settlePipeline();
-                requireExport(app.authorUndo.size()==beforeDrag+1 && authoring::distance(app.source,1,2)>3,"geometry drag commits one history step");
+                requireExport(app.authorUndo.size()==beforeDrag+1 &&
+                    std::abs(authoring::distance(app.source,1,2)-(3+.9/U(1)))<1e-4,
+                    "geometry drag commits final release position in one history step");
+                app.history(false); settlePipeline(); frame();
+                guiIO.AddMousePosEvent(blank.x,blank.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                guiIO.AddMousePosEvent(blank.x+20,blank.y-20); guiIO.AddMouseButtonEvent(0,false); frame(); settlePipeline();
+                requireExport(app.authorUndo.size()==beforeDrag+1 &&
+                    std::abs(authoring::distance(app.source,1,2)-(3+.4/U(1)))<1e-4 && app.source.atoms[1].x==1,
+                    "short geometry drag with move and release in one frame changes only moving side");
                 app.history(false); settlePipeline(); frame();
                 guiIO.AddKeyEvent(ImGuiMod_Alt,true); frame();
                 guiIO.AddMousePosEvent(blank.x,blank.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();

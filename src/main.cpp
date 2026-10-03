@@ -5079,7 +5079,9 @@ struct App {
             else { if (!creationDragShift) selectCreationAtom(-1,false); creationDrag=CreationDrag::Box; }
         }
         if (creationDrag!=CreationDrag::None &&
-            ImGui::IsMouseDown(creationDragButton)) {
+            (ImGui::IsMouseDown(creationDragButton) || ImGui::IsMouseReleased(creationDragButton))) {
+            // Windows may deliver the last move and release in the same frame.
+            // Apply that final position before committing/canceling the gesture.
             if (std::abs(mouse.x-creationDragStart.x)+std::abs(mouse.y-creationDragStart.y)>U(3))
                 creationDragMoved=true;
             const float dx=mouse.x-creationDragPrevious.x,dy=mouse.y-creationDragPrevious.y;
