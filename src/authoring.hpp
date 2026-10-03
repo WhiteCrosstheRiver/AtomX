@@ -66,6 +66,45 @@ inline Vec3 rotatedPoint(Vec3 point, Vec3 center, Vec3 axis, double radians) {
         scale(axis,dot(axis,v)*(1-std::cos(radians)))));
 }
 
+// Validate and prepare a rigid transform before the caller records history.
+// The input is untouched, including on overflow or malformed selections.
+inline std::vector<std::pair<int,Vec3>> transformedSelection(const Dataset &data,
+        std::vector<int> selected, Vec3 translation, Vec3 axis, double degrees) {
+    auto finite=[](Vec3 v) {
+        return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);
+    };
+    if (!finite(translation)||!finite(axis)||!std::isfinite(degrees))
+        throw std::invalid_argument("位移与角度必须为有限数值");
+    if (degrees!=0 && length(axis)<1e-10)
+        throw std::invalid_argument("旋转轴不能为零");
+    std::sort(selected.begin(),selected.end());
+    selected.erase(std::unique(selected.begin(),selected.end()),selected.end());
+    double cx=0,cy=0,cz=0;
+    for (int index:selected) {
+        if (index<0 || size_t(index)>=data.atoms.size())
+            throw std::invalid_argument("选中原子已改变，请重新选择");
+        const auto &a=data.atoms[size_t(index)];
+        if (!finite({a.x,a.y,a.z})) throw std::invalid_argument("原子坐标无效");
+        cx+=a.x; cy+=a.y; cz+=a.z;
+    }
+    if (selected.empty() || (degrees==0 && length(translation)==0)) return {};
+    const Vec3 center{float(cx/selected.size()),float(cy/selected.size()),float(cz/selected.size())};
+    std::vector<std::pair<int,Vec3>> positions;
+    positions.reserve(selected.size());
+    bool changed=false;
+    for (int index:selected) {
+        const auto &a=data.atoms[size_t(index)];
+        const Vec3 original{a.x,a.y,a.z};
+        const Vec3 rotated=degrees==0?original:rotatedPoint(original,center,axis,degrees*kPi/180);
+        const Vec3 at=add(rotated,translation);
+        if (!finite(at)) throw std::invalid_argument("位移超出坐标范围");
+        changed=changed || at.x!=original.x || at.y!=original.y || at.z!=original.z;
+        positions.push_back({index,at});
+    }
+    if (!changed) return {};
+    return positions;
+}
+
 struct LatticeParameters {
     double a = 0, b = 0, c = 0;
     double alpha = 90, beta = 90, gamma = 90;

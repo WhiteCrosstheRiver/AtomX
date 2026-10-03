@@ -2821,6 +2821,24 @@ int main() {
             const auto rotated=authoring::rotatedPoint({1,0,0},{0,0,0},{0,0,2},authoring::kPi/2);
             require(std::abs(rotated.x)<1e-6 && std::abs(rotated.y-1)<1e-6,
                     "rigid rotation normalizes its axis and rotates about the chosen center");
+            const auto translated=authoring::transformedSelection(molecule,{0,1,0},{2,-1,3},{},0);
+            require(translated.size()==2 && translated[0].second.x==3 && translated[1].second.y==-1 &&
+                    molecule.atoms[0].x==1 && molecule.atoms[2].y==1,
+                    "rigid transform deduplicates selection, prepares exact offsets, and leaves source untouched");
+            const auto spun=authoring::transformedSelection(molecule,{0,1},{},{0,0,1},90);
+            require(std::abs(spun[0].second.x-.5)<1e-6 && std::abs(spun[0].second.y-.5)<1e-6 &&
+                    std::abs(spun[1].second.x-.5)<1e-6 && std::abs(spun[1].second.y+.5)<1e-6,
+                    "group rotation uses its own geometric center rather than the cell origin");
+            require(authoring::transformedSelection(molecule,{0},{},{0,0,1},45).empty(),
+                    "rotating a single atom about itself creates no redundant edit");
+            bool invalidTransform=false;
+            try { (void)authoring::transformedSelection(molecule,{0,999},{1,0,0},{},0); }
+            catch (const std::invalid_argument &) { invalidTransform=true; }
+            require(invalidTransform && molecule.atoms[0].x==1,"invalid transform cannot partially change atoms");
+            invalidTransform=false;
+            try { (void)authoring::transformedSelection(molecule,{0,1},{},{},NAN); }
+            catch (const std::invalid_argument &) { invalidTransform=true; }
+            require(invalidTransform,"non-finite rotation rejected before history or data changes");
             molecule.cell={4,1,0,0,5,1,1,0,6}; molecule.origin={2,3,4};
             const auto untouched=molecule.atoms[1];
             require(authoring::setAtomPosition(molecule,0,{.25f,.5f,.75f},true),

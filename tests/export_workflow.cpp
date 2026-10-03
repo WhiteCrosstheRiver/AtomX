@@ -344,6 +344,81 @@ int main() {
                 guiIO.AddKeyEvent(ImGuiKey_Escape,true); frame();
                 guiIO.AddKeyEvent(ImGuiKey_Escape,false); frame();
             }
+            {
+                app.editStructure("movement fixture",[](Dataset &data) {
+                    auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
+                    atom.x+=2; data.atoms.push_back(atom);
+                }); settlePipeline();
+                app.creationSelection={0,1}; app.creationPick=0; frame();
+                const auto a=app.source.atoms[0], b=app.source.atoms[1], outside=app.source.atoms[2];
+                const auto crystal=app.source.cell;
+                click("creation.edit-movement"); frame();
+                requireExport(app.creationMovementAngle==45,"movement dialog defaults to the MS 45 degree step");
+                click("creation.movement-world-axes");
+                app.creationMovementDistance=1.25f; frame();
+                const size_t undo=app.authorUndo.size();
+                click("creation.movement-right"); settlePipeline();
+                requireExport(app.authorUndo.size()==undo+1 && app.source.atoms[0].x==a.x+1.25f &&
+                              app.source.atoms[1].x==b.x+1.25f && app.source.atoms[2].x==outside.x &&
+                              app.source.cell==crystal,"precise group translation preserves unselected atoms and cell");
+                app.creationMovementAngle=90; frame();
+                click("creation.movement-rotate-z"); settlePipeline();
+                requireExport(app.authorUndo.size()==undo+2 &&
+                              std::abs(app.source.atoms[0].x-(a.x+2.25f))<1e-5 &&
+                              std::abs(app.source.atoms[0].y-(a.y-1.f))<1e-5 &&
+                              std::abs(app.source.atoms[1].y-(b.y+1.f))<1e-5 &&
+                              app.source.atoms[2].x==outside.x,
+                              "precise 90 degree rotation is about the selected group center");
+                guiIO.AddKeyEvent(ImGuiMod_Ctrl,true);
+                guiIO.AddKeyEvent(ImGuiKey_D,true); frame();
+                guiIO.AddKeyEvent(ImGuiKey_D,false);
+                guiIO.AddKeyEvent(ImGuiMod_Ctrl,false); frame();
+                requireExport(app.creationSelection.size()==2,"modal editor owns shortcuts and preserves selection");
+                click("creation.movement-close");
+                app.history(false); settlePipeline();
+                app.history(false); settlePipeline();
+                requireExport(app.source.atoms[0].x==a.x && app.source.atoms[1].x==b.x &&
+                              app.source.atoms[0].y==a.y,"precise transformation undo restores exact coordinates");
+                app.creationSelection={0,1}; app.creationPick=0; frame();
+                click("creation.edit-movement"); frame();
+                click("creation.movement-screen-axes");
+                app.creationMovementDistance=10; frame();
+                click("creation.movement-percent");
+                const float span=app.creationMovementScreenSpan;
+                const auto screenAxis=app.creationMovementAxes[0];
+                click("creation.movement-right"); settlePipeline();
+                const auto moved=app.source.atoms[0];
+                requireExport(span>0 && std::abs(moved.x-a.x-screenAxis.x*span*.1f)<1e-5 &&
+                              std::abs(moved.y-a.y-screenAxis.y*span*.1f)<1e-5 &&
+                              std::abs(moved.z-a.z-screenAxis.z*span*.1f)<1e-5,
+                              "screen percentage movement follows the camera at the selected center depth");
+                const auto depthAxis=app.creationMovementAxes[2];
+                click("creation.movement-in"); settlePipeline();
+                const auto inward=app.source.atoms[0];
+                requireExport(std::abs(inward.x-moved.x+depthAxis.x*span*.1f)<1e-5 &&
+                              std::abs(inward.y-moved.y+depthAxis.y*span*.1f)<1e-5 &&
+                              std::abs(inward.z-moved.z+depthAxis.z*span*.1f)<1e-5,
+                              "inward screen movement travels away from the viewer in a right handed camera");
+                click("creation.movement-out"); settlePipeline();
+                requireExport(std::abs(app.source.atoms[0].x-moved.x)<1e-5 &&
+                              std::abs(app.source.atoms[0].y-moved.y)<1e-5 &&
+                              std::abs(app.source.atoms[0].z-moved.z)<1e-5,
+                              "outward screen movement reverses inward movement");
+                app.creationMovementDistance=NAN; frame();
+                const size_t beforeInvalid=app.authorUndo.size();
+                const auto disabledMove=app.uiTestItems.at("creation.movement-right");
+                guiIO.AddMousePosEvent((disabledMove.min.x+disabledMove.max.x)*.5f,
+                                      (disabledMove.min.y+disabledMove.max.y)*.5f); frame();
+                guiIO.AddMouseButtonEvent(0,true); frame();
+                guiIO.AddMouseButtonEvent(0,false); frame();
+                requireExport(app.authorUndo.size()==beforeInvalid,"invalid movement step is disabled without history");
+                click("creation.movement-close");
+                app.history(false); settlePipeline();
+                app.history(false); settlePipeline();
+                app.history(false); settlePipeline();
+                app.history(false); settlePipeline();
+                requireExport(app.source.atoms.size()==originalAtomCount,"movement fixture cleanup restores original structure");
+            }
             click("creation.properties-toggle");
             requireExport(!app.creationPropertiesOpen,"creation file properties can collapse");
             frame();

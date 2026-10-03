@@ -868,6 +868,15 @@ struct App {
     int creationPositionIndex = -1;
     uint64_t creationPositionTabId = 0;
     float creationPositionDraft[3]{};
+    bool openCreationMovement = false, creationMovementScreenAxes = true;
+    bool creationMovementPercent = false;
+    float creationMovementDistance = 1.f, creationMovementAngle = 45.f;
+    uint64_t creationMovementTabId = 0;
+    std::vector<int> creationMovementSelection;
+    Vec3 creationMovementAxes[3]{};
+    float creationMovementScreenSpan = 0;
+    ImVec2 creationViewportSize{};
+    std::string creationMovementMessage;
     int creationPick = -1;
     int creationMeasure = -1;
     int creationAngle = -1;
@@ -3796,6 +3805,61 @@ struct App {
         creationPositionFractional=false;
         openCreationPosition=true;
     }
+    void requestCreationMovement() {
+        if (!creationMode || creationSelection.empty() || documentsBusy()) return;
+        creationMovementSelection=creationSelection;
+        creationMovementTabId=tabs[size_t(activeTab)].id;
+        creationMovementMessage.clear();
+        const auto projection=creationProjection(source,cameras[3],creationViewportSize);
+        const auto inverseView=DirectX::XMMatrixInverse(nullptr,projection.view);
+        for (int axis=0;axis<3;++axis) {
+            DirectX::XMFLOAT3 direction;
+            DirectX::XMStoreFloat3(&direction,DirectX::XMVector3TransformNormal(
+                DirectX::XMVectorSet(axis==0?1.f:0.f,axis==1?1.f:0.f,axis==2?1.f:0.f,0),inverseView));
+            creationMovementAxes[axis]={direction.x,direction.y,direction.z};
+        }
+        double x=0,y=0,z=0;
+        for (int index:creationMovementSelection) {
+            if (index<0 || size_t(index)>=source.atoms.size()) return;
+            const auto &atom=source.atoms[size_t(index)]; x+=atom.x; y+=atom.y; z+=atom.z;
+        }
+        const double count=double(creationMovementSelection.size());
+        DirectX::XMFLOAT4 q;
+        DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+            DirectX::XMVectorSet(float(x/count),float(y/count),float(z/count),1),projection.combined));
+        creationMovementScreenSpan=0;
+        if (q.w>0 && creationViewportSize.x>0 && creationViewportSize.y>0) {
+            const float extent=std::min(creationViewportSize.x,creationViewportSize.y);
+            const auto a=creationWorldAt({0,0},q.z/q.w,{},creationViewportSize,projection.combined);
+            const auto b=creationWorldAt({extent,0},q.z/q.w,{},creationViewportSize,projection.combined);
+            creationMovementScreenSpan=float(authoring::length(authoring::sub(b,a)));
+        }
+        openCreationMovement=true;
+    }
+    bool validCreationMovement() const {
+        return creationMode && activeTab>=0 && activeTab<int(tabs.size()) &&
+            tabs[size_t(activeTab)].id==creationMovementTabId && !creationMovementSelection.empty();
+    }
+    void applyCreationMovement(int axis, int direction, bool rotate) {
+        if (!validCreationMovement() || documentsBusy() || axis<0 || axis>2) return;
+        Vec3 vector=creationMovementScreenAxes?creationMovementAxes[axis]:
+            Vec3{axis==0?1.f:0.f,axis==1?1.f:0.f,axis==2?1.f:0.f};
+        const double step=creationMovementPercent?
+            double(creationMovementDistance)*creationMovementScreenSpan/100:creationMovementDistance;
+        try {
+            const auto positions=authoring::transformedSelection(source,creationMovementSelection,
+                rotate?Vec3{}:authoring::scale(vector,step*direction),
+                rotate?vector:Vec3{},rotate?double(creationMovementAngle)*direction:0);
+            if (positions.empty()) { creationMovementMessage="坐标未改变"; return; }
+            const std::string message=(rotate?"精准旋转 ":"精准移动 ")+std::to_string(positions.size())+" 个原子";
+            editStructure(message,[&](Dataset &data) {
+                for (const auto &[index,at]:positions) {
+                    auto &atom=data.atoms[size_t(index)]; atom.x=at.x; atom.y=at.y; atom.z=at.z;
+                }
+            });
+            creationMovementMessage=message+" · 已记录一步历史";
+        } catch (const std::exception &e) { creationMovementMessage=e.what(); }
+    }
     struct CreationProjection {
         DirectX::XMMATRIX view, projection, combined;
     };
@@ -4124,6 +4188,7 @@ struct App {
             for (size_t type = 0; type < originalRadii.size(); ++type)
                 gpu.styles[type].visual[0] = originalRadii[type];
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
+        if (creationMode) creationViewportSize=avail;
         const bool viewportHovered = ImGui::IsItemHovered();
         if (creationMode) recordUiTestItem("creation.viewport","creation.viewport");
         const bool creationContextRequested=creationMode && creationPointer(p,avail,cam,viewportHovered);
@@ -4398,6 +4463,8 @@ struct App {
                 if (ImGui::MenuItem("选中连接片段",nullptr,false,creationPick>=0))
                     selectCreationFragment(creationPick);
                 if (ImGui::MenuItem("编辑坐标...",nullptr,false,creationPick>=0)) requestCreationPosition();
+                if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty()))
+                    requestCreationMovement();
                 if (ImGui::MenuItem("反选")) {
                     std::vector<uint8_t> selected(source.atoms.size(),0);
                     for (int index:creationSelection)
@@ -5411,6 +5478,64 @@ struct App {
         ImGui::End();
     }
     void creationDialogs() {
+        if (openCreationMovement) {
+            ImGui::OpenPopup("精准移动 / 旋转"); openCreationMovement=false;
+        }
+        if (ImGui::BeginPopupModal("精准移动 / 旋转",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("选中 %zu 个原子",creationMovementSelection.size());
+            ImGui::TextDisabled("绕选中原子的几何中心旋转 · 不移动晶胞");
+            if (ImGui::RadioButton("屏幕轴",creationMovementScreenAxes)) creationMovementScreenAxes=true;
+            recordUiTestItem("creation.movement-screen-axes");
+            ImGui::SameLine();
+            if (ImGui::RadioButton("体系轴 XYZ",!creationMovementScreenAxes)) creationMovementScreenAxes=false;
+            recordUiTestItem("creation.movement-world-axes");
+            ImGui::SeparatorText("移动");
+            if (ImGui::RadioButton("距离 Å",!creationMovementPercent)) creationMovementPercent=false;
+            ImGui::SameLine();
+            ImGui::BeginDisabled(creationMovementScreenSpan<=0);
+            if (ImGui::RadioButton("视图比例 %",creationMovementPercent)) creationMovementPercent=true;
+            recordUiTestItem("creation.movement-percent");
+            ImGui::EndDisabled();
+            ImGui::SetNextItemWidth(U(220));
+            ImGui::InputFloat(creationMovementPercent?"步长 (%)":"步长 (Å)",&creationMovementDistance,0,0,"%.4f");
+            if (creationMovementPercent)
+                ImGui::TextDisabled("以打开窗口时视图的较短边为 100%%（选中中心所在深度）");
+            ImGui::SetNextItemWidth(U(220));
+            ImGui::InputFloat("旋转步长 (°)",&creationMovementAngle,0,0,"%.4f");
+            const bool canTranslate=std::isfinite(creationMovementDistance)&&creationMovementDistance>0 &&
+                (!creationMovementPercent || creationMovementScreenSpan>0);
+            const bool canRotate=std::isfinite(creationMovementAngle)&&creationMovementAngle>0;
+            ImGui::BeginDisabled(!validCreationMovement() || documentsBusy());
+            auto action=[&](const char *label,const char *key,int axis,int sign,bool rotate) {
+                if (ImGui::Button(label,{U(134),U(34)})) applyCreationMovement(axis,sign,rotate);
+                recordUiTestItem(key);
+            };
+            ImGui::BeginDisabled(!canTranslate);
+            action(creationMovementScreenAxes?"← 左":"-X","creation.movement-left",0,-1,false); ImGui::SameLine();
+            action(creationMovementScreenAxes?"右 →":"+X","creation.movement-right",0,1,false); ImGui::SameLine();
+            action(creationMovementScreenAxes?"↑ 上":"+Y","creation.movement-up",1,1,false);
+            action(creationMovementScreenAxes?"↓ 下":"-Y","creation.movement-down",1,-1,false); ImGui::SameLine();
+            // The right-handed view matrix has +Z toward the viewer.
+            action(creationMovementScreenAxes?"向里":"+Z","creation.movement-in",2,creationMovementScreenAxes?-1:1,false); ImGui::SameLine();
+            action(creationMovementScreenAxes?"向外":"-Z","creation.movement-out",2,creationMovementScreenAxes?1:-1,false);
+            ImGui::EndDisabled();
+            ImGui::SeparatorText("旋转（右手方向，反向使用负角度）");
+            ImGui::BeginDisabled(!canRotate);
+            action("X +角度","creation.movement-rotate-x",0,1,true); ImGui::SameLine();
+            action("Y +角度","creation.movement-rotate-y",1,1,true); ImGui::SameLine();
+            action("Z +角度","creation.movement-rotate-z",2,1,true);
+            action("X -角度","creation.movement-rotate-neg-x",0,-1,true); ImGui::SameLine();
+            action("Y -角度","creation.movement-rotate-neg-y",1,-1,true); ImGui::SameLine();
+            action("Z -角度","creation.movement-rotate-neg-z",2,-1,true);
+            ImGui::EndDisabled(); ImGui::EndDisabled();
+            if (!creationMovementMessage.empty()) ImGui::TextWrapped("%s",creationMovementMessage.c_str());
+            if (!validCreationMovement()) ImGui::TextUnformatted("原标签已改变，请关闭并重新打开");
+            ImGui::Separator();
+            if (ImGui::Button("关闭",{U(100),0}) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+                ImGui::CloseCurrentPopup();
+            recordUiTestItem("creation.movement-close");
+            ImGui::EndPopup();
+        }
         if (openCreationPosition) {
             ImGui::OpenPopup("编辑原子坐标"); openCreationPosition=false;
         }
@@ -5881,6 +6006,10 @@ struct App {
             }
             ImGui::Spacing();
             if (ImGui::Button("Delete / make vacancy", {-1, U(34)})) deletePickedAtom();
+        }
+        if (!creationSelection.empty()) {
+            if (ImGui::Button("精准移动 / 旋转...",{-1,U(32)})) requestCreationMovement();
+            recordUiTestItem("creation.edit-movement");
         }
         ImGui::Separator();
         if (headingFont) ImGui::PushFont(headingFont);
@@ -7528,6 +7657,7 @@ struct App {
         ImFontGlyphRangesBuilder chineseBuilder;
         chineseBuilder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
         chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位转换原胞对称操作识别失败三维周期晶面重排沿法向添加关闭边界编号须标准设置参数相容基元无效");
+        chineseBuilder.AddText("精准移动旋转选中原子的几何中心不移动晶胞屏幕轴体系轴距离视图比例步长角度以打开窗口时视图的较短边为选中中心所在深度上下左右向里向外右手方向反向使用负角度坐标未改变已记录一步历史原标签已改变请关闭并重新打开位移与角度必须为有限数值旋转轴不能为零选中原子已改变请重新选择原子坐标无效位移超出坐标范围连接片段分数坐标切换添加约束←→↑↓−°Å");
         static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
         chineseBuilder.AddRanges(extraRanges);
         ImVector<ImWchar> chineseRanges;
@@ -8075,6 +8205,9 @@ struct App {
             overlayStatusAt = ImGui::GetTime();
         }
         auto &io = ImGui::GetIO();
+        // Modal inputs own their keyboard shortcuts. Never delete/move atoms,
+        // switch documents, or create an undo step behind a modal editor.
+        if (!ImGui::GetTopMostPopupModal()) {
         // Menu accelerators. Ctrl+O loads per OVITO; Ctrl+Z/Y stay on undo /
         // redo; Ctrl+P focuses the Quick command search.
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T))
@@ -8119,6 +8252,7 @@ struct App {
                 if (ImGui::IsKeyPressed(ImGuiKey_P)) chooseCreationTool(CreationTool::Sketch);
             }
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) selectCreationAtom(-1,false);
+        }
         }
         if (openNewCell) {
             ImGui::OpenPopup("New Orthogonal Cell");
