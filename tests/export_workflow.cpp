@@ -1185,6 +1185,42 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("bond label fixture",[](Dataset &data) {
+                    data={};data.species={"C","O"};data.atoms={{-2,0,0,0},{0,0,0,1},{2,0,0,0}};
+                    data.bonds={{0,1,{},1},{1,2,{},2}};data.scalarProperties["Charge"]={-.2,.4,-.2};
+                });settlePipeline();app.creationSelection.clear();app.creationPick=-1;frame();
+                click("creation.edit-bond-labels");frame();click("creation.bond-label-field-1");frame();
+                const auto labelHistory=app.authorUndo.size(),generation=app.pipelineGeneration;
+                click("creation.bond-label-apply");frame();click("creation.bond-label-close");frame();
+                requireExport(app.creationDisplay.bondLabels.defaultLabel.fields.size()==2 && app.authorUndo.size()==labelHistory+1 &&
+                    !app.authorUndo.back().data && app.pipelineGeneration==generation && !app.pipelineBusy && app.source.atoms.size()==3,
+                    "real bond label dialog applies fields globally with display-only history and no pipeline evaluation");
+                app.history(false);frame();requireExport(app.creationDisplay.bondLabels.defaultLabel.empty(),"undo restores absent bond labels");
+                app.history(true);frame();requireExport(app.creationDisplay.bondLabels.defaultLabel.fields.size()==2,"redo restores bond fields");
+                app.selectCreationAtom(0,false);app.selectCreationAtom(1,true);frame();
+                app.requestCreationBondLabels();frame();
+                requireExport(!app.creationBondLabelAll && app.creationBondLabelCount==1,"captured endpoint selection scopes exactly one edge");
+                strcpy_s(app.creationBondLabelText,"local edge");frame();click("creation.bond-label-apply");frame();click("creation.bond-label-close");frame();
+                requireExport(app.creationDisplay.bondLabels.at(0).text=="local edge" && app.creationDisplay.bondLabels.at(1).text.empty(),"local annotation preserves unrelated global edge");
+                app.editStructure("move labeled endpoint",[](Dataset &d){d.atoms[0].x=-3;});settlePipeline();
+                requireExport(creation::bondLabelText(app.source,0,app.creationDisplay.bondLabels.at(0)).find("3 Å")!=std::string::npos,"label text follows actual edited geometry");
+                const auto path=dir/"bond-label-ui.atomx";io::ExportOptions opts;opts.documentView=app.captureDocumentView();
+                io::write(path,io::Format::AtomX,app.source,opts);
+                requireExport(document::read(path).view.display.bondLabels==app.creationDisplay.bondLabels && document::read(path).data.scalarProperties.at("Charge")[0]==-.2,
+                    "native save restores local and global bond rules without changing scientific properties");
+                app.requestCreationBondLabels();frame();const auto staleHistory=app.authorUndo.size();
+                ++app.pipelineGeneration;frame();
+                const auto disabledRemove=app.uiTestItems.at("creation.bond-label-remove-all");
+                guiIO.AddMousePosEvent((disabledRemove.min.x+disabledRemove.max.x)*.5f,(disabledRemove.min.y+disabledRemove.max.y)*.5f);
+                frame();guiIO.AddMouseButtonEvent(0,true);frame();guiIO.AddMouseButtonEvent(0,false);frame();
+                requireExport(app.authorUndo.size()==staleHistory && !app.creationDisplay.bondLabels.defaultLabel.empty(),"stale source generation disables bond label actions");
+                --app.pipelineGeneration;click("creation.bond-label-close");frame();
+                app.requestCreationBondLabels();frame();click("creation.bond-label-remove");frame();click("creation.bond-label-close");frame();
+                requireExport(app.creationDisplay.bondLabels.at(0).empty() && !app.creationDisplay.bondLabels.at(1).empty(),"local removal creates an exception to the default rule");
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
                     atom.x+=2; data.atoms.push_back(atom);

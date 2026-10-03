@@ -988,6 +988,14 @@ struct App {
     int32_t creationLabelPrecision=6;
     creation::Display creationLabelDraft;
     std::vector<int> creationLabelSelection;
+    bool openCreationBondLabels=false,creationBondLabelAll=true;
+    uint64_t creationBondLabelTabId=0,creationBondLabelGeneration=0;
+    creation::BondLabels creationBondLabelDraft;
+    creation::BondLabel creationBondLabelRule;
+    std::vector<int> creationBondLabelSelection;
+    size_t creationBondLabelCount=0;
+    char creationBondLabelText[1025]{};
+    std::string creationBondLabelMessage;
     int creationPick = -1;
     int creationMeasure = -1;
     int creationAngle = -1;
@@ -1652,7 +1660,7 @@ struct App {
         authorUndo = tab.authorUndo;
         authorRedo = tab.authorRedo;
         creationDisplay = tab.display;
-        creationDisplay.normalize(source.atoms.size());
+        creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
         creationSnapshots = tab.snapshots;
         creationSnapshotSelected = tab.selectedSnapshot;
         creationPropertyPage = tab.propertyPage;
@@ -1739,7 +1747,7 @@ struct App {
         const auto snapshot=creationSnapshots[size_t(index)];
         adoptStructure(*snapshot.data,"已载入工作区快照："+snapshot.name);
         creationDisplay=snapshot.display;
-        creationDisplay.normalize(source.atoms.size());
+        creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
         queueCreationLabelFont();
         creationSnapshotSelected=index;
     }
@@ -1956,7 +1964,7 @@ struct App {
         creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
         edit(source);
-        creationDisplay.normalize(source.atoms.size());
+        creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
         source.sourceCount = source.atoms.size();
         source.bounds();
         if (!mods.empty()) {
@@ -4885,12 +4893,14 @@ struct App {
         glyphs(creationDisplay.defaultLabel);
         for (const auto &[index,label]:creationDisplay.labels) { (void)index; glyphs(label); }
         missingGlyph(creationDisplay.defaultColor.property);
+        missingGlyph(creationDisplay.bondLabels.defaultLabel.text);
+        for(const auto &[key,label]:creationDisplay.bondLabels.labels) { (void)key;missingGlyph(label.text); }
     }
     void refreshCreationDisplay(bool visibilityChanged=true) {
         geometryPanelMonitor=-1; geometryPending.clear();
         creationRingPreviewValid=false;
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion();
-        creationDisplay.normalize(source.atoms.size());
+        creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
         creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
             [&](int index){return !creationAtomVisible(index);}),creationSelection.end());
         creationPick=creationSelection.empty()?-1:creationSelection.back();
@@ -4901,7 +4911,7 @@ struct App {
     }
     void editCreationDisplay(creation::Display next,const std::string &message) {
         if (!creationMode || documentsBusy()) return;
-        next.normalize(source.atoms.size());
+        next.normalize(source.atoms.size()); next.bondLabels.normalize(source);
         if (next==creationDisplay) return;
         const bool visibilityChanged=!next.sameGpuAppearance(creationDisplay);
         if (authorUndo.size()>=64) authorUndo.erase(authorUndo.begin());
@@ -4935,6 +4945,23 @@ struct App {
         creationLabelFields=label.fields.empty()?std::vector<creation::LabelField>{{creation::LabelFieldKind::Element,{}},{creation::LabelFieldKind::Index,{}}}:label.fields;
         creationLabelPrecision=label.precision;
         openCreationLabels=true;
+    }
+    void requestCreationBondLabels() {
+        if(!creationMode || documentsBusy())return;
+        creationBondLabelTabId=tabs[size_t(activeTab)].id;creationBondLabelGeneration=pipelineGeneration;
+        creationBondLabelSelection=creationSelection;creationBondLabelAll=creationSelection.empty();
+        creationBondLabelDraft=creationDisplay.bondLabels;
+        creationBondLabelRule=creationBondLabelDraft.defaultLabel;
+        const std::unordered_set<int> selected(creationSelection.begin(),creationSelection.end());
+        creationBondLabelCount=0;bool first=true;
+        for(size_t i=0;!selected.empty() && i<source.bonds.size();++i) {
+            const auto &b=source.bonds[i];if(selected.contains(int(b.a)) && selected.contains(int(b.b))) {
+                ++creationBondLabelCount;if(first) {creationBondLabelRule=creationBondLabelDraft.at(source,i);first=false;}
+            }
+        }
+        if(creationBondLabelRule.empty())creationBondLabelRule.fields={creation::BondField::Length};
+        snprintf(creationBondLabelText,sizeof(creationBondLabelText),"%s",creationBondLabelRule.text.c_str());
+        creationBondLabelMessage.clear();openCreationBondLabels=true;
     }
     void requestCreationPosition() {
         if (creationPick<0 || size_t(creationPick)>=source.atoms.size()) return;
@@ -6396,6 +6423,36 @@ struct App {
                     draw->AddCircle(to,U(9),IM_COL32(255,218,103,230),24,U(2));
                 }
             }
+            const auto &bondLabels=creationDisplay.bondLabels;
+            if(sameAtomCount() && result.data.bondStyle.visible && bondLabels.visible && !gpu.bondsOmittedForPerformance()) {
+                ImFont *font=bondLabels.bold && headingFont?headingFont:ImGui::GetFont();
+                const float fontSize=U(bondLabels.fontSize);
+                const auto color=ImGui::ColorConvertFloat4ToU32({bondLabels.color[0],bondLabels.color[1],bondLabels.color[2],bondLabels.color[3]});
+                size_t drawn=0;
+                for(auto index:bondLabels.candidates(result.data.bonds.size())) {
+                    if(drawn>=size_t(bondLabels.budget) || index>=result.data.bonds.size())break;
+                    const auto &b=result.data.bonds[index];
+                    if(!creationAtomVisible(int(b.a)) || !creationAtomVisible(int(b.b)))continue;
+                    const bool periodic=b.image[0] || b.image[1] || b.image[2];
+                    if(periodic && !result.data.bondStyle.showPeriodicImages)continue;
+                    const auto text=creation::bondLabelText(result.data,index,bondLabels.at(result.data,index));if(text.empty())continue;
+                    const auto &a=result.data.atoms[b.a],&z=result.data.atoms[b.b];
+                    // Use the same segments as Renderer::upload, including its periodic stubs.
+                    const auto segments=bondSegments(result.data.cell,{a.x,a.y,a.z},{z.x,z.y,z.z},b.image);
+                    for(size_t j=0;j<segments.size() && drawn<size_t(bondLabels.budget);++j) {
+                        const auto presetA=creationDisplay.presetAt(b.a),presetB=creationDisplay.presetAt(b.b);
+                        if(periodic?(creationDisplay.presetAt(j==0?b.a:b.b)==4):(presetA==4 && presetB==4))continue;
+                        const auto &s=segments[j];if(bondSegmentLength(s)<=1e-6)continue;float t=.5f;
+                        if(!periodic) {if(presetA==4)t=.75f;else if(presetB==4)t=.25f;}
+                        const Vec3 middle{s.p1.x+(s.p2.x-s.p1.x)*t,s.p1.y+(s.p2.y-s.p1.y)*t,s.p1.z+(s.p2.z-s.p1.z)*t};
+                        DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(middle.x,middle.y,middle.z,1),mvp));
+                        if(q.w<=0 || q.z<=0 || q.z>=q.w || std::abs(q.x)>q.w || std::abs(q.y)>q.w)continue;
+                        const ImVec2 at{p.x+(q.x/q.w+1)*avail.x*.5f+U(5),p.y+(1-q.y/q.w)*avail.y*.5f-fontSize-U(4)};
+                        draw->AddText(font,fontSize,{at.x+U(1),at.y+U(1)},IM_COL32(0,0,0,230),text.c_str());
+                        draw->AddText(font,fontSize,at,color,text.c_str());++drawn;
+                    }
+                }
+            }
             if (sameAtomCount() && creationDisplay.labelsVisible &&
                 (creationDisplay.defaultLabel.kind!=creation::LabelKind::None || !creationDisplay.explicitLabels.empty())) {
                 const auto candidates=creationDisplay.candidates(source.atoms.size());
@@ -6477,6 +6534,7 @@ struct App {
                 if (ImGui::MenuItem("显示全部",nullptr,false,creationDisplay.hiddenCount>0)) creationVisibility(2);
                 if (ImGui::MenuItem("显示样式...")) requestCreationStyles();
                 if (ImGui::MenuItem("原子标签...")) requestCreationLabels();
+                if (ImGui::MenuItem("键标签...")) requestCreationBondLabels();
                 if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
                 if (ImGui::MenuItem("反选")) {
                     std::vector<uint8_t> selected(source.atoms.size(),0);
@@ -7491,6 +7549,57 @@ struct App {
         ImGui::End();
     }
     void creationDialogs() {
+        if(openCreationBondLabels) { ImGui::OpenPopup("键标签");openCreationBondLabels=false; }
+        const auto *bondLabelViewport=ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(bondLabelViewport->GetWorkCenter(),ImGuiCond_Always,{.5f,.5f});
+        ImGui::SetNextWindowSizeConstraints({0,0},{std::max(U(200),bondLabelViewport->WorkSize.x-U(24)),std::max(U(200),bondLabelViewport->WorkSize.y-U(24))});
+        if(ImGui::BeginPopupModal("键标签",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            const bool valid=creationMode && activeTab>=0 && activeTab<int(tabs.size()) &&
+                tabs[size_t(activeTab)].id==creationBondLabelTabId && pipelineGeneration==creationBondLabelGeneration;
+            ImGui::TextDisabled("对象：显式键 · 数值跟随当前坐标和键级");
+            ImGui::Checkbox("整个体系",&creationBondLabelAll);recordUiTestItem("creation.bond-label-all");
+            ImGui::TextDisabled("局部：两端原子都在打开窗口时的选择中");
+            ImGui::Text("作用范围：%zu 条键",creationBondLabelAll?source.bonds.size():creationBondLabelCount);
+            ImGui::SeparatorText("属性（按勾选顺序组合）");
+            static constexpr const char *captions[]={"键长 Length (Å)","键级 BondOrder","端点编号","中点 MidPoint (Å)","周期像 Image"};
+            for(int i=0;i<5;++i) {
+                auto &fields=creationBondLabelRule.fields;const auto value=creation::BondField(i);
+                const auto it=std::find(fields.begin(),fields.end(),value);bool checked=it!=fields.end();
+                if(ImGui::Checkbox(captions[i],&checked)) {if(checked)fields.push_back(value);else fields.erase(it);}
+                recordUiTestItem("creation.bond-label-field-"+std::to_string(i));
+            }
+            ImGui::SetNextItemWidth(U(280));ImGui::InputText("文字",creationBondLabelText,sizeof(creationBondLabelText));
+            recordUiTestItem("creation.bond-label-text");
+            creationBondLabelRule.text=creationBondLabelText;
+            ImGui::SetNextItemWidth(U(150));ImGui::SliderInt("有效数字",&creationBondLabelRule.precision,1,9);
+            ImGui::SliderFloat("字号",&creationBondLabelDraft.fontSize,10,32,"%.0f");
+            ImGui::Checkbox("粗体",&creationBondLabelDraft.bold);
+            ImGui::ColorEdit4("颜色",creationBondLabelDraft.color.data(),ImGuiColorEditFlags_NoInputs);
+            ImGui::Checkbox("显示键标签",&creationBondLabelDraft.visible);
+            ImGui::SetNextItemWidth(U(150));ImGui::InputInt("屏幕标签上限",&creationBondLabelDraft.budget);
+            ImGui::TextDisabled("1–2000，默认 500；大体系抽样显示；隐藏键不标注");
+            if(!valid)ImGui::TextColored({1,.65f,.2f,1},"体系已改变，请关闭后重新打开");
+            if(!creationBondLabelMessage.empty())ImGui::TextWrapped("%s",creationBondLabelMessage.c_str());
+            auto apply=[&](const creation::BondLabel &rule,bool all,const char *message,bool style) {
+                try {
+                    auto next=creationDisplay;
+                    if(style) {next.bondLabels.fontSize=creationBondLabelDraft.fontSize;next.bondLabels.color=creationBondLabelDraft.color;
+                        next.bondLabels.bold=creationBondLabelDraft.bold;next.bondLabels.visible=creationBondLabelDraft.visible;next.bondLabels.budget=creationBondLabelDraft.budget;}
+                    next.bondLabels.set(source,creationBondLabelSelection,rule,all);
+                    editCreationDisplay(std::move(next),message);creationBondLabelMessage=message;
+                } catch(const std::exception &e) {creationBondLabelMessage=e.what();}
+            };
+            ImGui::BeginDisabled(!valid || documentsBusy());
+            ImGui::BeginDisabled((!creationBondLabelAll && !creationBondLabelCount) || creationBondLabelDraft.budget<1 || creationBondLabelDraft.budget>2000 || !creation::validBondLabel(creationBondLabelRule));
+            if(ImGui::Button("应用",{U(110),U(30)}))apply(creationBondLabelRule,creationBondLabelAll,"编辑键标签",true);
+            recordUiTestItem("creation.bond-label-apply");ImGui::EndDisabled();ImGui::SameLine();
+            if(ImGui::Button("移除",{U(110),U(30)}))apply({},creationBondLabelAll,"移除键标签",false);
+            recordUiTestItem("creation.bond-label-remove");
+            if(ImGui::Button("移除全部",{U(110),U(30)}))apply({},true,"移除全部键标签",false);
+            recordUiTestItem("creation.bond-label-remove-all");ImGui::EndDisabled();ImGui::SameLine();
+            if(ImGui::Button("关闭",{U(110),U(30)}) || ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
+            recordUiTestItem("creation.bond-label-close");ImGui::EndPopup();
+        }
         if (openCreationLabels) { ImGui::OpenPopup("原子标签"); openCreationLabels=false; }
         // Keep the expanded property editor and its actions inside the native window.
         const auto *labelViewport=ImGui::GetMainViewport();
@@ -8234,6 +8343,8 @@ struct App {
         }
         if (ImGui::Button("原子标签...",{-1,U(28)})) requestCreationLabels();
         recordUiTestItem("creation.edit-labels");
+        if(ImGui::Button("键标签...",{-1,U(28)}))requestCreationBondLabels();
+        recordUiTestItem("creation.edit-bond-labels");
         if (ImGui::Button("显示样式...",{-1,U(28)})) requestCreationStyles();
         recordUiTestItem("creation.edit-styles");
         if (ImGui::Button("运动分组...",{-1,U(28)})) requestMotionGroups();
@@ -9888,6 +9999,9 @@ struct App {
         chineseBuilder.AddText("精准移动旋转选中原子的几何中心不移动晶胞屏幕轴体系轴距离视图比例步长角度以打开窗口时视图的较短边为选中中心所在深度上下左右向里向外右手方向反向使用负角度坐标未改变已记录一步历史原标签已改变请关闭并重新打开位移与角度必须为有限数值旋转轴不能为零选中原子已改变请重新选择原子坐标无效位移超出坐标范围连接片段分数坐标切换添加约束←→↑↓−°Å");
         chineseBuilder.AddText("隐藏选中仅显示选中显示全部已隐藏原子标签对象默认显示元素和编号整个体系内容无标签笛卡尔坐标分数坐标自定义文字字号粗体颜色显示标签屏幕标签上限大体系自动抽样优先显示选中原子的标签隐藏原子不显示标签上限默认应用移除移除全部编辑原子标签撤销重做");
         chineseBuilder.AddText(creationDisplay.defaultLabel.text.c_str());
+        chineseBuilder.AddText(creationDisplay.bondLabels.defaultLabel.text.c_str());
+        chineseBuilder.AddText("键标签对象显式键数值跟随当前坐标键级局部两端原子都在打开窗口时的选择中作用范围条键属性按勾选顺序组合键长端点编号中点周期像显示大体系抽样隐藏不标注已改变请关闭后重新打开编辑移除全部规则无效超过缩小选择应用到整个体系");
+        for(const auto &[key,label]:creationDisplay.bondLabels.labels) { (void)key;chineseBuilder.AddText(label.text.c_str()); }
         chineseBuilder.AddText("属性组合可组合至多项按勾选顺序排列元素名称原子序数质量列优先没有该列时用元素质量缺失值为清空属性有效数字");
         chineseBuilder.AddText("原子与半键着色来源颜色元素颜色自定义颜色属性渐变分类编号着色方式自定义色按当前范围调整正在后台读取范围已更新范围属性没有有限数值下限上限渐变反转颜色段显示全体系图例缺失值为灰色颜色随数据更新范围仅手动调整应用着色来源颜色保留文件配色元素颜色使用当前元素外观着色不修改科学属性或键拓扑非负整数编号保持固定颜色可选择运动分组或层编号其他值为灰色编辑原子着色");
         chineseBuilder.AddText(creationDisplay.defaultColor.property.c_str());

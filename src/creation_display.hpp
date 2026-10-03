@@ -3,6 +3,7 @@
 #include "geometry_monitors.hpp"
 #include "elements.hpp"
 #include "creation_colors.hpp"
+#include "bond_labels.hpp"
 #include <cstdio>
 #include <unordered_map>
 
@@ -46,6 +47,7 @@ inline std::string fieldTitle(const LabelField &f) {
     return "?";
 }
 struct Display {
+    BondLabels bondLabels;
     ColorRule defaultColor;
     std::unordered_map<int,ColorRule> colors;
     bool hasColors() const { return defaultColor.kind!=ColorKind::Source || !colors.empty(); }
@@ -168,6 +170,7 @@ struct Display {
         for(const auto &[index,rule]:colors)
             if(index>=0 && size_t(index)<oldCount && remap[size_t(index)]>=0) nextColors.emplace(remap[size_t(index)],rule);
         colors=std::move(nextColors);
+        bondLabels.eraseAtoms(remap);
         for(auto &monitor:monitors) for(size_t i=0;i<monitor.count;++i) {
             auto &index=monitor.atoms[i]; index=index>=0 && size_t(index)<oldCount?remap[size_t(index)]:-1;
         }

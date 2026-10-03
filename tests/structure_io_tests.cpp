@@ -83,10 +83,33 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=9; rejectBytes(version);
+            auto version=bytes; version[8]=10; rejectBytes(version);
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
-            auto invalidAuto=bytes; invalidAuto[invalidAuto.size()-5]=2; rejectBytes(invalidAuto);
-            auto version7=bytes; version7[8]=7; version7.erase(version7.size()-5,1);
+            std::ostringstream bondBlock(std::ios::binary); document::Writer bondWriter{bondBlock}; document::writeBondLabels(bondWriter,view.display.bondLabels); const size_t bondLabelBytes=bondBlock.str().size();
+            auto version8=bytes;version8[8]=8;version8.erase(version8.size()-4-bondLabelBytes,bondLabelBytes);
+            auto invalidAuto=version8; invalidAuto[invalidAuto.size()-5]=2; rejectBytes(invalidAuto);
+            auto version7=version8; version7[8]=7; version7.erase(version7.size()-5,1);
+            const auto v8Path=dir/"v8.atomx";
+            { std::ofstream out(v8Path,std::ios::binary);out.write(version8.data(),std::streamsize(version8.size())); }
+            require(document::read(v8Path).view.display.bondLabels.defaultLabel.empty() && document::read(v8Path).view.autoHydrogens,"v8 defaults to no bond labels and retains chemistry switch");
+            auto labeledOptions=nativeOptions;
+            auto &bl=labeledOptions.documentView.display.bondLabels;
+            bl.defaultLabel={"全部",{creation::BondField::Order},5};
+            bl.set(native,{0,1},{"跨周期",{creation::BondField::Length,creation::BondField::Midpoint},7},false);
+            bl.fontSize=18;bl.color={.2f,.8f,.6f,1};bl.bold=true;bl.visible=false;bl.budget=37;
+            const auto blPath=dir/"bond-labels.atomx";
+            io::write(blPath,io::Format::AtomX,native,labeledOptions);
+            const auto blRead=document::read(blPath);
+            require(blRead.view.display.bondLabels==bl && blRead.view.display.bondLabels.at(0).text=="跨周期" &&
+                creation::bondLabelText(blRead.data,0,blRead.view.display.bondLabels.at(0)).find("Å")!=std::string::npos,
+                "v9 restores global and identity-keyed UTF-8 bond rules, style, budget and derived candidates");
+            auto invalidOptions=labeledOptions;
+            invalidOptions.documentView.display.bondLabels.budget=2001;
+            bool invalidLabels=false;try {io::write(blPath,io::Format::AtomX,native,invalidOptions);}catch(...) {invalidLabels=true;}
+            require(invalidLabels && document::read(blPath).view.display.bondLabels==bl,"invalid bond settings preserve existing destination");
+            std::ifstream blIn(blPath,std::ios::binary);std::string blBytes((std::istreambuf_iterator<char>(blIn)),{});blIn.close();
+            auto badBondFlag=blBytes;badBondFlag[badBondFlag.size()-9]=2;rejectBytes(badBondFlag);
+            auto badBondBudget=blBytes;for(size_t i=blBytes.size()-8;i<blBytes.size()-4;++i)badBondBudget[i]=char(-1);rejectBytes(badBondBudget);
             const auto version7Path=dir/"v7.atomx";
             { std::ofstream out(version7Path,std::ios::binary); out.write(version7.data(),std::streamsize(version7.size())); }
             require(!document::read(version7Path).view.autoHydrogens && document::read(version7Path).view.display==view.display,
@@ -154,7 +177,7 @@ int main() {
             require(compositeRead.view.display==composite && creation::labelText(compositeRead.data,0,compositeRead.view.display.labelAt(0)).find("Energy = -2.5")!=std::string::npos,
                 "v6 restores composite property names, order, prefix, precision and sparse selected overrides");
             std::ifstream compositeIn(compositePath,std::ios::binary); std::string compositeBytes((std::istreambuf_iterator<char>(compositeIn)),{});
-            compositeBytes.erase(compositeBytes.size()-5,1); compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
+            compositeBytes.erase(compositeBytes.size()-4-bondLabelBytes,bondLabelBytes);compositeBytes.erase(compositeBytes.size()-5,1); compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
             auto badField=compositeBytes; badField[badField.size()-4-9]=char(255); rejectBytes(badField);
             auto badPrecision=compositeBytes; badPrecision[badPrecision.size()-4-21]=0; rejectBytes(badPrecision);
             creation::ColorRule color; color.kind=creation::ColorKind::Property; color.property="Energy";color.low=-4;color.high=2;color.gradient=8;color.reverse=true;
@@ -163,7 +186,7 @@ int main() {
             io::write(compositePath,io::Format::AtomX,native,compositeOptions);
             require(document::read(compositePath).view.display==composite,"v7 restores global color range and sparse custom overrides");
             std::ifstream colorIn(compositePath,std::ios::binary); std::string colorData((std::istreambuf_iterator<char>(colorIn)),{});
-            colorData.erase(colorData.size()-5,1);colorData[8]=7;auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);
+            colorData.erase(colorData.size()-4-bondLabelBytes,bondLabelBytes);colorData.erase(colorData.size()-5,1);colorData[8]=7;auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }
             require(rejected && document::read(nativePath).data.bonds==native.bonds,

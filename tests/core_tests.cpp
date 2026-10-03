@@ -3066,6 +3066,42 @@ int main() {
             display.eraseAtoms(6,{0});
             require(display.monitors.size()==1 && display.monitors[0].atoms==std::array<int32_t,4>{0,1,-1,-1} && display.activeMonitor==-1,"deleted endpoint removes monitor and surviving monitor remaps");
         }
+        {
+            Dataset d;d.species={"C","O"};d.atoms={{0,0,0,0},{2,0,0,1},{4,0,0,0},{9,0,0,0}};
+            d.cell={10,0,0,0,10,0,0,0,10};d.pbc={true,true,true};
+            d.bonds={{0,1,{},1},{1,2,{},4},{3,0,{1,0,0},2}};
+            creation::BondLabel length{"",{creation::BondField::Length},4};
+            creation::BondLabels labels;labels.set(d,{0,1},length,false);
+            require(labels.labels.size()==1 && labels.candidates(3)==std::vector<size_t>{0} && labels.at(1).empty(),"local bond labels require both selected endpoints");
+            require(creation::bondLabelText(d,0,labels.at(0))=="2 Å","bond label reads physical length");
+            d.atoms[1].x=3;require(creation::bondLabelText(d,0,labels.at(0))=="3 Å","text updates from current coordinates without cache invalidation");
+            std::reverse(d.bonds.begin(),d.bonds.end());d.bonds[2]={1,0,{},3};labels.normalize(d);
+            require(labels.candidates(3)==std::vector<size_t>{2} && labels.at(2)==length,"bond reorder, reversal and changed order preserve identity");
+            creation::BondLabel all{"",{creation::BondField::Length,creation::BondField::Order,creation::BondField::Midpoint},5};
+            labels.set(d,{},all,true);require(labels.labels.empty() && labels.indexed.empty(),"all bonds use one rule without per-bond allocations");
+            require(creation::bondLabelText(d,0,all).find("1 Å")!=std::string::npos && creation::bondLabelText(d,0,all).find("9.5")!=std::string::npos,
+                "periodic length and physical midpoint use the image, not wrapped endpoints");
+            require(creation::bondLabelText(d,1,all).find("1.5 (aromatic)")!=std::string::npos,"aromatic order displays 1.5, not four");
+            labels.set(d,{0,1},{},false);require(labels.at(2).empty() && !labels.at(1).empty(),"local removal masks a global rule");
+            labels.set(d,{0,3},length,false);
+            const auto key=creation::bondKey(d.bonds[0]);
+            require(key==creation::bondKey(Bond{0,3,{-1,0,0},2}),"periodic key is independent of orientation");
+            require(creation::bondKey(Bond{0,1,{INT32_MIN,0,0},1})==creation::bondKey(Bond{0,1,{INT32_MIN,0,0},3}),"minimum integer image canonicalization has no overflow");
+            labels.eraseAtoms({0,-1,1,2});
+            d.atoms.erase(d.atoms.begin()+1);d.bonds={{2,0,{1,0,0},2}};labels.normalize(d);
+            require(labels.labels.size()==1 && labels.at(0)==length,"deleting endpoints drops annotations and remaps surviving bond identity");
+            d.bonds.clear();labels.normalize(d);require(labels.labels.empty(),"removed bond annotations cannot attach to a later unrelated bond");
+            labels.budget=17;auto sampled=labels.candidates(13000000);
+            require(sampled.size()==17 && sampled.front()==0 && sampled.back()<13000000 && labels.indexed.empty(),"thirteen million global bonds produce only a bounded sample");
+            labels.visible=false;require(labels.candidates(13000000).empty(),"disabled bond labels do no candidate work");
+            Dataset many;many.atoms.resize(2002);std::vector<int> selected;
+            for(size_t i=0;i<many.atoms.size();++i) {selected.push_back(int(i));if(i)many.bonds.push_back({0,uint32_t(i)});}
+            bool bounded=false;try{labels.set(many,selected,length,false);}catch(...){bounded=true;}
+            require(bounded && labels.labels.empty() && labels.defaultLabel==all,"oversized local selection aborts before publication and bounds temporary annotation storage");
+            all.fields={creation::BondField::Order,creation::BondField::Order};require(!creation::validBondLabel(all),"duplicate bond fields rejected");
+            creation::Display display,changed;changed.bondLabels.defaultLabel=length;
+            require(display!=changed && display.sameGpuAppearance(changed),"bond labels participate in display history without GPU appearance changes");
+        }
         testLayerBuilder();
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "
