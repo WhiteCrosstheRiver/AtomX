@@ -98,8 +98,14 @@ inline void eraseAtoms(Dataset &data,const std::vector<int> &removed) {
 
 // Connected component of explicit bond topology. No distance guessing or
 // all-pairs search: large structures take O(atoms + bonds) on demand only.
-inline std::vector<int> fragment(const Dataset &data, int seed) {
-    if (seed < 0 || size_t(seed) >= data.atoms.size()) return {};
+inline std::vector<int> fragments(const Dataset &data, const std::vector<int> &seeds) {
+    if(std::none_of(seeds.begin(),seeds.end(),[&](int i){return i>=0 && size_t(i)<data.atoms.size();}))return {};
+    std::vector<uint8_t> visited(data.atoms.size(),0);
+    std::vector<int> found;
+    for(int seed:seeds) if(seed>=0 && size_t(seed)<data.atoms.size() && !visited[size_t(seed)]) {
+        visited[size_t(seed)]=1; found.push_back(seed);
+    }
+    if(found.empty())return {};
     std::vector<size_t> offsets(data.atoms.size()+1,0);
     for (const auto &bond:data.bonds)
         if (bond.a<data.atoms.size() && bond.b<data.atoms.size()) {
@@ -113,14 +119,15 @@ inline std::vector<int> fragment(const Dataset &data, int seed) {
             neighbors[cursor[bond.a]++]=bond.b;
             neighbors[cursor[bond.b]++]=bond.a;
         }
-    std::vector<uint8_t> visited(data.atoms.size(),0);
-    std::vector<int> found{seed}; visited[size_t(seed)]=1;
     for (size_t i=0;i<found.size();++i)
         for (size_t j=offsets[size_t(found[i])];j<offsets[size_t(found[i])+1];++j)
             if (!visited[neighbors[j]]) {
                 visited[neighbors[j]]=1; found.push_back(int(neighbors[j]));
             }
     return found;
+}
+inline std::vector<int> fragment(const Dataset &data, int seed) {
+    return fragments(data,{seed});
 }
 inline Vec3 rotatedPoint(Vec3 point, Vec3 center, Vec3 axis, double radians) {
     const double norm=length(axis);

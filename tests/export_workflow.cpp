@@ -1296,6 +1296,63 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("bond endpoint movement fixture",[](Dataset &data) {
+                    data={};data.species={"C"};data.atoms={{-4,0,0,0},{0,0,0,0},{4,0,0,0},{-4,5,0,0},{0,5,0,0}};
+                    data.bonds={{0,1,{},1},{1,2,{},2},{3,4,{},1}};data.scalarProperties["Charge"]={-.2,.4,-.2,.1,.2};
+                });settlePipeline();app.creationDisplay={};app.creationDisplay.defaultPreset=3;
+                app.creationSelection.clear();app.creationPick=-1;app.cameras[3].mode=0;app.cameras[3].roll=0;
+                app.fitCamera(3,false);app.refreshCreationDisplay();frame();
+                app.selectCreationBond(0,false);app.selectCreationBond(1,true);app.selectCreationAtom(0,true);frame();
+                const auto science=app.source.scalarProperties;const auto movementHistory=app.authorUndo.size();
+                click("creation.selected-bond-movement");frame();
+                requireExport(app.creationMovementSelection==std::vector<int>({0,1,2}) && app.creationSelection==std::vector<int>{0} &&
+                    app.creationBondSelection==std::vector<int>({0,1}),"endpoint dialog captures mixed selection without changing explicit picks");
+                click("creation.movement-world-axes");app.creationMovementPercent=false;app.creationMovementDistance=1;app.creationMovementAngle=90;frame();
+                click("creation.movement-up");settlePipeline();frame();
+                requireExport(app.source.atoms[0].y==1 && app.source.atoms[1].y==1 && app.source.atoms[2].y==1 && app.source.atoms[3].y==5 &&
+                    app.source.scalarProperties==science && app.creationBondSelection==std::vector<int>({0,1}) && app.authorUndo.size()==movementHistory+1,
+                    "numerical movement applies shared endpoints once, preserving other fragments, science, edge identity and one history step");
+                click("creation.movement-rotate-z");settlePipeline();frame();
+                requireExport(std::abs(app.source.atoms[0].x)<1e-5 && std::abs(app.source.atoms[0].y+3)<1e-5 &&
+                    std::abs(app.source.atoms[2].y-5)<1e-5 && app.source.atoms[1].y==1 && app.source.atoms[3].x==-4 && app.authorUndo.size()==movementHistory+2,
+                    "successive movement remains valid after its own edit and rotates about the deduplicated geometric center");
+                app.update();settlePipeline();frame();
+                const auto disabled=app.uiTestItems.at("creation.movement-up");
+                guiIO.AddMousePosEvent((disabled.min.x+disabled.max.x)/2,(disabled.min.y+disabled.max.y)/2);frame();
+                guiIO.AddMouseButtonEvent(0,true);frame();guiIO.AddMouseButtonEvent(0,false);frame();
+                requireExport(!app.validCreationMovement() && app.authorUndo.size()==movementHistory+2,"changed source generation disables captured endpoint movement");
+                click("creation.movement-close");app.history(false);settlePipeline();app.history(false);settlePipeline();frame();
+                requireExport(app.source.atoms[0].x==-4 && app.source.atoms[0].y==0 && app.source.atoms[2].x==4 && app.source.scalarProperties==science,
+                    "undo restores both endpoint operations exactly");
+                app.selectCreationBond(1,false);frame();
+                const auto generation=app.pipelineGeneration,uploads=app.gpu.dataUploadRevision(),selectionHistory=app.authorUndo.size();
+                click("creation.selected-bond-fragments");frame();
+                requireExport(std::set<int>(app.creationSelection.begin(),app.creationSelection.end())==std::set<int>({0,1,2}) && app.creationBondSelection.empty() &&
+                    app.authorUndo.size()==selectionHistory && app.pipelineGeneration==generation && app.gpu.dataUploadRevision()==uploads,
+                    "bond inspector selects only its connected fragment without history, pipeline evaluation or buffer upload");
+                app.selectCreationAtom(-1,false);app.selectCreationBond(1,false);app.selectCreationBond(2,true);frame();
+                app.selectCreationFragments();frame();
+                requireExport(app.creationSelection.size()==5,"multiple selected bonds expand all seeded fragments in one traversal");
+                app.selectCreationBond(1,false);app.selectCreationAtom(0,true);app.creationDisplay.hidden={0,0,0,1,0};app.creationDisplay.normalize(5);
+                app.invertCreationSelection();frame();
+                requireExport(app.creationSelection==std::vector<int>({1,2,4}) && app.creationBondSelection==std::vector<int>{0},
+                    "mixed inversion complements visible atoms and visible bonds independently, excluding hidden endpoints");
+                app.invertCreationSelection();frame();
+                requireExport(app.creationSelection==std::vector<int>{0} && app.creationBondSelection==std::vector<int>{1},"two inversions recover original visible mixed selection");
+                app.creationDisplay.hidden.clear();app.creationDisplay.normalize(5);app.selectCreationAtom(-1,false);frame();
+                auto edgeClick=[&]() {
+                    const auto vp=app.uiTestItems.at("creation.viewport");const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};
+                    DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(2,0,0,1),app.creationProjection(app.result.data,app.cameras[3],size).combined));
+                    guiIO.AddMousePosEvent(vp.min.x+(q.x/q.w+1)*size.x*.5f,vp.min.y+(1-q.y/q.w)*size.y*.5f);frame();
+                    guiIO.AddMouseButtonEvent(0,true);frame();guiIO.AddMouseButtonEvent(0,false);frame();
+                };
+                for(int i=0;i<30;++i)frame();edgeClick();edgeClick();
+                requireExport(std::set<int>(app.creationSelection.begin(),app.creationSelection.end())==std::set<int>({0,1,2}) && app.creationBondSelection.empty(),
+                    "actual double click on a bond expands its connected fragment");
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("bond label fixture",[](Dataset &data) {
                     data={};data.species={"C","O"};data.atoms={{-2,0,0,0},{0,0,0,1},{2,0,0,0}};
                     data.bonds={{0,1,{},1},{1,2,{},2}};data.scalarProperties["Charge"]={-.2,.4,-.2};

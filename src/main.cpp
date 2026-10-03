@@ -978,7 +978,10 @@ struct App {
     bool creationMovementPercent = false;
     float creationMovementDistance = 1.f, creationMovementAngle = 45.f;
     uint64_t creationMovementTabId = 0;
+    uint64_t creationMovementGeneration = 0;
     std::vector<int> creationMovementSelection;
+    std::vector<int> creationMovementBonds;
+    bool creationMovementPeriodic=false;
     Vec3 creationMovementAxes[3]{};
     float creationMovementScreenSpan = 0;
     ImVec2 creationViewportSize{};
@@ -4924,6 +4927,35 @@ struct App {
         creationPick=creationSelection.empty()?-1:index;
         status="选中连接片段 · "+std::to_string(creationSelection.size())+" 个原子";
     }
+    std::vector<int> creationTransformSelection() const {
+        try {
+            auto selected=creation::selectedAtoms(source,creationSelection,creationBondSelection);
+            selected.erase(std::remove_if(selected.begin(),selected.end(),[&](int i){return !creationAtomVisible(i);}),selected.end());
+            return selected;
+        } catch(const std::invalid_argument &) {return {};}
+    }
+    void selectCreationFragments() {
+        const auto seeds=creationTransformSelection();
+        creationSelection=authoring::fragments(source,seeds);
+        creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
+            [&](int i){return !creationAtomVisible(i);}),creationSelection.end());
+        creationBondSelection.clear();
+        creationPick=creationSelection.empty()?-1:creationSelection.back();
+        status="选中连接片段 · "+std::to_string(creationSelection.size())+" 个原子";
+    }
+    void invertCreationSelection() {
+        std::vector<uint8_t> atoms(source.atoms.size(),0);
+        for(int i:creationSelection)if(i>=0 && size_t(i)<atoms.size())atoms[size_t(i)]=1;
+        creationSelection.clear();
+        for(size_t i=0;i<atoms.size();++i)if(!atoms[i] && creationAtomVisible(int(i)))creationSelection.push_back(int(i));
+        if(source.bonds.size()<=interactiveBondBudget) {
+            std::vector<uint8_t> bonds(source.bonds.size(),0);
+            for(int i:creationBondSelection)if(i>=0 && size_t(i)<bonds.size())bonds[size_t(i)]=1;
+            creationBondSelection.clear();
+            for(size_t i=0;i<bonds.size();++i)if(!bonds[i] && creationBondVisible(int(i)))creationBondSelection.push_back(int(i));
+        } else creationBondSelection.clear();
+        creationPick=creationSelection.empty()?-1:creationSelection.back();
+    }
     bool creationAtomVisible(int index) const {
         if (!particles || index<0 || size_t(index)>=source.atoms.size() || creationDisplay.isHidden(size_t(index)))
             return false;
@@ -5420,9 +5452,14 @@ struct App {
         ImGui::EndPopup();
     }
     void requestCreationMovement() {
-        if (!creationMode || creationSelection.empty() || documentsBusy()) return;
-        creationMovementSelection=creationSelection;
+        if (!creationMode || documentsBusy()) return;
+        creationMovementSelection=creationTransformSelection();
+        if(creationMovementSelection.empty())return;
+        creationMovementBonds=creationBondSelection;
+        creationMovementPeriodic=std::any_of(creationMovementBonds.begin(),creationMovementBonds.end(),
+            [&](int i){return source.bonds[size_t(i)].image!=std::array<int32_t,3>{};});
         creationMovementTabId=tabs[size_t(activeTab)].id;
+        creationMovementGeneration=pipelineGeneration;
         creationMovementMessage.clear();
         const auto projection=creationProjection(source,cameras[3],creationViewportSize);
         const auto inverseView=DirectX::XMMatrixInverse(nullptr,projection.view);
@@ -5454,7 +5491,7 @@ struct App {
     }
     bool validCreationMovement() const {
         return creationMode && activeTab>=0 && activeTab<int(tabs.size()) &&
-            tabs[size_t(activeTab)].id==creationMovementTabId && !creationMovementSelection.empty();
+            tabs[size_t(activeTab)].id==creationMovementTabId && creationMovementGeneration==pipelineGeneration && !creationMovementSelection.empty();
     }
     void applyCreationMovement(int axis, int direction, bool rotate) {
         if (!validCreationMovement() || documentsBusy() || axis<0 || axis>2) return;
@@ -5474,6 +5511,10 @@ struct App {
                     auto &atom=data.atoms[size_t(index)]; atom.x=at.x; atom.y=at.y; atom.z=at.z;
                 }
             });
+            // This edit changes only coordinates, so captured source edge rows
+            // retain identity. Other source edits invalidate the dialog.
+            creationMovementGeneration=pipelineGeneration;
+            creationBondSelection=creationMovementBonds;
             creationMovementMessage=message+" · 已记录一步历史";
         } catch (const std::exception &e) { creationMovementMessage=e.what(); }
     }
@@ -5789,10 +5830,7 @@ struct App {
         }
         auto captureAtoms=[&]() {
             creationDragAtoms.clear(); creationDragCenter={};
-            std::set<int> selected(creationSelection.begin(),creationSelection.end());
-            for(int row:creationBondSelection)if(row>=0 && size_t(row)<source.bonds.size()) {
-                selected.insert(int(source.bonds[size_t(row)].a));selected.insert(int(source.bonds[size_t(row)].b));
-            }
+            const auto selected=creationTransformSelection();
             for (int index:selected)
                 if (index>=0 && size_t(index)<source.atoms.size()) {
                     const auto &a=source.atoms[size_t(index)];
@@ -5913,7 +5951,10 @@ struct App {
             }
             else {
                 const int bond=creationBondHit(p,size,cam,mouse,true);
-                if(bond>=0)selectCreationBond(bond,creationDragShift,creationDragToggle);
+                if(bond>=0) {
+                    if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))selectCreationFragment(int(source.bonds[size_t(bond)].a));
+                    else selectCreationBond(bond,creationDragShift,creationDragToggle);
+                }
                 else {if(!creationDragShift)selectCreationAtom(-1,false);creationDrag=CreationDrag::Box;}
             }
         }
@@ -6713,17 +6754,19 @@ struct App {
                 if (ImGui::MenuItem("删除选中原子 / 键",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty())) deletePickedAtom();
                 if (ImGui::MenuItem("选中同元素",nullptr,false,creationPick>=0)) {
                     const uint32_t type=source.atoms[size_t(creationPick)].type;
-                    creationSelection.clear();
+                    creationSelection.clear();creationBondSelection.clear();
                     for (size_t index=0;index<source.atoms.size();++index)
                         if (source.atoms[index].type==type && creationAtomVisible(int(index))) creationSelection.push_back(int(index));
                     creationPick=creationSelection.empty()?-1:creationSelection.back();
                 }
-                if (ImGui::MenuItem("选中连接片段",nullptr,false,creationPick>=0))
-                    selectCreationFragment(creationPick);
+                if (ImGui::MenuItem("选中连接片段",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty()))
+                    selectCreationFragments();
+                recordUiTestItem("creation.context-fragments");
                 if (ImGui::MenuItem("编辑坐标...",nullptr,false,creationPick>=0)) requestCreationPosition();
                 if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
-                if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty()))
+                if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty()))
                     requestCreationMovement();
+                recordUiTestItem("creation.context-movement");
                 if (ImGui::MenuItem("隐藏选中",nullptr,false,!creationSelection.empty())) creationVisibility(0);
                 if (ImGui::MenuItem("仅显示选中",nullptr,false,!creationSelection.empty())) creationVisibility(1);
                 if (ImGui::MenuItem("显示全部",nullptr,false,creationDisplay.hiddenCount>0)) creationVisibility(2);
@@ -6731,15 +6774,8 @@ struct App {
                 if (ImGui::MenuItem("原子标签...")) requestCreationLabels();
                 if (ImGui::MenuItem("键标签...")) requestCreationBondLabels();
                 if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
-                if (ImGui::MenuItem("反选")) {
-                    std::vector<uint8_t> selected(source.atoms.size(),0);
-                    for (int index:creationSelection)
-                        if (index>=0 && size_t(index)<selected.size()) selected[size_t(index)]=1;
-                    creationSelection.clear();
-                    for (size_t index=0;index<selected.size();++index)
-                        if (!selected[index] && creationAtomVisible(int(index))) creationSelection.push_back(int(index));
-                    creationPick=creationSelection.empty()?-1:creationSelection.back();
-                }
+                if (ImGui::MenuItem("反选")) invertCreationSelection();
+                recordUiTestItem("creation.context-invert");
                 ImGui::Separator();
                 ImGui::TextDisabled("右键拖动旋转 · Alt+右键平移");
                 ImGui::TextDisabled("Shift+Alt+右键移动选中原子");
@@ -7905,7 +7941,11 @@ struct App {
             ImGui::OpenPopup("精准移动 / 旋转"); openCreationMovement=false;
         }
         if (ImGui::BeginPopupModal("精准移动 / 旋转",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("选中 %zu 个原子",creationMovementSelection.size());
+            ImGui::Text("操作 %zu 个原子",creationMovementSelection.size());
+            if(!creationMovementBonds.empty()) {
+                ImGui::TextDisabled("含 %zu 条选中键的端点，共用端点只移动一次",creationMovementBonds.size());
+                if(creationMovementPeriodic)ImGui::TextWrapped("按主晶胞端点坐标操作；晶胞不变，跨周期键在旋转后可能改变长度。");
+            }
             ImGui::TextDisabled(creationMovementMassCenter?"绕选中原子的质心旋转 · 不移动晶胞":"绕选中原子的几何中心旋转 · 不移动晶胞");
             ImGui::BeginDisabled(!creationMovementHasMass);
             ImGui::Checkbox("绕质心旋转（需 Mass 属性）",&creationMovementMassCenter);
@@ -7955,7 +7995,7 @@ struct App {
             action("Z -角度","creation.movement-rotate-neg-z",2,-1,true);
             ImGui::EndDisabled(); ImGui::EndDisabled();
             if (!creationMovementMessage.empty()) ImGui::TextWrapped("%s",creationMovementMessage.c_str());
-            if (!validCreationMovement()) ImGui::TextUnformatted("原标签已改变，请关闭并重新打开");
+            if (!validCreationMovement()) ImGui::TextUnformatted("原标签或体系已改变，请关闭并重新打开");
             ImGui::Separator();
             if (ImGui::Button("关闭",{U(100),0}) || ImGui::IsKeyPressed(ImGuiKey_Escape))
                 ImGui::CloseCurrentPopup();
@@ -8293,7 +8333,7 @@ struct App {
                     ImGui::SameLine();
                     const std::string row=source.species[type]+"    "+std::to_string(counts[type]);
                     if (ImGui::Selectable(row.c_str())) {
-                        creationSelection.clear();
+                        creationSelection.clear();creationBondSelection.clear();
                         for (size_t i=0;i<source.atoms.size();++i)
                             if (source.atoms[i].type==type && creationAtomVisible(int(i))) creationSelection.push_back(int(i));
                         creationPick=creationSelection.empty()?-1:creationSelection.back();
@@ -8473,7 +8513,13 @@ struct App {
         }
         ImGui::Separator();
         if(!creationBondSelection.empty()) {
+            if(ImGui::Button("选中键所在连接片段",{-1,U(28)}))selectCreationFragments();
+            recordUiTestItem("creation.selected-bond-fragments");
+        }
+        if(!creationBondSelection.empty()) {
             ImGui::Text("已选中 %zu 条键",creationBondSelection.size());
+            if(ImGui::Button("精准移动 / 旋转键端点...",{-1,U(28)}))requestCreationMovement();
+            recordUiTestItem("creation.selected-bond-movement");
             const int row=creationBondSelection.back();
             if(row>=0 && size_t(row)<source.bonds.size()) {
                 const auto &b=source.bonds[size_t(row)];const auto vector=bondVector(source,b);

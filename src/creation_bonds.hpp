@@ -2,6 +2,19 @@
 #include "core.hpp"
 
 namespace atomx::creation {
+// Coordinates belong to primary-cell atoms. Shared endpoints are transformed
+// once, including when several selected edges cross a periodic boundary.
+inline std::vector<int> selectedAtoms(const Dataset &d,std::vector<int> atoms,const std::vector<int> &rows) {
+    for(int row:rows) {
+        if(row<0 || size_t(row)>=d.bonds.size())throw std::invalid_argument("Invalid bond selection");
+        const auto &b=d.bonds[size_t(row)];
+        if(b.a>=d.atoms.size() || b.b>=d.atoms.size())throw std::invalid_argument("Invalid bond endpoints");
+        atoms.push_back(int(b.a));atoms.push_back(int(b.b));
+    }
+    for(int atom:atoms)if(atom<0 || size_t(atom)>=d.atoms.size())throw std::invalid_argument("Invalid atom selection");
+    std::sort(atoms.begin(),atoms.end());atoms.erase(std::unique(atoms.begin(),atoms.end()),atoms.end());
+    return atoms;
+}
 // Edit the actual bond rows, including periodic images. Never infer a direct
 // bond from endpoints: a pair can have several different image connections.
 inline std::vector<int> editBonds(Dataset &d,std::vector<int> rows,int order) {

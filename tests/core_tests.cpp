@@ -2918,6 +2918,9 @@ int main() {
                     "fragment selection traverses topology without selecting a disconnected molecule");
             require(authoring::fragment(molecule,3)==std::vector<int>{3} &&
                     authoring::fragment(molecule,-1).empty(),"isolated and invalid fragment seeds");
+            const auto unionFragments=authoring::fragments(molecule,{0,2,3,3,-1,999});
+            require(unionFragments.size()==4 && std::set<int>(unionFragments.begin(),unionFragments.end())==std::set<int>({0,1,2,3}),
+                    "multiple fragment seeds traverse each connected component once, ignoring invalid seeds");
             const auto rotated=authoring::rotatedPoint({1,0,0},{0,0,0},{0,0,2},authoring::kPi/2);
             require(std::abs(rotated.x)<1e-6 && std::abs(rotated.y-1)<1e-6,
                     "rigid rotation normalizes its axis and rotates about the chosen center");
@@ -3108,6 +3111,10 @@ int main() {
             d.cell={10,0,0,0,10,0,0,0,10};d.pbc={true,true,true};
             d.bonds={{0,1,{},1},{0,1,{1,0,0},2},{1,2,{},1}};
             d.scalarProperties["Charge"]={.1,.2,.3};const auto atoms=d.atoms;const auto science=d.scalarProperties;
+            const auto endpoints=creation::selectedAtoms(d,{0,0},{0,1,2,2});
+            require(endpoints==std::vector<int>({0,1,2}),"mixed selection transforms shared periodic and direct endpoints only once");
+            bool invalidEndpoints=false;try {(void)creation::selectedAtoms(d,{0},{999});}catch(const std::invalid_argument &){invalidEndpoints=true;}
+            require(invalidEndpoints && d.scalarProperties==science,"invalid captured edge rows reject without changing science");
             creation::BondLabels labels;creation::BondLabel length{"selected image",{creation::BondField::Length},4};
             labels.setBonds(d,{1},length,false);
             require(labels.at(0).empty() && labels.at(1).text=="selected image" && labels.at(2).empty(),"explicit selection labels only that periodic image, not all edges sharing endpoints");
