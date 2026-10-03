@@ -598,6 +598,77 @@ int main() {
                 app.authorRedo.clear(); app.chooseCreationTool(App::CreationTool::Select); app.cameras[3].mode=7; frame();
             }
             {
+                app.fragmentLibraryDirectory=dir/"library"; app.fragmentLibraryRequested=false;
+                const size_t baseline=app.authorUndo.size();
+                app.editStructure("fragment fixture",[&](Dataset &data) {
+                    data=app.fragmentLibrary[0].data;
+                    data.cell={10,0,0,0,10,0,0,0,10};
+                    for (auto &a:data.atoms) { a.x+=2; a.y+=2; a.z+=2; }
+                    data.scalarProperties["Charge"]={1,2,3,4,5};
+                }); settlePipeline();
+                app.creationDisplay.labels[4]={creation::LabelKind::Custom,"survivor"};
+                app.cameras[3].mode=2; app.cell=true; app.fitCamera(3,false); frame();
+                click("creation.tool-fragment"); frame();
+                requireExport(app.showFragmentBrowser && app.uiTestItems.contains("creation.fragment-preview"),
+                              "fragment toolbar opens the classified browser and connection point preview");
+                click("creation.fragment-place"); frame();
+                requireExport(!app.showFragmentBrowser && app.creationTool==App::CreationTool::Fragment,
+                              "fragment browser starts placement in the same creation viewport");
+                auto pointOf=[&](Vec3 a) {
+                    const auto vp=app.uiTestItems.at("creation.viewport"); const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};
+                    const auto matrix=app.creationProjection(app.result.data,app.cameras[3],size).combined; DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(a.x,a.y,a.z,1),matrix));
+                    return ImVec2{vp.min.x+(q.x/q.w+1)*size.x*.5f,vp.min.y+(1-q.y/q.w)*size.y*.5f};
+                };
+                auto pointerClick=[&](ImVec2 at) {
+                    guiIO.AddMousePosEvent(at.x,at.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                    guiIO.AddMouseButtonEvent(0,false); frame(); settlePipeline();
+                };
+                const size_t start=app.authorUndo.size(); const auto blank=pointOf({6,5,2});
+                guiIO.AddMousePosEvent(blank.x,blank.y); frame();
+                requireExport(app.creationFragmentPreviewValid && app.source.atoms.size()==5,"fragment preview never edits the source");
+                pointerClick(blank);
+                requireExport(app.source.atoms.size()==10 && app.source.bonds.size()==8 && app.authorUndo.size()==start+1,
+                              "isolated capped template placement creates one history step");
+                app.history(false); settlePipeline();
+                click("creation.fragment-browser"); frame();
+                click("creation.fragment-entry-builtin/hydroxyl"); frame();
+                click("creation.fragment-place"); frame();
+                auto terminal=pointOf({.91f,2,2});
+                guiIO.AddMousePosEvent(terminal.x,terminal.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                const auto provisional=app.creationFragmentPreview.points;
+                guiIO.AddMousePosEvent(terminal.x+40,terminal.y+20); frame();
+                requireExport(app.creationDrag==App::CreationDrag::Fragment && app.creationFragmentPreviewValid &&
+                              app.source.atoms.size()==5 && std::abs(app.creationFragmentPreview.points[2].z-provisional[2].z)>.01,
+                              "held attachment rotates a small ghost without modifying the large document");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true); frame(); guiIO.AddKeyEvent(ImGuiKey_Escape,false); frame();
+                guiIO.AddMouseButtonEvent(0,false); frame();
+                requireExport(app.source.atoms.size()==5 && app.authorUndo.size()==start,"Escape cancels provisional fragment placement");
+                pointerClick(pointOf({.91f,2,2}));
+                requireExport(app.source.atoms.size()==6 && app.source.bonds.size()==5 &&
+                              app.creationDisplay.labelAt(3).text=="survivor" &&
+                              app.source.scalarProperties.at("Charge")[1]==3 && app.creationSelection.size()==2,
+                              "terminal H substitution creates methanol while remapping surviving attributes and labels");
+                app.history(false); settlePipeline();
+                requireExport(app.source.atoms.size()==5 && app.creationDisplay.labelAt(4).text=="survivor", "undo restores replaced hydrogen and atom identities");
+                app.history(true); settlePipeline();
+                app.selectCreationAtom(5,false); app.defineFragment(); frame();
+                strcpy_s(app.fragmentName,"GUI methanol"); frame(); click("creation.fragment-save");
+                app.fragmentSaveJob.wait(); app.poll(); frame();
+                requireExport(app.currentFragment()->name=="GUI methanol" && app.currentFragment()->key.starts_with("user/"),
+                              "definition dialog saves the current connected component with its selected terminal point");
+                const auto customKey=app.creationFragmentKey;
+                requireExport(fragments::load(app.fragmentLibraryDirectory/(customKey.substr(5)+".atomx")).name=="GUI methanol",
+                              "application custom library entry survives reopening from disk");
+                app.showFragmentBrowser=false; frame();
+                const auto tab=app.captureTab(); app.selectFragment(app.fragmentLibrary[0]); app.restoreTab(tab);
+                requireExport(app.creationFragmentKey==customKey && app.creationFragmentConnector==5 && !app.creationFragmentPreviewValid,
+                              "tabs retain independent fragment and connection point without carrying a gesture");
+                settlePipeline();
+                while (app.authorUndo.size()>baseline) { app.history(false); settlePipeline(); }
+                app.authorRedo.clear(); app.chooseCreationTool(App::CreationTool::Select); app.cameras[3].mode=7; frame();
+            }
+            {
                 const size_t baseline=app.authorUndo.size();
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
@@ -1223,8 +1294,10 @@ int main() {
                           "creation copy restores its own structure, workspace and panel state");
         }
         ImGui::DestroyContext();
-        for (const auto &e : std::filesystem::directory_iterator(dir))
-            std::filesystem::remove(e.path());
+        for (const auto &e : std::filesystem::directory_iterator(dir)) {
+            requireExport(e.path().parent_path()==dir,"fixture cleanup stays inside its owned temporary directory");
+            std::filesystem::remove_all(e.path());
+        }
         std::filesystem::remove(dir);
         DestroyWindow(window);
         CoUninitialize();

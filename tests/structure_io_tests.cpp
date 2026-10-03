@@ -81,9 +81,16 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=3; rejectBytes(version);
+            auto version=bytes; version[8]=4; rejectBytes(version);
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
-            auto legacy=bytes; legacy[8]=1; legacy.erase(legacy.size()-8,4);
+            auto version2=bytes; version2[8]=2;
+            const size_t fragmentBytes=8+view.fragmentKey.size()+4;
+            version2.erase(version2.size()-4-fragmentBytes,fragmentBytes);
+            const auto version2Path=dir/"v2.atomx";
+            { std::ofstream out(version2Path,std::ios::binary); out.write(version2.data(),std::streamsize(version2.size())); }
+            require(document::read(version2Path).view.ringSize==5 && document::read(version2Path).view.fragmentKey=="builtin/methyl",
+                    "version 2 documents retain ring settings and default fragment selection");
+            auto legacy=version2; legacy[8]=1; legacy.erase(legacy.size()-8,4);
             const auto legacyPath=dir/"legacy.atomx";
             { std::ofstream out(legacyPath,std::ios::binary); out.write(legacy.data(),std::streamsize(legacy.size())); }
             require(document::read(legacyPath).view.ringSize==6 && document::read(legacyPath).data.bonds==native.bonds,
@@ -93,7 +100,14 @@ int main() {
             const auto ringPath=dir/"aromatic.atomx";
             io::write(ringPath,io::Format::AtomX,aromatic,ringOptions);
             require(document::read(ringPath).data.bonds[0].order==4 && document::read(ringPath).view.tool==5,
-                    "version 2 retains aromatic topology and ring tool settings");
+                    "native document retains aromatic topology and ring tool settings");
+            auto fragmentOptions=nativeOptions; fragmentOptions.documentView.tool=6;
+            fragmentOptions.documentView.fragmentKey="builtin/phenyl"; fragmentOptions.documentView.fragmentConnector=6;
+            const auto fragmentPath=dir/"fragment-tool.atomx";
+            io::write(fragmentPath,io::Format::AtomX,native,fragmentOptions);
+            const auto fragmentRestored=document::read(fragmentPath);
+            require(fragmentRestored.view.tool==6 && fragmentRestored.view.fragmentKey=="builtin/phenyl" && fragmentRestored.view.fragmentConnector==6,
+                    "version 3 persists active fragment key and changed terminal connector");
             rejectBytes(bytes+"trailing data");
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }

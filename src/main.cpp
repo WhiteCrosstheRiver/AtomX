@@ -1,6 +1,7 @@
 #include "renderer.hpp"
 #include "analysis.hpp"
 #include "authoring.hpp"
+#include "fragment_library.hpp"
 #include "creation_display.hpp"
 #include "symmetry.hpp"
 #include "structure_io.hpp"
@@ -797,8 +798,8 @@ struct App {
     std::filesystem::path colorRangePath;
     // One structure per browser-style tab. The live document stays in the
     // fields above; a tab is only a snapshot taken when leaving it.
-    enum class CreationTool { Select, Rotate, Pan, Move, Sketch, Ring };
-    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring };
+    enum class CreationTool { Select, Rotate, Pan, Move, Sketch, Ring, Fragment };
+    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring, Fragment };
     struct CreationHistoryState {
         std::optional<Dataset> data; // Display-only history does not copy a large structure.
         creation::Display display;
@@ -832,6 +833,8 @@ struct App {
         bool sketchContinuous = true;
         int sketchOrder = 1;
         int ringSize = 6;
+        std::string fragmentKey="builtin/methyl";
+        int fragmentConnector=1;
         CreationTool creationTool = CreationTool::Select;
         std::vector<int> selection;
         int picked = -1;
@@ -865,6 +868,23 @@ struct App {
     bool creationRingPreviewValid=false;
     authoring::RingSketch creationRingPreview{}, creationRingStart{};
     ImVec2 creationRingMouse{-1,-1};
+    std::vector<fragments::Template> fragmentLibrary=fragments::builtins();
+    std::string creationFragmentKey="builtin/methyl";
+    int creationFragmentConnector=1;
+    bool creationFragmentPreviewValid=false,showFragmentBrowser=false,openFragmentDefine=false;
+    fragments::Placement creationFragmentPreview,creationFragmentStart;
+    ImVec2 creationFragmentMouse{-1,-1};
+    float fragmentPreviewYaw=.5f,fragmentPreviewPitch=.3f,fragmentPreviewZoom=1.f;
+    ImVec2 fragmentPreviewPan{};
+    char fragmentSearch[128]{},fragmentName[128]{},fragmentCategory[128]="我的片段";
+    std::optional<fragments::Template> fragmentDefineDraft;
+    std::string fragmentLibraryMessage;
+    std::filesystem::path fragmentLibraryDirectory;
+    bool fragmentLibraryRequested=false,fragmentSaveComplete=false;
+    struct FragmentLoad { std::vector<fragments::Template> entries; std::string message; };
+    std::future<FragmentLoad> fragmentLibraryJob;
+    std::future<fragments::Template> fragmentSaveJob;
+    uint64_t fragmentSaveTabId=0;
     CreationTool creationTool = CreationTool::Select;
     std::vector<int> creationSelection;
     std::vector<CreationSnapshot> creationSnapshots;
@@ -1496,6 +1516,7 @@ struct App {
         tab.creationSketch = creationSketch;
         tab.sketchContinuous = creationSketchContinuous; tab.sketchOrder = creationSketchOrder;
         tab.ringSize=creationRingSize;
+        tab.fragmentKey=creationFragmentKey; tab.fragmentConnector=creationFragmentConnector;
         tab.creationTool = creationTool;
         tab.selection = creationSelection;
         tab.picked = creationPick;
@@ -1536,6 +1557,8 @@ struct App {
         creationSketch = tab.creationSketch;
         creationSketchContinuous=tab.sketchContinuous; creationSketchOrder=tab.sketchOrder;
         creationRingSize=tab.ringSize; creationRingPreviewValid=false;
+        creationFragmentKey=tab.fragmentKey; creationFragmentConnector=tab.fragmentConnector;
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; showFragmentBrowser=false;
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationTool = tab.creationTool;
         creationSelection = tab.selection;
@@ -1817,6 +1840,7 @@ struct App {
         structureEditIsLatest = true;
     }
     void adoptStructure(Dataset data, const std::string &message) {
+        chooseCreationTool(creationTool);
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         rememberStructure(message);
         creationDisplay={};
@@ -1841,6 +1865,7 @@ struct App {
         }
         rememberStructure(message);
         creationRingPreviewValid=false;
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
@@ -1976,6 +2001,202 @@ struct App {
             creationSelection=edit.selection; creationPick=creationSelection.back();
         } catch (const std::exception &e) { status=e.what(); }
     }
+    const fragments::Template *currentFragment() const {
+        for (const auto &t:fragmentLibrary) if (t.key==creationFragmentKey) return &t;
+        return nullptr;
+    }
+    void requestFragmentLibrary() {
+        if (fragmentLibraryRequested) return;
+        fragmentLibraryRequested=true;
+        if (fragmentLibraryDirectory.empty()) fragmentLibraryDirectory=desktop::settingsPath().parent_path()/"fragments";
+        const auto directory=fragmentLibraryDirectory;
+        fragmentLibraryJob=std::async(std::launch::async,[directory] {
+            FragmentLoad result;
+            try {
+                if (!std::filesystem::exists(directory)) return result;
+                size_t bytes=0,count=0,invalid=0;
+                for (const auto &file:std::filesystem::directory_iterator(directory)) {
+                    if (!file.is_regular_file() || file.path().extension()!=L".atomx") continue;
+                    const auto size=file.file_size();
+                    if (++count>128 || bytes+size>8*1024*1024) { result.message="片段库读取上限：128 个文件 / 8 MiB"; break; }
+                    bytes+=size;
+                    try { result.entries.push_back(fragments::load(file.path())); }
+                    catch (const std::exception &) { ++invalid; }
+                }
+                if (invalid) result.message="已跳过 "+std::to_string(invalid)+" 个无效片段文件";
+                std::sort(result.entries.begin(),result.entries.end(),[](const auto &a,const auto &b){return a.name<b.name;});
+            } catch (const std::exception &e) { result.message=e.what(); }
+            return result;
+        });
+    }
+    void selectFragment(const fragments::Template &t) {
+        creationFragmentKey=t.key; creationFragmentConnector=t.connector;
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+        fragmentPreviewYaw=.5f; fragmentPreviewPitch=.3f; fragmentPreviewZoom=1.f; fragmentPreviewPan={};
+        chooseCreationTool(CreationTool::Fragment);
+    }
+    void fragmentBrowser() {
+        if (!creationMode) { showFragmentBrowser=false; return; }
+        if (showFragmentBrowser) {
+            requestFragmentLibrary();
+            ImGui::SetNextWindowSize({U(610),U(480)},ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSizeConstraints({U(500),U(390)},{U(900),U(760)});
+            if (ImGui::Begin("片段浏览器##fragments",&showFragmentBrowser)) {
+                ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##fragment-search","搜索片段...",fragmentSearch,sizeof(fragmentSearch));
+                recordUiTestItem("creation.fragment-search");
+                if (ImGui::BeginChild("##fragment-list",{U(210),-U(100)},ImGuiChildFlags_Borders)) {
+                    std::map<std::string,std::vector<size_t>> categories;
+                    for (size_t index=0;index<fragmentLibrary.size();++index)
+                        if (!fragmentSearch[0] || fragmentLibrary[index].name.find(fragmentSearch)!=std::string::npos)
+                            categories[fragmentLibrary[index].category].push_back(index);
+                    for (const auto &[category,indexes]:categories) {
+                        ImGui::SetNextItemOpen(true,ImGuiCond_Once);
+                        if (ImGui::TreeNode(category.c_str())) {
+                            for (auto index:indexes) {
+                                const auto &t=fragmentLibrary[index]; ImGui::PushID(t.key.c_str());
+                                if (ImGui::Selectable(t.name.c_str(),t.key==creationFragmentKey)) selectFragment(t);
+                                recordUiTestItem("creation.fragment-entry-"+t.key);
+                                ImGui::PopID();
+                            }
+                            ImGui::TreePop();
+                        }
+                    }
+                }
+                ImGui::EndChild(); ImGui::SameLine();
+                if (ImGui::BeginChild("##fragment-detail",{0,-U(100)},ImGuiChildFlags_Borders)) {
+                    if (const auto *t=currentFragment()) {
+                        ImGui::TextWrapped("%s",t->name.c_str());
+                        ImGui::TextDisabled("%zu 原子 · %zu 键",t->data.atoms.size(),t->data.bonds.size());
+                        const ImVec2 size{ImGui::GetContentRegionAvail().x,std::max(U(140),ImGui::GetContentRegionAvail().y-U(95))};
+                        const auto start=ImGui::GetCursorScreenPos();
+                        ImGui::InvisibleButton("##fragment-preview",size,ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);
+                        recordUiTestItem("creation.fragment-preview");
+                        auto &io=ImGui::GetIO();
+                        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
+                            fragmentPreviewYaw+=io.MouseDelta.x*.012f; fragmentPreviewPitch+=io.MouseDelta.y*.012f;
+                        }
+                        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(1)) {
+                            fragmentPreviewPan.x+=io.MouseDelta.x; fragmentPreviewPan.y+=io.MouseDelta.y;
+                        }
+                        if (ImGui::IsItemHovered() && io.MouseWheel!=0) fragmentPreviewZoom=std::clamp(fragmentPreviewZoom*std::pow(1.12f,io.MouseWheel),.3f,4.f);
+                        const Vec3 center=authoring::scale(authoring::add(t->data.lo,t->data.hi),.5);
+                        const float span=std::max({t->data.hi.x-t->data.lo.x,t->data.hi.y-t->data.lo.y,t->data.hi.z-t->data.lo.z,1.f});
+                        const float zoom=std::min(size.x,size.y)*.62f/span*fragmentPreviewZoom;
+                        std::vector<ImVec2> points; std::vector<float> depths; std::vector<int> order;
+                        for (size_t i=0;i<t->data.atoms.size();++i) {
+                            auto v=authoring::sub(fragments::at(t->data,int(i)),center);
+                            v=authoring::rotatedPoint(v,{}, {0,1,0},fragmentPreviewYaw);
+                            v=authoring::rotatedPoint(v,{}, {1,0,0},fragmentPreviewPitch);
+                            points.push_back({start.x+size.x*.5f+v.x*zoom+fragmentPreviewPan.x,start.y+size.y*.5f-v.y*zoom+fragmentPreviewPan.y});
+                            depths.push_back(v.z); order.push_back(int(i));
+                        }
+                        std::sort(order.begin(),order.end(),[&](int a,int b){return depths[size_t(a)]<depths[size_t(b)];});
+                        auto *draw=ImGui::GetWindowDrawList(); draw->PushClipRect(start,{start.x+size.x,start.y+size.y},true);
+                        draw->AddRectFilled(start,{start.x+size.x,start.y+size.y},IM_COL32(0,0,0,255),U(4));
+                        for (const auto &b:t->data.bonds) {
+                            auto a=points[b.a],z=points[b.b]; const float len=std::max(std::hypot(z.x-a.x,z.y-a.y),1.f);
+                            const int strands=b.order==4?2:b.order;
+                            for (int lane=0;lane<strands;++lane) {
+                                const float offset=U(3)*(lane-(strands-1)*.5f),x=-(z.y-a.y)/len*offset,y=(z.x-a.x)/len*offset;
+                                draw->AddLine({a.x+x,a.y+y},{z.x+x,z.y+y},IM_COL32(180,190,202,210),U(3));
+                            }
+                        }
+                        int hoveredAtom=-1; float nearestDepth=-FLT_MAX;
+                        for (int i:order) {
+                            const auto *element=elements::find(t->data.species[t->data.atoms[size_t(i)].type]);
+                            const float radiusPx=std::clamp(element->covalent*zoom*.25f,U(5),U(19));
+                            const auto at=points[size_t(i)];
+                            for (int shade=0;shade<8;++shade) {
+                                const float f=float(shade)/7,brightness=.48f+.52f*f;
+                                const unsigned color=element->rgb;
+                                draw->AddCircleFilled({at.x-radiusPx*f*.24f,at.y-radiusPx*f*.24f},radiusPx*(1-f*.76f),
+                                    IM_COL32(int(((color>>16)&255)*brightness),int(((color>>8)&255)*brightness),int((color&255)*brightness),255),20);
+                            }
+                            if (i==creationFragmentConnector) {
+                                draw->AddCircle(at,radiusPx+U(4),IM_COL32(255,104,88,255),24,U(2));
+                                draw->AddLine({at.x-radiusPx-U(4),at.y},{at.x+radiusPx+U(4),at.y},IM_COL32(255,104,88,150));
+                            }
+                            if (ImGui::IsItemHovered() && std::hypot(io.MousePos.x-at.x,io.MousePos.y-at.y)<radiusPx+U(3) && depths[size_t(i)]>=nearestDepth) {
+                                hoveredAtom=i; nearestDepth=depths[size_t(i)];
+                            }
+                        }
+                        draw->PopClipRect();
+                        if (hoveredAtom>=0 && ImGui::IsMouseDoubleClicked(0)) {
+                            if (fragments::terminalNeighbor(t->data,hoveredAtom)>=0) {
+                                creationFragmentConnector=hoveredAtom; creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+                            } else fragmentLibraryMessage="连接点必须是只有一条直接键的末端原子";
+                        }
+                        ImGui::TextDisabled("红圈：连接点 · 双击末端原子更换");
+                        ImGui::TextDisabled("拖动旋转 · 右键平移 · 滚轮缩放");
+                        if (ImGui::SmallButton("重置预览")) { fragmentPreviewYaw=.5f; fragmentPreviewPitch=.3f; fragmentPreviewZoom=1; fragmentPreviewPan={}; }
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("开始放置")) { chooseCreationTool(CreationTool::Fragment); showFragmentBrowser=false; }
+                        recordUiTestItem("creation.fragment-place");
+                    } else ImGui::TextWrapped("正在加载所选片段，或片段不在本机库中。");
+                }
+                ImGui::EndChild();
+                if (ImGui::Button("定义片段...")) defineFragment();
+                recordUiTestItem("creation.fragment-define");
+                ImGui::SameLine();
+                if (ImGui::Button("关闭")) showFragmentBrowser=false;
+                recordUiTestItem("creation.fragment-close");
+                if (fragmentLibraryJob.valid()) ImGui::TextDisabled("正在读取本机片段库...");
+                if (!fragmentLibraryMessage.empty()) ImGui::TextWrapped("%s",fragmentLibraryMessage.c_str());
+                ImGui::TextDisabled("主视口：空白处放置 · 末端原子接枝 · 按住拖动调整朝向");
+            }
+            ImGui::End();
+        }
+        if (openFragmentDefine) { ImGui::OpenPopup("定义片段##fragment-define"); openFragmentDefine=false; }
+        if (ImGui::BeginPopupModal("定义片段##fragment-define",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (fragmentSaveComplete) { fragmentSaveComplete=false; ImGui::CloseCurrentPopup(); }
+            if (fragmentDefineDraft) {
+                ImGui::Text("%zu 原子 · 连接点 #%d",fragmentDefineDraft->data.atoms.size(),fragmentDefineDraft->connector+1);
+                ImGui::InputText("名称",fragmentName,sizeof(fragmentName)); recordUiTestItem("creation.fragment-name");
+                ImGui::InputText("库",fragmentCategory,sizeof(fragmentCategory)); recordUiTestItem("creation.fragment-category");
+                ImGui::BeginDisabled(fragmentSaveJob.valid() || !fragmentName[0] || !fragmentCategory[0]);
+                if (ImGui::Button("保存到片段库")) {
+                    requestFragmentLibrary();
+                    auto entry=*fragmentDefineDraft; entry.name=fragmentName; entry.category=fragmentCategory;
+                    const auto directory=fragmentLibraryDirectory;
+                    const auto filename=std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".atomx";
+                    fragmentSaveTabId=tabs[size_t(activeTab)].id;
+                    fragmentSaveJob=std::async(std::launch::async,[directory,filename,entry=std::move(entry)]() mutable {
+                        std::filesystem::create_directories(directory);
+                        entry.key="user/"+std::filesystem::path(filename).stem().string();
+                        fragments::save(directory/filename,entry); return entry;
+                    });
+                }
+                recordUiTestItem("creation.fragment-save"); ImGui::EndDisabled(); ImGui::SameLine();
+                if (ImGui::Button("取消")) ImGui::CloseCurrentPopup(); recordUiTestItem("creation.fragment-cancel");
+                if (!fragmentLibraryMessage.empty()) ImGui::TextWrapped("%s",fragmentLibraryMessage.c_str());
+            }
+            ImGui::EndPopup();
+        }
+    }
+    void commitCreationFragment(const fragments::Placement &placement) {
+        if (documentsBusy() || !creationMode || !sameAtomCount()) return;
+        const auto *t=currentFragment(); if (!t) return;
+        try {
+            fragments::preflight(source,*t,placement,creationDisplay.hidden);
+            std::vector<int> added;
+            editStructure("放置片段 · "+t->name,[&](Dataset &data) {
+                if (placement.removed>=0) creationDisplay.eraseAtoms(data.atoms.size(),{placement.removed});
+                added=fragments::apply(data,*t,placement); data.bondStyle.visible=true;
+            });
+            creationSelection=std::move(added); creationPick=creationSelection.empty()?-1:creationSelection.back();
+            creationMeasure=creationAngle=creationDihedral=-1;
+        } catch (const std::exception &e) { status=e.what(); }
+    }
+    void defineFragment() {
+        if (documentsBusy() || !creationMode || creationSelection.size()!=1) {
+            fragmentLibraryMessage="请在主视口选中一个末端原子作为连接点"; return;
+        }
+        try {
+            fragmentDefineDraft=fragments::define(source,creationSelection[0],"我的片段","我的片段");
+            snprintf(fragmentName,sizeof(fragmentName),"%s",fragmentDefineDraft->name.c_str());
+            openFragmentDefine=true;
+        } catch (const std::exception &e) { fragmentLibraryMessage=e.what(); }
+    }
     void nudgePicked(int axis, float delta) {
         if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
             status = "Pick an atom in Creation Mode first";
@@ -2032,6 +2253,7 @@ struct App {
                               : "Display style: Ball and stick";
     }
     void history(bool forward) {
+        chooseCreationTool(creationTool);
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         if (creationMode || structureEditIsLatest || !authorRedo.empty()) {
             if (!forward && !authorUndo.empty()) {
@@ -2185,6 +2407,27 @@ struct App {
             });
     }
     void poll() {
+        if (fragmentLibraryJob.valid() && fragmentLibraryJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            const auto loaded=fragmentLibraryJob.get();
+            for (auto t:loaded.entries) {
+                const bool exists=std::any_of(fragmentLibrary.begin(),fragmentLibrary.end(),[&](const auto &old){return old.key==t.key;});
+                if (!exists) fragmentLibrary.push_back(std::move(t));
+            }
+            fragmentLibraryMessage=loaded.message;
+            if (!loaded.entries.empty()) refreshFont=true;
+            if (creationTool==CreationTool::Fragment && !currentFragment()) {
+                chooseCreationTool(CreationTool::Select); status="所选自定义片段不在本机片段库中，请重新选择片段";
+            }
+        }
+        if (fragmentSaveJob.valid() && fragmentSaveJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            try {
+                fragmentLibrary.push_back(fragmentSaveJob.get());
+                if (creationMode && tabs[size_t(activeTab)].id==fragmentSaveTabId) selectFragment(fragmentLibrary.back());
+                fragmentLibraryMessage="片段已保存 · "+fragmentLibrary.back().name;
+                refreshFont=true;
+                showFragmentBrowser=creationMode; fragmentSaveComplete=true;
+            } catch (const std::exception &e) { fragmentLibraryMessage=e.what(); }
+        }
         if (inspectorBusy && inspectorJob.valid() &&
             inspectorJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             inspectorBusy = false;
@@ -2403,6 +2646,7 @@ struct App {
             v.display=creationDisplay; v.selection.assign(creationSelection.begin(),creationSelection.end());
             v.element=creationElement; v.tool=int(creationTool); v.order=creationSketchOrder;
             v.ringSize=creationRingSize;
+            v.fragmentKey=creationFragmentKey; v.fragmentConnector=creationFragmentConnector;
             v.continuous=creationSketchContinuous; v.propertyPage=creationPropertyPage;
             v.propertiesOpen=creationPropertiesOpen;
         }
@@ -2426,6 +2670,10 @@ struct App {
         creationTool=CreationTool(v.tool); creationSketch=creationTool==CreationTool::Sketch;
         creationSketchOrder=v.order; creationSketchContinuous=v.continuous;
         creationRingSize=v.ringSize; creationRingPreviewValid=false;
+        creationFragmentKey=v.fragmentKey; creationFragmentConnector=v.fragmentConnector;
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; showFragmentBrowser=false;
+        if (creationTool==CreationTool::Fragment) requestFragmentLibrary();
+        creationDrag=CreationDrag::None; creationDragAtoms.clear();
         snprintf(creationElement,sizeof(creationElement),"%s",v.element.c_str());
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationPropertiesOpen=v.propertiesOpen; creationPropertyPage=v.propertyPage;
@@ -2963,6 +3211,9 @@ struct App {
         } else if (name=="draw") {
             line(4,19,17,5);line(17,5,21,9);line(21,9,8,22);line(8,22,4,22);
             line(4,22,4,19);line(14,8,18,12);
+        } else if (name=="fragment") {
+            line(7,8,16,6); line(7,8,11,18); line(11,18,20,15);
+            circle(7,8,3); circle(16,6,2.5f); circle(11,18,3); circle(20,15,2.5f);
         } else if (name=="ring") {
             ImVec2 vertices[6];
             for (int i=0;i<6;++i) {
@@ -3125,6 +3376,8 @@ struct App {
             if (ImGui::MenuItem("几何优化")) cleanGeometryCommand();
         });
         menu("构建", "##create-build", [&] {
+            if (ImGui::MenuItem("片段浏览器...")) { requestFragmentLibrary(); showFragmentBrowser=true; }
+            if (ImGui::MenuItem("定义片段...")) defineFragment();
             if (ImGui::BeginMenu("绘制碳环")) {
                 for (int size=4;size<=6;++size) {
                     const auto caption=std::to_string(size)+" 元环";
@@ -3185,7 +3438,10 @@ struct App {
         icon("pan",0xE72A,"P","Pan view",green,creationTool==CreationTool::Pan,[&]{chooseCreationTool(CreationTool::Pan);});
         icon("move",0xE8AB,"M","Move selected atoms",orange,creationTool==CreationTool::Move,[&]{chooseCreationTool(CreationTool::Move);});
         icon("draw",0xE70F,"+","Draw atoms",green,creationTool==CreationTool::Sketch,[&]{chooseCreationTool(CreationTool::Sketch);});
-        icon("ring",0,"6","绘制碳环 (4 / 5 / 6) · Alt 芳香环",green,creationTool==CreationTool::Ring,[&]{chooseCreationTool(CreationTool::Ring);}); divider();
+        icon("ring",0,"6","绘制碳环 (4 / 5 / 6) · Alt 芳香环",green,creationTool==CreationTool::Ring,[&]{chooseCreationTool(CreationTool::Ring);});
+        icon("fragment",0,"CH","片段浏览器 · 常用与自定义片段",green,creationTool==CreationTool::Fragment,[&]{
+            requestFragmentLibrary(); chooseCreationTool(CreationTool::Fragment); showFragmentBrowser=true;
+        }); divider();
         icon("delete",0xE74D,"X","Delete selected atom",red,false,[&]{deletePickedAtom();});
         icon("hydrogen",0xE8FA,"H+","Add hydrogens",violet,false,[&]{addHydrogensCommand();});
         icon("clean",0xE734,"*","Clean geometry",violet,false,[&]{cleanGeometryCommand();}); divider();
@@ -4001,13 +4257,14 @@ struct App {
             }
             uploadCreationDisplay(result.data,result.selected,result.colorSelected);
         }
-        creationRingPreviewValid=false; creationDrag=CreationDrag::None; creationDragAtoms.clear();
+        creationRingPreviewValid=false; creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; creationDrag=CreationDrag::None; creationDragAtoms.clear();
         creationTool = tool;
         creationSketch = tool == CreationTool::Sketch;
         status = tool == CreationTool::Select ? "选择原子或拖动框选" :
                  tool == CreationTool::Rotate ? "拖动旋转" :
                  tool == CreationTool::Pan ? "拖动平移" :
                  tool == CreationTool::Move ? "拖动选中原子" :
+                 tool == CreationTool::Fragment ? "点击放置片段 · 末端原子上接枝 · 拖动调整朝向 · Esc 取消" :
                  tool == CreationTool::Ring ? "点击放置碳环 · 原子或键上接环 · 拖动调整朝向 · Alt 芳香环" : "点击绘制或连键 · 双击结束 · Esc 取消";
     }
     void selectCreationAtom(int index, bool shift, bool toggle = false) {
@@ -4056,6 +4313,7 @@ struct App {
     }
     void refreshCreationDisplay(bool visibilityChanged=true) {
         creationRingPreviewValid=false;
+        creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
         creationDisplay.normalize(source.atoms.size());
         creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
             [&](int index){return !creationAtomVisible(index);}),creationSelection.end());
@@ -4274,9 +4532,13 @@ struct App {
     bool creationPointer(ImVec2 p, ImVec2 size, Camera &cam, bool hovered) {
         auto &io=ImGui::GetIO();
         creationSketchPreviewValid=false;
+        if (creationTool!=CreationTool::Fragment || !hovered || io.AppFocusLost || io.MouseWheel!=0 ||
+            (creationDrag!=CreationDrag::None && creationDrag!=CreationDrag::Fragment)) {
+            creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
+        }
         if (creationTool!=CreationTool::Ring || !hovered || io.AppFocusLost || io.MouseWheel!=0 ||
             (creationDrag!=CreationDrag::None && creationDrag!=CreationDrag::Ring)) creationRingPreviewValid=false;
-        if (io.AppFocusLost && creationDrag==CreationDrag::Ring) {
+        if (io.AppFocusLost && (creationDrag==CreationDrag::Ring || creationDrag==CreationDrag::Fragment)) {
             creationDrag=CreationDrag::None; return false;
         }
         if (io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -4297,6 +4559,7 @@ struct App {
             // event and retain atom indexes from an outdated document.
             creationDrag=CreationDrag::None; creationDragAtoms.clear();
             creationRingPreviewValid=false;
+            creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
             creationLastHoverMouse={-1,-1};
             return false;
         }
@@ -4310,6 +4573,7 @@ struct App {
             if (!creationDragAtoms.empty()) uploadCreationDisplay(result.data,result.selected,result.colorSelected);
             creationDragAtoms.clear(); creationDrag=CreationDrag::None;
             creationRingPreviewValid=false;
+            creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
             creationLastHoverMouse={-1,-1};
             return false;
         }
@@ -4347,6 +4611,25 @@ struct App {
              creationRingPreview.aromatic!=io.KeyAlt)) {
             try { creationRingPreview=ringAt(mouse); creationRingPreviewValid=true; creationRingMouse=mouse; }
             catch (const std::exception &) { creationRingPreviewValid=false; }
+        }
+        if (creationTool==CreationTool::Fragment && creationDrag==CreationDrag::None && hovered && !io.AppFocusLost &&
+            (mouse.x!=creationFragmentMouse.x || mouse.y!=creationFragmentMouse.y)) {
+            creationFragmentMouse=mouse;
+            try {
+                const auto *t=currentFragment(); if (!t) throw std::invalid_argument("片段库尚未加载");
+                const auto projection=creationProjection(result.data,cam,size);
+                Vec3 center=creationHover>=0?fragments::at(source,creationHover):authoring::cartesian(source,.5,.5,.5);
+                DirectX::XMFLOAT4 q;
+                DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(center.x,center.y,center.z,1),projection.combined));
+                if (q.w<=0) throw std::invalid_argument("绘制位置在视图之外");
+                const auto inverse=DirectX::XMMatrixInverse(nullptr,projection.view);
+                DirectX::XMFLOAT3 right,normal;
+                DirectX::XMStoreFloat3(&right,DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(1,0,0,0),inverse));
+                DirectX::XMStoreFloat3(&normal,DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0,0,-1,0),inverse));
+                creationFragmentPreview=fragments::place(source,*t,creationFragmentConnector,
+                    creationWorldAt(mouse,q.z/q.w,p,size,projection.combined),{right.x,right.y,right.z},{normal.x,normal.y,normal.z},creationHover);
+                creationFragmentPreviewValid=true;
+            } catch (const std::exception &) { creationFragmentPreviewValid=false; }
         }
         auto captureAtoms=[&]() {
             creationDragAtoms.clear(); creationDragCenter={};
@@ -4402,6 +4685,11 @@ struct App {
                     creationRingStart=creationRingPreview; creationDrag=CreationDrag::Ring;
                 }
             }
+            else if (creationTool==CreationTool::Fragment) {
+                if (creationFragmentPreviewValid) {
+                    creationFragmentStart=creationFragmentPreview; creationDrag=CreationDrag::Fragment;
+                } else status="请点击空白处、孤立原子或末端原子放置片段";
+            }
             else if (hit>=0) {
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) selectCreationFragment(hit);
                 else selectCreationAtom(hit,io.KeyShift||io.KeyCtrl,io.KeyCtrl);
@@ -4418,6 +4706,11 @@ struct App {
                 const double angle=(double(mouse.x-creationDragStart.x)+double(mouse.y-creationDragStart.y))*.012;
                 creationRingPreview=authoring::rotatedRing(creationRingStart,angle);
                 creationRingPreviewValid=hovered;
+            }
+            if (creationDrag==CreationDrag::Fragment) {
+                const double angle=(double(mouse.x-creationDragStart.x)+double(mouse.y-creationDragStart.y))*.012;
+                creationFragmentPreview=fragments::rotated(creationFragmentStart,angle);
+                creationFragmentPreviewValid=hovered;
             }
             if (creationDrag==CreationDrag::Sketch && creationDragMoved) {
                 if (creationSketchStartHit>=0 && !io.KeyAlt) {
@@ -4577,6 +4870,9 @@ struct App {
             } else if (creationDrag==CreationDrag::Ring && hovered && creationRingPreviewValid) {
                 const auto ring=creationRingPreview;
                 commitCreationRing(ring); creationRingPreviewValid=false;
+            } else if (creationDrag==CreationDrag::Fragment && hovered && creationFragmentPreviewValid) {
+                const auto placement=creationFragmentPreview;
+                commitCreationFragment(placement); creationFragmentPreviewValid=false;
             } else if (creationDrag==CreationDrag::Sketch && hovered && sketchPositionValid) {
                 const int bond=sketchHit<0 && creationSketchAnchor<0 && !io.KeyAlt && !creationDragMoved?
                     creationBondHit(p,size,cam,mouse):-1;
@@ -4601,7 +4897,7 @@ struct App {
             creationLastHoverMouse={-1,-1};
         }
         if (hovered) {
-            if (creationTool==CreationTool::Sketch || creationTool==CreationTool::Ring) g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
+            if (creationTool==CreationTool::Sketch || creationTool==CreationTool::Ring || creationTool==CreationTool::Fragment) g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
             else if (creationHover>=0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             else if (creationTool==CreationTool::Pan||creationTool==CreationTool::Move)
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
@@ -4867,6 +5163,32 @@ struct App {
             const auto projection=creationProjection(result.data,cam,avail);
             auto mvp=projection.combined;
             draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
+            if (creationFragmentPreviewValid && !pipelineBusy) {
+                if (const auto *t=currentFragment()) {
+                    const auto &placement=creationFragmentPreview;
+                    std::vector<ImVec2> points(placement.points.size()); std::vector<uint8_t> visible(points.size(),0);
+                    for (size_t index=0;index<points.size();++index) {
+                        const auto at=placement.points[index]; DirectX::XMFLOAT4 q;
+                        DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),mvp));
+                        visible[index]=q.w>0 && q.z>0 && q.z<q.w;
+                        if (visible[index]) points[index]={p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};
+                    }
+                    for (const auto &b:t->data.bonds) {
+                        if (placement.anchor>=0 && (int(b.a)==placement.connector || int(b.b)==placement.connector)) continue;
+                        if (visible[b.a] && visible[b.b]) draw->AddLine(points[b.a],points[b.b],IM_COL32(255,218,103,210),U(2));
+                    }
+                    for (size_t index=0;index<points.size();++index) if (visible[index] && !(placement.anchor>=0 && int(index)==placement.connector))
+                        draw->AddCircle(points[index],U(5),IM_COL32(255,218,103,210),16,U(1.5f));
+                    if (placement.anchor>=0 && visible[size_t(placement.root)]) {
+                        DirectX::XMFLOAT4 q; const auto at=placement.anchorPosition;
+                        DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),mvp));
+                        if (q.w>0 && q.z>0 && q.z<q.w) draw->AddLine({p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f},
+                            points[size_t(placement.root)],IM_COL32(255,218,103,210),U(2));
+                    }
+                    if (visible[size_t(placement.root)]) draw->AddText({points[size_t(placement.root)].x+U(12),points[size_t(placement.root)].y-U(24)},
+                        IM_COL32(255,218,103,230),t->name.c_str());
+                }
+            }
             if (creationRingPreviewValid && !pipelineBusy) {
                 const auto &ring=creationRingPreview;
                 ImVec2 projected[6]; bool visible[6]{};
@@ -6537,6 +6859,16 @@ struct App {
         ImGui::End();
 
         fixed("Creation selection", w - rightW, y, rightW, bodyH);
+        if (creationTool==CreationTool::Fragment) {
+            ImGui::SeparatorText("放置片段");
+            if (const auto *t=currentFragment()) ImGui::TextWrapped("%s",t->name.c_str());
+            if (ImGui::Button("片段浏览器...")) { requestFragmentLibrary(); showFragmentBrowser=true; }
+            recordUiTestItem("creation.fragment-browser");
+            ImGui::TextDisabled("空白处放置 · 末端原子接枝");
+            ImGui::TextDisabled("按住拖动调整朝向 · Esc 取消");
+            ImGui::TextDisabled("末端氢会被替换 · 其他原子保留");
+            ImGui::Separator();
+        }
         if (creationTool==CreationTool::Ring) {
             ImGui::SeparatorText("绘制碳环");
             ImGui::TextDisabled("环大小"); ImGui::SameLine();
@@ -8306,6 +8638,8 @@ struct App {
         chineseBuilder.AddText(creationDisplay.defaultLabel.text.c_str());
         chineseBuilder.AddText("绘制原子与键键级单键双键三键连续成链点击已有原子吸附连键双击结束取消虚拟原子替换元素放置孤立原子拖动向里自由键长起点默认键长结束成链连接选中原子修改键级断键设置断开请选择有效元素无法连键重合坐标或键数已达上限");
         chineseBuilder.AddText("绘制碳环元芳香环大小空白处放置原子或键上接环按住拖动调整朝向松开提交取消环已存在环顶点重合请调整朝向环与隐藏原子重合请先显示原子碳环不自动加氢保存文档文档另存为");
+        chineseBuilder.AddText("片段浏览器常用自定义搜索定义连接点末端接枝红圈双击更换拖动旋转右键平移滚轮缩放重置预览开始放置关闭名称库保存到正在读取本机文件已跳过无效上限氢会被替换其他保留甲基乙羟氨酰羧苯烃官能团卤素我的需要最多原子有效直接键不支持周期连通网络通过显式键未知元素长度匹配尚未加载状态改变超过无法暂存被隐藏请重新选择");
+        for (const auto &entry:fragmentLibrary) { chineseBuilder.AddText(entry.name.c_str()); chineseBuilder.AddText(entry.category.c_str()); }
         for (const auto &[index,label]:creationDisplay.labels) { (void)index; chineseBuilder.AddText(label.text.c_str()); }
         static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
         chineseBuilder.AddRanges(extraRanges);
@@ -9004,6 +9338,7 @@ struct App {
         }
         statusStrip(w, h);
         creationDialogs();
+        fragmentBrowser();
         catalog();
         settings();
         commandPalette();

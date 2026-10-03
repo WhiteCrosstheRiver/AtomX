@@ -2,7 +2,7 @@
 #include "creation_display.hpp"
 #include <bit>
 
-// AtomX document v2 (reads v1): little-endian IEEE floats; explicit field order and
+// AtomX document v3 (reads v1/v2): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -11,6 +11,8 @@ struct View {
     std::array<float,5> camera{.65f,.48f,1,0,0};
     int32_t cameraMode=7,shape=0,tool=0,order=1,propertyPage=0;
     int32_t ringSize=6;
+    std::string fragmentKey="builtin/methyl";
+    int32_t fragmentConnector=1;
     bool fitSelected=false,continuous=true;
     Vec3 fitLo{},fitHi{};
     float radius=.32f;
@@ -101,8 +103,9 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
         valid(index>=0 && size_t(index)<d.atoms.size() && int(label.kind)>=0 && int(label.kind)<=6);
     valid(std::isfinite(v.radius) && v.radius>0 && v.shape>=0 && v.shape<=6 && v.cameraMode>=0 && v.cameraMode<=7);
     valid(std::all_of(v.camera.begin(),v.camera.end(),[](float x){return std::isfinite(x);}) && v.camera[2]>0);
-    valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=5 && v.order>=1 && v.order<=3);
+    valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=6 && v.order>=1 && v.order<=3);
     valid(v.ringSize>=4 && v.ringSize<=6);
+    valid(v.fragmentKey.size()<=256 && v.fragmentConnector>=0 && v.fragmentConnector<512);
     valid(v.propertyPage>=0 && v.propertyPage<=2 && (v.styles.empty() || v.styles.size()==d.species.size()));
     valid(std::isfinite(v.display.fontSize) && v.display.fontSize>=1 && v.display.fontSize<=200 &&
           v.display.labelBudget>=1 && v.display.labelBudget<=2000);
@@ -120,7 +123,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(2));
+    w.bytes(magic,8); w.value(uint32_t(3));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -155,6 +158,7 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     w.value(display.fontSize); for (auto x:display.color) w.value(x);
     w.flag(display.bold); w.flag(display.labelsVisible); w.value(int32_t(display.labelBudget));
     w.value(view.ringSize);
+    w.text(view.fragmentKey); w.value(view.fragmentConnector);
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -163,7 +167,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version!=1 && version!=2) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>3) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -210,6 +214,8 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
         valid(v.tool<=4);
         for (const auto &bond:d.bonds) valid(bond.order<=3);
     }
+    if (version>=3) { v.fragmentKey=r.text(); v.fragmentConnector=r.value<int32_t>(); }
+    else valid(v.tool<=5);
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size()); return result;
 }
