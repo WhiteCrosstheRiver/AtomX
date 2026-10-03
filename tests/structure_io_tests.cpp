@@ -52,6 +52,7 @@ int main() {
             view.creation=true; view.camera={.8f,.3f,.5f,.1f,-.1f}; view.title="晶体 · 创作";
             view.display.visibility(2,{0},0);
             view.display.setLabels(2,{1},{creation::LabelKind::Custom,"测试原子\n换行"},false);
+            view.display.defaultPreset=3; view.display.presets[1]=4; view.display.ballRadius=.55f; view.display.cpkScale=.8f;
             view.selection={1}; view.order=3; view.continuous=false; view.ringSize=5;
             const auto nativePath=dir/"model.atomx";
             io::write(nativePath,io::Format::AtomX,native,nativeOptions);
@@ -81,9 +82,18 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=4; rejectBytes(version);
+            auto version=bytes; version[8]=5; rejectBytes(version);
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
-            auto version2=bytes; version2[8]=2;
+            auto version3=bytes; version3[8]=3;
+            const size_t styleBytes=25+5*view.display.presets.size();
+            version3.erase(version3.size()-4-styleBytes,styleBytes);
+            const auto version3Path=dir/"v3.atomx";
+            { std::ofstream out(version3Path,std::ios::binary); out.write(version3.data(),std::streamsize(version3.size())); }
+            require(document::read(version3Path).view.display.defaultPreset==0 && document::read(version3Path).view.display.presets.empty(),
+                    "version 3 documents use original appearance without style overrides");
+            auto badPreset=bytes; badPreset[badPreset.size()-4-styleBytes]=5; rejectBytes(badPreset);
+            auto badIndex=bytes; for(int i=0;i<4;++i) badIndex[badIndex.size()-9+i]=char(-1); rejectBytes(badIndex);
+            auto version2=version3; version2[8]=2;
             const size_t fragmentBytes=8+view.fragmentKey.size()+4;
             version2.erase(version2.size()-4-fragmentBytes,fragmentBytes);
             const auto version2Path=dir/"v2.atomx";
@@ -107,7 +117,7 @@ int main() {
             io::write(fragmentPath,io::Format::AtomX,native,fragmentOptions);
             const auto fragmentRestored=document::read(fragmentPath);
             require(fragmentRestored.view.tool==6 && fragmentRestored.view.fragmentKey=="builtin/phenyl" && fragmentRestored.view.fragmentConnector==6,
-                    "version 3 persists active fragment key and changed terminal connector");
+                    "version 4 persists active fragment key and changed terminal connector");
             rejectBytes(bytes+"trailing data");
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }

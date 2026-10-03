@@ -392,6 +392,40 @@ int main(int argc, char **argv) {
                     throw std::runtime_error("Single/double/triple/aromatic bonds must produce distinct GPU strand images");
             }
         }
+        {
+            atomx::Dataset styled;
+            styled.species={"C","O"}; styled.atoms={{-2,0,0,0},{2,0,0,1},{0,0,100,0}};
+            styled.bonds={{0,1,{},1}}; styled.bounds(); styled.bondStyle.radius=.12f;
+            renderer.resetStyles(2,&styled.species);
+            atomx::creation::Display display;
+            Camera front=cam; front.mode=2; front.fitSelected=true;
+            front.fitLo={-5,-3,-3}; front.fitHi={5,3,3};
+            const auto originalStyles=renderer.styles;
+            std::set<uint64_t> images;
+            for(int preset=0;preset<=4;++preset) {
+                display.setPreset(2,{},uint8_t(preset),true);
+                renderer.upload(styled,{},{},{},&display);
+                renderer.draw(t,styled,front,.3f,0,0,0,0,0,1,false,false,false,bg,true,false,.43f,&display);
+                images.insert(imageHash(t));
+                renderer.png(t,"build/shape-validation/preset-"+std::to_string(preset)+".png");
+            }
+            if(images.size()!=5 || renderer.styles!=originalStyles || styled.atoms[1].type!=1)
+                throw std::runtime_error("GPU presets must render distinct images without altering source or saved styles");
+            display.setPreset(3,{},0,true);
+            // An offscreen CPK atom establishes the same conservative fit
+            // margin before and after changing the selected foreground atom.
+            display.setPreset(3,{2},4,false);
+            renderer.upload(styled,{},{},{0,0,1},&display);
+            renderer.draw(t,styled,front,.3f,0,0,0,0,0,1,false,false,false,bg,true,false,.43f,&display);
+            const auto originalRight=litInXRange(t,155,256), originalImage=imageHash(t);
+            display.setPreset(3,{0},4,false);
+            renderer.upload(styled,{},{},{0,0,1},&display);
+            renderer.draw(t,styled,front,.3f,0,0,0,0,0,1,false,false,false,bg,true,false,.43f,&display);
+            if(imageHash(t)==originalImage || litInXRange(t,155,256)!=originalRight)
+                throw std::runtime_error("Selected CPK must preserve unselected atom and bond-half coverage with fixed camera bounds");
+            renderer.png(t,"build/shape-validation/preset-mixed.png");
+        }
+        renderer.resetStyles(2,&typed.species);
         renderer.upload(typed, {});
         renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
         const auto perTypeImage = imageHash(t);

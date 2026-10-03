@@ -918,6 +918,9 @@ struct App {
     float creationPositionDraft[3]{};
     bool openCreationMovement = false, creationMovementScreenAxes = true;
     bool creationMovementMassCenter=false,creationMovementHasMass=false,showMotionGroups=false,motionGroupBusy=false;
+    bool showCreationStyles=false,creationStyleAll=false;
+    int creationStylePreset=0;
+    creation::Display creationStyleDraft;
     uint64_t motionRevision=0,motionCacheRevision=UINT64_MAX;
     std::vector<motion::Group> motionGroupCache;
     std::future<motion::Assignment> motionGroupJob;
@@ -1549,7 +1552,7 @@ struct App {
         return tab;
     }
     void restoreTab(const StructureTab &tab) {
-        showMotionGroups=false; motionGroupSelected=0; motionCacheRevision=UINT64_MAX;
+        showMotionGroups=false; showCreationStyles=false; motionGroupSelected=0; motionCacheRevision=UINT64_MAX;
         homeMode = tab.home;
         creationBasedOn = tab.basedOn;
         source = tab.source;
@@ -2256,6 +2259,12 @@ struct App {
                       [](Dataset &data) { authoring::cleanGeometry(data); });
     }
     void setDisplayStyle(int style) {
+        if(creationMode) {
+            auto next=creationDisplay;
+            const uint8_t preset=style==0?3:style==1?4:style==2?2:1;
+            next.setPreset(source.atoms.size(),creationSelection,preset,creationSelection.empty());
+            editCreationDisplay(std::move(next),"切换显示样式"); return;
+        }
         particleShape = 0;
         if (style == 1) radius = 1.15f;
         else if (style == 2) radius = 0.12f;
@@ -2272,7 +2281,7 @@ struct App {
         if (creationMode || structureEditIsLatest || !authorRedo.empty()) {
             if (!forward && !authorUndo.empty()) {
                 auto previous=std::move(authorUndo.back());
-                const bool visibilityChanged=previous.display.hidden!=creationDisplay.hidden;
+                const bool visibilityChanged=!previous.display.sameGpuAppearance(creationDisplay);
                 authorRedo.push_back({previous.data?std::optional<Dataset>(source):std::nullopt,creationDisplay,previous.action});
                 if (previous.data) source = std::move(*previous.data);
                 creationDisplay = std::move(previous.display);
@@ -2290,7 +2299,7 @@ struct App {
             }
             if (forward && !authorRedo.empty()) {
                 auto next=std::move(authorRedo.back());
-                const bool visibilityChanged=next.display.hidden!=creationDisplay.hidden;
+                const bool visibilityChanged=!next.display.sameGpuAppearance(creationDisplay);
                 authorUndo.push_back({next.data?std::optional<Dataset>(source):std::nullopt,creationDisplay,next.action});
                 if (next.data) source = std::move(*next.data);
                 creationDisplay = std::move(next.display);
@@ -2744,7 +2753,9 @@ struct App {
             return;
         Target t;
         gpu.target(t, exportW, exportH);
-            gpu.draw(t, result.data, cameras[active], radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles, cell);
+            const bool compact=!creationMode && result.data.bondStyle.visible && result.data.bondStyle.radius>0 && gpu.bondsUploaded();
+            gpu.draw(t, result.data, cameras[active], radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles, cell,
+                creationMode?.43f:compact?.50f:1.f,creationMode && sameAtomCount()?&creationDisplay:nullptr);
         ColorLegendOptions legend{colorCoding && colorLegend, colorRangeProperty, colorGradient,
                                   colorMin, colorMax, colorReverse, colorDiscrete};
         gpu.png(t, p, legend);
@@ -3391,8 +3402,7 @@ struct App {
             if (ImGui::MenuItem("化学键", nullptr, result.data.bondStyle.visible)) {
                 source.bondStyle.visible = !source.bondStyle.visible; update();
             }
-            if (ImGui::MenuItem("球棍")) setDisplayStyle(0);
-            if (ImGui::MenuItem("填充")) setDisplayStyle(1);
+            if (ImGui::MenuItem("显示样式...")) requestCreationStyles();
             if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
         });
         menu("修改", "##create-modify", [&] {
@@ -4322,7 +4332,8 @@ struct App {
                                const std::vector<uint8_t> &colorSelected) {
         static const std::vector<uint8_t> empty;
         gpu.upload(data,selected,colorSelected,
-            creationMode && data.atoms.size()==source.atoms.size()?creationDisplay.hidden:empty);
+            creationMode && data.atoms.size()==source.atoms.size()?creationDisplay.hidden:empty,
+            creationMode && data.atoms.size()==source.atoms.size()?&creationDisplay:nullptr);
     }
     void queueCreationLabelFont() {
         auto missingGlyph=[&](const std::string &text) {
@@ -4354,7 +4365,7 @@ struct App {
         if (!creationMode || documentsBusy()) return;
         next.normalize(source.atoms.size());
         if (next==creationDisplay) return;
-        const bool visibilityChanged=next.hidden!=creationDisplay.hidden;
+        const bool visibilityChanged=!next.sameGpuAppearance(creationDisplay);
         if (authorUndo.size()>=64) authorUndo.erase(authorUndo.begin());
         authorUndo.push_back({std::nullopt,creationDisplay,message});
         authorRedo.clear(); structureEditIsLatest=true;
@@ -4409,6 +4420,49 @@ struct App {
             motionGroupMessage="分组有隐藏成员，请先显示全部再整体移动"; return false;
         }
         return !creationSelection.empty();
+    }
+    void requestCreationStyles() {
+        if(!creationMode || documentsBusy()) return;
+        chooseCreationTool(CreationTool::Select);
+        creationStyleAll=creationSelection.empty();
+        creationStylePreset=creationStyleAll?creationDisplay.defaultPreset:creationDisplay.presetAt(creationSelection.back());
+        creationStyleDraft=creationDisplay;
+        showCreationStyles=true;
+    }
+    void creationStylesDialog() {
+        if(!creationMode) {showCreationStyles=false;return;}
+        if(!showCreationStyles) return;
+        ImGui::SetNextWindowSize({U(410),U(450)},ImGuiCond_FirstUseEver);
+        if(ImGui::Begin("显示样式##creation-styles",&showCreationStyles)) {
+            ImGui::Checkbox("整个体系",&creationStyleAll); recordUiTestItem("creation.style-all");
+            if(!creationStyleAll) ImGui::Text("选中 %zu 个原子",creationSelection.size());
+            const char *names[]={"原有外观","线","棒","球棒","CPK"};
+            for(int i=0;i<5;++i) {
+                ImGui::RadioButton(names[i],&creationStylePreset,i);
+                recordUiTestItem(("creation.style-preset-"+std::to_string(i)).c_str());
+                if(i<4) ImGui::SameLine();
+            }
+            ImGui::Separator();
+            ImGui::SliderFloat("球半径 / Å",&creationStyleDraft.ballRadius,.02f,5.f,"%.2f");
+            ImGui::SliderFloat("棒半径 / Å",&creationStyleDraft.stickRadius,.01f,creationStyleDraft.ballRadius,"%.2f");
+            ImGui::SliderFloat("CPK 比例",&creationStyleDraft.cpkScale,.05f,3.f,"%.2f");
+            ImGui::SliderFloat("线宽 / px",&creationStyleDraft.lineWidth,.5f,10.f,"%.1f");
+            creationStyleDraft.stickRadius=std::min(creationStyleDraft.stickRadius,creationStyleDraft.ballRadius);
+            ImGui::TextWrapped("半径和比例为当前标签的共享参数；样式可分别应用到不同原子。CPK 使用范德华半径，不显示对应半键。");
+            ImGui::TextWrapped("线样式保留微小原子点便于选择。大体系沿用显示预算，超限键自动降为线或省略。");
+            ImGui::BeginDisabled(documentsBusy() || (!creationStyleAll && creationSelection.empty()));
+            if(ImGui::Button("应用",{U(110),U(30)})) {
+                auto next=creationDisplay;
+                next.ballRadius=creationStyleDraft.ballRadius; next.stickRadius=creationStyleDraft.stickRadius;
+                next.cpkScale=creationStyleDraft.cpkScale; next.lineWidth=creationStyleDraft.lineWidth;
+                next.setPreset(source.atoms.size(),creationSelection,uint8_t(creationStylePreset),creationStyleAll);
+                editCreationDisplay(std::move(next),std::string("显示样式 · ")+names[creationStylePreset]);
+            }
+            recordUiTestItem("creation.style-apply"); ImGui::EndDisabled(); ImGui::SameLine();
+            if(ImGui::Button("关闭",{U(110),U(30)})) showCreationStyles=false;
+            recordUiTestItem("creation.style-close");
+        }
+        ImGui::End();
     }
     void motionGroupsDialog() {
         if (!creationMode) { showMotionGroups=false; return; }
@@ -4545,28 +4599,28 @@ struct App {
         DirectX::XMMATRIX view, projection, combined;
     };
     CreationProjection creationProjection(const Dataset &data, const Camera &camera, ImVec2 size) {
-        std::vector<float> original;
-        original.reserve(gpu.styles.size());
-        for (auto &style:gpu.styles) {
-            original.push_back(style.visual[0]);
-            const float base=style.visual[0]>0?style.visual[0]
-                :style.visual[3]>0?style.visual[3]:radius;
-            style.visual[0]=base*.43f;
-        }
         CreationProjection projected;
         projected.combined=gpu.matrix(data,camera,size.x/std::max(size.y,1.f),cell,radius,
-            &projected.view,&projected.projection);
-        for (size_t i=0;i<original.size();++i) gpu.styles[i].visual[0]=original[i];
+            &projected.view,&projected.projection,.43f);
         return projected;
     }
     float creationScreenRadius(const Atom &atom, const CreationProjection &projection,
-                               ImVec2 size) const {
+                               ImVec2 size,int index=-1) const {
         float worldRadius=radius*.43f;
         if (atom.type<gpu.styles.size()) {
             const auto &style=gpu.styles[atom.type];
             const float base=style.visual[0]>0?style.visual[0]
                 :style.visual[3]>0?style.visual[3]:radius;
             worldRadius=base*.43f*std::max({style.axes[0],style.axes[1],style.axes[2],.05f});
+        }
+        const auto preset=index>=0?creationDisplay.presetAt(size_t(index)):0;
+        if(preset==1) worldRadius=.04f;
+        if(preset==2) worldRadius=creationDisplay.stickRadius;
+        if(preset==3) worldRadius=creationDisplay.ballRadius;
+        if(preset==4) {
+            const auto *e=atom.type<source.species.size()?elements::find(source.species[atom.type]):nullptr;
+            const float covalent=atom.type<gpu.styles.size()?gpu.styles[atom.type].visual[3]:0;
+            worldRadius=(e && e->vdw>0?e->vdw:covalent>0?covalent:radius)*creationDisplay.cpkScale;
         }
         using namespace DirectX;
         const auto center=XMVector4Transform(XMVectorSet(atom.x,atom.y,atom.z,1),projection.view);
@@ -4596,7 +4650,7 @@ struct App {
             const float x=p.x+(q.x/q.w+1)*size.x*.5f;
             const float y=p.y+(1-q.y/q.w)*size.y*.5f;
             const float dx=x-mouse.x,dy=y-mouse.y, distance=dx*dx+dy*dy;
-            const float hitRadius=creationScreenRadius(atom,projection,size);
+            const float hitRadius=creationScreenRadius(atom,projection,size,int(index));
             if (distance>hitRadius*hitRadius) continue;
             const float depth=q.z/q.w;
             if (depth<bestDepth-1e-4f || (std::abs(depth-bestDepth)<1e-4f && distance<bestPixel)) {
@@ -5033,24 +5087,11 @@ struct App {
         auto &cam = cameras[i];
         auto p = ImGui::GetCursorScreenPos();
         auto avail = ImGui::GetContentRegionAvail();
-        std::vector<float> originalRadii;
         const bool compactBondView = !creationMode && result.data.bondStyle.visible &&
             result.data.bondStyle.radius > 0 && gpu.bondsUploaded();
-        if (creationMode || compactBondView) {
-            const float particleScale = creationMode ? .43f : .50f;
-            originalRadii.reserve(gpu.styles.size());
-            for (auto &style : gpu.styles) {
-                originalRadii.push_back(style.visual[0]);
-                const float baseRadius = style.visual[0] > 0 ? style.visual[0] :
-                    style.visual[3] > 0 ? style.visual[3] : radius;
-                style.visual[0] = baseRadius * particleScale;
-            }
-        }
         gpu.target(targets[i], int(avail.x), int(avail.y));
-            gpu.draw(targets[i], result.data, cam, radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles, cell);
-        if (creationMode)
-            for (size_t type = 0; type < originalRadii.size(); ++type)
-                gpu.styles[type].visual[0] = originalRadii[type];
+            gpu.draw(targets[i], result.data, cam, radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles, cell,
+                creationMode?.43f:compactBondView?.50f:1.f,creationMode && sameAtomCount()?&creationDisplay:nullptr);
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         if (creationMode) creationViewportSize=avail;
         const bool viewportHovered = ImGui::IsItemHovered();
@@ -5367,7 +5408,7 @@ struct App {
                     DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
                         DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),mvp));
                     if (q.w<=0 || q.z<=0 || q.z>=q.w || std::abs(q.x)>q.w || std::abs(q.y)>q.w) return;
-                    const float offset=creationScreenRadius(atom,projection,avail)+U(3);
+                    const float offset=creationScreenRadius(atom,projection,avail,index)+U(3);
                     const ImVec2 at{p.x+(q.x/q.w+1)*avail.x*.5f+offset,p.y+(1-q.y/q.w)*avail.y*.5f-fontSize*.5f};
                     draw->AddText(font,fontSize,{at.x+U(1),at.y+U(1)},IM_COL32(0,0,0,230),text.c_str());
                     draw->AddText(font,fontSize,at,color,text.c_str());
@@ -5384,7 +5425,7 @@ struct App {
                     DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),mvp));
                 if (q.w<=0||q.z<=0) return;
                 const ImVec2 at{p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};
-                const float screenRadius=creationScreenRadius(atom,projection,avail);
+                const float screenRadius=creationScreenRadius(atom,projection,avail,index);
                 draw->AddCircle(at,screenRadius,color,48,width);
             };
             for (int index:creationSelection) ring(index,IM_COL32(29,155,240,255),U(2));
@@ -5427,6 +5468,7 @@ struct App {
                 if (ImGui::MenuItem("隐藏选中",nullptr,false,!creationSelection.empty())) creationVisibility(0);
                 if (ImGui::MenuItem("仅显示选中",nullptr,false,!creationSelection.empty())) creationVisibility(1);
                 if (ImGui::MenuItem("显示全部",nullptr,false,creationDisplay.hiddenCount>0)) creationVisibility(2);
+                if (ImGui::MenuItem("显示样式...")) requestCreationStyles();
                 if (ImGui::MenuItem("原子标签...")) requestCreationLabels();
                 if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
                 if (ImGui::MenuItem("反选")) {
@@ -5475,9 +5517,6 @@ struct App {
                 }
             }
         }
-        if (compactBondView)
-            for (size_t type = 0; type < originalRadii.size(); ++type)
-                gpu.styles[type].visual[0] = originalRadii[type];
         ImGui::EndChild();
         ImGui::PopStyleColor(); ImGui::PopStyleVar();
         ImGui::PopID();
@@ -7108,6 +7147,8 @@ struct App {
         }
         if (ImGui::Button("原子标签...",{-1,U(28)})) requestCreationLabels();
         recordUiTestItem("creation.edit-labels");
+        if (ImGui::Button("显示样式...",{-1,U(28)})) requestCreationStyles();
+        recordUiTestItem("creation.edit-styles");
         if (ImGui::Button("运动分组...",{-1,U(28)})) requestMotionGroups();
         recordUiTestItem("creation.edit-motion-groups");
         ImGui::Separator();
@@ -8763,6 +8804,7 @@ struct App {
         chineseBuilder.AddText("绘制原子与键键级单键双键三键连续成链点击已有原子吸附连键双击结束取消虚拟原子替换元素放置孤立原子拖动向里自由键长起点默认键长结束成链连接选中原子修改键级断键设置断开请选择有效元素无法连键重合坐标或键数已达上限");
         chineseBuilder.AddText("绘制碳环元芳香环大小空白处放置原子或键上接环按住拖动调整朝向松开提交取消环已存在环顶点重合请调整朝向环与隐藏原子重合请先显示原子碳环不自动加氢保存文档文档另存为");
         chineseBuilder.AddText("片段浏览器常用自定义搜索定义连接点末端接枝红圈双击更换拖动旋转右键平移滚轮缩放重置预览开始放置关闭名称库保存到正在读取本机文件已跳过无效上限氢会被替换其他保留甲基乙羟氨酰羧苯烃官能团卤素我的需要最多原子有效直接键不支持周期连通网络通过显式键未知元素长度匹配尚未加载状态改变超过无法暂存被隐藏请重新选择");
+        chineseBuilder.AddText("显示样式原有外观线棒球棒整个体系半径比例范德华对应半键共享参数微小原子点便于选择大体系沿用显示预算超限自动降为省略");
         chineseBuilder.AddText("运动分组从选择创建按独立片段自动分组已属于取消名称改名选中整组整体移动旋转质心需属性保留原子显式键周期网络隐藏成员先显示不自动限制手工编辑正在查找连接分量暂无采样体系不能上限");
         for (const auto &group:motionGroupCache) chineseBuilder.AddText(group.name.c_str());
         for (const auto &entry:fragmentLibrary) { chineseBuilder.AddText(entry.name.c_str()); chineseBuilder.AddText(entry.category.c_str()); }
@@ -9466,6 +9508,7 @@ struct App {
         creationDialogs();
         fragmentBrowser();
         motionGroupsDialog();
+        creationStylesDialog();
         catalog();
         settings();
         commandPalette();

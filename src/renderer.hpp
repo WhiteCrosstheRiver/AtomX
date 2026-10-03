@@ -11,6 +11,7 @@
 #include "core.hpp"
 #include "color_maps.hpp"
 #include "elements.hpp"
+#include "creation_display.hpp"
 #include "particle_mesh.hpp"
 using Microsoft::WRL::ComPtr;
 inline void check(HRESULT hr, const char *message) {
@@ -122,7 +123,7 @@ struct ColorLegendOptions {
     bool reverse = false, discrete = false;
 };
 class Renderer {
-    struct BondVertex { DirectX::XMFLOAT3 position, color; float lane=0; };
+    struct BondVertex { DirectX::XMFLOAT3 position, color; float lane=0,preset=0; };
     struct Chunk {
         ComPtr<ID3D11Buffer> buffer;
         ComPtr<ID3D11ShaderResourceView> srv;
@@ -145,6 +146,7 @@ class Renderer {
         DirectX::XMFLOAT4 color{.72f,.78f,.86f,1};
         float colorByType = 0;
         float padding[3]{};
+        DirectX::XMFLOAT4 styleParams{};
     };
     struct PlaneConstants {
         DirectX::XMFLOAT4X4 viewProjection;
@@ -170,6 +172,7 @@ class Renderer {
     ComPtr<ID3D11GeometryShader> bondGS;
     ComPtr<ID3D11InputLayout> bondLayout;
     UINT bondVertexCount = 0;
+    float presetExtent=0;
     bool bondDisplayOmitted = false;
     size_t bondLaneCount = 0;
     // Translucent slice-plane overlay: an unlit, alpha-blended polygon drawn
@@ -226,6 +229,8 @@ class Renderer {
         // Unknown types keep the palette color and the global radius default.
         if (names)
             atomx::elements::applyTypeDefaults(*names, styles);
+        if(names) for(size_t i=0;i<names->size();++i)
+            if(const auto *e=atomx::elements::find((*names)[i])) styles[i].axes[3]=e->vdw;
     }
     void uploadStyles(size_t count, const std::vector<std::string> *names = nullptr) {
         if (styles.size() != std::max<size_t>(count, 1))
@@ -238,7 +243,10 @@ class Renderer {
         bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
         bd.StructureByteStride = sizeof(ParticleStyle);
-        D3D11_SUBRESOURCE_DATA data{styles.data(), 0, 0};
+        auto gpuStyles=styles;
+        if(names) for(size_t i=0;i<names->size();++i)
+            if(const auto *e=atomx::elements::find((*names)[i])) gpuStyles[i].axes[3]=e->vdw;
+        D3D11_SUBRESOURCE_DATA data{gpuStyles.data(), 0, 0};
         ComPtr<ID3D11Buffer> buffer;
         ComPtr<ID3D11ShaderResourceView> view;
         check(device->CreateBuffer(&bd, &data, &buffer), "Particle styles");
@@ -351,10 +359,12 @@ V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
  float2 q[6]={float2(-1,-1),float2(-1,1),float2(1,-1),float2(1,-1),float2(-1,1),float2(1,1)};
  Atom a=atoms[instance];
  if(a.type&0x20000000) { V hidden=(V)0;hidden.pos=float4(2,2,2,1);return hidden; }
- Style s=styles[a.type&0x1fffffff];V o;
+ Style s=styles[a.type&0x03ffffff];V o;
  o.overrideColor=colors[1].w>.5?particleColors[instance]:float3(-1,-1,-1);
  o.center=mul(float4(a.pos,1),view).xyz;o.world=a.pos;o.uv=q[id];o.type=a.type;
- float rad=s.visual.x>0?s.visual.x:s.visual.w>0?s.visual.w:radius;float kind=s.visual.y<0?shape:s.visual.y;
+ float rad=(s.visual.x>0?s.visual.x:s.visual.w>0?s.visual.w:radius)*colors[2].w;float kind=s.visual.y<0?shape:s.visual.y;
+ uint preset=(a.type>>26)&7;
+ if(preset>0) { kind=0; rad=preset==1?.04:preset==2?colors[3].y:preset==3?colors[3].x:(s.axes.w>0?s.axes.w:s.visual.w>0?s.visual.w:radius)*colors[3].z; s.axes.xyz=float3(1,1,1); }
  float3 dims=max(s.axes.xyz,float3(.05,.05,.05))*rad;
  float bound=(kind<.5||kind>5.5)?max(dims.x,max(dims.y,dims.z)):kind>2.5&&kind<3.5?length(float2(rad,dims.z)):kind>3.5&&kind<4.5?rad+dims.z:length(dims);
  // Expand the projected bounding sphere for perspective views close to the camera.
@@ -441,51 +451,55 @@ P pixel(V i) {
         check(device->CreatePixelShader(p->GetBufferPointer(), p->GetBufferSize(), nullptr, &ps),
               "Pixel shader");
         const char *bondShader = R"(
- cbuffer BondCamera : register(b0) { row_major float4x4 vp; float2 viewport; float width; float radius; float4 color; float colorByType; float3 padding; };
- struct I { float3 p:POSITION; float3 c:COLOR; float lane:TEXCOORD0; };
- struct V { float3 p:POSITION; float3 c:COLOR; float lane:TEXCOORD0; };
- struct O { float4 p:SV_POSITION; float3 normal:NORMAL; float3 c:COLOR; float progress:TEXCOORD0; nointerpolation float dashed:TEXCOORD1; };
- V bondVertex(I i) { V o; o.p=i.p; o.c=i.c; o.lane=i.lane; return o; }
- void emit(float3 p,float3 n,float3 c,float progress,float dashed,inout TriangleStream<O> stream) {
-  O o; o.p=mul(float4(p,1),vp); o.normal=n; o.c=c; o.progress=progress; o.dashed=dashed; stream.Append(o);
+ cbuffer BondCamera : register(b0) { row_major float4x4 vp; float2 viewport; float width; float radius; float4 color; float colorByType; float3 padding; float4 styleParams; };
+ struct I { float3 p:POSITION; float3 c:COLOR; float lane:TEXCOORD0; float preset:TEXCOORD1; };
+ struct V { float3 p:POSITION; float3 c:COLOR; float lane:TEXCOORD0; float preset:TEXCOORD1; };
+ struct O { float4 p:SV_POSITION; float3 normal:NORMAL; float3 c:COLOR; float progress:TEXCOORD0; nointerpolation float dashed:TEXCOORD1; nointerpolation float typeColor:TEXCOORD2; };
+ V bondVertex(I i) { V o; o.p=i.p; o.c=i.c; o.lane=i.lane; o.preset=i.preset; return o; }
+ void emit(float3 p,float3 n,float3 c,float progress,float dashed,float typeColor,inout TriangleStream<O> stream) {
+  O o; o.p=mul(float4(p,1),vp); o.normal=n; o.c=c; o.progress=progress; o.dashed=dashed; o.typeColor=typeColor; stream.Append(o);
 }
  [maxvertexcount(72)] void bondGeometry(line V input[2], inout TriangleStream<O> stream) {
+ if(input[0].preset>3.5) return;
+ float localRadius=input[0].preset>.5 && input[0].preset<1.5?0:input[0].preset>1.5?styleParams.x:radius;
+ if(styleParams.y<.5) localRadius=0;
  float3 pa=input[0].p, pb=input[1].p;
  // A lane sentinel carries the aromatic dash flag without a larger vertex.
  float dashed=input[0].lane>2?1:0, lane=dashed>.5?.5:input[0].lane;
- if (radius>0) {
+ if (localRadius>0) {
   float3 delta=pb-pa; float len=length(delta); if (len<1e-6) return;
   float3 axis=delta/len;
   float3 helper=abs(axis.z)<.85 ? float3(0,0,1) : float3(0,1,0);
   float3 sideVector=cross(axis,padding);
   if (length(sideVector)<1e-5) sideVector=cross(axis,helper);
   float3 u=normalize(sideVector), v=normalize(cross(axis,u));
-  pa+=u*lane*radius*3; pb+=u*lane*radius*3;
+  pa+=u*lane*localRadius*3; pb+=u*lane*localRadius*3;
   const float tau=6.28318530718;
    [unroll] for (int side=0;side<12;side++) {
     float a0=tau*side/12, a1=tau*(side+1)/12;
    float3 n0=cos(a0)*u+sin(a0)*v, n1=cos(a1)*u+sin(a1)*v;
-   float3 p0=pa+radius*n0, p1=pa+radius*n1, q0=pb+radius*n0, q1=pb+radius*n1;
-    emit(p0,n0,input[0].c,0,dashed,stream); emit(q0,n0,input[0].c,1,dashed,stream); emit(q1,n1,input[0].c,1,dashed,stream); stream.RestartStrip();
-    emit(p0,n0,input[0].c,0,dashed,stream); emit(q1,n1,input[0].c,1,dashed,stream); emit(p1,n1,input[0].c,0,dashed,stream); stream.RestartStrip();
+   float3 p0=pa+localRadius*n0, p1=pa+localRadius*n1, q0=pb+localRadius*n0, q1=pb+localRadius*n1;
+    emit(p0,n0,input[0].c,0,dashed,input[0].preset>.5?1:0,stream); emit(q0,n0,input[0].c,1,dashed,input[0].preset>.5?1:0,stream); emit(q1,n1,input[0].c,1,dashed,input[0].preset>.5?1:0,stream); stream.RestartStrip();
+    emit(p0,n0,input[0].c,0,dashed,input[0].preset>.5?1:0,stream); emit(q1,n1,input[0].c,1,dashed,input[0].preset>.5?1:0,stream); emit(p1,n1,input[0].c,0,dashed,input[0].preset>.5?1:0,stream); stream.RestartStrip();
   }
  } else {
   float4 ca=mul(float4(pa,1),vp), cb=mul(float4(pb,1),vp);
   float2 delta=(cb.xy/cb.w-ca.xy/ca.w)*viewport;
   float lengthDelta=max(length(delta),1e-5); float2 perpendicular=float2(-delta.y,delta.x)/lengthDelta;
-  float2 offset=perpendicular*width/viewport;
-  float2 laneOffset=perpendicular*lane*max(width*3,4)*2/viewport;
+  float localWidth=input[0].preset>.5?styleParams.z:width;
+  float2 offset=perpendicular*localWidth/viewport;
+  float2 laneOffset=perpendicular*lane*max(localWidth*3,4)*2/viewport;
   ca.xy+=laneOffset*ca.w; cb.xy+=laneOffset*cb.w;
    O a,b; a.normal=0; b.normal=0; a.c=input[0].c; b.c=input[0].c; a.p=ca; b.p=cb;
-   a.progress=0; b.progress=1; a.dashed=dashed; b.dashed=dashed;
+   a.progress=0; b.progress=1; a.dashed=dashed; b.dashed=dashed; a.typeColor=input[0].preset>.5?1:0; b.typeColor=a.typeColor;
   a.p.xy+=offset*a.p.w; b.p.xy+=offset*b.p.w; stream.Append(a); stream.Append(b);
   a.p=ca; b.p=cb; a.p.xy-=offset*a.p.w; b.p.xy-=offset*b.p.w; stream.Append(a); stream.Append(b);
  }
 }
 float4 bondPixel(O i):SV_TARGET {
   if (i.dashed>.5 && frac(i.progress*3)>.55) discard;
-  float3 base=colorByType>.5 ? i.c : color.rgb;
-  if (radius<=0) return float4(base,color.a);
+  float3 base=colorByType>.5 || i.typeColor>.5 ? i.c : color.rgb;
+  if (dot(i.normal,i.normal)<.01) return float4(base,color.a);
  float3 n=normalize(i.normal), light=normalize(float3(-.32,.48,.82));
  float diffuse=max(dot(n,light),0); float spec=pow(max(dot(n,normalize(light+float3(0,0,1))),0),24)*.16;
   return float4(base*(.55+.45*diffuse)+spec,color.a);
@@ -503,8 +517,9 @@ float4 bondPixel(O i):SV_TARGET {
         check(device->CreateGeometryShader(bondG->GetBufferPointer(), bondG->GetBufferSize(), nullptr, &bondGS), "Bond geometry shader");
         D3D11_INPUT_ELEMENT_DESC bondElements[]={{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
                                                  {"COLOR",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
-                                                 {"TEXCOORD",0,DXGI_FORMAT_R32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0}};
-        check(device->CreateInputLayout(bondElements,3,bondV->GetBufferPointer(),bondV->GetBufferSize(),&bondLayout), "Bond vertex layout");
+                                                 {"TEXCOORD",0,DXGI_FORMAT_R32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0},
+                                                 {"TEXCOORD",1,DXGI_FORMAT_R32_FLOAT,0,28,D3D11_INPUT_PER_VERTEX_DATA,0}};
+        check(device->CreateInputLayout(bondElements,4,bondV->GetBufferPointer(),bondV->GetBufferSize(),&bondLayout), "Bond vertex layout");
         D3D11_BUFFER_DESC bondCb{}; bondCb.ByteWidth=sizeof(BondConstants); bondCb.Usage=D3D11_USAGE_DEFAULT; bondCb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         check(device->CreateBuffer(&bondCb,nullptr,&bondConstants), "Bond camera constants");
         const char *planeShader = R"(
@@ -569,7 +584,22 @@ float4 slicePlanePixel():SV_TARGET { return color; }
     }
     void upload(const atomx::Dataset &d, const std::vector<uint8_t> &selected,
                 const std::vector<uint8_t> &colorSelected = {},
-                const std::vector<uint8_t> &hidden = {}) {
+                const std::vector<uint8_t> &hidden = {}, const atomx::creation::Display *display=nullptr) {
+        if(d.species.size()>0x04000000) throw std::runtime_error("Too many particle types for interactive display");
+        presetExtent=0;
+        if(display) {
+            bool used[5]{}; used[display->defaultPreset]=true;
+            for(const auto &[index,preset]:display->presets) { (void)index; if(preset<=4) used[preset]=true; }
+            if(used[1]) presetExtent=.04f;
+            if(used[2]) presetExtent=std::max(presetExtent,display->stickRadius);
+            if(used[3]) presetExtent=std::max(presetExtent,display->ballRadius);
+            if(used[4]) for(size_t i=0;i<d.species.size();++i) {
+                const auto *e=atomx::elements::find(d.species[i]);
+                const float fallback=i<styles.size()?styles[i].visual[3]:.4f;
+                presetExtent=std::max(presetExtent,(e && e->vdw>0?e->vdw:std::max(fallback,.4f))*display->cpkScale);
+            }
+        }
+        auto presetAt=[&](uint32_t index){return display?display->presetAt(index):uint8_t(0);};
         std::vector<BondVertex> bondVertices;
         bondDisplayOmitted = d.bonds.size() > atomx::interactiveBondBudget;
         bondLaneCount=0;
@@ -602,12 +632,13 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             const auto &a=d.atoms[bond.a], &b=d.atoms[bond.b];
             const auto colorA = atomColor(bond.a), colorB = atomColor(bond.b);
             const auto append = [&](const atomx::Vec3 &p1, const atomx::Vec3 &p2,
-                                    const DirectX::XMFLOAT3 &c) {
+                                    const DirectX::XMFLOAT3 &c,uint8_t preset) {
+                if(preset==4) return;
                 const int order=bond.order==4?2:std::clamp(int(bond.order),1,3);
                 for (int lane=0;lane<order;++lane) {
                     const float offset=bond.order==4 && lane==1?4.f:float(lane)-float(order-1)*.5f;
-                    bondVertices.push_back({{p1.x,p1.y,p1.z},c,offset});
-                    bondVertices.push_back({{p2.x,p2.y,p2.z},c,offset});
+                    bondVertices.push_back({{p1.x,p1.y,p1.z},c,offset,float(preset)});
+                    bondVertices.push_back({{p2.x,p2.y,p2.z},c,offset,float(preset)});
                 }
             };
             // Periodic-image bonds expand into both cell-translated halves so
@@ -617,13 +648,13 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             for (size_t i=0; i<segments.size(); ++i) {
                 const auto &segment = segments[i];
                 if (periodic) {
-                    append(segment.p1, segment.p2, i == 0 ? colorA : colorB);
+                    append(segment.p1, segment.p2, i == 0 ? colorA : colorB,presetAt(i==0?bond.a:bond.b));
                 } else {
                     const atomx::Vec3 middle{(segment.p1.x+segment.p2.x)*.5f,
                                              (segment.p1.y+segment.p2.y)*.5f,
                                              (segment.p1.z+segment.p2.z)*.5f};
-                    append(segment.p1,middle,colorA);
-                    append(middle,segment.p2,colorB);
+                    append(segment.p1,middle,colorA,presetAt(bond.a));
+                    append(middle,segment.p2,colorB,presetAt(bond.b));
                 }
             }
         }
@@ -645,6 +676,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             std::vector<atomx::Atom> tmp(d.atoms.begin() + start,
                                          d.atoms.begin() + start + c.count);
             for (size_t j = 0; j < tmp.size(); j++) {
+                tmp[j].type |= uint32_t(presetAt(uint32_t(start+j)))<<26;
                 if (start+j<hidden.size() && hidden[start+j]) tmp[j].type |= 0x20000000;
                 if (start + j < selected.size() && selected[start + j])
                     tmp[j].type |= 0x80000000;
@@ -732,7 +764,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
     DirectX::XMMATRIX matrix(const atomx::Dataset &d, const Camera &cam, float aspect,
                              bool includeCell, float defaultRadius,
                              DirectX::XMMATRIX *viewOut = nullptr,
-                             DirectX::XMMATRIX *projOut = nullptr) {
+                             DirectX::XMMATRIX *projOut = nullptr,float styleScale=1) {
         using namespace DirectX;
         auto lo = cam.fitSelected ? cam.fitLo : d.lo;
         auto hi = cam.fitSelected ? cam.fitHi : d.hi;
@@ -746,9 +778,10 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             const float ay = std::max(style.axes[1], .05f);
             const float az = std::max(style.axes[2], .05f);
             particleExtent = std::max(particleExtent,
-                                      particleRadius * std::sqrt(ax * ax + ay * ay + az * az));
+                                      particleRadius * styleScale * std::sqrt(ax * ax + ay * ay + az * az));
         }
         if (particleExtent == 0 && styles.empty()) particleExtent = defaultRadius;
+        particleExtent=std::max(particleExtent,presetExtent);
         lo.x -= particleExtent; lo.y -= particleExtent; lo.z -= particleExtent;
         hi.x += particleExtent; hi.y += particleExtent; hi.z += particleExtent;
         if (includeCell && !cam.fitSelected && (d.cell[0] != 0 || d.cell[4] != 0 || d.cell[8] != 0)) {
@@ -842,7 +875,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         return v * p;
     }
     void draw(Target &t, const atomx::Dataset &d, const Camera &cam, float radius, int shape, int renderMode, int colorAxis, int colorGradient, float colorMin, float colorMax, bool colorCoding, bool discrete, bool selectedOnly, const float *bg,
-              bool visible = true, bool includeCellInFit = true) {
+              bool visible = true, bool includeCellInFit = true,float styleScale=1,const atomx::creation::Display *display=nullptr) {
         using namespace DirectX;
         uploadStyles(d.species.size(), &d.species);
         context->VSSetShaderResources(1, 1, styleView.GetAddressOf());
@@ -862,7 +895,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         context->GSSetShader(nullptr, nullptr, 0);
         Constants c{};
         XMMATRIX view, proj;
-        matrix(d, cam, float(t.w) / t.h, includeCellInFit, radius, &view, &proj);
+        matrix(d, cam, float(t.w) / t.h, includeCellInFit, radius, &view, &proj,styleScale);
         XMStoreFloat4x4(&c.view, view);
         XMStoreFloat4x4(&c.projection, proj);
         c.radius = radius;
@@ -880,6 +913,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         std::copy(std::begin(colors), std::end(colors), c.colors);
         c.colors[0].w = float(meshTriangleCount);
         c.colors[1].w = d.particleColors.size()==d.atoms.size()?1.f:0.f;
+        c.colors[2].w=styleScale;
+        c.colors[3]={display?display->ballRadius:.4f,display?display->stickRadius:.2f,display?display->cpkScale:.7f,0};
         context->UpdateSubresource(constants.Get(), 0, nullptr, &c, 0, 0);
         context->VSSetConstantBuffers(0, 1, constants.GetAddressOf());
         context->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
@@ -896,8 +931,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             DirectX::XMStoreFloat4x4(&bondCamera.viewProjection, view * proj);
             bondCamera.viewport={float(t.w),float(t.h)};
             bondCamera.width=d.bondStyle.width;
-            bondCamera.radius=bondLaneCount > atomx::cylinderBondBudget
-                ? 0.f : d.bondStyle.radius;
+            bondCamera.radius=bondLaneCount > atomx::cylinderBondBudget ? 0.f : d.bondStyle.radius;
+            bondCamera.styleParams={display?display->stickRadius:.2f,bondLaneCount<=atomx::cylinderBondBudget?1.f:0.f,display?display->lineWidth:1.6f,0};
             DirectX::XMFLOAT3 viewForward;
             DirectX::XMStoreFloat3(&viewForward,DirectX::XMVector3TransformNormal(
                 DirectX::XMVectorSet(0,0,1,0),DirectX::XMMatrixInverse(nullptr,view)));

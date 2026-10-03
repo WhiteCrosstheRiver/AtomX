@@ -599,6 +599,51 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("display style fixture",[](Dataset &data) {
+                    data={}; data.species={"C","O"};
+                    data.atoms={{-2,0,0,0},{0,0,0,1},{2,0,0,0}}; data.bonds={{0,1,{},1},{1,2,{},1}};
+                }); settlePipeline(); app.creationSelection={0}; app.creationPick=0; frame();
+                const auto topology=app.source.bonds; const auto styles=app.gpu.styles;
+                auto stylePixels=[&]() {
+                    const auto &target=app.targets[3]; D3D11_TEXTURE2D_DESC desc{}; target.texture->GetDesc(&desc);
+                    desc.Usage=D3D11_USAGE_STAGING; desc.BindFlags=0; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                    ComPtr<ID3D11Texture2D> copy; check(app.gpu.device->CreateTexture2D(&desc,nullptr,&copy),"Style history readback");
+                    app.gpu.context->CopyResource(copy.Get(),target.texture.Get());
+                    D3D11_MAPPED_SUBRESOURCE map{}; check(app.gpu.context->Map(copy.Get(),0,D3D11_MAP_READ,0,&map),"Style history pixels");
+                    uint64_t hash=1469598103934665603ULL;
+                    for(int y=0;y<target.h;++y) for(int x=0;x<target.w*4;++x) {
+                        hash^=static_cast<const uint8_t *>(map.pData)[y*map.RowPitch+x]; hash*=1099511628211ULL;
+                    }
+                    app.gpu.context->Unmap(copy.Get(),0); return hash;
+                };
+                const auto originalPixels=stylePixels();
+                click("creation.edit-styles"); frame();
+                requireExport(!app.creationStyleAll,"style dialog defaults to current selection");
+                click("creation.style-preset-4"); click("creation.style-apply");
+                requireExport(app.creationDisplay.presetAt(0)==4 && app.creationDisplay.presetAt(1)==0 &&
+                              !app.authorUndo.back().data && !app.pipelineBusy && app.source.bonds==topology && app.source.atoms[0].type==0,
+                              "CPK selection is display-only history and preserves species and topology");
+                frame(); requireExport(app.gpu.styles==styles,"drawing and projection cannot mutate saved type styles");
+                const auto cpkPixels=stylePixels(); requireExport(cpkPixels!=originalPixels,"selected CPK updates actual viewport pixels");
+                app.history(false); frame();
+                requireExport(app.creationDisplay.presets.empty(),"style undo restores original appearance");
+                requireExport(stylePixels()==originalPixels,"style undo restores the actual GPU image");
+                app.history(true); frame();
+                requireExport(stylePixels()==cpkPixels,"style redo restores the actual GPU image");
+                click("creation.style-all"); click("creation.style-preset-3"); click("creation.style-apply");
+                requireExport(app.creationDisplay.defaultPreset==3 && app.creationDisplay.presets.empty(),"global ball-stick clears prior selected override");
+                click("creation.style-close"); app.creationSelection={1}; app.creationPick=1; frame();
+                click("creation.edit-styles"); frame(); click("creation.style-preset-4"); click("creation.style-apply"); click("creation.style-close");
+                const auto styleFile=dir/"gui-styles.atomx"; io::ExportOptions styleOptions;
+                styleOptions.documentView=app.captureDocumentView(); io::write(styleFile,io::Format::AtomX,app.source,styleOptions);
+                requireExport(document::read(styleFile).view.display==app.creationDisplay,"native document persists mixed appearance and parameters");
+                const auto styleTab=app.captureTab(); app.restoreTab(styleTab); frame();
+                requireExport(!app.showCreationStyles && app.creationDisplay.defaultPreset==3 && app.creationDisplay.presetAt(1)==4,"tab restore keeps mixed styles and closes stale dialog");
+                while(app.authorUndo.size()>baseline) {app.history(false); settlePipeline();}
+                app.authorRedo.clear(); frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("motion group fixture",[](Dataset &data) {
                     data={}; data.species={"C","H"};
                     data.atoms={{0,0,0,0},{2,0,0,1},{5,0,0,0},{7,0,0,1}};

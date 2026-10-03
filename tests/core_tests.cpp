@@ -2979,6 +2979,17 @@ int main() {
             require(display.labelAt(0).kind==creation::LabelKind::None && display.labelAt(1).kind==creation::LabelKind::ElementIndex,
                     "selected label removal overrides the global rule without removing other labels");
         }
+        {
+            creation::Display display;
+            display.setPreset(1000000,{},3,true);
+            require(display.presets.empty() && display.presetAt(999999)==3,"global appearance uses one rule for a million atoms");
+            display.setPreset(5,{1,3,-1,9},4,false);
+            require(display.presets.size()==2 && display.presetAt(0)==3 && display.presetAt(3)==4,"selected presets preserve the rest of the structure");
+            display.eraseAtoms(5,{0,2});
+            require(display.presetAt(0)==4 && display.presetAt(1)==4 && display.presetAt(2)==3,"style overrides follow surviving identities after deletion");
+            display.setPreset(3,{0},3,false);
+            require(display.presets.size()==1 && display.presetAt(0)==3,"reset to default releases sparse override");
+        }
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);
         std::cout << "PASS: index, seek, schema, metadata, sampling, selection, slice plane "
                      "semantics, three-axis replication, stack composition, wrap, "

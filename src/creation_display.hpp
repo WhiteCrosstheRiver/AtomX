@@ -11,6 +11,23 @@ struct Label {
     bool operator==(const Label &) const = default;
 };
 struct Display {
+    uint8_t defaultPreset=0; // 0 original, 1 line, 2 stick, 3 ball/stick, 4 CPK.
+    std::unordered_map<int,uint8_t> presets;
+    float ballRadius=.4f,stickRadius=.2f,cpkScale=.7f,lineWidth=1.6f;
+    bool sameGpuAppearance(const Display &other) const {
+        return hidden==other.hidden && defaultPreset==other.defaultPreset && presets==other.presets &&
+            ballRadius==other.ballRadius && stickRadius==other.stickRadius && cpkScale==other.cpkScale && lineWidth==other.lineWidth;
+    }
+    uint8_t presetAt(size_t index) const {
+        const auto it=presets.find(int(index)); return it==presets.end()?defaultPreset:it->second;
+    }
+    void setPreset(size_t count,const std::vector<int> &selected,uint8_t preset,bool all) {
+        if (preset>4) throw std::invalid_argument("显示样式无效");
+        if (all) { defaultPreset=preset; presets.clear(); }
+        else for(int index:selected) if(index>=0 && size_t(index)<count) {
+            if(preset==defaultPreset) presets.erase(index); else presets[index]=preset;
+        }
+    }
     // Empty mask/default labels allocate nothing for the normal creation view.
     std::vector<uint8_t> hidden;
     size_t hiddenCount = 0;
@@ -29,6 +46,10 @@ struct Display {
         return found==labels.end()?defaultLabel:found->second;
     }
     void normalize(size_t count) {
+        for(auto it=presets.begin();it!=presets.end();) {
+            if(it->first<0 || size_t(it->first)>=count || it->second==defaultPreset) it=presets.erase(it);
+            else ++it;
+        }
         if (!hidden.empty()) hidden.resize(count,0);
         hiddenCount=size_t(std::count(hidden.begin(),hidden.end(),uint8_t(1)));
         if (!hiddenCount) hidden.clear();
@@ -76,7 +97,11 @@ struct Display {
         for (const auto &[index,label]:labels)
             if (index>=0 && size_t(index)<oldCount && remap[size_t(index)]>=0)
                 next.emplace(remap[size_t(index)],label);
-        labels=std::move(next); normalize(out);
+        labels=std::move(next);
+        std::unordered_map<int,uint8_t> nextPresets;
+        for(const auto &[index,preset]:presets)
+            if(index>=0 && size_t(index)<oldCount && remap[size_t(index)]>=0) nextPresets.emplace(remap[size_t(index)],preset);
+        presets=std::move(nextPresets); normalize(out);
     }
     // Bounded arithmetic sampling: global labels never create an entry/string
     // per atom, and drawing does not walk all atoms of a large structure.

@@ -2,7 +2,7 @@
 #include "creation_display.hpp"
 #include <bit>
 
-// AtomX document v3 (reads v1/v2): little-endian IEEE floats; explicit field order and
+// AtomX document v4 (reads v1/v2/v3): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -97,6 +97,11 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
     for (const auto &[name,values]:d.scalarProperties) { (void)name; validRows(values.size()); }
     for (const auto &[name,values]:d.vectorProperties) { (void)name; validRows(values.size()); }
     validRows(v.display.hidden.size());
+    valid(v.display.defaultPreset<=4 && std::isfinite(v.display.ballRadius) && v.display.ballRadius>=.02f && v.display.ballRadius<=5 &&
+        std::isfinite(v.display.stickRadius) && v.display.stickRadius>=.01f && v.display.stickRadius<=v.display.ballRadius &&
+        std::isfinite(v.display.cpkScale) && v.display.cpkScale>=.05f && v.display.cpkScale<=3 &&
+        std::isfinite(v.display.lineWidth) && v.display.lineWidth>=.5f && v.display.lineWidth<=10);
+    for(const auto &[index,preset]:v.display.presets) valid(index>=0 && size_t(index)<d.atoms.size() && preset<=4);
     for (auto hidden:v.display.hidden) valid(hidden<=1);
     valid(int(v.display.defaultLabel.kind)>=0 && int(v.display.defaultLabel.kind)<=6);
     for (const auto &[index,label]:v.display.labels)
@@ -123,7 +128,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(3));
+    w.bytes(magic,8); w.value(uint32_t(4));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -159,6 +164,9 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     w.flag(display.bold); w.flag(display.labelsVisible); w.value(int32_t(display.labelBudget));
     w.value(view.ringSize);
     w.text(view.fragmentKey); w.value(view.fragmentConnector);
+    w.value(display.defaultPreset); w.value(display.ballRadius); w.value(display.stickRadius); w.value(display.cpkScale); w.value(display.lineWidth);
+    w.value(uint64_t(display.presets.size()));
+    for(const auto &[index,preset]:display.presets) { w.value(int32_t(index)); w.value(preset); }
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -167,7 +175,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version<1 || version>3) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>4) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -216,6 +224,12 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     }
     if (version>=3) { v.fragmentKey=r.text(); v.fragmentConnector=r.value<int32_t>(); }
     else valid(v.tool<=5);
+    if(version>=4) {
+        auto &display=v.display; display.defaultPreset=r.value<uint8_t>();
+        display.ballRadius=r.value<float>(); display.stickRadius=r.value<float>(); display.cpkScale=r.value<float>(); display.lineWidth=r.value<float>();
+        const size_t count=r.count(5,atomCount);
+        for(size_t i=0;i<count;++i) { const int index=r.value<int32_t>(); const auto preset=r.value<uint8_t>(); valid(display.presets.emplace(index,preset).second); }
+    }
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size()); return result;
 }
