@@ -3004,6 +3004,25 @@ int main() {
             auto bad=scientific; bad.fields.push_back(bad.fields[0]);
             require(!creation::validLabel(bad),"duplicate fields rejected"); bad=scientific; bad.precision=0;
             require(!creation::validLabel(bad),"invalid scientific label precision rejected");
+            {
+                Dataset colored;colored.species={"C"};colored.atoms={{0,0,0,0},{1,0,0,0},{2,0,0,0}};
+                colored.scalarProperties["Charge"]={-1,1,NAN};colored.vectorProperties["Force"]={{3,4,0},{0,0,1},{0,0,0}};
+                creation::Display appearance;creation::ColorRule cr;cr.kind=creation::ColorKind::Property;
+                appearance.setColor(1000000,{},cr,true);
+                require(appearance.colors.empty() && appearance.hasColors(),"global coloring stores a single rule for a million atoms");
+                creation::ColorResolver resolver(colored,appearance);
+                require(resolver.at(0).z>resolver.at(0).x && resolver.at(1).x>resolver.at(1).z && resolver.at(2).x==.5f,
+                    "property extremes map blue/red and NaN maps explicit gray");
+                require(creation::colorRange(creation::ColorValues(colored,"|Force|"),3,{},true)==std::pair<double,double>{0,5},"vector magnitude range resolves current rows without column copy");
+                cr.kind=creation::ColorKind::Custom;cr.rgb={.2f,.8f,.1f};appearance.setColor(3,{1},cr,false);
+                require(creation::ColorResolver(colored,appearance).at(1).y==.8f && creation::ColorResolver(colored,appearance).at(0).z>.8f,"local custom color preserves unselected mapping");
+                appearance.eraseAtoms(3,{0}); require(appearance.colors.contains(0) && !appearance.colors.contains(1),"sparse color follows surviving atom identity");
+                cr.kind=creation::ColorKind::Category;const auto category=creation::mappedColor(cr,7);
+                cr.low=-100;cr.high=100;require(creation::mappedColor(cr,7).x==category.x && creation::mappedColor(cr,-1).x==.5f,"identifier color is stable across range changes and invalid IDs are gray");
+                cr.kind=creation::ColorKind::Property;cr.low=-1e308;cr.high=1e308;
+                require(creation::mappedColor(cr,-1e308).z>.8f && creation::mappedColor(cr,1e308).x>.8f,"widest finite double color range avoids overflow");
+                cr.high=INFINITY;require(!creation::validColor(cr),"nonfinite color range rejected");
+            }
         }
         {
             creation::Display display;

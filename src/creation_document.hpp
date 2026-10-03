@@ -2,7 +2,7 @@
 #include "creation_display.hpp"
 #include <bit>
 
-// AtomX document v6 (reads v1..v5): little-endian IEEE floats; explicit field order and
+// AtomX document v7 (reads v1..v6): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -104,6 +104,9 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
     for(const auto &[index,preset]:v.display.presets) valid(index>=0 && size_t(index)<d.atoms.size() && preset<=4);
     for (auto hidden:v.display.hidden) valid(hidden<=1);
     valid(creation::validLabel(v.display.defaultLabel));
+    valid(creation::validColor(v.display.defaultColor));
+    for(const auto &[index,rule]:v.display.colors)
+        valid(index>=0 && size_t(index)<d.atoms.size() && creation::validColor(rule));
     for (const auto &[index,label]:v.display.labels)
         valid(index>=0 && size_t(index)<d.atoms.size() && creation::validLabel(label));
     valid(std::isfinite(v.radius) && v.radius>0 && v.shape>=0 && v.shape<=6 && v.cameraMode>=0 && v.cameraMode<=7);
@@ -131,7 +134,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(6));
+    w.bytes(magic,8); w.value(uint32_t(7));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -178,6 +181,13 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     };
     fields(display.defaultLabel); w.value(uint64_t(display.labels.size()));
     for(const auto &[index,l]:display.labels) { w.value(int32_t(index)); fields(l); }
+    auto color=[&](const creation::ColorRule &r) {
+        w.value(uint8_t(r.kind)); w.vec(r.rgb); w.text(r.property);
+        w.value(r.low); w.value(r.high); w.value(r.gradient);
+        w.flag(r.reverse); w.flag(r.discrete); w.flag(r.legend);
+    };
+    color(display.defaultColor); w.value(uint64_t(display.colors.size()));
+    for(const auto &[index,r]:display.colors) { w.value(int32_t(index)); color(r); }
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -186,7 +196,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version<1 || version>6) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>7) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -257,6 +267,16 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
         std::unordered_set<int> seen;
         for(size_t i=0;i<n;++i) { const auto index=r.value<int32_t>(); auto it=display.labels.find(index);
             valid(it!=display.labels.end() && seen.insert(index).second); fields(it->second); }
+    }
+    if(version>=7) {
+        auto color=[&]() { creation::ColorRule c; c.kind=creation::ColorKind(r.value<uint8_t>());
+            c.rgb=r.vec(); c.property=r.text(); c.low=r.value<double>(); c.high=r.value<double>();
+            c.gradient=r.value<int32_t>(); c.reverse=r.flag(); c.discrete=r.flag(); c.legend=r.flag();
+            valid(creation::validColor(c)); return c;
+        };
+        v.display.defaultColor=color(); const auto n=r.count(48,atomCount);
+        for(size_t i=0;i<n;++i) { const auto index=r.value<int32_t>(); auto c=color();
+            valid(v.display.colors.emplace(index,std::move(c)).second); }
     }
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size()); return result;

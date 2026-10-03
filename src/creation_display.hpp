@@ -2,6 +2,7 @@
 #include "authoring.hpp"
 #include "geometry_monitors.hpp"
 #include "elements.hpp"
+#include "creation_colors.hpp"
 #include <cstdio>
 #include <unordered_map>
 
@@ -45,6 +46,21 @@ inline std::string fieldTitle(const LabelField &f) {
     return "?";
 }
 struct Display {
+    ColorRule defaultColor;
+    std::unordered_map<int,ColorRule> colors;
+    bool hasColors() const { return defaultColor.kind!=ColorKind::Source || !colors.empty(); }
+    const ColorRule &colorAt(size_t i) const {
+        const auto it=colors.find(int(i)); return it==colors.end()?defaultColor:it->second;
+    }
+    void setColor(size_t count,const std::vector<int> &selected,const ColorRule &rule,bool all) {
+        if(!validColor(rule)) throw std::invalid_argument("着色规则无效");
+        if(!all && count && selected.size()==count && selected.front()==0 && selected.back()==int(count)-1 &&
+            std::is_sorted(selected.begin(),selected.end()) && std::adjacent_find(selected.begin(),selected.end())==selected.end()) all=true;
+        if(all) {defaultColor=rule;colors.clear();}
+        else for(int i:selected) if(i>=0 && size_t(i)<count) {
+            if(rule==defaultColor) colors.erase(i); else colors[i]=rule;
+        }
+    }
     std::vector<geometry::Monitor> monitors;
     int32_t activeMonitor=-1;
     bool monitorsVisible=true;
@@ -52,7 +68,7 @@ struct Display {
     std::unordered_map<int,uint8_t> presets;
     float ballRadius=.4f,stickRadius=.2f,cpkScale=.7f,lineWidth=1.6f;
     bool sameGpuAppearance(const Display &other) const {
-        return hidden==other.hidden && defaultPreset==other.defaultPreset && presets==other.presets &&
+        return defaultColor==other.defaultColor && colors==other.colors && hidden==other.hidden && defaultPreset==other.defaultPreset && presets==other.presets &&
             ballRadius==other.ballRadius && stickRadius==other.stickRadius && cpkScale==other.cpkScale && lineWidth==other.lineWidth;
     }
     uint8_t presetAt(size_t index) const {
@@ -83,6 +99,9 @@ struct Display {
         return found==labels.end()?defaultLabel:found->second;
     }
     void normalize(size_t count) {
+        for(auto it=colors.begin();it!=colors.end();) {
+            if(it->first<0 || size_t(it->first)>=count || it->second==defaultColor) it=colors.erase(it); else ++it;
+        }
         for(size_t i=monitors.size();i-->0;) if(!geometry::valid(monitors[i],count)) {
             monitors.erase(monitors.begin()+i);
             if(activeMonitor==int(i)) activeMonitor=-1; else if(activeMonitor>int(i)) --activeMonitor;
@@ -145,6 +164,10 @@ struct Display {
         for(const auto &[index,preset]:presets)
             if(index>=0 && size_t(index)<oldCount && remap[size_t(index)]>=0) nextPresets.emplace(remap[size_t(index)],preset);
         presets=std::move(nextPresets);
+        std::unordered_map<int,ColorRule> nextColors;
+        for(const auto &[index,rule]:colors)
+            if(index>=0 && size_t(index)<oldCount && remap[size_t(index)]>=0) nextColors.emplace(remap[size_t(index)],rule);
+        colors=std::move(nextColors);
         for(auto &monitor:monitors) for(size_t i=0;i<monitor.count;++i) {
             auto &index=monitor.atoms[i]; index=index>=0 && size_t(index)<oldCount?remap[size_t(index)]:-1;
         }
@@ -163,6 +186,25 @@ struct Display {
             result.push_back(defaultLabel.kind==LabelKind::None?explicitLabels[sampled]:int(sampled));
         }
         return result;
+    }
+};
+struct ColorResolver {
+    const Dataset &data;
+    const Display &display;
+    ColorValues defaultValues;
+    std::unordered_map<std::string,ColorValues> values;
+    ColorResolver(const Dataset &d,const Display &s):data(d),display(s),defaultValues(d,s.defaultColor.property) {
+        for(const auto &[index,r]:s.colors) { (void)index;
+            if(r.kind>=ColorKind::Property) values.try_emplace(r.property,d,r.property);
+        }
+    }
+    Vec3 at(size_t i) const {
+        const auto &r=display.colorAt(i);
+        if(r.kind==ColorKind::Source) return data.particleColors.size()==data.atoms.size()?data.particleColors[i]:Vec3{-1,-1,-1};
+        if(r.kind==ColorKind::Element) return {-1,-1,-1};
+        if(r.kind==ColorKind::Custom) return r.rgb;
+        const double v=&r==&display.defaultColor?defaultValues.at(i):values.at(r.property).at(i);
+        return mappedColor(r,v);
     }
 };
 inline std::string labelText(const Dataset &data,int index,const Label &label) {

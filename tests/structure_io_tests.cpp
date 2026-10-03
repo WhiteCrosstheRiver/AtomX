@@ -83,10 +83,15 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=7; rejectBytes(version);
+            auto version=bytes; version[8]=8; rejectBytes(version);
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
             const size_t labelBytes=20+16*view.display.labels.size();
-            auto version5=bytes; version5[8]=5; version5.erase(version5.size()-4-labelBytes,labelBytes);
+            const size_t colorBytes=44+view.display.defaultColor.property.size()+8;
+            auto version6=bytes; version6[8]=6; version6.erase(version6.size()-4-colorBytes,colorBytes);
+            const auto version6Path=dir/"v6.atomx";
+            { std::ofstream out(version6Path,std::ios::binary); out.write(version6.data(),std::streamsize(version6.size())); }
+            require(document::read(version6Path).view.display==view.display,"v6 labels remain compatible with source colors");
+            auto version5=version6; version5[8]=5; version5.erase(version5.size()-4-labelBytes,labelBytes);
             const auto version5Path=dir/"v5.atomx";
             { std::ofstream out(version5Path,std::ios::binary); out.write(version5.data(),std::streamsize(version5.size())); }
             require(document::read(version5Path).view.display==view.display,"v5 retains monitors and legacy labels without composite fields");
@@ -143,8 +148,16 @@ int main() {
             require(compositeRead.view.display==composite && creation::labelText(compositeRead.data,0,compositeRead.view.display.labelAt(0)).find("Energy = -2.5")!=std::string::npos,
                 "v6 restores composite property names, order, prefix, precision and sparse selected overrides");
             std::ifstream compositeIn(compositePath,std::ios::binary); std::string compositeBytes((std::istreambuf_iterator<char>(compositeIn)),{});
+            compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
             auto badField=compositeBytes; badField[badField.size()-4-9]=char(255); rejectBytes(badField);
             auto badPrecision=compositeBytes; badPrecision[badPrecision.size()-4-21]=0; rejectBytes(badPrecision);
+            creation::ColorRule color; color.kind=creation::ColorKind::Property; color.property="Energy";color.low=-4;color.high=2;color.gradient=8;color.reverse=true;
+            composite.setColor(2,{},color,true); color.kind=creation::ColorKind::Custom;color.rgb={.1f,.8f,.3f};
+            composite.setColor(2,{1},color,false);
+            io::write(compositePath,io::Format::AtomX,native,compositeOptions);
+            require(document::read(compositePath).view.display==composite,"v7 restores global color range and sparse custom overrides");
+            std::ifstream colorIn(compositePath,std::ios::binary); std::string colorData((std::istreambuf_iterator<char>(colorIn)),{});
+            auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }
             require(rejected && document::read(nativePath).data.bonds==native.bonds,

@@ -9,7 +9,7 @@
 #include <wrl/client.h>
 #include <wincodec.h>
 #include "core.hpp"
-#include "color_maps.hpp"
+#include "color_gradient.hpp"
 #include "elements.hpp"
 #include "creation_display.hpp"
 #include "particle_mesh.hpp"
@@ -54,72 +54,11 @@ struct ParticleStyle {
     bool operator==(const ParticleStyle &) const = default;
 };
 static_assert(sizeof(ParticleStyle) == 48);
-inline std::array<float, 3> sampleColorGradientFormula(int gradient, float u) {
-    u = std::clamp(u, 0.f, 1.f);
-    auto mix = [](std::array<float,3> a, std::array<float,3> b, float t) {
-        t = std::clamp(t, 0.f, 1.f);
-        return std::array<float,3>{a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t};
-    };
-    if (gradient == 0) {
-        const std::array<float,3> a{.10f,.15f,.85f}, b{.12f,.85f,.75f}, c{.98f,.88f,.08f}, d{.9f,.08f,.04f};
-        return u < .5f ? mix(a,b,u*2) : u < .8f ? mix(b,c,(u-.5f)*3.3333333f) : mix(c,d,(u-.8f)*5);
-    }
-    if (gradient == 1)
-        return u < .5f ? mix({.1f,.15f,.9f},{1,1,1},u*2) : mix({1,1,1},{.9f,.05f,.05f},(u-.5f)*2);
-    if (gradient == 2)
-        return {.5f+.5f*std::cos(6.2831853f*u), .5f+.5f*std::cos(6.2831853f*(u+.33f)), .5f+.5f*std::cos(6.2831853f*(u+.67f))};
-    if (gradient == 3) return mix({.02f,.02f,.02f},{1,.95f,.1f},u);
-    if (gradient == 4) return {u,u,u};
-    if (gradient == 5) return mix({.02f,.02f,.15f},{1,.02f,0},u);
-    if (gradient == 6) return {std::clamp(1.5f-std::abs(4*u-3),0.f,1.f), std::clamp(1.5f-std::abs(4*u-2),0.f,1.f), std::clamp(1.5f-std::abs(4*u-1),0.f,1.f)};
-    if (gradient == 7 || gradient == 8 || gradient == 9) {
-        const auto &lut = gradient == 7 ? atomx::color_maps::magma
-                         : gradient == 8 ? atomx::color_maps::viridis
-                                         : atomx::color_maps::plasma;
-        const float position = u * float(atomx::color_maps::sampleCount - 1);
-        const auto lower = size_t(position);
-        const auto upper = std::min(lower + 1, size_t(atomx::color_maps::sampleCount - 1));
-        const float blend = position - float(lower);
-        std::array<float, 3> result{};
-        for (int channel = 0; channel < 3; ++channel) {
-            const float a = float(lut[lower][channel]) / 255.f;
-            const float b = float(lut[upper][channel]) / 255.f;
-            result[channel] = a + (b - a) * blend;
-        }
-        return result;
-    }
-    return mix({.02f,.02f,.02f},{1,.95f,.1f},u);
-}
-inline constexpr int colorGradientCount = 10;
-inline const auto &colorGradientLut() {
-    static const auto lut = [] {
-        std::array<std::array<std::array<float, 3>, atomx::color_maps::sampleCount>, colorGradientCount> result{};
-        for (int gradient = 0; gradient < colorGradientCount; ++gradient)
-            for (int sample = 0; sample < atomx::color_maps::sampleCount; ++sample)
-                result[gradient][sample] = sampleColorGradientFormula(
-                    gradient, float(sample) / float(atomx::color_maps::sampleCount - 1));
-        return result;
-    }();
-    return lut;
-}
-inline std::array<float, 3> sampleColorGradient(int gradient, float u) {
-    gradient = std::clamp(gradient, 0, colorGradientCount - 1);
-    u = std::clamp(u, 0.f, 1.f);
-    const auto &lut = colorGradientLut()[gradient];
-    const float position = u * float(atomx::color_maps::sampleCount - 1);
-    const size_t lower = size_t(position);
-    const size_t upper = std::min(lower + 1, size_t(atomx::color_maps::sampleCount - 1));
-    const float blend = position - float(lower);
-    std::array<float, 3> result{};
-    for (int channel = 0; channel < 3; ++channel)
-        result[channel] = lut[lower][channel] + (lut[upper][channel] - lut[lower][channel]) * blend;
-    return result;
-}
 struct ColorLegendOptions {
     bool visible = false;
     std::string property;
     int gradient = 0;
-    float minimum = 0, maximum = 1;
+    double minimum = 0, maximum = 1;
     bool reverse = false, discrete = false;
 };
 class Renderer {
@@ -610,6 +549,10 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         if (!bondDisplayOmitted && d.bondStyle.visible)
             bondVertices.reserve(d.bonds.size() * 4);
         const bool particleOverride = d.particleColors.size() == d.atoms.size();
+        const bool creationColors=display && display->hasColors() &&
+            (display->defaultColor.kind!=atomx::creation::ColorKind::Element || !display->colors.empty() || particleOverride);
+        std::optional<atomx::creation::ColorResolver> creationColor;
+        if(creationColors) creationColor.emplace(d,*display);
         const auto atomColor = [&](uint32_t index) {
             const auto &atom = d.atoms[index];
             DirectX::XMFLOAT3 result{.72f,.78f,.86f};
@@ -617,8 +560,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                 const auto &c = styles[atom.type].color;
                 result = {c[0], c[1], c[2]};
             }
-            if (particleOverride) {
-                const auto &c = d.particleColors[index];
+            if (particleOverride || creationColors) {
+                const auto c = creationColors?creationColor->at(index):d.particleColors[index];
                 if (c.x >= 0) result = {c.x, c.y, c.z};
             }
             return result;
@@ -716,10 +659,10 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             sv.Buffer.NumElements = c.count;
             check(device->CreateShaderResourceView(c.propertyBuffer.Get(), &sv, &c.propertyView),
                   "Particle property buffer view");
-            if (d.particleColors.size()==d.atoms.size()) {
+            if (particleOverride || creationColors) {
                 std::vector<DirectX::XMFLOAT3> colors(c.count);
                 for (size_t j=0;j<colors.size();++j) {
-                    const auto &source=d.particleColors[start+j];
+                    const auto source=creationColors?creationColor->at(start+j):d.particleColors[start+j];
                     colors[j]={source.x,source.y,source.z};
                 }
                 D3D11_BUFFER_DESC colorDesc{}; colorDesc.ByteWidth=UINT(colors.size()*sizeof(DirectX::XMFLOAT3));
@@ -734,7 +677,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         }
         chunks = std::move(next);
         gpuBytes = d.atoms.size() * (sizeof(atomx::Atom) + sizeof(float) +
-                                      (d.particleColors.size()==d.atoms.size()?sizeof(DirectX::XMFLOAT3):0));
+                                      (particleOverride || creationColors?sizeof(DirectX::XMFLOAT3):0));
     }
     void target(Target &t, int w, int h) {
         w = std::max(1, w);
@@ -904,7 +847,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         if (auto it = d.scalarProperties.find("Color coding"); it != d.scalarProperties.end())
             hasPropertyValues = it->second.size() == d.atoms.size();
         c.colorAxis = float(colorAxis); c.colorMin=colorMin; c.colorMax=colorMax;
-        c.colorMode = colorCoding ? (hasPropertyValues ? (selectedOnly ? 4.f : 3.f)
+        c.colorMode = colorCoding && !(display && display->hasColors()) ? (hasPropertyValues ? (selectedOnly ? 4.f : 3.f)
                                                        : (selectedOnly ? 2.f : 1.f)) : 0.f;
         c.colorDiscrete=discrete?1.f:0.f; c.colorGradient=float(colorGradient);
         XMFLOAT4 colors[] = {{.76f, .57f, .38f, 1}, {.35f, .68f, .78f, 1}, {.62f, .76f, .46f, 1},
@@ -912,7 +855,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                              {.47f, .61f, .85f, 1}, {.8f, .8f, .8f, 1}};
         std::copy(std::begin(colors), std::end(colors), c.colors);
         c.colors[0].w = float(meshTriangleCount);
-        c.colors[1].w = d.particleColors.size()==d.atoms.size()?1.f:0.f;
+        c.colors[1].w = d.particleColors.size()==d.atoms.size() || (display && display->hasColors() &&
+            (display->defaultColor.kind!=atomx::creation::ColorKind::Element || !display->colors.empty()))?1.f:0.f;
         c.colors[2].w=styleScale;
         c.colors[3]={display?display->ballRadius:.4f,display?display->stickRadius:.2f,display?display->cpkScale:.7f,0};
         context->UpdateSubresource(constants.Get(), 0, nullptr, &c, 0, 0);
@@ -1079,6 +1023,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             for (int x = 0; x < barW; ++x) {
                 float u = barW > 1 ? float(x) / float(barW-1) : 0;
                 if (legend.reverse) u = 1-u;
+                if (legend.minimum==legend.maximum) u=.5f;
                 if (legend.discrete) u = std::min(std::floor(u*12),11.f)/11.f;
                 auto color = sampleColorGradient(legend.gradient, u);
                 BYTE red = BYTE(std::clamp(color[0],0.f,1.f)*255), green = BYTE(std::clamp(color[1],0.f,1.f)*255), blue = BYTE(std::clamp(color[2],0.f,1.f)*255);

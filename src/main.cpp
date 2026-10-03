@@ -934,6 +934,10 @@ struct App {
     bool showCreationStyles=false,creationStyleAll=false;
     int creationStylePreset=0;
     creation::Display creationStyleDraft;
+    creation::ColorRule creationColorDraft;
+    bool creationColorBusy=false;
+    std::future<std::pair<double,double>> creationColorRangeJob;
+    std::string creationColorMessage;
     uint64_t motionRevision=0,motionCacheRevision=UINT64_MAX;
     std::vector<motion::Group> motionGroupCache;
     std::future<motion::Assignment> motionGroupJob;
@@ -1026,6 +1030,7 @@ struct App {
         if (dxaJob.valid()) dxaJob.wait();
         colorRangeCancel = true;
         if (colorRangeJob.valid()) colorRangeJob.wait();
+        if (creationColorRangeJob.valid()) creationColorRangeJob.wait();
         exportCancel = true;
         if (exportJob.valid())
             exportJob.wait();
@@ -1638,7 +1643,7 @@ struct App {
         queueCreationLabelFont();
         update();
     }
-    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy || layerBuildBusy; }
+    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy || layerBuildBusy || creationColorBusy; }
     void switchTab(int index) {
         if (index < 0 || index >= int(tabs.size()) || index == activeTab) return;
         if (documentsBusy()) {
@@ -2304,6 +2309,7 @@ struct App {
                               : "Display style: Ball and stick";
     }
     void history(bool forward) {
+        if(creationColorBusy) return;
         chooseCreationTool(creationTool);
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         if (creationMode || structureEditIsLatest || !authorRedo.empty()) {
@@ -2351,13 +2357,14 @@ struct App {
         update();
     }
     void jumpCreationHistory(size_t position) {
+        if(creationColorBusy) return;
         const size_t end=authorUndo.size()+authorRedo.size();
         if (position>end) return;
         while (authorUndo.size()>position) history(false);
         while (authorUndo.size()<position && !authorRedo.empty()) history(true);
     }
     void load(const std::filesystem::path &p, int frame = 0) {
-        if (busy || p.empty())
+        if (busy || creationColorBusy || p.empty())
             return;
         if (inspectorBusy) {
             inspectorCancel = true;
@@ -2458,6 +2465,12 @@ struct App {
             });
     }
     void poll() {
+        if(creationColorBusy && creationColorRangeJob.valid() && creationColorRangeJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            creationColorBusy=false;
+            try { const auto r=creationColorRangeJob.get(); creationColorDraft.low=r.first; creationColorDraft.high=r.second;
+                creationColorMessage="已更新范围";
+            } catch(const std::exception &e) {creationColorMessage=e.what();}
+        }
         if (layerBuildBusy && layerBuildJob.valid() && layerBuildJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             layerBuildBusy=false;
             try {
@@ -2800,6 +2813,10 @@ struct App {
                 creationMode?.43f:compact?.50f:1.f,creationMode && sameAtomCount()?&creationDisplay:nullptr);
         ColorLegendOptions legend{colorCoding && colorLegend, colorRangeProperty, colorGradient,
                                   colorMin, colorMax, colorReverse, colorDiscrete};
+        if(creationMode && creationDisplay.hasColors()) {
+            const auto &r=creationDisplay.defaultColor;
+            legend={r.kind==creation::ColorKind::Property && r.legend,r.property,r.gradient,r.low,r.high,r.reverse,r.discrete};
+        }
         gpu.png(t, p, legend);
         status = "Rendered " + utf8(p.filename().wstring());
     }
@@ -4065,7 +4082,7 @@ struct App {
             pipelineCheckpointNode=SIZE_MAX;
             update();
         }
-        if (ImGui::Button("Load demo crystal", {-1, U(30)}) && !busy) {
+        if (ImGui::Button("Load demo crystal", {-1, U(30)}) && !documentsBusy()) {
             source = crystal(24);
             path.clear();
             frames.clear();
@@ -4558,6 +4575,7 @@ struct App {
             for(const auto &field:label.fields) missingGlyph(field.property); };
         glyphs(creationDisplay.defaultLabel);
         for (const auto &[index,label]:creationDisplay.labels) { (void)index; glyphs(label); }
+        missingGlyph(creationDisplay.defaultColor.property);
     }
     void refreshCreationDisplay(bool visibilityChanged=true) {
         geometryPanelMonitor=-1; geometryPending.clear();
@@ -4640,15 +4658,22 @@ struct App {
         creationStyleAll=creationSelection.empty();
         creationStylePreset=creationStyleAll?creationDisplay.defaultPreset:creationDisplay.presetAt(creationSelection.back());
         creationStyleDraft=creationDisplay;
+        creationColorDraft=creationStyleAll?creationDisplay.defaultColor:creationDisplay.colorAt(creationSelection.back());
+        creationColorMessage.clear();
         showCreationStyles=true;
     }
     void creationStylesDialog() {
         if(!creationMode) {showCreationStyles=false;return;}
         if(!showCreationStyles) return;
-        ImGui::SetNextWindowSize({U(410),U(450)},ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({U(440),U(560)},ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints({U(300),U(250)},{U(700),std::max(U(250),ImGui::GetMainViewport()->WorkSize.y-U(24))});
         if(ImGui::Begin("显示样式##creation-styles",&showCreationStyles)) {
+            ImGui::BeginDisabled(documentsBusy());
             ImGui::Checkbox("整个体系",&creationStyleAll); recordUiTestItem("creation.style-all");
+            ImGui::EndDisabled();
             if(!creationStyleAll) ImGui::Text("选中 %zu 个原子",creationSelection.size());
+            if(ImGui::BeginTabBar("##appearance-pages")) {
+            if(ImGui::BeginTabItem("样式")) {
             const char *names[]={"原有外观","线","棒","球棒","CPK"};
             for(int i=0;i<5;++i) {
                 ImGui::RadioButton(names[i],&creationStylePreset,i);
@@ -4674,6 +4699,67 @@ struct App {
             recordUiTestItem("creation.style-apply"); ImGui::EndDisabled(); ImGui::SameLine();
             if(ImGui::Button("关闭",{U(110),U(30)})) showCreationStyles=false;
             recordUiTestItem("creation.style-close");
+            ImGui::EndTabItem();
+            }
+            const bool colorsPage=ImGui::BeginTabItem("着色"); recordUiTestItem("creation.style-colors-page");
+            if(colorsPage) {
+            ImGui::SeparatorText("原子与半键着色");
+            ImGui::BeginDisabled(documentsBusy());
+            const char *colorKinds[]={"来源颜色","元素颜色","自定义颜色","属性渐变","分类编号"};
+            int colorKind=int(creationColorDraft.kind);
+            if(ImGui::BeginCombo("着色方式",colorKinds[colorKind])) {
+                for(int k=0;k<5;++k) {
+                    if(ImGui::Selectable(colorKinds[k],k==colorKind)) creationColorDraft.kind=creation::ColorKind(k);
+                    recordUiTestItem("creation.color-kind-"+std::to_string(k));
+                } ImGui::EndCombo();
+            } recordUiTestItem("creation.color-kind");
+            auto &cr=creationColorDraft;
+            if(cr.kind==creation::ColorKind::Custom) ImGui::ColorEdit3("自定义色",&cr.rgb.x,ImGuiColorEditFlags_NoInputs);
+            if(cr.kind>=creation::ColorKind::Property) {
+                if(ImGui::BeginCombo("属性",cr.property.c_str())) {
+                    std::unordered_set<std::string> offered;
+                    auto choice=[&](const std::string &name) {
+                        if(!offered.insert(name).second) return;
+                        if(ImGui::Selectable(name.c_str(),cr.property==name)) cr.property=name;
+                        recordUiTestItem("creation.color-property-"+name);
+                    };
+                    for(const auto &[name,v]:source.scalarProperties) {(void)v;choice(name);}
+                    if(cr.kind==creation::ColorKind::Property) {
+                        for(const char *p:{"Position.X","Position.Y","Position.Z"}) choice(p);
+                        for(const auto &[name,v]:source.vectorProperties) { (void)v;
+                            choice(name+".X");choice(name+".Y");choice(name+".Z");choice("|"+name+"|"); }
+                    }
+                    ImGui::EndCombo();
+                } recordUiTestItem("creation.color-property");
+                if(cr.kind==creation::ColorKind::Property) {
+                    if(ImGui::Button("按当前范围调整")) {
+                        const bool all=creationStyleAll; auto selection=all?std::vector<int>{}:creationSelection;
+                        const std::string property=cr.property;
+                        creationColorBusy=true;creationColorMessage="正在后台读取范围…";
+                        creationColorRangeJob=std::async(std::launch::async,[this,all,selection=std::move(selection),property] {
+                            return creation::colorRange(creation::ColorValues(source,property),source.atoms.size(),selection,all);
+                        });
+                    } recordUiTestItem("creation.color-range");
+                    ImGui::SetNextItemWidth(U(210)); ImGui::InputDouble("下限",&cr.low,0,0,"%.6g");
+                    ImGui::SetNextItemWidth(U(210)); ImGui::InputDouble("上限",&cr.high,0,0,"%.6g");
+                    ImGui::Combo("渐变",&cr.gradient,"Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0Plasma\0");
+                    ImGui::Checkbox("反转颜色",&cr.reverse); ImGui::SameLine(); ImGui::Checkbox("12 段",&cr.discrete);
+                    ImGui::Checkbox("显示全体系图例",&cr.legend);
+                } else ImGui::TextWrapped("非负整数编号保持固定颜色；可选择运动分组或层编号，其他值为灰色。");
+                ImGui::TextDisabled("缺失值为灰色；颜色随数据更新，范围仅手动调整。");
+            }
+            if(!creationColorMessage.empty()) ImGui::TextWrapped("%s",creationColorMessage.c_str());
+            ImGui::BeginDisabled(!creation::validColor(cr) || (!creationStyleAll && creationSelection.empty()));
+            if(ImGui::Button("应用着色",{U(110),U(30)})) {
+                auto next=creationDisplay; next.setColor(source.atoms.size(),creationSelection,cr,creationStyleAll);
+                editCreationDisplay(std::move(next),"编辑原子着色");
+            } recordUiTestItem("creation.color-apply"); ImGui::EndDisabled(); ImGui::EndDisabled();
+            ImGui::SameLine(); if(ImGui::Button("关闭",{U(110),U(30)})) showCreationStyles=false;
+            recordUiTestItem("creation.color-close");
+            ImGui::TextWrapped("来源颜色保留文件配色；元素颜色使用当前元素外观。着色不修改科学属性或键拓扑。");
+            ImGui::EndTabItem();
+            } ImGui::EndTabBar();
+            }
         }
         ImGui::End();
     }
@@ -5654,30 +5740,40 @@ struct App {
             draw->AddText({o.x+U(18),o.y+U(7)},IM_COL32(37,209,89,255),"y");
             draw->AddText({o.x-U(4),o.y-U(38)},IM_COL32(34,172,237,255),"z");
         }
-        if (colorCoding && colorLegend && avail.x >= U(220) && avail.y >= U(110)) {
+        const auto &creationColor=creationDisplay.defaultColor;
+        const bool creationLegend=creationMode && creationColor.kind==creation::ColorKind::Property && creationColor.legend;
+        const bool useCreationColors=creationMode && creationDisplay.hasColors();
+        if ((creationLegend || (!useCreationColors && colorCoding && colorLegend)) && avail.x >= U(220) && avail.y >= U(110)) {
+            const auto &legendProperty=creationLegend?creationColor.property:colorRangeProperty;
+            const int legendGradient=creationLegend?creationColor.gradient:colorGradient;
+            const bool legendReverse=creationLegend?creationColor.reverse:colorReverse;
+            const bool legendDiscrete=creationLegend?creationColor.discrete:colorDiscrete;
+            const double legendLow=creationLegend?creationColor.low:double(colorMin);
+            const double legendHigh=creationLegend?creationColor.high:double(colorMax);
             const float sx = U(174), sy = U(64), pad = U(8);
             ImVec2 a{p.x + avail.x - sx - U(12), p.y + U(12)};
             ImVec2 b{a.x + sx, a.y + sy};
             draw->AddRectFilled(a,b,IM_COL32(15,19,25,238),U(4));
             draw->AddRect(a,b,IM_COL32(104,119,138,255),U(4));
-            std::string title = colorRangeProperty;
+            std::string title = legendProperty;
             if (title.size() > 24) title = title.substr(0,21) + "...";
             draw->AddText({a.x+pad,a.y+U(5)},IM_COL32(238,243,250,255),title.c_str());
             const float barX=a.x+pad, barY=a.y+U(25), barW=sx-pad*2, barH=U(12);
-            const int segments=colorDiscrete?12:96;
+            const int segments=legendDiscrete?12:96;
             for (int segment=0; segment<segments; ++segment) {
                 float u=segments>1?float(segment)/float(segments-1):0;
-                if (colorReverse) u=1-u;
-                if (colorDiscrete) u=std::min(std::floor(u*12),11.f)/11.f;
-                auto c=sampleColorGradient(colorGradient,u);
+                if (legendReverse) u=1-u;
+                if(creationLegend && legendLow==legendHigh) u=.5f;
+                if (legendDiscrete) u=std::min(std::floor(u*12),11.f)/11.f;
+                auto c=sampleColorGradient(legendGradient,u);
                 auto packed=ImGui::ColorConvertFloat4ToU32({c[0],c[1],c[2],1});
                 const float x0=barX+barW*segment/segments;
                 const float x1=barX+barW*(segment+1)/segments+.5f;
                 draw->AddRectFilled({x0,barY},{x1,barY+barH},packed);
             }
             char low[48]{}, high[48]{};
-            snprintf(low,sizeof(low),"%.5g",colorMin);
-            snprintf(high,sizeof(high),"%.5g",colorMax);
+            snprintf(low,sizeof(low),"%.5g",legendLow);
+            snprintf(high,sizeof(high),"%.5g",legendHigh);
             draw->AddText({barX,a.y+U(42)},IM_COL32(218,226,237,255),low);
             auto highSize=ImGui::CalcTextSize(high);
             draw->AddText({barX+barW-highSize.x,a.y+U(42)},IM_COL32(218,226,237,255),high);
@@ -9322,6 +9418,8 @@ struct App {
         chineseBuilder.AddText("隐藏选中仅显示选中显示全部已隐藏原子标签对象默认显示元素和编号整个体系内容无标签笛卡尔坐标分数坐标自定义文字字号粗体颜色显示标签屏幕标签上限大体系自动抽样优先显示选中原子的标签隐藏原子不显示标签上限默认应用移除移除全部编辑原子标签撤销重做");
         chineseBuilder.AddText(creationDisplay.defaultLabel.text.c_str());
         chineseBuilder.AddText("属性组合可组合至多项按勾选顺序排列元素名称原子序数质量列优先没有该列时用元素质量缺失值为清空属性有效数字");
+        chineseBuilder.AddText("原子与半键着色来源颜色元素颜色自定义颜色属性渐变分类编号着色方式自定义色按当前范围调整正在后台读取范围已更新范围属性没有有限数值下限上限渐变反转颜色段显示全体系图例缺失值为灰色颜色随数据更新范围仅手动调整应用着色来源颜色保留文件配色元素颜色使用当前元素外观着色不修改科学属性或键拓扑非负整数编号保持固定颜色可选择运动分组或层编号其他值为灰色编辑原子着色");
+        chineseBuilder.AddText(creationDisplay.defaultColor.property.c_str());
         for(const auto &field:creationDisplay.defaultLabel.fields) chineseBuilder.AddText(field.property.c_str());
         chineseBuilder.AddText("绘制原子与键键级单键双键三键连续成链点击已有原子吸附连键双击结束取消虚拟原子替换元素放置孤立原子拖动向里自由键长起点默认键长结束成链连接选中原子修改键级断键设置断开请选择有效元素无法连键重合坐标或键数已达上限");
         chineseBuilder.AddText("绘制碳环元芳香环大小空白处放置原子或键上接环按住拖动调整朝向松开提交取消环已存在环顶点重合请调整朝向环与隐藏原子重合请先显示原子碳环不自动加氢保存文档文档另存为");

@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
         }
         if (hashes.size() != 7)
             throw std::runtime_error("Shape images must differ");
-        auto imageHash = [&](const Target &target) {
+        auto imageHash = [&](const Target &target,int minX=0,int maxX=INT_MAX) {
             D3D11_TEXTURE2D_DESC td{};
             target.texture->GetDesc(&td);
             td.Usage = D3D11_USAGE_STAGING;
@@ -127,7 +127,7 @@ int main(int argc, char **argv) {
             check(renderer.context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &map), "Color map");
             uint64_t hash = 1469598103934665603ULL;
             for (int y = 0; y < target.h; ++y)
-                for (int x = 0; x < target.w; ++x) {
+                for (int x = std::max(0,minX); x < std::min(target.w,maxX); ++x) {
                     auto pixel = (unsigned char *)map.pData + y * map.RowPitch + x * 4;
                     for (int c = 0; c < 3; ++c) { hash ^= pixel[c]; hash *= 1099511628211ULL; }
                 }
@@ -424,6 +424,23 @@ int main(int argc, char **argv) {
             if(imageHash(t)==originalImage || litInXRange(t,155,256)!=originalRight)
                 throw std::runtime_error("Selected CPK must preserve unselected atom and bond-half coverage with fixed camera bounds");
             renderer.png(t,"build/shape-validation/preset-mixed.png");
+            display={}; styled.bondStyle.colorByType=true;
+            auto colorImage=[&]() {
+                renderer.upload(styled,{},{},{0,0,1},&display);
+                renderer.draw(t,styled,front,.3f,0,0,0,0,0,1,false,false,false,bg,true,false,.43f,&display);
+                return imageHash(t);
+            };
+            const auto sourceImage=colorImage(),sourceRight=imageHash(t,155,256);
+            atomx::creation::ColorRule cr;cr.kind=atomx::creation::ColorKind::Custom;cr.rgb={0,1,0};
+            display.setColor(3,{0},cr,false);
+            if(colorImage()==sourceImage || imageHash(t,155,256)!=sourceRight)
+                throw std::runtime_error("Selected custom colors must change atom/half-bond pixels while preserving the other side exactly");
+            cr.kind=atomx::creation::ColorKind::Property;styled.scalarProperties["Charge"]={-1,1,NAN};
+            display.setColor(3,{},cr,true);const auto mappedImage=colorImage();
+            styled.scalarProperties["Charge"]={1,-1,NAN};
+            if(colorImage()==mappedImage) throw std::runtime_error("Creation property colors must refresh with current data on GPU upload");
+            display={};if(colorImage()!=sourceImage || renderer.styles!=originalStyles)
+                throw std::runtime_error("Returning to source colors must exactly restore GPU appearance and element styles");
         }
         renderer.resetStyles(2,&typed.species);
         renderer.upload(typed, {});

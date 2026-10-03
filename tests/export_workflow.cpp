@@ -917,6 +917,29 @@ int main() {
                 app.history(false); settlePipeline(); app.history(false); frame();
                 requireExport(app.creationDisplay.labelAt(1).text=="site A" && app.creationDisplay.labelAt(1).kind==creation::LabelKind::Custom,
                     "mixed structure/display undo restores the prior custom label");
+                app.selectCreationAtom(1,false);frame();
+                click("creation.edit-styles");frame();click("creation.style-colors-page");frame();
+                click("creation.color-kind");frame();click("creation.color-kind-3");frame();
+                click("creation.color-property");frame();click("creation.color-property-Charge");frame();
+                click("creation.color-range");
+                requireExport(app.creationColorBusy,"range scan is dispatched outside the UI frame");
+                const auto rangeHistory=app.authorUndo.size(), rangeRedo=app.authorRedo.size();
+                app.history(false);app.history(true);app.jumpCreationHistory(0);app.load(propertyPath);
+                requireExport(app.authorUndo.size()==rangeHistory && app.authorRedo.size()==rangeRedo && !app.busy,
+                    "range scan keeps source stable against undo, redo, history jump and loading");
+                app.creationColorRangeJob.wait();app.poll();frame();
+                requireExport(app.creationColorDraft.low==-.5 && app.creationColorDraft.high==-.5,"selected range excludes unselected and missing values");
+                const auto beforeColorHistory=app.authorUndo.size();click("creation.color-apply");frame();
+                requireExport(app.creationDisplay.colorAt(1).kind==creation::ColorKind::Property && !app.creationDisplay.colors.contains(0) &&
+                    app.authorUndo.size()==beforeColorHistory+1 && !app.authorUndo.back().data && !app.pipelineBusy,"actual color controls change selected appearance without structure copy or pipeline");
+                click("creation.style-all");frame();click("creation.color-range");app.creationColorRangeJob.wait();app.poll();frame();
+                requireExport(app.creationColorDraft.low==-.5 && app.creationColorDraft.high==.125,"whole-system range ignores NaN");
+                click("creation.color-apply");frame();click("creation.color-close");frame();
+                requireExport(app.creationDisplay.defaultColor.kind==creation::ColorKind::Property && app.creationDisplay.colors.empty(),"full-system color is stored as one rule");
+                app.startDataExport(propertyPath);app.exportJob.wait();app.poll();
+                requireExport(document::read(propertyPath).view.display.defaultColor==app.creationDisplay.defaultColor,"application export persists global color range and gradient");
+                app.history(false);frame();requireExport(app.creationDisplay.colors.contains(1),"undo global coloring restores sparse selection");
+                app.history(false);frame();requireExport(!app.creationDisplay.hasColors(),"undo selection coloring restores source appearance");
                 {
                     const int originalCreationTab=app.activeTab;
                     const auto currentCamera=app.cameras[3];
