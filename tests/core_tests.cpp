@@ -2812,6 +2812,54 @@ int main() {
         {
             Dataset molecule;
             molecule.species={"C"};
+            molecule.cell={10,0,0,0,10,0,0,0,10};
+            molecule.pbc={true,true,true};
+            molecule.atoms={{0,0,0,0},{1.52f,0,0,0},{3.04f,0,0,0},{4.56f,0,0,0}};
+            require(authoring::setDirectBond(molecule,0,1,2),"manual double bond created");
+            require(!authoring::setDirectBond(molecule,1,0,2) && molecule.bonds.size()==1,
+                    "reverse endpoint duplicate is a no-op");
+            require(authoring::setDirectBond(molecule,1,0,3) && molecule.bonds[0].order==3,
+                    "bond order changes in place without duplicate edges");
+            molecule.bonds.push_back({1,2,{1,0,0},2});
+            require(authoring::setDirectBond(molecule,1,2,1) && molecule.bonds.size()==3,
+                    "manual direct bonds do not overwrite periodic image bonds");
+            Modifier replicate{Op::Replicate}; replicate.replicateN[0]=2;
+            const auto replicated=evaluate(molecule,{replicate});
+            require(replicated.data.bonds.size()==6 && replicated.data.bonds[0].order==3 &&
+                    replicated.data.bonds[1].order==2,"replication preserves manual bond orders");
+            Modifier recalculate{Op::CreateBonds}; recalculate.value=2;
+            const auto calculated=evaluate(molecule,{recalculate});
+            require(calculated.data.bonds[0].order==3,
+                    "distance-generated duplicate does not erase an existing manual bond order");
+            bool rejected=false;
+            try { authoring::setDirectBond(molecule,0,0,1); } catch (const std::invalid_argument &) { rejected=true; }
+            require(rejected && molecule.bonds.size()==3,"self bond rejected without changing topology");
+            require(authoring::setDirectBond(molecule,0,1,0) && molecule.bonds.size()==2,
+                    "bond removal retains other topology");
+            molecule.particleColors={{1,0,0},{0,1,0},{0,0,1},{1,1,1}};
+            molecule.scalarProperties["Charge"]={0,1,2,3};
+            molecule.vectorProperties["MoveMask"]={{0,0,0},{1,0,0},{1,1,0},{1,1,1}};
+            authoring::eraseAtoms(molecule,{0,3});
+            require(molecule.atoms.size()==2 && molecule.bonds.size()==2 && molecule.bonds[0].a==0 &&
+                    molecule.bonds[0].b==1 && molecule.bonds[0].order==2 &&
+                    molecule.bonds[0].image==std::array<int32_t,3>{1,0,0},
+                    "creation delete remaps surviving bond endpoints, images and order");
+            require(molecule.scalarProperties["Charge"]==std::vector<double>{1,2} &&
+                    molecule.particleColors[0].y==1 && molecule.vectorProperties["MoveMask"][1].y==1,
+                    "creation delete remaps particle properties and colors");
+            require(std::abs(authoring::sketchBondLength(molecule,0,"C")-1.52)<1e-5,
+                    "sketch default length is the sum of covalent radii");
+            const auto front=authoring::sketchPosition({0,0,0},{.8f,0,0},{0,0,1},1,false,false);
+            const auto behind=authoring::sketchPosition({0,0,0},{.8f,0,0},{0,0,1},1,true,false);
+            const auto beyond=authoring::sketchPosition({0,0,0},{3,0,0},{0,0,1},1,false,false);
+            const auto stretch=authoring::sketchPosition({0,0,0},{3,0,0},{0,0,1},1,false,true);
+            require(std::abs(authoring::length(front)-1)<1e-5 && front.z>0 && behind.z<0 &&
+                    beyond.x==1 && beyond.z==0 && stretch.x==3,
+                    "sketch projection retains bond length, supports screen depth and free length");
+        }
+        {
+            Dataset molecule;
+            molecule.species={"C"};
             molecule.atoms={{1,0,0,0},{0,0,0,0},{0,1,0,0},{8,8,8,0}};
             molecule.bonds={{0,1,{}},{1,2,{}},{1,2,{}},{999,0,{}}};
             const auto connected=authoring::fragment(molecule,0);

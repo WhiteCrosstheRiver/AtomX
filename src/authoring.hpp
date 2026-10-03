@@ -30,6 +30,72 @@ inline Vec3 scale(Vec3 v, double s) { return {float(v.x * s), float(v.y * s), fl
 inline Vec3 add(Vec3 u, Vec3 v) { return {u.x + v.x, u.y + v.y, u.z + v.z}; }
 inline Vec3 sub(Vec3 u, Vec3 v) { return {u.x - v.x, u.y - v.y, u.z - v.z}; }
 
+inline int directBondIndex(const Dataset &data,int a,int b) {
+    for (size_t index=0;index<data.bonds.size();++index) {
+        const auto &bond=data.bonds[index];
+        if (bond.image!=std::array<int32_t,3>{}) continue;
+        if ((bond.a==uint32_t(a) && bond.b==uint32_t(b)) ||
+            (bond.a==uint32_t(b) && bond.b==uint32_t(a))) return int(index);
+    }
+    return -1;
+}
+inline bool setDirectBond(Dataset &data,int a,int b,int order) {
+    if (a<0 || b<0 || a==b || size_t(a)>=data.atoms.size() || size_t(b)>=data.atoms.size() ||
+        order<0 || order>3) throw std::invalid_argument("连键需要两个不同原子，键级为 1-3");
+    const int existing=directBondIndex(data,a,b);
+    if (!order) {
+        if (existing<0) return false;
+        data.bonds.erase(data.bonds.begin()+existing); return true;
+    }
+    if (existing>=0) {
+        if (data.bonds[size_t(existing)].order==order) return false;
+        data.bonds[size_t(existing)].order=uint8_t(order); return true;
+    }
+    const auto &first=data.atoms[size_t(a)], &last=data.atoms[size_t(b)];
+    const auto delta=sub({first.x,first.y,first.z},{last.x,last.y,last.z});
+    if (!std::isfinite(length(delta)) || length(delta)<1e-6)
+        throw std::invalid_argument("重合或无效坐标的原子不能连键");
+    if (data.bonds.size()>=interactiveBondBudget) throw std::invalid_argument("键数已达到交互显示上限");
+    data.bonds.push_back({uint32_t(a),uint32_t(b),{},uint8_t(order)}); return true;
+}
+inline double sketchBondLength(const Dataset &data,int anchor,const std::string &element) {
+    const auto *next=elements::find(element);
+    const auto *start=anchor>=0 && size_t(anchor)<data.atoms.size() &&
+        data.atoms[size_t(anchor)].type<data.species.size()?
+        elements::find(data.species[data.atoms[size_t(anchor)].type]):nullptr;
+    return (start?start->covalent:.76)+(next?next->covalent:.76);
+}
+inline Vec3 sketchPosition(Vec3 anchor,Vec3 plane,Vec3 towardViewer,double bondLength,bool behind,bool stretch) {
+    Vec3 delta=sub(plane,anchor);
+    if (stretch) return plane;
+    const double distance=length(delta);
+    if (distance>bondLength) delta=scale(delta,bondLength/distance);
+    const double depth=std::sqrt(std::max(0.0,bondLength*bondLength-dot(delta,delta)));
+    return add(anchor,add(delta,scale(towardViewer,(behind?-1:1)*depth)));
+}
+// Preserve every surviving explicit bond, its periodic image and its order.
+inline void eraseAtoms(Dataset &data,const std::vector<int> &removed) {
+    const size_t count=data.atoms.size();
+    std::vector<int> remap(count,-1); size_t cursor=0,out=0;
+    for (size_t i=0;i<count;++i) {
+        if (cursor<removed.size() && size_t(removed[cursor])==i) { ++cursor; continue; }
+        remap[i]=int(out); data.atoms[out++]=data.atoms[i];
+    }
+    data.atoms.resize(out);
+    data.bonds.erase(std::remove_if(data.bonds.begin(),data.bonds.end(),[&](Bond &bond) {
+        if (bond.a>=count || bond.b>=count || remap[bond.a]<0 || remap[bond.b]<0) return true;
+        bond.a=uint32_t(remap[bond.a]); bond.b=uint32_t(remap[bond.b]); return false;
+    }),data.bonds.end());
+    auto compact=[&](auto &values) {
+        if (values.size()!=count) { values.clear(); return; }
+        for (size_t i=0;i<count;++i) if (remap[i]>=0) values[size_t(remap[i])]=values[i];
+        values.resize(out);
+    };
+    compact(data.particleColors);
+    for (auto &[name,values]:data.scalarProperties) { (void)name; compact(values); }
+    for (auto &[name,values]:data.vectorProperties) { (void)name; compact(values); }
+}
+
 // Connected component of explicit bond topology. No distance guessing or
 // all-pairs search: large structures take O(atoms + bonds) on demand only.
 inline std::vector<int> fragment(const Dataset &data, int seed) {

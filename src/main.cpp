@@ -825,6 +825,8 @@ struct App {
         bool cell = true, particles = true, quad = false;
         bool creationMode = false;
         bool creationSketch = false;
+        bool sketchContinuous = true;
+        int sketchOrder = 1;
         CreationTool creationTool = CreationTool::Select;
         std::vector<int> selection;
         int picked = -1;
@@ -850,6 +852,10 @@ struct App {
     std::string creationBasedOn;
     bool creationMode = false;
     bool creationSketch = false;
+    bool creationSketchContinuous = true, creationSketchPreviewValid = false, creationSketchDoubleClick = false;
+    int creationSketchOrder = 1, creationSketchAnchor = -1, creationSketchStartHit = -1;
+    int creationSketchLastPlaced = -1;
+    Vec3 creationSketchPreview{};
     CreationTool creationTool = CreationTool::Select;
     std::vector<int> creationSelection;
     std::vector<CreationSnapshot> creationSnapshots;
@@ -1478,6 +1484,7 @@ struct App {
         tab.quad = quad;
         tab.creationMode = creationMode;
         tab.creationSketch = creationSketch;
+        tab.sketchContinuous = creationSketchContinuous; tab.sketchOrder = creationSketchOrder;
         tab.creationTool = creationTool;
         tab.selection = creationSelection;
         tab.picked = creationPick;
@@ -1516,6 +1523,8 @@ struct App {
         quad = tab.quad;
         creationMode = tab.creationMode;
         creationSketch = tab.creationSketch;
+        creationSketchContinuous=tab.sketchContinuous; creationSketchOrder=tab.sketchOrder;
+        creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationTool = tab.creationTool;
         creationSelection = tab.selection;
         creationPick = creationSelection.empty() ? tab.picked : creationSelection.back();
@@ -1796,6 +1805,7 @@ struct App {
         structureEditIsLatest = true;
     }
     void adoptStructure(Dataset data, const std::string &message) {
+        creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         rememberStructure(message);
         creationDisplay={};
         creationSymmetry.reset(); creationSymmetryChecked=false;
@@ -1818,6 +1828,7 @@ struct App {
             return;
         }
         rememberStructure(message);
+        creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
         edit(source);
@@ -1846,13 +1857,7 @@ struct App {
         selected.erase(std::unique(selected.begin(),selected.end()),selected.end());
         editStructure("删除 " + std::to_string(selected.size()) + " 个原子", [&](Dataset &data) {
             creationDisplay.eraseAtoms(data.atoms.size(),selected);
-            size_t removed=0,out=0;
-            for (size_t index=0;index<data.atoms.size();++index) {
-                if (removed<selected.size() && size_t(selected[removed])==index) { ++removed; continue; }
-                data.atoms[out++]=data.atoms[index];
-            }
-            data.atoms.resize(out);
-            data.bonds.clear();
+            authoring::eraseAtoms(data,selected);
         });
         creationSelection.clear();
         creationPick = creationMeasure = creationAngle = creationDihedral = -1;
@@ -1879,6 +1884,73 @@ struct App {
             creationPick = int(data.atoms.size() - 1);
             creationSelection={creationPick};
         });
+    }
+    bool editCreationBond(int first,int last,int order) {
+        if (!creationMode || documentsBusy() || order<0 || order>3 || first<0 || last<0 || first==last ||
+            size_t(first)>=source.atoms.size() || size_t(last)>=source.atoms.size()) return false;
+        const int existing=authoring::directBondIndex(source,first,last);
+        if ((existing<0 && order==0) ||
+            (existing>=0 && source.bonds[size_t(existing)].order==order)) return false;
+        if (order && existing<0) {
+            const auto &a=source.atoms[size_t(first)], &b=source.atoms[size_t(last)];
+            const double distance=authoring::length({a.x-b.x,a.y-b.y,a.z-b.z});
+            if (!std::isfinite(distance) || distance<1e-6 || source.bonds.size()>=interactiveBondBudget) {
+                status="无法连键：重合坐标或键数已达上限"; return false;
+            }
+        }
+        editStructure(order?"设置键级 "+std::to_string(order):"断开键",[&](Dataset &data) {
+            authoring::setDirectBond(data,first,last,order);
+            if (order) data.bondStyle.visible=true;
+        });
+        return true;
+    }
+    void commitCreationSketch(int hit,Vec3 at,bool isolated,bool finish,bool replace) {
+        if (documentsBusy() || !creationMode) return;
+        const std::string symbol=creationElement[0]?creationElement:"C";
+        if (!elements::find(symbol)) { status="请选择有效元素"; return; }
+        if (hit>=0) {
+            creationSketchLastPlaced=-1;
+            if (replace) { selectCreationAtom(hit,false); replacePickedElement(); return; }
+            const int anchor=creationSketchAnchor;
+            if (anchor>=0 && anchor!=hit && !isolated) editCreationBond(anchor,hit,creationSketchOrder);
+            selectCreationAtom(hit,false);
+            creationSketchAnchor=finish || (anchor>=0 && !creationSketchContinuous) || isolated?-1:hit;
+            creationSketchPreviewValid=false;
+            return;
+        }
+        if (!std::isfinite(at.x) || !std::isfinite(at.y) || !std::isfinite(at.z)) return;
+        const int anchor=isolated?-1:creationSketchAnchor;
+        if (anchor>=0 && source.bonds.size()>=interactiveBondBudget) {
+            status="键数已达到交互显示上限"; return;
+        }
+        if (anchor>=0) {
+            const auto &a=source.atoms[size_t(anchor)];
+            if (authoring::length({at.x-a.x,at.y-a.y,at.z-a.z})<1e-6) return;
+        }
+        int added=-1;
+        editStructure(anchor>=0?"绘制 "+symbol+" 并连键":"绘制 "+symbol,[&](Dataset &data) {
+            const uint32_t type=authoring::speciesIndex(data,symbol);
+            added=int(data.atoms.size());
+            data.atoms.push_back({at.x,at.y,at.z,type});
+            // New geometry has no measured per-particle properties yet.
+            // Keep existing values; mark the new row as missing instead of
+            // invalidating every old particle's property arrays.
+            if (!data.particleColors.empty() && data.particleColors.size()==size_t(added))
+                data.particleColors.push_back({-1,-1,-1});
+            for (auto &[name,values]:data.scalarProperties) {
+                (void)name; if (values.size()==size_t(added)) values.push_back(NAN);
+            }
+            for (auto &[name,values]:data.vectorProperties) {
+                (void)name; if (values.size()==size_t(added)) values.push_back({NAN,NAN,NAN});
+            }
+            if (anchor>=0) {
+                authoring::setDirectBond(data,anchor,added,creationSketchOrder);
+                data.bondStyle.visible=true;
+            }
+        });
+        selectCreationAtom(added,false);
+        creationSketchLastPlaced=added;
+        creationSketchAnchor=finish || !creationSketchContinuous || isolated?-1:added;
     }
     void nudgePicked(int axis, float delta) {
         if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
@@ -1936,6 +2008,7 @@ struct App {
                               : "Display style: Ball and stick";
     }
     void history(bool forward) {
+        creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         if (creationMode || structureEditIsLatest || !authorRedo.empty()) {
             if (!forward && !authorUndo.empty()) {
                 auto previous=std::move(authorUndo.back());
@@ -3810,12 +3883,13 @@ struct App {
     }
     const char *views = "Top\0Bottom\0Front\0Back\0Left\0Right\0Ortho\0Perspective\0";
     void chooseCreationTool(CreationTool tool) {
+        creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationTool = tool;
         creationSketch = tool == CreationTool::Sketch;
         status = tool == CreationTool::Select ? "选择原子或拖动框选" :
                  tool == CreationTool::Rotate ? "拖动旋转" :
                  tool == CreationTool::Pan ? "拖动平移" :
-                 tool == CreationTool::Move ? "拖动选中原子" : "点击空白处绘制原子";
+                 tool == CreationTool::Move ? "拖动选中原子" : "点击绘制或连键 · 双击结束 · Esc 取消";
     }
     void selectCreationAtom(int index, bool shift, bool toggle = false) {
         if (index>=0 && !creationAtomVisible(index)) return;
@@ -4046,8 +4120,52 @@ struct App {
         const float w=std::abs(q.w)>1e-6f?q.w:1.f;
         return {q.x/w,q.y/w,q.z/w};
     }
+    // Bond picking runs only on Sketch click. A periodic boundary stub is
+    // not treated as a direct bond between the displayed atoms.
+    int creationBondHit(ImVec2 p,ImVec2 size,const Camera &cam,ImVec2 mouse) {
+        if (!source.bondStyle.visible || source.bonds.size()>interactiveBondBudget) return -1;
+        const auto matrix=creationProjection(result.data,cam,size).combined;
+        auto project=[&](int index,ImVec2 &at,float &depth) {
+            if (!creationAtomVisible(index)) return false;
+            const auto &a=result.data.atoms[size_t(index)];
+            DirectX::XMFLOAT4 q;
+            DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                DirectX::XMVectorSet(a.x,a.y,a.z,1),matrix));
+            if (q.w<=0 || q.z<=0 || q.z>=q.w) return false;
+            at={p.x+(q.x/q.w+1)*size.x*.5f,p.y+(1-q.y/q.w)*size.y*.5f};
+            depth=q.z/q.w; return true;
+        };
+        int found=-1; float bestDepth=FLT_MAX;
+        for (size_t i=0;i<source.bonds.size();++i) {
+            const auto &bond=source.bonds[i];
+            if (bond.image!=std::array<int32_t,3>{}) continue;
+            ImVec2 a,b; float za,zb;
+            if (!project(int(bond.a),a,za) || !project(int(bond.b),b,zb)) continue;
+            const float dx=b.x-a.x,dy=b.y-a.y;
+            const float lengthSquared=dx*dx+dy*dy;
+            if (lengthSquared<1) continue;
+            const float t=std::clamp(((mouse.x-a.x)*dx+(mouse.y-a.y)*dy)/lengthSquared,0.f,1.f);
+            const float distance=std::hypot(mouse.x-a.x-t*dx,mouse.y-a.y-t*dy);
+            const float depth=za+(zb-za)*t;
+            if (distance<=U(6) && depth<bestDepth) { bestDepth=depth; found=int(i); }
+        }
+        return found;
+    }
     bool creationPointer(ImVec2 p, ImVec2 size, Camera &cam, bool hovered) {
         auto &io=ImGui::GetIO();
+        creationSketchPreviewValid=false;
+        if (io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape))
+            creationSketchAnchor=creationSketchLastPlaced=-1;
+        // The first click may change the automatic camera bounds or start
+        // an asynchronous pipeline update. Finish on the second press before
+        // either can make the old screen coordinate create another atom.
+        if (hovered && creationTool==CreationTool::Sketch &&
+            ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
+            (creationSketchAnchor>=0 || creationSketchLastPlaced>=0)) {
+            creationSketchAnchor=creationSketchLastPlaced=-1;
+            creationDrag=CreationDrag::None; creationDragAtoms.clear();
+            return false;
+        }
         if (pipelineBusy || staleResult || !sameAtomCount()) {
             // A history/tab/data change can finish while a button is held.
             // Discard the old gesture rather than miss its single release
@@ -4068,7 +4186,7 @@ struct App {
             creationLastHoverMouse={-1,-1};
             return false;
         }
-        if (creationDrag==CreationDrag::None && hovered &&
+        if ((creationDrag==CreationDrag::None || creationDrag==CreationDrag::Sketch) && hovered &&
             (mouse.x!=creationLastHoverMouse.x || mouse.y!=creationLastHoverMouse.y)) {
             creationHover=creationHit(p,size,cam,mouse);
             creationLastHoverMouse=mouse;
@@ -4121,7 +4239,11 @@ struct App {
                 creationDrag=CreationDrag::Move;
                 captureAtoms();
             } else if (creationTool==CreationTool::Move) creationDrag=CreationDrag::Rotate;
-            else if (creationTool==CreationTool::Sketch && hit<0) creationDrag=CreationDrag::Sketch;
+            else if (creationTool==CreationTool::Sketch) {
+                creationDrag=CreationDrag::Sketch;
+                creationSketchStartHit=hit;
+                creationSketchDoubleClick=ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+            }
             else if (hit>=0) {
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) selectCreationFragment(hit);
                 else selectCreationAtom(hit,io.KeyShift||io.KeyCtrl,io.KeyCtrl);
@@ -4134,8 +4256,12 @@ struct App {
             if (std::abs(mouse.x-creationDragStart.x)+std::abs(mouse.y-creationDragStart.y)>U(3))
                 creationDragMoved=true;
             const float dx=mouse.x-creationDragPrevious.x,dy=mouse.y-creationDragPrevious.y;
-            if (creationDrag==CreationDrag::Sketch && creationDragMoved)
-                creationDrag=CreationDrag::Rotate;
+            if (creationDrag==CreationDrag::Sketch && creationDragMoved) {
+                if (creationSketchStartHit>=0 && !io.KeyAlt) {
+                    selectCreationAtom(creationSketchStartHit,false);
+                    creationDrag=CreationDrag::Move; captureAtoms();
+                } else if (creationSketchAnchor<0) creationDrag=CreationDrag::Rotate;
+            }
             if (creationDrag==CreationDrag::Rotate && creationDragMoved) {
                 cam.yaw-=dx*.008f;
                 cam.pitch=std::clamp(cam.pitch+dy*.008f,-1.55f,1.55f);
@@ -4202,6 +4328,41 @@ struct App {
             }
             creationDragPrevious=mouse;
         }
+        Vec3 sketchAt{};
+        bool sketchPositionValid=false;
+        int sketchHit=-1;
+        if (creationTool==CreationTool::Sketch && hovered &&
+            (creationDrag==CreationDrag::None || creationDrag==CreationDrag::Sketch)) {
+            const auto projection=creationProjection(result.data,cam,size);
+            sketchHit=creationHover;
+            const bool anchored=creationSketchAnchor>=0 && size_t(creationSketchAnchor)<source.atoms.size();
+            Vec3 center=authoring::cartesian(source,.5,.5,.5);
+            if (anchored) {
+                const auto &a=source.atoms[size_t(creationSketchAnchor)]; center={a.x,a.y,a.z};
+            }
+            DirectX::XMFLOAT4 q;
+            DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                DirectX::XMVectorSet(center.x,center.y,center.z,1),projection.combined));
+            if (q.w>0) {
+                sketchPositionValid=true;
+                sketchAt=creationWorldAt(mouse,q.z/q.w,p,size,projection.combined);
+                if (anchored) {
+                    if (sketchHit>=0 && sketchHit!=creationSketchAnchor) {
+                        const auto &a=source.atoms[size_t(sketchHit)]; sketchAt={a.x,a.y,a.z};
+                    } else {
+                        DirectX::XMFLOAT3 towardViewer;
+                        DirectX::XMStoreFloat3(&towardViewer,DirectX::XMVector3TransformNormal(
+                            DirectX::XMVectorSet(0,0,-1,0),DirectX::XMMatrixInverse(nullptr,projection.view)));
+                        sketchAt=authoring::sketchPosition(center,sketchAt,
+                            {towardViewer.x,towardViewer.y,towardViewer.z},
+                            authoring::sketchBondLength(source,creationSketchAnchor,creationElement),
+                            io.KeyAlt,io.KeyAlt && io.KeyShift);
+                    }
+                    creationSketchPreview=sketchAt;
+                    creationSketchPreviewValid=true;
+                }
+            }
+        }
         if (creationDrag!=CreationDrag::None &&
             ImGui::IsMouseReleased(creationDragButton)) {
             contextRequested=creationDragButton==ImGuiMouseButton_Right &&
@@ -4250,26 +4411,36 @@ struct App {
                         auto &a=data.atoms[size_t(index)]; a.x=at.x; a.y=at.y; a.z=at.z;
                     }
                 });
-            } else if (creationDrag==CreationDrag::Sketch && !creationDragMoved) {
-                const auto matrix=creationProjection(result.data,cam,size).combined;
-                const auto center=authoring::cartesian(source,.5,.5,.5);
-                DirectX::XMFLOAT4 q;
-                DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
-                    DirectX::XMVectorSet(center.x,center.y,center.z,1),matrix));
-                if (q.w>0) addAtomAt(creationWorldAt(creationDragStart,q.z/q.w,p,size,matrix));
+            } else if (creationDrag==CreationDrag::Sketch && hovered && sketchPositionValid) {
+                const int bond=sketchHit<0 && creationSketchAnchor<0 && !io.KeyAlt && !creationDragMoved?
+                    creationBondHit(p,size,cam,mouse):-1;
+                if (bond>=0) {
+                    const auto existing=source.bonds[size_t(bond)];
+                    editCreationBond(int(existing.a),int(existing.b),int(existing.order)%3+1);
+                } else {
+                    if (io.KeyAlt && !creationDragMoved && sketchHit<0) {
+                        const auto projection=creationProjection(result.data,cam,size);
+                        const auto center=authoring::cartesian(source,.5,.5,.5);
+                        DirectX::XMFLOAT4 q;
+                        DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                            DirectX::XMVectorSet(center.x,center.y,center.z,1),projection.combined));
+                        if (q.w>0) sketchAt=creationWorldAt(mouse,q.z/q.w,p,size,projection.combined);
+                    }
+                    commitCreationSketch(sketchHit,sketchAt,io.KeyAlt && !creationDragMoved,
+                        creationSketchDoubleClick,io.KeyAlt && sketchHit>=0);
+                }
             }
             creationDrag=CreationDrag::None;
             creationDragAtoms.clear();
             creationLastHoverMouse={-1,-1};
         }
         if (hovered) {
-            if (creationHover>=0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (creationTool==CreationTool::Sketch) g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
+            else if (creationHover>=0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             else if (creationTool==CreationTool::Pan||creationTool==CreationTool::Move)
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
             else if (creationTool==CreationTool::Rotate)
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            else if (creationTool==CreationTool::Sketch)
-                g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
         }
         return contextRequested;
     }
@@ -4530,6 +4701,28 @@ struct App {
             const auto projection=creationProjection(result.data,cam,avail);
             auto mvp=projection.combined;
             draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
+            if (creationSketchPreviewValid && creationSketchAnchor>=0 && !pipelineBusy) {
+                const auto &anchor=source.atoms[size_t(creationSketchAnchor)];
+                auto project=[&](Vec3 world,ImVec2 &at) {
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                        DirectX::XMVectorSet(world.x,world.y,world.z,1),mvp));
+                    if (q.w<=0 || q.z<=0 || q.z>=q.w) return false;
+                    at={p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};
+                    return true;
+                };
+                ImVec2 from,to;
+                if (project({anchor.x,anchor.y,anchor.z},from) && project(creationSketchPreview,to)) {
+                    const float dx=to.x-from.x,dy=to.y-from.y,norm=std::max(std::hypot(dx,dy),1.f);
+                    for (int lane=0;lane<creationSketchOrder;++lane) {
+                        const float offset=U(4)*(lane-(creationSketchOrder-1)*.5f);
+                        draw->AddLine({from.x-dy/norm*offset,from.y+dx/norm*offset},
+                            {to.x-dy/norm*offset,to.y+dx/norm*offset},IM_COL32(255,218,103,190),U(2));
+                    }
+                    draw->AddCircleFilled(to,U(9),IM_COL32(255,218,103,80),24);
+                    draw->AddCircle(to,U(9),IM_COL32(255,218,103,230),24,U(2));
+                }
+            }
             if (sameAtomCount() && creationDisplay.labelsVisible &&
                 (creationDisplay.defaultLabel.kind!=creation::LabelKind::None || !creationDisplay.explicitLabels.empty())) {
                 const auto candidates=creationDisplay.candidates(source.atoms.size());
@@ -5233,7 +5426,7 @@ struct App {
                         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, U(74));
                         ImGui::TableSetupColumn("Topology [A B]", ImGuiTableColumnFlags_WidthFixed, U(140));
                         ImGui::TableSetupColumn("Periodic Image [X Y Z]", ImGuiTableColumnFlags_WidthFixed, U(170));
-                        ImGui::TableSetupColumn("Bond Type");
+                        ImGui::TableSetupColumn("Bond Order");
                         ImGui::TableHeadersRow();
                         ImGuiListClipper clip;
                         clip.Begin(int(shown));
@@ -5251,7 +5444,7 @@ struct App {
                                 ImGui::TableNextColumn();
                                 colorSwatch(inspected->data.bondStyle.color);
                                 ImGui::SameLine();
-                                ImGui::TextUnformatted("1");
+                                ImGui::Text("%u",unsigned(bond.order));
                             }
                         ImGui::EndTable();
                     }
@@ -6158,6 +6351,31 @@ struct App {
         ImGui::End();
 
         fixed("Creation selection", w - rightW, y, rightW, bodyH);
+        if (creationTool==CreationTool::Sketch) {
+            ImGui::SeparatorText("绘制原子与键");
+            ImGui::SetNextItemWidth(U(75));
+            ImGui::InputText("元素##sketch",creationElement,sizeof(creationElement));
+            recordUiTestItem("creation.sketch-element");
+            ImGui::SameLine(); ImGui::SetNextItemWidth(U(75));
+            int order=creationSketchOrder-1;
+            if (ImGui::Combo("键级##sketch",&order,"单键\0双键\0三键\0")) creationSketchOrder=order+1;
+            recordUiTestItem("creation.sketch-order");
+            ImGui::Checkbox("连续成链",&creationSketchContinuous);
+            recordUiTestItem("creation.sketch-continuous");
+            ImGui::TextDisabled("点击已有原子吸附连键");
+            ImGui::TextDisabled("双击结束 · Esc 取消虚拟原子");
+            ImGui::TextDisabled("Alt 点击替换元素 / 放置孤立原子");
+            ImGui::TextDisabled("Alt 拖动向里 · Shift + Alt 自由键长");
+            if (creationSketchAnchor>=0) {
+                ImGui::Text("起点 #%d · 默认键长 %.2f Å",creationSketchAnchor,
+                    authoring::sketchBondLength(source,creationSketchAnchor,creationElement));
+                if (ImGui::Button("结束成链",{-1,U(28)})) {
+                    creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
+                }
+                recordUiTestItem("creation.sketch-finish");
+            }
+            ImGui::Separator();
+        }
         if (headingFont) ImGui::PushFont(headingFont);
         ImGui::TextUnformatted("选中");
         if (headingFont) ImGui::PopFont();
@@ -6168,6 +6386,17 @@ struct App {
             ImGui::TextDisabled("右键 更多操作");
         }
         ImGui::Separator();
+        if (creationSelection.size()==2) {
+            ImGui::TextDisabled("连接选中原子 / 修改键级");
+            int order=0;
+            for (const char *label:{"断键","单键","双键","三键"}) {
+                ImGui::PushID(order);
+                if (ImGui::Button(label,{U(58),U(28)}))
+                    editCreationBond(creationSelection[0],creationSelection[1],order);
+                recordUiTestItem("creation.bond-order-"+std::to_string(order));
+                ImGui::PopID(); if (++order<4) ImGui::SameLine();
+            }
+        }
         if (creationSelection.size()>1) {
             ImGui::Text("已选中 %zu 个原子",creationSelection.size());
             ImGui::TextDisabled("Shift + 点击继续选择 · 拖动空白处框选");
@@ -7872,6 +8101,7 @@ struct App {
         chineseBuilder.AddText("精准移动旋转选中原子的几何中心不移动晶胞屏幕轴体系轴距离视图比例步长角度以打开窗口时视图的较短边为选中中心所在深度上下左右向里向外右手方向反向使用负角度坐标未改变已记录一步历史原标签已改变请关闭并重新打开位移与角度必须为有限数值旋转轴不能为零选中原子已改变请重新选择原子坐标无效位移超出坐标范围连接片段分数坐标切换添加约束←→↑↓−°Å");
         chineseBuilder.AddText("隐藏选中仅显示选中显示全部已隐藏原子标签对象默认显示元素和编号整个体系内容无标签笛卡尔坐标分数坐标自定义文字字号粗体颜色显示标签屏幕标签上限大体系自动抽样优先显示选中原子的标签隐藏原子不显示标签上限默认应用移除移除全部编辑原子标签撤销重做");
         chineseBuilder.AddText(creationDisplay.defaultLabel.text.c_str());
+        chineseBuilder.AddText("绘制原子与键键级单键双键三键连续成链点击已有原子吸附连键双击结束取消虚拟原子替换元素放置孤立原子拖动向里自由键长起点默认键长结束成链连接选中原子修改键级断键设置断开请选择有效元素无法连键重合坐标或键数已达上限");
         for (const auto &[index,label]:creationDisplay.labels) { (void)index; chineseBuilder.AddText(label.text.c_str()); }
         static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
         chineseBuilder.AddRanges(extraRanges);
@@ -8466,7 +8696,10 @@ struct App {
                 if (ImGui::IsKeyPressed(ImGuiKey_G)) chooseCreationTool(CreationTool::Move);
                 if (ImGui::IsKeyPressed(ImGuiKey_P)) chooseCreationTool(CreationTool::Sketch);
             }
-            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) selectCreationAtom(-1,false);
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
+                selectCreationAtom(-1,false);
+            }
         }
         }
         if (openNewCell) {

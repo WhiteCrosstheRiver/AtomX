@@ -371,6 +371,27 @@ int main(int argc, char **argv) {
         if (imageHash(t) == splitColorBondImage)
             throw std::runtime_error("Bond cylinders must honor particle-colored and uniform modes");
         typed.bonds.clear();
+        {
+            atomx::Dataset ordered;
+            ordered.species={"X"}; ordered.atoms={{-2,0,0,0},{2,0,0,0}};
+            ordered.bonds={{0,1,{}}}; ordered.bounds();
+            renderer.styles[0].visual={.22f,0,1,0}; renderer.styles[0].axes={1,1,1,0};
+            Camera front=cam; front.mode=2;
+            for (float cylinderRadius:{0.f,.1f}) {
+                ordered.bondStyle.radius=cylinderRadius;
+                std::set<uint64_t> orderImages;
+                for (int order=1;order<=3;++order) {
+                    ordered.bonds[0].order=uint8_t(order);
+                    renderer.upload(ordered,{});
+                    renderer.draw(t,ordered,front,.22f,0,0,0,0,0,1,false,false,false,bg);
+                    orderImages.insert(imageHash(t));
+                    renderer.png(t,"build/shape-validation/bond-order-"+std::to_string(order)+
+                        (cylinderRadius>0?"-cylinder.png":"-line.png"));
+                }
+                if (orderImages.size()!=3)
+                    throw std::runtime_error("Single/double/triple bonds must produce distinct GPU strand images");
+            }
+        }
         renderer.upload(typed, {});
         renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);
         const auto perTypeImage = imageHash(t);

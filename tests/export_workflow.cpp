@@ -421,6 +421,111 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("sketch fixture",[](Dataset &data) {
+                    data.species={"C"}; data.pbc={false,false,false};
+                    data.cell={10,0,0,0,10,0,0,0,10};
+                    data.atoms={{1,1,1,0},{4,1,1,0},{7,1,1,0}};
+                    data.bonds.clear();
+                }); settlePipeline();
+                app.cameras[3].mode=2; app.fitCamera(3,false);
+                strcpy_s(app.creationElement,"C");
+                app.chooseCreationTool(App::CreationTool::Sketch); frame();
+                auto pointOf=[&](int index) {
+                    const auto viewport=app.uiTestItems.at("creation.viewport");
+                    const ImVec2 size{viewport.max.x-viewport.min.x,viewport.max.y-viewport.min.y};
+                    const auto matrix=app.creationProjection(app.result.data,app.cameras[3],size).combined;
+                    const auto &a=app.source.atoms[size_t(index)];
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                        DirectX::XMVectorSet(a.x,a.y,a.z,1),matrix));
+                    return ImVec2{viewport.min.x+(q.x/q.w+1)*size.x*.5f,
+                                  viewport.min.y+(1-q.y/q.w)*size.y*.5f};
+                };
+                auto sketchClick=[&](ImVec2 point) {
+                    guiIO.AddMousePosEvent(point.x,point.y); frame();
+                    guiIO.AddMouseButtonEvent(0,true); frame();
+                    guiIO.AddMouseButtonEvent(0,false); frame();
+                    settlePipeline();
+                };
+                const size_t sketchBase=app.authorUndo.size();
+                sketchClick(pointOf(0));
+                requireExport(app.creationSketchAnchor==0 && app.authorUndo.size()==sketchBase,
+                              "click existing atom starts sketch without a geometry history step");
+                const auto anchor=pointOf(0);
+                guiIO.AddMousePosEvent(anchor.x+20,anchor.y+35); frame();
+                requireExport(app.creationSketchPreviewValid && app.source.atoms.size()==3 &&
+                              std::abs(authoring::length(authoring::sub(app.creationSketchPreview,{1,1,1}))-1.52)<1e-4,
+                              "virtual atom follows cursor on covalent-radius sphere without editing source");
+                app.creationSketchOrder=2;
+                sketchClick(pointOf(1));
+                requireExport(app.source.atoms.size()==3 && app.source.bonds.size()==1 &&
+                              app.source.bonds[0].order==2 && app.creationSketchAnchor==1 &&
+                              app.authorUndo.size()==sketchBase+1,
+                              "sketch snaps to an existing atom and creates one double bond/history step");
+                // The second click on the same atom completes the chain.
+                sketchClick(pointOf(1));
+                requireExport(app.creationSketchAnchor<0 && app.source.atoms.size()==3 &&
+                              app.authorUndo.size()==sketchBase+1,
+                              "double-click finish does not create an overlapping atom or extra history");
+                app.creationSelection={0,1}; app.creationPick=1; frame();
+                click("creation.bond-order-3"); settlePipeline();
+                requireExport(app.source.bonds.size()==1 && app.source.bonds[0].order==3,
+                              "selected pair bond-order buttons edit existing topology");
+                app.history(false); settlePipeline();
+                requireExport(app.source.bonds[0].order==2,"undo restores previous bond order");
+                app.chooseCreationTool(App::CreationTool::Sketch); frame();
+                const auto bondStart=pointOf(0),bondEnd=pointOf(1);
+                sketchClick({(bondStart.x+bondEnd.x)*.5f,(bondStart.y+bondEnd.y)*.5f});
+                requireExport(app.source.bonds.size()==1 && app.source.bonds[0].order==3 &&
+                              app.source.atoms.size()==3 && app.creationSketchAnchor<0,
+                              "click bond cycles its order without starting a chain or adding an atom");
+                app.history(false); settlePipeline();
+                strcpy_s(app.creationElement,"O");
+                guiIO.AddKeyEvent(ImGuiMod_Alt,true); frame();
+                sketchClick(pointOf(2));
+                guiIO.AddKeyEvent(ImGuiMod_Alt,false); frame();
+                requireExport(app.source.species[app.source.atoms[2].type]=="O" &&
+                              app.source.atoms.size()==3 && app.creationSketchAnchor<0,
+                              "Alt click existing atom changes its element without extending the chain");
+                app.history(false); settlePipeline();
+                strcpy_s(app.creationElement,"C");
+                app.creationSketchContinuous=false;
+                sketchClick(pointOf(0));
+                requireExport(app.creationSketchAnchor==0,"single-step sketch can still start from an existing atom");
+                sketchClick(pointOf(2));
+                requireExport(app.creationSketchAnchor<0 && app.source.bonds.size()==2,
+                              "disabling continuous sketch finishes after one new bond");
+                app.history(false); settlePipeline(); app.creationSketchContinuous=true;
+                app.cell=false; app.fitCamera(3,false); frame();
+                // Let the previous double-click interval elapse before restarting at atom #1.
+                for (int i=0;i<24;++i) frame();
+                sketchClick(pointOf(1));
+                const auto start=pointOf(1);
+                sketchClick({start.x+40,start.y+55});
+                requireExport(app.source.atoms.size()==4 && app.source.bonds.size()==2 &&
+                              app.creationSketchAnchor==3 && app.authorUndo.size()==sketchBase+2,
+                              "continuous sketch adds an atom and its bond in one history step");
+                sketchClick({start.x+40,start.y+55});
+                requireExport(app.creationSketchAnchor<0 && app.source.atoms.size()==4 &&
+                              app.authorUndo.size()==sketchBase+2,
+                              "double click at old cursor position finishes even after automatic camera bounds change");
+                for (int i=0;i<24;++i) frame();
+                sketchClick(pointOf(2));
+                requireExport(app.creationSketchAnchor==2,"sketch can restart after double-click finish");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true); frame();
+                guiIO.AddKeyEvent(ImGuiKey_Escape,false); frame();
+                requireExport(app.creationSketchAnchor<0 && !app.creationSketchPreviewValid &&
+                              app.source.atoms.size()==4,"Escape discards only the virtual sketch atom");
+                app.history(false); settlePipeline();
+                requireExport(app.source.atoms.size()==3 && app.source.bonds.size()==1,
+                              "undo removes the new atom and its incident bond together");
+                while (app.authorUndo.size()>baseline) { app.history(false); settlePipeline(); }
+                app.authorRedo.clear(); app.chooseCreationTool(App::CreationTool::Select);
+                app.cell=true;
+                app.cameras[3].mode=7; app.fitCamera(3,false); frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
                     atom.x+=2; data.atoms.push_back(atom);

@@ -53,6 +53,7 @@ struct Bond {
     // b + image*cell - a (see bondVector). For a non-periodic bond this is
     // {0,0,0}.
     std::array<int32_t, 3> image{};
+    uint8_t order = 1; // Explicit sketch bond order; distance-generated bonds remain single.
     bool operator==(const Bond &) const = default;
 };
 struct DataTable {

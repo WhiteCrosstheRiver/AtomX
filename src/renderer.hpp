@@ -122,7 +122,7 @@ struct ColorLegendOptions {
     bool reverse = false, discrete = false;
 };
 class Renderer {
-    struct BondVertex { DirectX::XMFLOAT3 position, color; };
+    struct BondVertex { DirectX::XMFLOAT3 position, color; float lane=0; };
     struct Chunk {
         ComPtr<ID3D11Buffer> buffer;
         ComPtr<ID3D11ShaderResourceView> srv;
@@ -171,6 +171,7 @@ class Renderer {
     ComPtr<ID3D11InputLayout> bondLayout;
     UINT bondVertexCount = 0;
     bool bondDisplayOmitted = false;
+    size_t bondLaneCount = 0;
     // Translucent slice-plane overlay: an unlit, alpha-blended polygon drawn
     // after atoms and bonds with depth testing but no depth writes.
     ComPtr<ID3D11VertexShader> planeVS;
@@ -441,10 +442,10 @@ P pixel(V i) {
               "Pixel shader");
         const char *bondShader = R"(
  cbuffer BondCamera : register(b0) { row_major float4x4 vp; float2 viewport; float width; float radius; float4 color; float colorByType; float3 padding; };
- struct I { float3 p:POSITION; float3 c:COLOR; };
- struct V { float3 p:POSITION; float3 c:COLOR; };
+ struct I { float3 p:POSITION; float3 c:COLOR; float lane:TEXCOORD0; };
+ struct V { float3 p:POSITION; float3 c:COLOR; float lane:TEXCOORD0; };
  struct O { float4 p:SV_POSITION; float3 normal:NORMAL; float3 c:COLOR; };
- V bondVertex(I i) { V o; o.p=i.p; o.c=i.c; return o; }
+ V bondVertex(I i) { V o; o.p=i.p; o.c=i.c; o.lane=i.lane; return o; }
  void emit(float3 p,float3 n,float3 c,inout TriangleStream<O> stream) {
   O o; o.p=mul(float4(p,1),vp); o.normal=n; o.c=c; stream.Append(o);
 }
@@ -454,7 +455,10 @@ P pixel(V i) {
   float3 delta=pb-pa; float len=length(delta); if (len<1e-6) return;
   float3 axis=delta/len;
   float3 helper=abs(axis.z)<.85 ? float3(0,0,1) : float3(0,1,0);
-  float3 u=normalize(cross(axis,helper)), v=normalize(cross(axis,u));
+  float3 sideVector=cross(axis,padding);
+  if (length(sideVector)<1e-5) sideVector=cross(axis,helper);
+  float3 u=normalize(sideVector), v=normalize(cross(axis,u));
+  pa+=u*input[0].lane*radius*3; pb+=u*input[0].lane*radius*3;
   const float tau=6.28318530718;
    [unroll] for (int side=0;side<12;side++) {
     float a0=tau*side/12, a1=tau*(side+1)/12;
@@ -468,6 +472,8 @@ P pixel(V i) {
   float2 delta=(cb.xy/cb.w-ca.xy/ca.w)*viewport;
   float lengthDelta=max(length(delta),1e-5); float2 perpendicular=float2(-delta.y,delta.x)/lengthDelta;
   float2 offset=perpendicular*width/viewport;
+  float2 laneOffset=perpendicular*input[0].lane*max(width*3,4)*2/viewport;
+  ca.xy+=laneOffset*ca.w; cb.xy+=laneOffset*cb.w;
    O a,b; a.normal=0; b.normal=0; a.c=input[0].c; b.c=input[0].c; a.p=ca; b.p=cb;
   a.p.xy+=offset*a.p.w; b.p.xy+=offset*b.p.w; stream.Append(a); stream.Append(b);
   a.p=ca; b.p=cb; a.p.xy-=offset*a.p.w; b.p.xy-=offset*b.p.w; stream.Append(a); stream.Append(b);
@@ -492,8 +498,9 @@ float4 bondPixel(O i):SV_TARGET {
         check(device->CreatePixelShader(bondP->GetBufferPointer(), bondP->GetBufferSize(), nullptr, &bondPS), "Bond pixel shader");
         check(device->CreateGeometryShader(bondG->GetBufferPointer(), bondG->GetBufferSize(), nullptr, &bondGS), "Bond geometry shader");
         D3D11_INPUT_ELEMENT_DESC bondElements[]={{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
-                                                 {"COLOR",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0}};
-        check(device->CreateInputLayout(bondElements,2,bondV->GetBufferPointer(),bondV->GetBufferSize(),&bondLayout), "Bond vertex layout");
+                                                 {"COLOR",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
+                                                 {"TEXCOORD",0,DXGI_FORMAT_R32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0}};
+        check(device->CreateInputLayout(bondElements,3,bondV->GetBufferPointer(),bondV->GetBufferSize(),&bondLayout), "Bond vertex layout");
         D3D11_BUFFER_DESC bondCb{}; bondCb.ByteWidth=sizeof(BondConstants); bondCb.Usage=D3D11_USAGE_DEFAULT; bondCb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         check(device->CreateBuffer(&bondCb,nullptr,&bondConstants), "Bond camera constants");
         const char *planeShader = R"(
@@ -561,6 +568,11 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                 const std::vector<uint8_t> &hidden = {}) {
         std::vector<BondVertex> bondVertices;
         bondDisplayOmitted = d.bonds.size() > atomx::interactiveBondBudget;
+        bondLaneCount=0;
+        if (!bondDisplayOmitted) for (const auto &bond:d.bonds) {
+            bondLaneCount+=size_t(std::clamp(int(bond.order),1,3));
+            if (bondLaneCount>atomx::interactiveBondBudget) { bondDisplayOmitted=true; break; }
+        }
         if (!bondDisplayOmitted && d.bondStyle.visible)
             bondVertices.reserve(d.bonds.size() * 4);
         const bool particleOverride = d.particleColors.size() == d.atoms.size();
@@ -587,8 +599,12 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             const auto colorA = atomColor(bond.a), colorB = atomColor(bond.b);
             const auto append = [&](const atomx::Vec3 &p1, const atomx::Vec3 &p2,
                                     const DirectX::XMFLOAT3 &c) {
-                bondVertices.push_back({{p1.x,p1.y,p1.z},c});
-                bondVertices.push_back({{p2.x,p2.y,p2.z},c});
+                const int order=std::clamp(int(bond.order),1,3);
+                for (int lane=0;lane<order;++lane) {
+                    const float offset=float(lane)-float(order-1)*.5f;
+                    bondVertices.push_back({{p1.x,p1.y,p1.z},c,offset});
+                    bondVertices.push_back({{p2.x,p2.y,p2.z},c,offset});
+                }
             };
             // Periodic-image bonds expand into both cell-translated halves so
             // each box face shows a short attached stub; see bondSegments.
@@ -876,8 +892,12 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             DirectX::XMStoreFloat4x4(&bondCamera.viewProjection, view * proj);
             bondCamera.viewport={float(t.w),float(t.h)};
             bondCamera.width=d.bondStyle.width;
-            bondCamera.radius=d.bonds.size() > atomx::cylinderBondBudget
+            bondCamera.radius=bondLaneCount > atomx::cylinderBondBudget
                 ? 0.f : d.bondStyle.radius;
+            DirectX::XMFLOAT3 viewForward;
+            DirectX::XMStoreFloat3(&viewForward,DirectX::XMVector3TransformNormal(
+                DirectX::XMVectorSet(0,0,1,0),DirectX::XMMatrixInverse(nullptr,view)));
+            bondCamera.padding[0]=viewForward.x; bondCamera.padding[1]=viewForward.y; bondCamera.padding[2]=viewForward.z;
             bondCamera.color={d.bondStyle.color[0],d.bondStyle.color[1],d.bondStyle.color[2],d.bondStyle.color[3]};
             bondCamera.colorByType=d.bondStyle.colorByType ? 1.f : 0.f;
             context->UpdateSubresource(bondConstants.Get(),0,nullptr,&bondCamera,0,0);
