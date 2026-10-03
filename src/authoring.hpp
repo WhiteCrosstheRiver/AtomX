@@ -135,7 +135,7 @@ inline Vec3 rotatedPoint(Vec3 point, Vec3 center, Vec3 axis, double radians) {
 // Validate and prepare a rigid transform before the caller records history.
 // The input is untouched, including on overflow or malformed selections.
 inline std::vector<std::pair<int,Vec3>> transformedSelection(const Dataset &data,
-        std::vector<int> selected, Vec3 translation, Vec3 axis, double degrees) {
+        std::vector<int> selected, Vec3 translation, Vec3 axis, double degrees, std::optional<Vec3> pivot={}) {
     auto finite=[](Vec3 v) {
         return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);
     };
@@ -154,7 +154,8 @@ inline std::vector<std::pair<int,Vec3>> transformedSelection(const Dataset &data
         cx+=a.x; cy+=a.y; cz+=a.z;
     }
     if (selected.empty() || (degrees==0 && length(translation)==0)) return {};
-    const Vec3 center{float(cx/selected.size()),float(cy/selected.size()),float(cz/selected.size())};
+    const Vec3 center=pivot.value_or(Vec3{float(cx/selected.size()),float(cy/selected.size()),float(cz/selected.size())});
+    if (!finite(center)) throw std::invalid_argument("旋转中心必须为有限数值");
     std::vector<std::pair<int,Vec3>> positions;
     positions.reserve(selected.size());
     bool changed=false;

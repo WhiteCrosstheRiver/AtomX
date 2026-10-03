@@ -115,7 +115,7 @@ inline Template define(const Dataset &source,int connector,std::string name,std:
     for (auto b:source.bonds) if (remap.contains(int(b.a)) && remap.contains(int(b.b))) {
         b.a=uint32_t(remap.at(int(b.a))); b.b=uint32_t(remap.at(int(b.b))); t.data.bonds.push_back(b);
     }
-    for (const auto &[nameIn,rows]:source.scalarProperties) if (rows.size()==source.atoms.size()) {
+    for (const auto &[nameIn,rows]:source.scalarProperties) if (nameIn!="AtomX.MotionGroup" && rows.size()==source.atoms.size()) {
         auto &out=t.data.scalarProperties[nameIn]; for (int i:selected) out.push_back(rows[size_t(i)]);
     }
     for (const auto &[nameIn,rows]:source.vectorProperties) if (rows.size()==source.atoms.size()) {
@@ -205,7 +205,7 @@ inline std::vector<int> apply(Dataset &source,const Template &t,const Placement 
     int anchor=p.anchor;
     if (p.removed>=0) { eraseAtoms(source,{p.removed}); if (anchor>p.removed) --anchor; }
     const size_t old=source.atoms.size();
-    for (const auto &[name,rows]:t.data.scalarProperties) if (rows.size()==t.data.atoms.size() && !source.scalarProperties.contains(name))
+    for (const auto &[name,rows]:t.data.scalarProperties) if (name!="AtomX.MotionGroup" && rows.size()==t.data.atoms.size() && !source.scalarProperties.contains(name))
         source.scalarProperties[name]=std::vector<double>(old,NAN);
     for (const auto &[name,rows]:t.data.vectorProperties) if (rows.size()==t.data.atoms.size() && !source.vectorProperties.contains(name))
         source.vectorProperties[name]=std::vector<Vec3>(old,{NAN,NAN,NAN});
@@ -230,7 +230,7 @@ inline std::vector<int> apply(Dataset &source,const Template &t,const Placement 
     for (auto &[name,rows]:source.scalarProperties) if (rows.size()==old) {
         auto found=t.data.scalarProperties.find(name);
         for (size_t i=0;i<remap.size();++i) if (remap[i]>=0)
-            rows.push_back(found!=t.data.scalarProperties.end()?found->second[i]:NAN);
+            rows.push_back(name=="AtomX.MotionGroup"?0:found!=t.data.scalarProperties.end()?found->second[i]:NAN);
     }
     for (auto &[name,rows]:source.vectorProperties) if (rows.size()==old) {
         auto found=t.data.vectorProperties.find(name);

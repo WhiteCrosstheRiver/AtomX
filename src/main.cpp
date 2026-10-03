@@ -2,6 +2,7 @@
 #include "analysis.hpp"
 #include "authoring.hpp"
 #include "fragment_library.hpp"
+#include "motion_groups.hpp"
 #include "creation_display.hpp"
 #include "symmetry.hpp"
 #include "structure_io.hpp"
@@ -678,8 +679,12 @@ struct App {
         std::string selected;
         if (appearanceType >= 0 && size_t(appearanceType) < appearanceNames.size())
             selected = appearanceNames[appearanceType];
-        for (size_t i = 0; i < appearanceNames.size() && i < gpu.styles.size(); ++i)
-            appearanceMemory[appearanceNames[i]] = gpu.styles[i];
+        // During an asynchronous file change the last displayed dataset may
+        // briefly resize renderer styles. Those entries belong to the old
+        // dataset, so never remember them under the incoming element names.
+        if (gpu.styles.size() == std::max<size_t>(appearanceNames.size(), 1))
+            for (size_t i = 0; i < appearanceNames.size(); ++i)
+                appearanceMemory[appearanceNames[i]] = gpu.styles[i];
         if (names != appearanceNames || gpu.styles.size() != std::max<size_t>(names.size(), 1)) {
             gpu.resetStyles(names.size(), &names);
             for (size_t i = 0; i < names.size(); ++i) {
@@ -912,6 +917,13 @@ struct App {
     uint64_t creationPositionTabId = 0;
     float creationPositionDraft[3]{};
     bool openCreationMovement = false, creationMovementScreenAxes = true;
+    bool creationMovementMassCenter=false,creationMovementHasMass=false,showMotionGroups=false,motionGroupBusy=false;
+    uint64_t motionRevision=0,motionCacheRevision=UINT64_MAX;
+    std::vector<motion::Group> motionGroupCache;
+    std::future<motion::Assignment> motionGroupJob;
+    char motionGroupName[256]="我的分组";
+    int motionGroupSelected=0;
+    std::string motionGroupMessage;
     bool creationMovementPercent = false;
     float creationMovementDistance = 1.f, creationMovementAngle = 45.f;
     uint64_t creationMovementTabId = 0;
@@ -1064,8 +1076,8 @@ struct App {
                     colorMin = float(lo); colorMax = float(hi);
                 }
             }
-            uploadCreationDisplay(next.data, next.selected, next.colorSelected);
             syncAppearance(next.data.species);
+            uploadCreationDisplay(next.data, next.selected, next.colorSelected);
             result = std::move(next);
             updateSlicePlaneVisual();
             for (auto &camera : cameras)
@@ -1301,6 +1313,7 @@ struct App {
             });
     }
     void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
+        ++motionRevision;
         const size_t first = dirtyFrom == SIZE_MAX
             ? (mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1))
             : dirtyFrom;
@@ -1536,6 +1549,7 @@ struct App {
         return tab;
     }
     void restoreTab(const StructureTab &tab) {
+        showMotionGroups=false; motionGroupSelected=0; motionCacheRevision=UINT64_MAX;
         homeMode = tab.home;
         creationBasedOn = tab.basedOn;
         source = tab.source;
@@ -1594,7 +1608,7 @@ struct App {
         queueCreationLabelFont();
         update();
     }
-    bool documentsBusy() const { return busy || pipelineBusy || indexing; }
+    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy; }
     void switchTab(int index) {
         if (index < 0 || index >= int(tabs.size()) || index == activeTab) return;
         if (documentsBusy()) {
@@ -2407,6 +2421,16 @@ struct App {
             });
     }
     void poll() {
+        if (motionGroupBusy && motionGroupJob.valid() && motionGroupJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            motionGroupBusy=false;
+            try {
+                auto assignment=motionGroupJob.get();
+                const size_t count=assignment.labels.size(),skipped=assignment.skipped;
+                if (count) editStructure("自动创建 "+std::to_string(count)+" 个运动分组",[&](Dataset &data){motion::apply(data,std::move(assignment));});
+                motionGroupMessage="已创建 "+std::to_string(count)+" 组 · 跳过周期网络中的 "+std::to_string(skipped)+" 个原子";
+                refreshFont=true;
+            } catch (const std::exception &e) { motionGroupMessage=e.what(); }
+        }
         if (fragmentLibraryJob.valid() && fragmentLibraryJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             const auto loaded=fragmentLibraryJob.get();
             for (auto t:loaded.entries) {
@@ -2665,6 +2689,8 @@ struct App {
         syncAppearance(source.species);
         if (!v.styles.empty()) for (size_t i=0;i<v.styles.size();++i)
             gpu.styles[i]={v.styles[i].color,v.styles[i].visual,v.styles[i].axes};
+        for (size_t i=0;i<source.species.size();++i)
+            appearanceMemory[source.species[i]]=gpu.styles[i];
         creationDisplay=v.display; creationSelection.assign(v.selection.begin(),v.selection.end());
         creationPick=creationSelection.empty()?-1:creationSelection.back();
         creationTool=CreationTool(v.tool); creationSketch=creationTool==CreationTool::Sketch;
@@ -3370,6 +3396,7 @@ struct App {
             if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
         });
         menu("修改", "##create-modify", [&] {
+            if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
             if (ImGui::MenuItem("替换元素")) replacePickedElement();
             if (ImGui::MenuItem("删除 / 空位")) deletePickedAtom();
             if (ImGui::MenuItem("自动加氢")) addHydrogensCommand();
@@ -4368,6 +4395,94 @@ struct App {
         creationPositionFractional=false;
         openCreationPosition=true;
     }
+    void requestMotionGroups() {
+        if (!creationMode || documentsBusy()) return;
+        chooseCreationTool(CreationTool::Select);
+        showMotionGroups=true; motionGroupSelected=0; motionGroupMessage.clear(); motionCacheRevision=UINT64_MAX;
+    }
+    bool selectMotionGroup(int key,bool movement=false) {
+        const auto members=motion::members(source,key); if (members.empty()) return false;
+        creationSelection.clear();
+        for (int index:members) if (creationAtomVisible(index)) creationSelection.push_back(index);
+        creationPick=creationSelection.empty()?-1:creationSelection.back();
+        if (movement && creationSelection.size()!=members.size()) {
+            motionGroupMessage="分组有隐藏成员，请先显示全部再整体移动"; return false;
+        }
+        return !creationSelection.empty();
+    }
+    void motionGroupsDialog() {
+        if (!creationMode) { showMotionGroups=false; return; }
+        if (!showMotionGroups) return;
+        if (motionCacheRevision!=motionRevision) {
+            try { motionGroupCache=motion::catalog(source); }
+            catch (const std::exception &e) { motionGroupCache.clear(); motionGroupMessage=e.what(); }
+            motionCacheRevision=motionRevision; refreshFont=true;
+        }
+        ImGui::SetNextWindowSize({U(570),U(450)},ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSizeConstraints({U(530),U(410)},{U(900),U(800)});
+        if (ImGui::Begin("运动分组##motion-groups",&showMotionGroups)) {
+            ImGui::TextDisabled("保留原子与显式键 · 分组不自动限制手工编辑");
+            ImGui::SetNextItemWidth(-1); ImGui::InputText("##group-name",motionGroupName,sizeof(motionGroupName));
+            recordUiTestItem("creation.group-name");
+            auto attempt=[&](auto action) { try { action(); } catch (const std::exception &e) { motionGroupMessage=e.what(); } };
+            ImGui::BeginDisabled(documentsBusy());
+            ImGui::BeginDisabled(creationSelection.empty() || !motionGroupName[0]);
+            if (ImGui::Button("从选择创建")) attempt([&] {
+                const int key=motion::prepare(source,creationSelection,motionGroupName);
+                const auto selected=creationSelection; const std::string name=motionGroupName;
+                editStructure("创建运动分组 · "+name,[&](Dataset &data){motion::create(data,selected,name,key);});
+                motionGroupSelected=key; motionGroupMessage="已创建分组 · "+name;
+            }); recordUiTestItem("creation.group-create"); ImGui::EndDisabled(); ImGui::SameLine();
+            if (ImGui::Button("按独立片段自动分组")) attempt([&] {
+                if (source.sampled() || !motion::catalog(source).empty())
+                    throw std::invalid_argument("请使用完整体系，并先取消已有分组");
+                const size_t count=source.atoms.size(); auto bonds=source.bonds;
+                motionGroupJob=std::async(std::launch::async,[count,bonds=std::move(bonds)]{return motion::automatic(count,bonds);});
+                motionGroupBusy=true; motionGroupMessage="正在查找连接分量...";
+            }); recordUiTestItem("creation.group-auto"); ImGui::EndDisabled();
+            ImGui::Separator();
+            if (ImGui::BeginChild("##group-list",{0,std::max(U(120),ImGui::GetContentRegionAvail().y-U(130))},ImGuiChildFlags_Borders)) {
+                ImGuiListClipper clipper; clipper.Begin(int(motionGroupCache.size()));
+                while (clipper.Step()) for (int index=clipper.DisplayStart;index<clipper.DisplayEnd;++index) {
+                    const auto &group=motionGroupCache[size_t(index)]; ImGui::PushID(group.id);
+                    const std::string label=group.name+" · "+std::to_string(group.count)+" 原子";
+                    if (ImGui::Selectable(label.c_str(),motionGroupSelected==group.id)) {
+                        motionGroupSelected=group.id; snprintf(motionGroupName,sizeof(motionGroupName),"%s",group.name.c_str());
+                    } recordUiTestItem("creation.group-row-"+std::to_string(group.id)); ImGui::PopID();
+                }
+                if (motionGroupCache.empty()) ImGui::TextDisabled("暂无分组");
+            } ImGui::EndChild();
+            ImGui::BeginDisabled(documentsBusy() || motionGroupSelected<=0);
+            if (ImGui::Button("选中整组")) attempt([&]{selectMotionGroup(motionGroupSelected);});
+            recordUiTestItem("creation.group-select"); ImGui::SameLine();
+            if (ImGui::Button("整体移动 / 旋转...")) attempt([&] {
+                if (selectMotionGroup(motionGroupSelected,true)) {
+                    requestCreationMovement(); creationMovementMassCenter=bool(motion::massCenter(source,creationSelection)); showMotionGroups=false;
+                }
+            }); recordUiTestItem("creation.group-move"); ImGui::SameLine();
+            if (ImGui::Button("改名")) attempt([&] {
+                if (motion::members(source,motionGroupSelected).empty() || !motionGroupName[0])
+                    throw std::invalid_argument("请选中有效分组并填写名称");
+                const auto labels=motion::names(source);
+                if (labels.contains(motionGroupSelected) && labels.at(motionGroupSelected)==motionGroupName) return;
+                editStructure("运动分组改名",[&](Dataset &data){motion::rename(data,motionGroupSelected,motionGroupName);});
+            }); recordUiTestItem("creation.group-rename"); ImGui::EndDisabled();
+            ImGui::BeginDisabled(documentsBusy() || motionGroupSelected<=0);
+            if (ImGui::Button("取消分组（保留原子）")) attempt([&] {
+                if (motion::members(source,motionGroupSelected).empty()) return;
+                editStructure("取消运动分组",[&](Dataset &data){motion::erase(data,motionGroupSelected);}); motionGroupSelected=0;
+            }); recordUiTestItem("creation.group-remove"); ImGui::EndDisabled(); ImGui::SameLine();
+            ImGui::BeginDisabled(documentsBusy() || motionGroupCache.empty());
+            if (ImGui::Button("取消全部分组")) {
+                editStructure("取消全部运动分组",[&](Dataset &data){
+                    data.scalarProperties.erase(motion::property); motion::setNames(data,{});
+                }); motionGroupSelected=0;
+            } recordUiTestItem("creation.group-clear"); ImGui::EndDisabled(); ImGui::SameLine();
+            if (ImGui::Button("关闭")) showMotionGroups=false; recordUiTestItem("creation.group-close");
+            if (!motionGroupMessage.empty()) ImGui::TextWrapped("%s",motionGroupMessage.c_str());
+        }
+        ImGui::End();
+    }
     void requestCreationMovement() {
         if (!creationMode || creationSelection.empty() || documentsBusy()) return;
         creationMovementSelection=creationSelection;
@@ -4397,6 +4512,8 @@ struct App {
             const auto b=creationWorldAt({extent,0},q.z/q.w,{},creationViewportSize,projection.combined);
             creationMovementScreenSpan=float(authoring::length(authoring::sub(b,a)));
         }
+        creationMovementMassCenter=false;
+        creationMovementHasMass=bool(motion::massCenter(source,creationMovementSelection));
         openCreationMovement=true;
     }
     bool validCreationMovement() const {
@@ -4412,7 +4529,8 @@ struct App {
         try {
             const auto positions=authoring::transformedSelection(source,creationMovementSelection,
                 rotate?Vec3{}:authoring::scale(vector,step*direction),
-                rotate?vector:Vec3{},rotate?double(creationMovementAngle)*direction:0);
+                rotate?vector:Vec3{},rotate?double(creationMovementAngle)*direction:0,
+                creationMovementMassCenter?motion::massCenter(source,creationMovementSelection):std::nullopt);
             if (positions.empty()) { creationMovementMessage="坐标未改变"; return; }
             const std::string message=(rotate?"精准旋转 ":"精准移动 ")+std::to_string(positions.size())+" 个原子";
             editStructure(message,[&](Dataset &data) {
@@ -5310,6 +5428,7 @@ struct App {
                 if (ImGui::MenuItem("仅显示选中",nullptr,false,!creationSelection.empty())) creationVisibility(1);
                 if (ImGui::MenuItem("显示全部",nullptr,false,creationDisplay.hiddenCount>0)) creationVisibility(2);
                 if (ImGui::MenuItem("原子标签...")) requestCreationLabels();
+                if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
                 if (ImGui::MenuItem("反选")) {
                     std::vector<uint8_t> selected(source.atoms.size(),0);
                     for (int index:creationSelection)
@@ -6384,7 +6503,10 @@ struct App {
         }
         if (ImGui::BeginPopupModal("精准移动 / 旋转",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::Text("选中 %zu 个原子",creationMovementSelection.size());
-            ImGui::TextDisabled("绕选中原子的几何中心旋转 · 不移动晶胞");
+            ImGui::TextDisabled(creationMovementMassCenter?"绕选中原子的质心旋转 · 不移动晶胞":"绕选中原子的几何中心旋转 · 不移动晶胞");
+            ImGui::BeginDisabled(!creationMovementHasMass);
+            ImGui::Checkbox("绕质心旋转（需 Mass 属性）",&creationMovementMassCenter);
+            recordUiTestItem("creation.movement-mass-center"); ImGui::EndDisabled();
             if (ImGui::RadioButton("屏幕轴",creationMovementScreenAxes)) creationMovementScreenAxes=true;
             recordUiTestItem("creation.movement-screen-axes");
             ImGui::SameLine();
@@ -6986,6 +7108,8 @@ struct App {
         }
         if (ImGui::Button("原子标签...",{-1,U(28)})) requestCreationLabels();
         recordUiTestItem("creation.edit-labels");
+        if (ImGui::Button("运动分组...",{-1,U(28)})) requestMotionGroups();
+        recordUiTestItem("creation.edit-motion-groups");
         ImGui::Separator();
         if (headingFont) ImGui::PushFont(headingFont);
         ImGui::TextUnformatted("历史");
@@ -8639,6 +8763,8 @@ struct App {
         chineseBuilder.AddText("绘制原子与键键级单键双键三键连续成链点击已有原子吸附连键双击结束取消虚拟原子替换元素放置孤立原子拖动向里自由键长起点默认键长结束成链连接选中原子修改键级断键设置断开请选择有效元素无法连键重合坐标或键数已达上限");
         chineseBuilder.AddText("绘制碳环元芳香环大小空白处放置原子或键上接环按住拖动调整朝向松开提交取消环已存在环顶点重合请调整朝向环与隐藏原子重合请先显示原子碳环不自动加氢保存文档文档另存为");
         chineseBuilder.AddText("片段浏览器常用自定义搜索定义连接点末端接枝红圈双击更换拖动旋转右键平移滚轮缩放重置预览开始放置关闭名称库保存到正在读取本机文件已跳过无效上限氢会被替换其他保留甲基乙羟氨酰羧苯烃官能团卤素我的需要最多原子有效直接键不支持周期连通网络通过显式键未知元素长度匹配尚未加载状态改变超过无法暂存被隐藏请重新选择");
+        chineseBuilder.AddText("运动分组从选择创建按独立片段自动分组已属于取消名称改名选中整组整体移动旋转质心需属性保留原子显式键周期网络隐藏成员先显示不自动限制手工编辑正在查找连接分量暂无采样体系不能上限");
+        for (const auto &group:motionGroupCache) chineseBuilder.AddText(group.name.c_str());
         for (const auto &entry:fragmentLibrary) { chineseBuilder.AddText(entry.name.c_str()); chineseBuilder.AddText(entry.category.c_str()); }
         for (const auto &[index,label]:creationDisplay.labels) { (void)index; chineseBuilder.AddText(label.text.c_str()); }
         static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
@@ -9339,6 +9465,7 @@ struct App {
         statusStrip(w, h);
         creationDialogs();
         fragmentBrowser();
+        motionGroupsDialog();
         catalog();
         settings();
         commandPalette();

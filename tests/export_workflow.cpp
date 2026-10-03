@@ -598,6 +598,45 @@ int main() {
                 app.authorRedo.clear(); app.chooseCreationTool(App::CreationTool::Select); app.cameras[3].mode=7; frame();
             }
             {
+                const size_t baseline=app.authorUndo.size();
+                app.editStructure("motion group fixture",[](Dataset &data) {
+                    data={}; data.species={"C","H"};
+                    data.atoms={{0,0,0,0},{2,0,0,1},{5,0,0,0},{7,0,0,1}};
+                    data.bonds={{0,1,{},1},{2,3,{},1}}; data.scalarProperties["Mass"]={12,1,12,1};
+                }); settlePipeline(); app.creationSelection={0,1}; app.creationPick=1; frame();
+                click("creation.edit-motion-groups"); frame(); strcpy_s(app.motionGroupName,"GUI group");
+                click("creation.group-create"); settlePipeline(); frame();
+                requireExport(motion::catalog(app.source).size()==1 && motion::members(app.source,1)==std::vector<int>{0,1},
+                              "motion group dialog creates exclusive membership from the selected atoms");
+                const auto beforeOverlap=app.authorUndo.size(); click("creation.group-create");
+                requireExport(app.authorUndo.size()==beforeOverlap,"overlapping group creation cannot add history");
+                strcpy_s(app.motionGroupName,"Renamed GUI group"); click("creation.group-rename"); settlePipeline(); frame();
+                requireExport(motion::catalog(app.source)[0].name=="Renamed GUI group","group name edit is stored in native metadata");
+                click("creation.group-row-1"); click("creation.group-move"); frame();
+                requireExport(app.creationMovementSelection==std::vector<int>{0,1} && app.creationMovementMassCenter,
+                              "whole-group movement captures all members and uses valid mass center");
+                const auto massCenter=motion::massCenter(app.source,{0,1}); const auto original=app.source.atoms;
+                click("creation.movement-world-axes"); app.creationMovementAngle=90; frame();
+                click("creation.movement-rotate-z"); settlePipeline();
+                const auto changedCenter=motion::massCenter(app.source,{0,1});
+                requireExport(std::abs(changedCenter->x-massCenter->x)<1e-5 && std::abs(changedCenter->y-massCenter->y)<1e-5 &&
+                              std::abs(app.source.atoms[1].y-24.f/13)<1e-5 && app.source.atoms[2].x==original[2].x,
+                              "group rigid rotation preserves mass center and unrelated atoms");
+                click("creation.movement-close"); app.history(false); settlePipeline(); frame();
+                requireExport(app.source.atoms[0].x==original[0].x && app.source.atoms[1].y==0,"whole-group transform undo restores precise coordinates");
+                click("creation.edit-motion-groups"); frame(); click("creation.group-row-1"); click("creation.group-select"); frame();
+                requireExport(app.creationSelection==std::vector<int>{0,1},"group selection selects the complete visible membership");
+                click("creation.group-remove"); settlePipeline(); frame();
+                requireExport(motion::catalog(app.source).empty() && app.source.atoms.size()==4,"ungroup preserves atoms");
+                click("creation.group-auto"); app.motionGroupJob.wait(); app.poll(); settlePipeline(); frame();
+                requireExport(motion::catalog(app.source).size()==2 && motion::members(app.source,2)==std::vector<int>{2,3},
+                              "background automatic grouping finds disconnected explicit fragments");
+                const auto saved=app.captureTab(); app.restoreTab(saved); frame();
+                requireExport(!app.showMotionGroups && motion::catalog(app.source).size()==2,"tab restoration retains group metadata and closes stale selection dialog");
+                while (app.authorUndo.size()>baseline) { app.history(false); settlePipeline(); }
+                app.authorRedo.clear(); frame();
+            }
+            {
                 app.fragmentLibraryDirectory=dir/"library"; app.fragmentLibraryRequested=false;
                 const size_t baseline=app.authorUndo.size();
                 app.editStructure("fragment fixture",[&](Dataset &data) {
@@ -737,7 +776,13 @@ int main() {
                                   saved.view.display.labelAt(1).text=="site A",
                                   "application native save captures creation annotations");
                     app.openFileTab(nativePath);
-                    app.job.wait(); app.poll(); settlePipeline();
+                    app.job.wait(); app.poll();
+                    // A stale two-type viewport can draw between document
+                    // restoration and publication of its three-type pipeline.
+                    // Renderer resize must not replace saved C/H/O styles.
+                    const std::vector<std::string> staleTypes={"Cu","Ni"};
+                    app.gpu.uploadStyles(staleTypes.size(),&staleTypes);
+                    settlePipeline();
                     requireExport(app.creationMode && app.activeTab!=originalCreationTab && app.source.atoms.size()==3 &&
                                   app.creationDisplay.hiddenCount==2 && app.creationDisplay.labelAt(1).text=="site A" &&
                                   app.gpu.styles==currentStyles && app.cameras[3].zoom==currentCamera.zoom &&
