@@ -4,6 +4,7 @@
 #include "elements.hpp"
 #include "creation_colors.hpp"
 #include "bond_labels.hpp"
+#include "bond_visibility.hpp"
 #include <cstdio>
 #include <unordered_map>
 
@@ -48,6 +49,8 @@ inline std::string fieldTitle(const LabelField &f) {
 }
 struct Display {
     BondLabels bondLabels;
+    BondVisibility bondVisibility;
+    void normalizeBonds(const Dataset &d) {bondLabels.normalize(d);bondVisibility.normalize(d);}
     ColorRule defaultColor;
     std::unordered_map<int,ColorRule> colors;
     bool hasColors() const { return defaultColor.kind!=ColorKind::Source || !colors.empty(); }
@@ -77,7 +80,7 @@ struct Display {
         return radius;
     }
     bool sameGpuAppearance(const Display &other) const {
-        return defaultColor==other.defaultColor && colors==other.colors && hidden==other.hidden && defaultPreset==other.defaultPreset && presets==other.presets &&
+        return bondVisibility==other.bondVisibility && defaultColor==other.defaultColor && colors==other.colors && hidden==other.hidden && defaultPreset==other.defaultPreset && presets==other.presets &&
             ballRadius==other.ballRadius && stickRadius==other.stickRadius && cpkScale==other.cpkScale && lineWidth==other.lineWidth;
     }
     uint8_t presetAt(size_t index) const {
@@ -178,6 +181,7 @@ struct Display {
             if(index>=0 && size_t(index)<oldCount && remap[size_t(index)]>=0) nextColors.emplace(remap[size_t(index)],rule);
         colors=std::move(nextColors);
         bondLabels.eraseAtoms(remap);
+        bondVisibility.eraseAtoms(remap);
         for(auto &monitor:monitors) for(size_t i=0;i<monitor.count;++i) {
             auto &index=monitor.atoms[i]; index=index>=0 && size_t(index)<oldCount?remap[size_t(index)]:-1;
         }

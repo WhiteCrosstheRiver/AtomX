@@ -3075,6 +3075,29 @@ int main() {
             d.cell={10,0,0,0,10,0,0,0,10};d.pbc={true,true,true};
             d.bonds={{0,1,{},1},{1,2,{},4},{3,0,{1,0,0},2}};
             creation::BondLabel length{"",{creation::BondField::Length},4};
+            creation::BondVisibility visibility;
+            require(visibility.exceptions.empty() && visibility.indexed.empty() && !visibility.isHidden(0),"default bond visibility allocates nothing");
+            visibility.visibility(d,{0,0},0);
+            require(visibility.hiddenCount==1 && visibility.isHidden(0) && !visibility.isHidden(1),"hide deduplicates actual bonds without hiding endpoints");
+            const auto savedVisibility=visibility;
+            bool invalidVisibility=false;try{visibility.visibility(d,{1,999},0);}catch(...){invalidVisibility=true;}
+            require(invalidVisibility && visibility==savedVisibility,"invalid row rejects visibility edit before publication");
+            auto reordered=d;std::reverse(reordered.bonds.begin(),reordered.bonds.end());reordered.bonds[2]={1,0,{},3};
+            require(visibility.isHidden(reordered,2) && !visibility.isHidden(reordered,0),"GPU identity lookup cannot transfer hiding to a reordered modifier edge");
+            visibility.normalize(reordered);
+            require(visibility.isHidden(2) && visibility.hiddenCount==1,"reordering, reversal and order edits preserve hidden bond identity");
+            visibility.visibility(d,{2},1);
+            require(visibility.defaultHidden && visibility.hiddenCount==2 && !visibility.isHidden(2) && visibility.isHidden(0),"show-only rule preserves just the selected periodic image");
+            visibility.eraseAtoms({0,-1,1,2});auto reduced=d;reduced.atoms.erase(reduced.atoms.begin()+1);reduced.bonds={{2,0,{1,0,0},2}};
+            visibility.normalize(reduced);
+            require(!visibility.isHidden(0) && visibility.hiddenCount==0 && visibility.exceptions.size()==1,"atom removal remaps surviving periodic visibility identity");
+            reduced.bonds.clear();visibility.normalize(reduced);require(visibility.exceptions.empty(),"deleted bond rule never attaches to a later replacement");
+            visibility.visibility(d,{},2);require(visibility==creation::BondVisibility{} && visibility.indexed.empty(),"show-all restores allocation-free visibility default");
+            auto large=d;large.bonds.assign(interactiveBondBudget+1,d.bonds[0]);visibility.visibility(large,{0},0);
+            require(visibility.hiddenCount==large.bonds.size() && visibility.indexed.empty() && visibility.exceptions.size()==1,
+                "oversized duplicate topology never expands one visibility identity into an unbounded row cache");
+            creation::Display visibilityDisplay;auto hiddenDisplay=visibilityDisplay;hiddenDisplay.bondVisibility.visibility(d,{1},0);
+            require(!visibilityDisplay.sameGpuAppearance(hiddenDisplay),"independent bond visibility requires a GPU appearance refresh");
             creation::BondLabels labels;labels.set(d,{0,1},length,false);
             require(labels.labels.size()==1 && labels.candidates(3)==std::vector<size_t>{0} && labels.at(1).empty(),"local bond labels require both selected endpoints");
             require(creation::bondLabelText(d,0,labels.at(0))=="2 Å","bond label reads physical length");

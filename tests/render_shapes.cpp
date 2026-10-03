@@ -500,6 +500,29 @@ int main(int argc, char **argv) {
             display={};if(colorImage()!=sourceImage || renderer.styles!=originalStyles)
                 throw std::runtime_error("Returning to source colors must exactly restore GPU appearance and element styles");
         }
+        {
+            atomx::Dataset edges;edges.species={"C","O"};edges.atoms={{-4,0,0,0},{0,0,0,0},{4,0,0,1}};
+            edges.bonds={{0,1,{},1},{1,2,{},3}};edges.bounds();edges.bondStyle.radius=.12f;
+            atomx::creation::Display display;display.defaultPreset=3;
+            renderer.resetStyles(2,&edges.species);
+            Camera front=cam;front.mode=0;front.fitSelected=true;front.fitLo={-6,-3,-3};front.fitHi={6,3,3};
+            auto render=[&] {
+                renderer.upload(edges,{},{},{},&display);
+                renderer.draw(t,edges,front,.3f,0,0,0,0,0,1,false,false,false,bg,true,false,.43f,&display);
+                return imageHash(t);
+            };
+            const auto full=render(),left=imageHash(t,0,115);
+            display.bondVisibility.visibility(edges,{1},0);const auto hidden=render();
+            if(hidden==full || imageHash(t,0,115)!=left || !renderer.bondsUploaded())
+                throw std::runtime_error("Independent bond hiding must remove only that edge while preserving unrelated GPU pixels");
+            std::reverse(edges.bonds.begin(),edges.bonds.end());
+            if(render()!=hidden)throw std::runtime_error("Reordered uploaded bonds must preserve identity visibility even with stale source row cache");
+            display.bondVisibility.visibility(edges,{},2);
+            if(render()!=full)throw std::runtime_error("Show All must exactly restore original atom and bond GPU pixels");
+            display.bondVisibility.visibility(edges,{},1);render();
+            if(renderer.bondsUploaded() || edges.atoms.size()!=3 || edges.bonds.size()!=2)
+                throw std::runtime_error("Global bond hiding must remove bond GPU draws without deleting scientific objects");
+        }
         renderer.resetStyles(2,&typed.species);
         renderer.upload(typed, {});
         renderer.draw(t, typed, cam, .3f, 0, 0, 0, 0, 0, 1, false, false, false, bg);

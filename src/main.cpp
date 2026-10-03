@@ -1673,7 +1673,7 @@ struct App {
         authorUndo = tab.authorUndo;
         authorRedo = tab.authorRedo;
         creationDisplay = tab.display;
-        creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
+        creationDisplay.normalize(source.atoms.size()); creationDisplay.normalizeBonds(source);
         creationSnapshots = tab.snapshots;
         creationSnapshotSelected = tab.selectedSnapshot;
         creationPropertyPage = tab.propertyPage;
@@ -1760,7 +1760,7 @@ struct App {
         const auto snapshot=creationSnapshots[size_t(index)];
         adoptStructure(*snapshot.data,"已载入工作区快照："+snapshot.name);
         creationDisplay=snapshot.display;
-        creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
+        creationDisplay.normalize(source.atoms.size()); creationDisplay.normalizeBonds(source);
         queueCreationLabelFont();
         creationSnapshotSelected=index;
     }
@@ -1978,7 +1978,7 @@ struct App {
         creationSnapshotSelected=-1;
         creationBondSelection.clear();
         edit(source);
-        creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
+        creationDisplay.normalize(source.atoms.size()); creationDisplay.normalizeBonds(source);
         source.sourceCount = source.atoms.size();
         source.bounds();
         if (!mods.empty()) {
@@ -4886,7 +4886,8 @@ struct App {
     }
     bool creationBondVisible(int row) const {
         if(row<0 || size_t(row)>=source.bonds.size() || !mods.empty() || !source.bondStyle.visible ||
-            source.bonds.size()>interactiveBondBudget || gpu.bondsOmittedForPerformance())return false;
+            source.bonds.size()>interactiveBondBudget || gpu.bondsOmittedForPerformance() ||
+            creationDisplay.bondVisibility.isHidden(size_t(row)))return false;
         const auto &b=source.bonds[size_t(row)];
         return creationAtomVisible(int(b.a)) && creationAtomVisible(int(b.b)) &&
             (b.image==std::array<int32_t,3>{} || source.bondStyle.showPeriodicImages) &&
@@ -4992,7 +4993,7 @@ struct App {
         geometryPanelMonitor=-1; geometryPending.clear();
         creationRingPreviewValid=false;
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion();
-        creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
+        creationDisplay.normalize(source.atoms.size()); creationDisplay.normalizeBonds(source);
         creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
             [&](int index){return !creationAtomVisible(index);}),creationSelection.end());
         creationPick=creationSelection.empty()?-1:creationSelection.back();
@@ -5005,7 +5006,7 @@ struct App {
     }
     void editCreationDisplay(creation::Display next,const std::string &message) {
         if (!creationMode || documentsBusy()) return;
-        next.normalize(source.atoms.size()); next.bondLabels.normalize(source);
+        next.normalize(source.atoms.size()); next.normalizeBonds(source);
         if (next==creationDisplay) return;
         const bool visibilityChanged=!next.sameGpuAppearance(creationDisplay);
         if (authorUndo.size()>=64) authorUndo.erase(authorUndo.begin());
@@ -5017,10 +5018,21 @@ struct App {
         status=message;
     }
     void creationVisibility(int mode) {
-        if (mode!=2 && creationSelection.empty()) return;
+        if (mode!=2 && creationSelection.empty() && creationBondSelection.empty()) return;
         auto next=creationDisplay;
-        next.visibility(source.atoms.size(),creationSelection,mode);
-        editCreationDisplay(std::move(next),mode==0?"隐藏选中原子":mode==1?"仅显示选中原子":"显示全部原子");
+        if(mode==2) {
+            next.visibility(source.atoms.size(),{},2);next.bondVisibility.visibility(source,{},2);
+        } else if(mode==0) {
+            if(!creationSelection.empty())next.visibility(source.atoms.size(),creationSelection,0);
+            if(!creationBondSelection.empty())next.bondVisibility.visibility(source,creationBondSelection,0);
+        } else {
+            // Retain the selected bond endpoints so Show Only never produces
+            // an empty viewport from a bond-only selection (as observed in MS).
+            const auto atoms=creation::selectedAtoms(source,creationSelection,creationBondSelection);
+            next.visibility(source.atoms.size(),atoms,1);
+            if(!creationBondSelection.empty())next.bondVisibility.visibility(source,creationBondSelection,1);
+        }
+        editCreationDisplay(std::move(next),mode==0?"隐藏选中对象":mode==1?"仅显示选中对象及键端点":"显示全部原子与键");
     }
     void requestCreationLabels() {
         if (!creationMode || documentsBusy()) return;
@@ -5596,7 +5608,7 @@ struct App {
     struct CreationBondHalf { Vec3 p1,p2;uint8_t preset=0; };
     std::vector<CreationBondHalf> creationBondHalves(int row) const {
         std::vector<CreationBondHalf> halves;
-        if(row<0 || size_t(row)>=source.bonds.size())return halves;
+        if(row<0 || size_t(row)>=source.bonds.size() || creationDisplay.bondVisibility.isHidden(size_t(row)))return halves;
         const auto &b=source.bonds[size_t(row)];
         if(b.a>=result.data.atoms.size() || b.b>=result.data.atoms.size())return halves;
         const auto &a=result.data.atoms[b.a],&z=result.data.atoms[b.b];
@@ -6659,7 +6671,7 @@ struct App {
                 for(auto index:bondLabels.candidates(result.data.bonds.size())) {
                     if(drawn>=size_t(bondLabels.budget) || index>=result.data.bonds.size())break;
                     const auto &b=result.data.bonds[index];
-                    if(!creationAtomVisible(int(b.a)) || !creationAtomVisible(int(b.b)))continue;
+                    if(creationDisplay.bondVisibility.isHidden(result.data,index) || !creationAtomVisible(int(b.a)) || !creationAtomVisible(int(b.b)))continue;
                     const bool periodic=b.image[0] || b.image[1] || b.image[2];
                     if(periodic && !result.data.bondStyle.showPeriodicImages)continue;
                     const auto text=creation::bondLabelText(result.data,index,bondLabels.at(result.data,index));if(text.empty())continue;
@@ -6767,9 +6779,10 @@ struct App {
                 if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty()))
                     requestCreationMovement();
                 recordUiTestItem("creation.context-movement");
-                if (ImGui::MenuItem("隐藏选中",nullptr,false,!creationSelection.empty())) creationVisibility(0);
-                if (ImGui::MenuItem("仅显示选中",nullptr,false,!creationSelection.empty())) creationVisibility(1);
-                if (ImGui::MenuItem("显示全部",nullptr,false,creationDisplay.hiddenCount>0)) creationVisibility(2);
+                const bool hasSelection=!creationSelection.empty() || !creationBondSelection.empty();
+                if (ImGui::MenuItem("隐藏选中",nullptr,false,hasSelection)) creationVisibility(0);
+                if (ImGui::MenuItem("仅显示选中及键端点",nullptr,false,hasSelection)) creationVisibility(1);
+                if (ImGui::MenuItem("显示全部",nullptr,false,creationDisplay.hiddenCount>0 || creationDisplay.bondVisibility.hiddenCount>0)) creationVisibility(2);
                 if (ImGui::MenuItem("显示样式...")) requestCreationStyles();
                 if (ImGui::MenuItem("原子标签...")) requestCreationLabels();
                 if (ImGui::MenuItem("键标签...")) requestCreationBondLabels();
@@ -8602,13 +8615,17 @@ struct App {
             recordUiTestItem("creation.edit-chemistry");
             if (ImGui::Button("精准移动 / 旋转...",{-1,U(32)})) requestCreationMovement();
             recordUiTestItem("creation.edit-movement");
-            if (ImGui::Button("隐藏选中",{rightW*.43f,U(28)})) creationVisibility(0);
-            recordUiTestItem("creation.hide-selected"); ImGui::SameLine();
-            if (ImGui::Button("仅显示选中",{rightW*.43f,U(28)})) creationVisibility(1);
+        }
+        if (!creationSelection.empty() || !creationBondSelection.empty()) {
+            const bool selectedBonds=!creationBondSelection.empty();
+            const float width=selectedBonds?-1:rightW*.43f;
+            if (ImGui::Button("隐藏选中",{width,U(28)})) creationVisibility(0);
+            recordUiTestItem("creation.hide-selected");if(!selectedBonds)ImGui::SameLine();
+            if (ImGui::Button(selectedBonds?"仅显示键及端点":"仅显示选中",{width,U(28)})) creationVisibility(1);
             recordUiTestItem("creation.show-only");
         }
-        if (creationDisplay.hiddenCount) {
-            ImGui::TextDisabled("已隐藏 %zu / %zu 原子",creationDisplay.hiddenCount,source.atoms.size());
+        if (creationDisplay.hiddenCount || creationDisplay.bondVisibility.hiddenCount) {
+            ImGui::TextDisabled("已隐藏 %zu 原子 · %zu 键",creationDisplay.hiddenCount,creationDisplay.bondVisibility.hiddenCount);
             if (ImGui::Button("显示全部",{-1,U(28)})) creationVisibility(2);
             recordUiTestItem("creation.show-all");
         }

@@ -1252,6 +1252,31 @@ int main() {
                     !app.pipelineBusy && app.gpu.dataUploadRevision()==uploads,"Ctrl toggles bonds without editing science/history or reuploading atom buffers");
                 const auto tab=app.captureTab();app.selectCreationAtom(0,false);app.restoreTab(tab);settlePipeline();frame();
                 requireExport(app.creationBondSelection==std::vector<int>{1} && app.creationSelection.empty(),"tab state restores independent bond selection");
+                const auto visibilityHistory=app.authorUndo.size(),visibilityGeneration=app.pipelineGeneration;
+                click("creation.hide-selected");frame();
+                requireExport(app.creationDisplay.bondVisibility.hiddenCount==1 && app.creationDisplay.bondVisibility.isHidden(1) &&
+                    !app.creationBondVisible(1) && app.creationBondVisible(0) && app.creationAtomVisible(1) && app.creationAtomVisible(2) &&
+                    app.creationBondSelection.empty() && app.source.bonds.size()==2 && app.source.scalarProperties.at("Charge")[1]==.4 &&
+                    app.authorUndo.size()==visibilityHistory+1 && !app.authorUndo.back().data && app.pipelineGeneration==visibilityGeneration && !app.pipelineBusy,
+                    "real Hide button hides only the selected bond in display-only history with no science evaluation");
+                const auto vpHidden=app.uiTestItems.at("creation.viewport");const ImVec2 szHidden{vpHidden.max.x-vpHidden.min.x,vpHidden.max.y-vpHidden.min.y};
+                requireExport(app.creationBondHit(vpHidden.min,szHidden,app.cameras[3],point({2,0,0}),true)<0,
+                    "hidden independent edge is excluded from exact bond picking");
+                click("creation.show-all");frame();
+                requireExport(app.creationDisplay.bondVisibility.hiddenCount==0 && app.creationBondVisible(1),"Show All restores hidden bond without changing endpoints");
+                app.history(false);frame();requireExport(app.creationDisplay.bondVisibility.isHidden(1),"undo Show All restores bond visibility rule");
+                app.history(true);frame();app.selectCreationBond(1,false);frame();click("creation.show-only");frame();
+                requireExport(app.creationDisplay.hiddenCount==1 && app.creationDisplay.isHidden(0) && app.creationAtomVisible(1) && app.creationAtomVisible(2) &&
+                    app.creationDisplay.bondVisibility.defaultHidden && app.creationBondVisible(1) && !app.creationBondVisible(0) &&
+                    app.creationBondSelection==std::vector<int>{1},"Show Only retains selected edge and its endpoints instead of an empty viewport");
+                const auto visibleTab=app.captureTab();app.creationVisibility(2);app.restoreTab(visibleTab);settlePipeline();frame();
+                requireExport(app.creationDisplay.bondVisibility.defaultHidden && app.creationDisplay.bondVisibility.hiddenCount==1 &&
+                    app.creationBondSelection==std::vector<int>{1},"tab capture restores independent bond visibility and selection");
+                io::ExportOptions visibilityOptions;visibilityOptions.documentView=app.captureDocumentView();const auto visibilityPath=dir/"bond-visibility-ui.atomx";
+                io::write(visibilityPath,io::Format::AtomX,app.source,visibilityOptions);const auto visibilityDoc=document::read(visibilityPath);
+                requireExport(visibilityDoc.view.display==app.creationDisplay && visibilityDoc.view.bondSelection==std::vector<int32_t>{1} &&
+                    visibilityDoc.data.bonds==app.source.bonds,"UI display rules roundtrip through native document alongside actual bond selection");
+                while(app.authorUndo.size()>visibilityHistory){app.history(false);settlePipeline();}app.authorRedo.clear();app.selectCreationBond(1,false);frame();
                 click("creation.selected-bond-order-3");settlePipeline();frame();
                 requireExport(app.source.bonds[0].order==1 && app.source.bonds[1].order==3 && app.creationBondSelection==std::vector<int>{1} &&
                     app.source.atoms[0].x==-4 && app.source.scalarProperties.at("Charge")[0]==-.2 && app.authorUndo.size()==selectionHistory+1,

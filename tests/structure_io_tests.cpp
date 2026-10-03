@@ -87,11 +87,12 @@ int main() {
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
             const size_t selectionBytes=8+view.bondSelection.size()*4;
-            auto version=bytes; version[8]=12; rejectBytes(version);
+            const size_t visibilityBytes=9; // No local rules in this legacy compatibility fixture.
+            auto version=bytes; version[8]=13; rejectBytes(version);
             auto badRoll=bytes; const float nanRoll=std::numeric_limits<float>::quiet_NaN();
-            std::memcpy(badRoll.data()+badRoll.size()-8-selectionBytes,&nanRoll,4);rejectBytes(badRoll);
+            std::memcpy(badRoll.data()+badRoll.size()-8-selectionBytes-visibilityBytes,&nanRoll,4);rejectBytes(badRoll);
             auto badSelection=bytes;const int32_t missingBond=99;
-            std::memcpy(badSelection.data()+badSelection.size()-8,&missingBond,4);rejectBytes(badSelection);
+            std::memcpy(badSelection.data()+badSelection.size()-8-visibilityBytes,&missingBond,4);rejectBytes(badSelection);
             auto invalidSelectionOptions=nativeOptions;invalidSelectionOptions.documentView.bondSelection={0,0};
             bool selectionRejected=false;try {io::write(nativePath,io::Format::AtomX,native,invalidSelectionOptions);}catch(...) {selectionRejected=true;}
             require(selectionRejected && document::read(nativePath).view.bondSelection==view.bondSelection,"duplicate bond selection is rejected without overwriting the saved document");
@@ -100,7 +101,12 @@ int main() {
             require(rollRejected && document::read(nativePath).view.cameraRoll==view.cameraRoll,"nonfinite roll is rejected without replacing a saved document");
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
             std::ostringstream bondBlock(std::ios::binary); document::Writer bondWriter{bondBlock}; document::writeBondLabels(bondWriter,view.display.bondLabels); const size_t bondLabelBytes=bondBlock.str().size();
-            auto version10=bytes;version10[8]=10;version10.erase(version10.size()-4-selectionBytes,selectionBytes);
+            auto version11=bytes;version11[8]=11;version11.erase(version11.size()-4-visibilityBytes,visibilityBytes);
+            const auto v11Path=dir/"v11.atomx";
+            {std::ofstream out(v11Path,std::ios::binary);out.write(version11.data(),std::streamsize(version11.size()));}
+            require(document::read(v11Path).view.bondSelection==view.bondSelection &&
+                document::read(v11Path).view.display.bondVisibility==creation::BondVisibility{},"v11 preserves independent selection and defaults all bonds to visible");
+            auto version10=version11;version10[8]=10;version10.erase(version10.size()-4-selectionBytes,selectionBytes);
             const auto v10Path=dir/"v10.atomx";
             {std::ofstream out(v10Path,std::ios::binary);out.write(version10.data(),std::streamsize(version10.size()));}
             require(document::read(v10Path).view.bondSelection.empty() && document::read(v10Path).view.cameraRoll==view.cameraRoll,"v10 documents retain roll and default to no independently selected bonds");
@@ -130,8 +136,30 @@ int main() {
             bool invalidLabels=false;try {io::write(blPath,io::Format::AtomX,native,invalidOptions);}catch(...) {invalidLabels=true;}
             require(invalidLabels && document::read(blPath).view.display.bondLabels==bl,"invalid bond settings preserve existing destination");
             std::ifstream blIn(blPath,std::ios::binary);std::string blBytes((std::istreambuf_iterator<char>(blIn)),{});blIn.close();
-            auto badBondFlag=blBytes;badBondFlag[badBondFlag.size()-13-selectionBytes]=2;rejectBytes(badBondFlag);
-            auto badBondBudget=blBytes;for(size_t i=blBytes.size()-12-selectionBytes;i<blBytes.size()-8-selectionBytes;++i)badBondBudget[i]=char(-1);rejectBytes(badBondBudget);
+            auto badBondFlag=blBytes;badBondFlag[badBondFlag.size()-13-selectionBytes-visibilityBytes]=2;rejectBytes(badBondFlag);
+            auto badBondBudget=blBytes;for(size_t i=blBytes.size()-12-selectionBytes-visibilityBytes;i<blBytes.size()-8-selectionBytes-visibilityBytes;++i)badBondBudget[i]=char(-1);rejectBytes(badBondBudget);
+            auto hiddenOptions=nativeOptions;
+            hiddenOptions.documentView.display.bondVisibility.visibility(native,{0},0);
+            const auto hiddenPath=dir/"hidden-bond.atomx";
+            io::write(hiddenPath,io::Format::AtomX,native,hiddenOptions);
+            auto hiddenRead=document::read(hiddenPath);
+            require(hiddenRead.view.display.bondVisibility.isHidden(0) && hiddenRead.view.display.bondVisibility.hiddenCount==1 &&
+                hiddenRead.data.bonds==native.bonds && hiddenRead.data.vectorProperties.at("Force").size()==2 &&
+                std::equal(hiddenRead.data.vectorProperties.at("Force").begin(),hiddenRead.data.vectorProperties.at("Force").end(),
+                    native.vectorProperties.at("Force").begin(),[](Vec3 a,Vec3 b){return a.x==b.x && a.y==b.y && a.z==b.z;}),
+                "v12 restores hidden periodic bond identity without changing topology or scientific properties");
+            std::ifstream hiddenIn(hiddenPath,std::ios::binary);std::string hiddenBytes((std::istreambuf_iterator<char>(hiddenIn)),{});hiddenIn.close();
+            auto badVisibilityFlag=hiddenBytes;badVisibilityFlag[badVisibilityFlag.size()-5]=2;rejectBytes(badVisibilityFlag);
+            auto missingIdentity=hiddenBytes;uint32_t missingEndpoint=99;
+            std::memcpy(missingIdentity.data()+missingIdentity.size()-37,&missingEndpoint,4);rejectBytes(missingIdentity);
+            auto badVisibilityOptions=hiddenOptions;badVisibilityOptions.documentView.display.bondVisibility.exceptions.begin()->second=false;
+            bool visibilityRejected=false;try{io::write(hiddenPath,io::Format::AtomX,native,badVisibilityOptions);}catch(...){visibilityRejected=true;}
+            require(visibilityRejected && document::read(hiddenPath).view.display.bondVisibility.isHidden(0),"invalid visibility exceptions cannot replace a valid saved document");
+            hiddenOptions.documentView.display.bondVisibility.visibility(native,{},1);
+            io::write(hiddenPath,io::Format::AtomX,native,hiddenOptions);
+            hiddenRead=document::read(hiddenPath);
+            require(hiddenRead.view.display.bondVisibility.defaultHidden && hiddenRead.view.display.bondVisibility.exceptions.empty() &&
+                hiddenRead.view.display.bondVisibility.hiddenCount==1,"v12 restores a global hidden rule without per-bond allocation");
             const auto version7Path=dir/"v7.atomx";
             { std::ofstream out(version7Path,std::ios::binary); out.write(version7.data(),std::streamsize(version7.size())); }
             require(!document::read(version7Path).view.autoHydrogens && document::read(version7Path).view.display==view.display,

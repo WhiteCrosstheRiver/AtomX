@@ -577,7 +577,9 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             return result;
         };
         if (!bondDisplayOmitted && d.bondStyle.visible)
-        for (const auto &bond : d.bonds) {
+        for (size_t row=0;row<d.bonds.size();++row) {
+            const auto &bond=d.bonds[row];
+            if(display && display->bondVisibility.isHidden(d,row))continue;
             if (bond.a >= d.atoms.size() || bond.b >= d.atoms.size()) continue;
             if ((bond.a<hidden.size() && hidden[bond.a]) || (bond.b<hidden.size() && hidden[bond.b])) continue;
             if (!d.bondStyle.showPeriodicImages &&
