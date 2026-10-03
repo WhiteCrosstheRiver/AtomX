@@ -2,7 +2,7 @@
 #include "creation_display.hpp"
 #include <bit>
 
-// AtomX document v5 (reads v1..v4): little-endian IEEE floats; explicit field order and
+// AtomX document v6 (reads v1..v5): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -103,9 +103,9 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
         std::isfinite(v.display.lineWidth) && v.display.lineWidth>=.5f && v.display.lineWidth<=10);
     for(const auto &[index,preset]:v.display.presets) valid(index>=0 && size_t(index)<d.atoms.size() && preset<=4);
     for (auto hidden:v.display.hidden) valid(hidden<=1);
-    valid(int(v.display.defaultLabel.kind)>=0 && int(v.display.defaultLabel.kind)<=6);
+    valid(creation::validLabel(v.display.defaultLabel));
     for (const auto &[index,label]:v.display.labels)
-        valid(index>=0 && size_t(index)<d.atoms.size() && int(label.kind)>=0 && int(label.kind)<=6);
+        valid(index>=0 && size_t(index)<d.atoms.size() && creation::validLabel(label));
     valid(std::isfinite(v.radius) && v.radius>0 && v.shape>=0 && v.shape<=6 && v.cameraMode>=0 && v.cameraMode<=7);
     valid(std::all_of(v.camera.begin(),v.camera.end(),[](float x){return std::isfinite(x);}) && v.camera[2]>0);
     valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=9 && v.order>=1 && v.order<=3);
@@ -131,7 +131,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(5));
+    w.bytes(magic,8); w.value(uint32_t(6));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -172,6 +172,12 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     for(const auto &[index,preset]:display.presets) { w.value(int32_t(index)); w.value(preset); }
     w.flag(display.monitorsVisible); w.value(display.activeMonitor); w.value(uint64_t(display.monitors.size()));
     for(const auto &m:display.monitors) { w.value(m.count); for(auto i:m.atoms) w.value(i); }
+    auto fields=[&](const creation::Label &l) {
+        w.value(l.precision); w.value(uint64_t(l.fields.size()));
+        for(const auto &f:l.fields) { w.value(uint8_t(f.kind)); w.text(f.property); }
+    };
+    fields(display.defaultLabel); w.value(uint64_t(display.labels.size()));
+    for(const auto &[index,l]:display.labels) { w.value(int32_t(index)); fields(l); }
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -180,7 +186,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version<1 || version>5) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>6) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -217,7 +223,8 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
         for (auto &x:style.color) x=r.value<float>(); for (auto &x:style.visual) x=r.value<float>(); for (auto &x:style.axes) x=r.value<float>();
     }
     v.display.hidden=r.array<uint8_t>(atomCount);
-    auto label=[&]() { creation::Label l; l.kind=creation::LabelKind(r.value<int32_t>()); l.text=r.text(); return l; };
+    auto label=[&]() { creation::Label l; l.kind=creation::LabelKind(r.value<int32_t>()); l.text=r.text();
+        valid(int(l.kind)>=0 && int(l.kind)<=(version>=6?7:6)); return l; };
     v.display.defaultLabel=label(); const size_t labels=r.count(16,atomCount);
     for (size_t i=0;i<labels;++i) { auto index=r.value<int32_t>(); auto l=label(); valid(v.display.labels.emplace(index,std::move(l)).second); }
     v.display.fontSize=r.value<float>(); for (auto &x:v.display.color) x=r.value<float>();
@@ -240,6 +247,17 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
         const size_t count=r.count(17,geometry::monitorLimit); display.monitors.resize(count);
         for(auto &m:display.monitors) { m.count=r.value<uint8_t>(); for(auto &i:m.atoms) i=r.value<int32_t>(); }
     } else valid(v.tool<=6);
+    if(version>=6) {
+        auto fields=[&](creation::Label &l) {
+            l.precision=r.value<int32_t>(); const auto n=r.count(9,creation::labelFieldLimit); l.fields.resize(n);
+            for(auto &f:l.fields) { f.kind=creation::LabelFieldKind(r.value<uint8_t>()); f.property=r.text(); }
+        };
+        auto &display=v.display; fields(display.defaultLabel);
+        const auto n=r.count(16,atomCount); valid(n==display.labels.size());
+        std::unordered_set<int> seen;
+        for(size_t i=0;i<n;++i) { const auto index=r.value<int32_t>(); auto it=display.labels.find(index);
+            valid(it!=display.labels.end() && seen.insert(index).second); fields(it->second); }
+    }
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size()); return result;
 }

@@ -1,16 +1,49 @@
 #pragma once
 #include "authoring.hpp"
 #include "geometry_monitors.hpp"
+#include "elements.hpp"
 #include <cstdio>
 #include <unordered_map>
 
 namespace atomx::creation {
-enum class LabelKind { None, Element, Index, ElementIndex, Cartesian, Fractional, Custom };
+enum class LabelKind { None, Element, Index, ElementIndex, Cartesian, Fractional, Custom, Properties };
+enum class LabelFieldKind { Element, Index, Cartesian, Fractional, ElementName, AtomicNumber, Mass,
+    Scalar, Vector, VectorX, VectorY, VectorZ, VectorMagnitude };
+struct LabelField {
+    LabelFieldKind kind=LabelFieldKind::Element;
+    std::string property;
+    bool operator==(const LabelField &) const = default;
+};
+inline constexpr size_t labelFieldLimit=16;
 struct Label {
     LabelKind kind = LabelKind::None;
     std::string text;
+    std::vector<LabelField> fields;
+    int32_t precision=6;
     bool operator==(const Label &) const = default;
 };
+inline bool validLabel(const Label &label) {
+    if(int(label.kind)<0 || label.kind>LabelKind::Properties || label.precision<1 || label.precision>9 ||
+        label.fields.size()>labelFieldLimit || (label.kind!=LabelKind::Properties && !label.fields.empty())) return false;
+    if(label.kind==LabelKind::Properties && label.fields.empty()) return false;
+    for(size_t i=0;i<label.fields.size();++i) {
+        const auto &f=label.fields[i];
+        if(int(f.kind)<0 || f.kind>LabelFieldKind::VectorMagnitude || f.property.size()>1024 ||
+            (f.kind>=LabelFieldKind::Scalar ? f.property.empty():!f.property.empty())) return false;
+        if(std::find(label.fields.begin(),label.fields.begin()+i,f)!=label.fields.begin()+i) return false;
+    }
+    return true;
+}
+inline std::string fieldTitle(const LabelField &f) {
+    static constexpr const char *builtins[]={"Element","Index","Position","Fractional","ElementName","AtomicNumber","Mass"};
+    const int k=int(f.kind);
+    if(k>=0 && k<7) return builtins[k];
+    if(f.kind==LabelFieldKind::Scalar) return f.property;
+    if(f.kind==LabelFieldKind::Vector) return f.property+" (XYZ)";
+    if(f.kind>=LabelFieldKind::VectorX && f.kind<=LabelFieldKind::VectorZ) return f.property+"."+"XYZ"[k-int(LabelFieldKind::VectorX)];
+    if(f.kind==LabelFieldKind::VectorMagnitude) return "|"+f.property+"|";
+    return "?";
+}
 struct Display {
     std::vector<geometry::Monitor> monitors;
     int32_t activeMonitor=-1;
@@ -82,6 +115,7 @@ struct Display {
         normalize(count);
     }
     void setLabels(size_t count,const std::vector<int> &selected,Label value,bool all) {
+        if(!validLabel(value)) throw std::invalid_argument("原子标签规则无效");
         if (!all && selected.size()==count && count && selected.front()==0 &&
             selected.back()==int(count)-1 && std::is_sorted(selected.begin(),selected.end()) &&
             std::adjacent_find(selected.begin(),selected.end())==selected.end()) all=true;
@@ -141,6 +175,52 @@ inline std::string labelText(const Dataset &data,int index,const Label &label) {
     case LabelKind::Index: return "#"+std::to_string(index);
     case LabelKind::ElementIndex: return element+" #"+std::to_string(index);
     case LabelKind::Custom: return label.text;
+    case LabelKind::Properties: {
+        // Read only this visible atom's current values. Never materialize a
+        // complete property column or compute a range for a text overlay.
+        auto number=[&](double value) {
+            if(!std::isfinite(value)) return std::string("N/A");
+            char text[64]; std::snprintf(text,sizeof(text),"%.*g",std::clamp(label.precision,1,9),value==0?0:value);
+            return std::string(text);
+        };
+        auto tuple=[&](double x,double y,double z) { return "("+number(x)+", "+number(y)+", "+number(z)+")"; };
+        std::string text=label.text;
+        const auto *e=elements::find(element);
+        for(size_t i=0;i<std::min(label.fields.size(),labelFieldLimit);++i) {
+            const auto &field=label.fields[i]; std::string value="N/A";
+            switch(field.kind) {
+            case LabelFieldKind::Element: value=element; break;
+            case LabelFieldKind::Index: value="#"+std::to_string(index); break;
+            case LabelFieldKind::ElementName: if(e) value=e->name; break;
+            case LabelFieldKind::AtomicNumber: if(e) value=std::to_string(e->z); break;
+            case LabelFieldKind::Cartesian: value=tuple(atom.x,atom.y,atom.z); break;
+            case LabelFieldKind::Fractional: {
+                double x,y,z; if(authoring::fractional(data,{atom.x,atom.y,atom.z},x,y,z)) value=tuple(x,y,z); break;
+            }
+            case LabelFieldKind::Mass:
+            case LabelFieldKind::Scalar: {
+                const auto it=data.scalarProperties.find(field.kind==LabelFieldKind::Mass?"Mass":field.property);
+                if(it!=data.scalarProperties.end()) { if(size_t(index)<it->second.size()) value=number(it->second[size_t(index)]); }
+                else if(field.kind==LabelFieldKind::Mass && e && elements::atomicMass(*e)>0) value=number(elements::atomicMass(*e));
+                break;
+            }
+            default: {
+                const auto it=data.vectorProperties.find(field.property);
+                if(it==data.vectorProperties.end() || size_t(index)>=it->second.size()) break;
+                const auto v=it->second[size_t(index)];
+                if(field.kind==LabelFieldKind::Vector) value=tuple(v.x,v.y,v.z);
+                else if(field.kind==LabelFieldKind::VectorX) value=number(v.x);
+                else if(field.kind==LabelFieldKind::VectorY) value=number(v.y);
+                else if(field.kind==LabelFieldKind::VectorZ) value=number(v.z);
+                else if(field.kind==LabelFieldKind::VectorMagnitude) value=number(std::hypot(double(v.x),double(v.y),double(v.z)));
+                break;
+            }
+            }
+            if(!text.empty()) text+='\n';
+            text+=fieldTitle(field)+" = "+value;
+        }
+        return text;
+    }
     default: {
         double x=atom.x,y=atom.y,z=atom.z;
         if (label.kind==LabelKind::Fractional && !authoring::fractional(data,{atom.x,atom.y,atom.z},x,y,z))

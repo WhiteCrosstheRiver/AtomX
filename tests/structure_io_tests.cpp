@@ -83,16 +83,21 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=6; rejectBytes(version);
+            auto version=bytes; version[8]=7; rejectBytes(version);
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
+            const size_t labelBytes=20+16*view.display.labels.size();
+            auto version5=bytes; version5[8]=5; version5.erase(version5.size()-4-labelBytes,labelBytes);
+            const auto version5Path=dir/"v5.atomx";
+            { std::ofstream out(version5Path,std::ios::binary); out.write(version5.data(),std::streamsize(version5.size())); }
+            require(document::read(version5Path).view.display==view.display,"v5 retains monitors and legacy labels without composite fields");
             const size_t monitorBytes=13+17*view.display.monitors.size();
-            auto version4=bytes; version4[8]=4; version4.erase(version4.size()-4-monitorBytes,monitorBytes);
+            auto version4=version5; version4[8]=4; version4.erase(version4.size()-4-monitorBytes,monitorBytes);
             const auto version4Path=dir/"v4.atomx";
             { std::ofstream out(version4Path,std::ios::binary); out.write(version4.data(),std::streamsize(version4.size())); }
             const auto legacy4=document::read(version4Path);
             require(legacy4.view.display.presets==view.display.presets && legacy4.view.display.monitors.empty(),"v4 retains appearance and defaults to no monitors");
-            auto invalidMonitor=bytes; invalidMonitor[invalidMonitor.size()-4-17]=5; rejectBytes(invalidMonitor);
-            auto invalidMonitorIndex=bytes; for(int i=0;i<4;++i) invalidMonitorIndex[invalidMonitorIndex.size()-4-16+i]=char(-1); rejectBytes(invalidMonitorIndex);
+            auto invalidMonitor=version5; invalidMonitor[invalidMonitor.size()-4-17]=5; rejectBytes(invalidMonitor);
+            auto invalidMonitorIndex=version5; for(int i=0;i<4;++i) invalidMonitorIndex[invalidMonitorIndex.size()-4-16+i]=char(-1); rejectBytes(invalidMonitorIndex);
             auto version3=version4; version3[8]=3;
             const size_t styleBytes=25+5*view.display.presets.size();
             version3.erase(version3.size()-4-styleBytes,styleBytes);
@@ -100,8 +105,8 @@ int main() {
             { std::ofstream out(version3Path,std::ios::binary); out.write(version3.data(),std::streamsize(version3.size())); }
             require(document::read(version3Path).view.display.defaultPreset==0 && document::read(version3Path).view.display.presets.empty(),
                     "version 3 documents use original appearance without style overrides");
-            auto badPreset=bytes; badPreset[badPreset.size()-4-monitorBytes-styleBytes]=5; rejectBytes(badPreset);
-            auto badIndex=bytes; for(int i=0;i<4;++i) badIndex[badIndex.size()-monitorBytes-9+i]=char(-1); rejectBytes(badIndex);
+            auto badPreset=version5; badPreset[badPreset.size()-4-monitorBytes-styleBytes]=5; rejectBytes(badPreset);
+            auto badIndex=version5; for(int i=0;i<4;++i) badIndex[badIndex.size()-monitorBytes-9+i]=char(-1); rejectBytes(badIndex);
             auto version2=version3; version2[8]=2;
             const size_t fragmentBytes=8+view.fragmentKey.size()+4;
             version2.erase(version2.size()-4-fragmentBytes,fragmentBytes);
@@ -128,6 +133,18 @@ int main() {
             require(fragmentRestored.view.tool==6 && fragmentRestored.view.fragmentKey=="builtin/phenyl" && fragmentRestored.view.fragmentConnector==6,
                     "version 4 persists active fragment key and changed terminal connector");
             rejectBytes(bytes+"trailing data");
+            auto compositeOptions=nativeOptions; auto &composite=compositeOptions.documentView.display;
+            using F=creation::LabelFieldKind;
+            composite.setLabels(2,{}, {creation::LabelKind::Properties,"测量",{{F::Scalar,"Energy"},{F::VectorMagnitude,"Force"}},7},true);
+            composite.setLabels(2,{1},{creation::LabelKind::Properties,"",{{F::Mass,{}}},4},false);
+            const auto compositePath=dir/"property-labels.atomx";
+            io::write(compositePath,io::Format::AtomX,native,compositeOptions);
+            const auto compositeRead=document::read(compositePath);
+            require(compositeRead.view.display==composite && creation::labelText(compositeRead.data,0,compositeRead.view.display.labelAt(0)).find("Energy = -2.5")!=std::string::npos,
+                "v6 restores composite property names, order, prefix, precision and sparse selected overrides");
+            std::ifstream compositeIn(compositePath,std::ios::binary); std::string compositeBytes((std::istreambuf_iterator<char>(compositeIn)),{});
+            auto badField=compositeBytes; badField[badField.size()-4-9]=char(255); rejectBytes(badField);
+            auto badPrecision=compositeBytes; badPrecision[badPrecision.size()-4-21]=0; rejectBytes(badPrecision);
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }
             require(rejected && document::read(nativePath).data.bonds==native.bonds,

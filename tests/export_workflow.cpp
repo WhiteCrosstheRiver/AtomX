@@ -848,6 +848,7 @@ int main() {
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
                     atom.x+=2; data.atoms.push_back(atom);
+                    data.scalarProperties["Charge"]={.125,-.5,NAN};
                 }); settlePipeline();
                 app.selectCreationAtom(0,false); frame();
                 const auto sourceBefore=app.source.atoms;
@@ -891,6 +892,31 @@ int main() {
                               app.creationDisplay.labelAt(0).kind==creation::LabelKind::None,
                               "label dialog applies custom text to the captured selection only");
                 app.saveCreationSnapshot("display state");
+                click("creation.edit-labels"); frame();
+                click("creation.label-kind"); frame(); click("creation.label-kind-7"); frame();
+                const auto fieldTop=app.uiTestItems.at("creation.label-field-builtin-0");
+                guiIO.AddMousePosEvent((fieldTop.min.x+fieldTop.max.x)*.5f,(fieldTop.min.y+fieldTop.max.y)*.5f); frame();
+                guiIO.AddMouseWheelEvent(0,-3); frame(); frame();
+                click("creation.label-field-builtin-6"); frame(); click("creation.label-field-scalar-Charge"); frame();
+                const auto labelHistory=app.authorUndo.size();
+                click("creation.label-apply"); frame(); click("creation.label-close"); frame();
+                const auto propertyRule=app.creationDisplay.labelAt(1);
+                requireExport(propertyRule.kind==creation::LabelKind::Properties && propertyRule.fields.size()==4 &&
+                    creation::labelText(app.source,1,propertyRule).find("Charge = -0.5")!=std::string::npos &&
+                    app.creationDisplay.labelAt(0).kind==creation::LabelKind::None && app.authorUndo.size()==labelHistory+1 &&
+                    !app.authorUndo.back().data && !app.pipelineBusy,
+                    "actual property dropdown and scrolled checkboxes apply composite labels only to captured atoms without geometry work");
+                const auto propertyPath=dir/"property-ui.atomx";
+                app.exportFormat=int(io::Format::AtomX); app.exportRange=false;
+                app.startDataExport(propertyPath); app.exportJob.wait(); app.poll();
+                requireExport(document::read(propertyPath).view.display.labelAt(1)==propertyRule,
+                    "UI composite label fields persist through the application native export");
+                app.editStructure("change label value",[](Dataset &data){data.scalarProperties.at("Charge")[1]=.75;}); settlePipeline();
+                requireExport(creation::labelText(app.source,1,app.creationDisplay.labelAt(1)).find("Charge = 0.75")!=std::string::npos,
+                    "applied property labels follow subsequent structure property edits");
+                app.history(false); settlePipeline(); app.history(false); frame();
+                requireExport(app.creationDisplay.labelAt(1).text=="site A" && app.creationDisplay.labelAt(1).kind==creation::LabelKind::Custom,
+                    "mixed structure/display undo restores the prior custom label");
                 {
                     const int originalCreationTab=app.activeTab;
                     const auto currentCamera=app.cameras[3];

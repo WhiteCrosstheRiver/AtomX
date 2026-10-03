@@ -953,6 +953,8 @@ struct App {
     uint64_t creationLabelTabId = 0;
     int creationLabelKind = int(creation::LabelKind::ElementIndex);
     char creationLabelText[128]{};
+    std::vector<creation::LabelField> creationLabelFields;
+    int32_t creationLabelPrecision=6;
     creation::Display creationLabelDraft;
     std::vector<int> creationLabelSelection;
     int creationPick = -1;
@@ -4552,8 +4554,10 @@ struct App {
                 cursor+=length;
             }
         };
-        missingGlyph(creationDisplay.defaultLabel.text);
-        for (const auto &[index,label]:creationDisplay.labels) { (void)index; missingGlyph(label.text); }
+        auto glyphs=[&](const creation::Label &label) { missingGlyph(label.text);
+            for(const auto &field:label.fields) missingGlyph(field.property); };
+        glyphs(creationDisplay.defaultLabel);
+        for (const auto &[index,label]:creationDisplay.labels) { (void)index; glyphs(label); }
     }
     void refreshCreationDisplay(bool visibilityChanged=true) {
         geometryPanelMonitor=-1; geometryPending.clear();
@@ -4601,6 +4605,8 @@ struct App {
         const auto label=creationPick>=0?creationDisplay.labelAt(creationPick):creationDisplay.defaultLabel;
         creationLabelKind=int(label.kind==creation::LabelKind::None?creation::LabelKind::ElementIndex:label.kind);
         snprintf(creationLabelText,sizeof(creationLabelText),"%s",label.text.c_str());
+        creationLabelFields=label.fields.empty()?std::vector<creation::LabelField>{{creation::LabelFieldKind::Element,{}},{creation::LabelFieldKind::Index,{}}}:label.fields;
+        creationLabelPrecision=label.precision;
         openCreationLabels=true;
     }
     void requestCreationPosition() {
@@ -6946,6 +6952,11 @@ struct App {
     }
     void creationDialogs() {
         if (openCreationLabels) { ImGui::OpenPopup("原子标签"); openCreationLabels=false; }
+        // Keep the expanded property editor and its actions inside the native window.
+        const auto *labelViewport=ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(labelViewport->GetWorkCenter(),ImGuiCond_Always,{0.5f,0.5f});
+        ImGui::SetNextWindowSizeConstraints({0,0},
+            {std::max(U(200),labelViewport->WorkSize.x-U(24)),std::max(U(200),labelViewport->WorkSize.y-U(24))});
         if (ImGui::BeginPopupModal("原子标签",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
             const bool valid=creationMode && activeTab>=0 && activeTab<int(tabs.size()) &&
                 tabs[size_t(activeTab)].id==creationLabelTabId;
@@ -6954,10 +6965,55 @@ struct App {
             recordUiTestItem("creation.label-all");
             if (!creationLabelAll) ImGui::Text("选中 %zu 个原子",creationLabelSelection.size());
             ImGui::SetNextItemWidth(U(280));
-            ImGui::Combo("内容",&creationLabelKind,"无标签\0元素\0原子编号\0元素 + 编号\0笛卡尔坐标\0分数坐标\0自定义文字\0");
-            if (creationLabelKind==int(creation::LabelKind::Custom)) {
+            const char *kinds[]={"无标签","元素","原子编号","元素 + 编号","笛卡尔坐标","分数坐标","自定义文字","属性组合"};
+            if(ImGui::BeginCombo("内容",kinds[creationLabelKind])) {
+                for(int i=0;i<8;++i) {
+                    if(ImGui::Selectable(kinds[i],creationLabelKind==i)) creationLabelKind=i;
+                    recordUiTestItem("creation.label-kind-"+std::to_string(i));
+                } ImGui::EndCombo();
+            } recordUiTestItem("creation.label-kind");
+            const bool properties=creationLabelKind==int(creation::LabelKind::Properties);
+            if(properties) {
+                ImGui::TextDisabled("可组合至多 16 项，按勾选顺序排列");
+                ImGui::BeginChild("##label-properties",{U(370),U(155)},ImGuiChildFlags_Borders);
+                auto field=[&](creation::LabelField value,const std::string &caption,const std::string &key) {
+                    const auto it=std::find(creationLabelFields.begin(),creationLabelFields.end(),value);
+                    bool checked=it!=creationLabelFields.end();
+                    ImGui::BeginDisabled(!checked && creationLabelFields.size()>=creation::labelFieldLimit);
+                    ImGui::PushID(key.c_str());
+                    if(ImGui::Checkbox(caption.c_str(),&checked)) {
+                        if(checked) creationLabelFields.push_back(std::move(value)); else creationLabelFields.erase(it);
+                    } recordUiTestItem("creation.label-field-"+key); ImGui::PopID(); ImGui::EndDisabled();
+                };
+                const char *captions[]={"元素","原子编号","笛卡尔坐标","分数坐标","元素名称","原子序数","质量 Mass"};
+                for(int i=0;i<7;++i) field({creation::LabelFieldKind(i),{}},captions[i],"builtin-"+std::to_string(i));
+                for(const auto &[name,values]:source.scalarProperties) {
+                    (void)values; if(name!="Mass") field({creation::LabelFieldKind::Scalar,name},name,"scalar-"+name);
+                }
+                for(const auto &[name,values]:source.vectorProperties) {
+                    (void)values;
+                    for(int i=int(creation::LabelFieldKind::Vector);i<=int(creation::LabelFieldKind::VectorMagnitude);++i) {
+                        creation::LabelField value{creation::LabelFieldKind(i),name};
+                        field(value,creation::fieldTitle(value),"vector-"+name+"-"+std::to_string(i));
+                    }
+                }
+                ImGui::EndChild();
+                if(ImGui::Button("清空属性")) creationLabelFields.clear(); recordUiTestItem("creation.label-clear-fields");
+                ImGui::SetNextItemWidth(U(160)); ImGui::SliderInt("有效数字",&creationLabelPrecision,1,9);
+                recordUiTestItem("creation.label-precision");
+                ImGui::TextDisabled("Mass 列优先；没有该列时用元素质量。缺失值为 N/A。");
+            }
+            if (creationLabelKind==int(creation::LabelKind::Custom) || properties) {
                 ImGui::SetNextItemWidth(U(280));
                 ImGui::InputText("文字",creationLabelText,sizeof(creationLabelText));
+            }
+            creation::Label rule{creation::LabelKind(creationLabelKind),
+                creationLabelKind==int(creation::LabelKind::Custom) || properties?creationLabelText:""};
+            if(properties) { rule.fields=creationLabelFields; rule.precision=creationLabelPrecision;
+                const int preview=creationLabelSelection.empty()?0:creationLabelSelection.back();
+                ImGui::BeginChild("##label-preview",{U(370),U(75)},ImGuiChildFlags_Borders);
+                const auto previewText=creation::labelText(source,preview,rule);
+                ImGui::TextUnformatted(previewText.c_str()); ImGui::EndChild();
             }
             ImGui::SliderFloat("字号",&creationLabelDraft.fontSize,10,32,"%.0f");
             ImGui::Checkbox("粗体",&creationLabelDraft.bold);
@@ -6967,7 +7023,7 @@ struct App {
             ImGui::InputInt("屏幕标签上限",&creationLabelDraft.labelBudget);
             ImGui::TextDisabled("大体系自动抽样，优先显示选中原子的标签");
             ImGui::TextDisabled("隐藏原子不显示标签；上限 1-2000，默认 500");
-            const bool validText=creationLabelKind!=int(creation::LabelKind::Custom) || creationLabelText[0];
+            const bool validText=(creationLabelKind!=int(creation::LabelKind::Custom) || creationLabelText[0]) && creation::validLabel(rule);
             const bool validBudget=creationLabelDraft.labelBudget>0 && creationLabelDraft.labelBudget<=2000;
             ImGui::BeginDisabled(!valid || documentsBusy() || (!creationLabelAll && creationLabelSelection.empty()));
             ImGui::BeginDisabled(!validText || !validBudget);
@@ -6976,8 +7032,7 @@ struct App {
                 next.fontSize=creationLabelDraft.fontSize; next.color=creationLabelDraft.color;
                 next.bold=creationLabelDraft.bold; next.labelsVisible=creationLabelDraft.labelsVisible;
                 next.labelBudget=creationLabelDraft.labelBudget;
-                next.setLabels(source.atoms.size(),creationLabelSelection,
-                    {creation::LabelKind(creationLabelKind),creationLabelKind==int(creation::LabelKind::Custom)?creationLabelText:""},creationLabelAll);
+                next.setLabels(source.atoms.size(),creationLabelSelection,rule,creationLabelAll);
                 editCreationDisplay(std::move(next),"编辑原子标签");
             }
             recordUiTestItem("creation.label-apply");
@@ -9266,6 +9321,8 @@ struct App {
         chineseBuilder.AddText("精准移动旋转选中原子的几何中心不移动晶胞屏幕轴体系轴距离视图比例步长角度以打开窗口时视图的较短边为选中中心所在深度上下左右向里向外右手方向反向使用负角度坐标未改变已记录一步历史原标签已改变请关闭并重新打开位移与角度必须为有限数值旋转轴不能为零选中原子已改变请重新选择原子坐标无效位移超出坐标范围连接片段分数坐标切换添加约束←→↑↓−°Å");
         chineseBuilder.AddText("隐藏选中仅显示选中显示全部已隐藏原子标签对象默认显示元素和编号整个体系内容无标签笛卡尔坐标分数坐标自定义文字字号粗体颜色显示标签屏幕标签上限大体系自动抽样优先显示选中原子的标签隐藏原子不显示标签上限默认应用移除移除全部编辑原子标签撤销重做");
         chineseBuilder.AddText(creationDisplay.defaultLabel.text.c_str());
+        chineseBuilder.AddText("属性组合可组合至多项按勾选顺序排列元素名称原子序数质量列优先没有该列时用元素质量缺失值为清空属性有效数字");
+        for(const auto &field:creationDisplay.defaultLabel.fields) chineseBuilder.AddText(field.property.c_str());
         chineseBuilder.AddText("绘制原子与键键级单键双键三键连续成链点击已有原子吸附连键双击结束取消虚拟原子替换元素放置孤立原子拖动向里自由键长起点默认键长结束成链连接选中原子修改键级断键设置断开请选择有效元素无法连键重合坐标或键数已达上限");
         chineseBuilder.AddText("绘制碳环元芳香环大小空白处放置原子或键上接环按住拖动调整朝向松开提交取消环已存在环顶点重合请调整朝向环与隐藏原子重合请先显示原子碳环不自动加氢保存文档文档另存为");
         chineseBuilder.AddText("片段浏览器常用自定义搜索定义连接点末端接枝红圈双击更换拖动旋转右键平移滚轮缩放重置预览开始放置关闭名称库保存到正在读取本机文件已跳过无效上限氢会被替换其他保留甲基乙羟氨酰羧苯烃官能团卤素我的需要最多原子有效直接键不支持周期连通网络通过显式键未知元素长度匹配尚未加载状态改变超过无法暂存被隐藏请重新选择");
@@ -9274,7 +9331,8 @@ struct App {
         chineseBuilder.AddText("运动分组从选择创建按独立片段自动分组已属于取消名称改名选中整组整体移动旋转质心需属性保留原子显式键周期网络隐藏成员先显示不自动限制手工编辑正在查找连接分量暂无采样体系不能上限");
         for (const auto &group:motionGroupCache) chineseBuilder.AddText(group.name.c_str());
         for (const auto &entry:fragmentLibrary) { chineseBuilder.AddText(entry.name.c_str()); chineseBuilder.AddText(entry.category.c_str()); }
-        for (const auto &[index,label]:creationDisplay.labels) { (void)index; chineseBuilder.AddText(label.text.c_str()); }
+        for (const auto &[index,label]:creationDisplay.labels) { (void)index; chineseBuilder.AddText(label.text.c_str());
+            for(const auto &field:label.fields) chineseBuilder.AddText(field.property.c_str()); }
         static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
         chineseBuilder.AddRanges(extraRanges);
         ImVector<ImWchar> chineseRanges;

@@ -2979,6 +2979,31 @@ int main() {
             display.setLabels(1000000,{0},{},false);
             require(display.labelAt(0).kind==creation::LabelKind::None && display.labelAt(1).kind==creation::LabelKind::ElementIndex,
                     "selected label removal overrides the global rule without removing other labels");
+            using F=creation::LabelFieldKind;
+            creation::Label scientific{creation::LabelKind::Properties,"site",{{F::Element,{}},{F::Scalar,"Charge"},
+                {F::Mass,{}},{F::Vector,"Force"},{F::VectorMagnitude,"Force"},{F::Fractional,{}}},4};
+            molecule.scalarProperties["Charge"]={-.125}; molecule.vectorProperties["Force"]={{3,4,0}};
+            auto text=creation::labelText(molecule,0,scientific);
+            require(text=="site\nElement = Na\nCharge = -0.125\nMass = 22.99\nForce (XYZ) = (3, 4, 0)\n|Force| = 5\nFractional = (0.25, 0.5, 0.75)",
+                    "composite labels combine live scientific fields with precision and element mass fallback");
+            molecule.scalarProperties["Charge"][0]=NAN; molecule.scalarProperties["Mass"]={23.5};
+            molecule.vectorProperties["Force"][0].x=6; molecule.atoms[0].x=2;
+            text=creation::labelText(molecule,0,scientific);
+            require(text.find("Charge = N/A")!=std::string::npos && text.find("Mass = 23.5")!=std::string::npos &&
+                text.find("Force (XYZ) = (6, 4, 0)")!=std::string::npos && text.find("Fractional = (0.5, 0.5, 0.75)")!=std::string::npos,
+                "property labels read changed atom values instead of frozen text; missing values never become zero");
+            molecule.scalarProperties["Mass"][0]=NAN; molecule.vectorProperties.erase("Force"); molecule.cell={};
+            text=creation::labelText(molecule,0,scientific);
+            require(text.find("Mass = N/A")!=std::string::npos && text.find("|Force| = N/A")!=std::string::npos &&
+                text.find("Fractional = N/A")!=std::string::npos,"explicit missing mass, removed vector and degenerate cell show missing labels");
+            display.setLabels(1000000,{},scientific,true);
+            require(display.labels.empty() && display.candidates(1000000).size()==500 && display.defaultLabel.fields.size()==6,
+                "million atom scientific labels keep one bounded rule without per atom materialization");
+            display.setLabels(3,{2},scientific,false); display.eraseAtoms(3,{0});
+            require(display.labelAt(1)==scientific,"scientific label rules follow surviving original atom identities");
+            auto bad=scientific; bad.fields.push_back(bad.fields[0]);
+            require(!creation::validLabel(bad),"duplicate fields rejected"); bad=scientific; bad.precision=0;
+            require(!creation::validLabel(bad),"invalid scientific label precision rejected");
         }
         {
             creation::Display display;
