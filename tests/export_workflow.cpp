@@ -1116,6 +1116,75 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("bond insertion fixture",[](Dataset &data) {
+                    data={};data.species={"C"};data.pbc={false,false,false};data.cell={10,0,0,0,10,0,0,0,10};
+                    data.atoms={{1,1,1,0},{5,1,1,0}};data.bonds={{0,1,{},2}};data.bondStyle.visible=true;
+                    data.scalarProperties["Charge"]={.2,-.2};data.vectorProperties["Force"]={{1,2,3},{4,5,6}};
+                });settlePipeline();app.creationDisplay={};app.creationSelection.clear();app.creationPick=-1;
+                app.creationAutoHydrogens=false;app.cameras[3].mode=2;app.cell=false;app.fitCamera(3,false);
+                app.chooseCreationTool(App::CreationTool::Sketch);strcpy_s(app.creationElement,"O");app.creationSketchOrder=1;frame();
+                auto insertionPoint=[&](Vec3 at) {
+                    const auto vp=app.uiTestItems.at("creation.viewport");const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};
+                    DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),
+                        app.creationProjection(app.result.data,app.cameras[3],size).combined));
+                    return ImVec2{vp.min.x+(q.x/q.w+1)*size.x*.5f,vp.min.y+(1-q.y/q.w)*size.y*.5f};
+                };
+                auto midpoint=[&]{return insertionPoint({3,1,1});};
+                auto insertClick=[&](ImVec2 at) {
+                    guiIO.AddMousePosEvent(at.x,at.y);frame();guiIO.AddMouseButtonEvent(0,true);frame();
+                    guiIO.AddMouseButtonEvent(0,false);frame();settlePipeline();
+                };
+                const auto insertionHistory=app.authorUndo.size();click("creation.sketch-insert");frame();
+                const auto middle=midpoint();guiIO.AddMousePosEvent(middle.x,middle.y);frame();
+                requireExport(app.creationInsertHover==0 && app.source.atoms.size()==2 && app.authorUndo.size()==insertionHistory,
+                    "insertion mode highlights existing bond midpoint without editing source/history");
+                frame();requireExport(app.creationInsertHover==0,"idle insertion preview retained from cache");
+                const auto bounds=app.uiTestItems.at("creation.viewport");const ImVec2 pickSize{bounds.max.x-bounds.min.x,bounds.max.y-bounds.min.y};
+                const auto lanePoint=insertionPoint({3,1.3f,1});
+                requireExport(app.creationBondHit(bounds.min,pickSize,app.cameras[3],lanePoint)==0,
+                    "bond picking follows visible offset cylinder lane instead of only centerline");
+                app.creationDisplay.defaultPreset=1;app.creationDisplay.lineWidth=8;
+                requireExport(app.creationBondHit(bounds.min,pickSize,app.cameras[3],{middle.x,middle.y+12})==0,
+                    "line bond picking follows width-dependent lane spacing");
+                app.creationDisplay.defaultPreset=3;app.creationDisplay.presets[0]=4;
+                requireExport(app.creationBondHit(bounds.min,pickSize,app.cameras[3],insertionPoint({2,1,1}))<0,
+                    "CPK endpoint's omitted half-bond is not pickable");app.creationDisplay.presets.clear();
+                insertClick(lanePoint);
+                requireExport(app.source.atoms.size()==3 && app.source.bonds.size()==2 && app.source.species[app.source.atoms[2].type]=="O" &&
+                    app.source.atoms[2].x==3 && app.source.atoms[0].x==1 && app.source.atoms[1].x==5 &&
+                    authoring::directBondIndex(app.source,0,1)<0 && app.source.bonds[0].order==1 && app.source.bonds[1].order==1 &&
+                    app.authorUndo.size()==insertionHistory+1 && app.creationPick==2 && app.creationSketchAnchor<0,
+                    "checkbox pointer insertion splits only target bond using sketch element/order in one history step");
+                requireExport(app.source.scalarProperties.at("Charge")[0]==.2 && std::isnan(app.source.scalarProperties.at("Charge")[2]) &&
+                    app.source.vectorProperties.at("Force")[1].z==6 && std::isnan(app.source.vectorProperties.at("Force")[2].x),
+                    "pointer insertion preserves existing science and marks unknown appended atom science missing");
+                {const auto path=dir/"bond-insertion.atomx";io::ExportOptions options;options.documentView=app.captureDocumentView();
+                    io::write(path,io::Format::AtomX,app.source,options);const auto saved=document::read(path);
+                    requireExport(saved.data.atoms.size()==3 && saved.data.bonds.size()==2 && saved.data.bonds[0].order==1 &&
+                        std::isnan(saved.data.scalarProperties.at("Charge")[2]),"insertion topology and science survive native document roundtrip");}
+                const auto vp=app.uiTestItems.at("creation.viewport");insertClick({vp.min.x+20,vp.min.y+90});
+                requireExport(app.source.atoms.size()==3 && app.authorUndo.size()==insertionHistory+1,"armed insertion background click does not add isolated atom");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true);frame();guiIO.AddKeyEvent(ImGuiKey_Escape,false);frame();
+                requireExport(!app.creationSketchInsert && app.creationInsertHover<0,"Escape exits insertion without adding history");
+                app.history(false);settlePipeline();requireExport(app.source.atoms.size()==2 && app.source.bonds[0].order==2,"undo restores original unsplit double bond");
+                app.history(true);settlePipeline();requireExport(app.source.atoms.size()==3 && app.source.bonds.size()==2,"redo restores inserted atom and two replacement bonds");
+                app.history(false);settlePipeline();app.chooseCreationTool(App::CreationTool::Sketch);strcpy_s(app.creationElement,"C");app.creationSketchOrder=2;frame();
+                guiIO.AddKeyEvent(ImGuiMod_Alt,true);frame();insertClick(midpoint());guiIO.AddKeyEvent(ImGuiMod_Alt,false);frame();
+                requireExport(app.source.atoms.size()==3 && app.source.bonds.size()==2 && app.source.bonds[0].order==2 && app.source.bonds[1].order==2 &&
+                    app.authorUndo.size()==insertionHistory+1,"Alt click bond inserts chosen element using current double order instead of isolated atom or cycling edge");
+                app.history(false);settlePipeline();app.chooseCreationTool(App::CreationTool::Sketch);app.creationAutoHydrogens=true;
+                strcpy_s(app.creationElement,"O");app.creationSketchOrder=1;frame();click("creation.sketch-insert");frame();insertClick(midpoint());
+                requireExport(app.source.atoms.size()==9 && app.source.bonds.size()==8 && app.source.species[app.source.atoms[2].type]=="O" &&
+                    app.authorUndo.size()==insertionHistory+1 && app.creationPick==2 && app.source.atoms[0].x==1 && app.source.atoms[1].x==5,
+                    "insertion and automatic local H share one history step with fixed heavy coordinates");
+                app.history(false);settlePipeline();requireExport(app.source.atoms.size()==2,"single undo removes insertion and automatic H together");
+                click("creation.sketch-insert");frame();const auto tab=app.captureTab();app.restoreTab(tab);settlePipeline();frame();
+                requireExport(!app.creationSketchInsert,"tab restoration cancels transient insertion gesture");
+                app.creationAutoHydrogens=false;while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();
+                app.chooseCreationTool(App::CreationTool::Select);app.cell=true;frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
                     atom.x+=2; data.atoms.push_back(atom);

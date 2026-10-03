@@ -128,6 +128,7 @@ class Renderer {
   public:
     bool bondsUploaded() const { return bondVertexCount != 0; }
     bool bondsOmittedForPerformance() const { return bondDisplayOmitted; }
+    size_t renderedBondLaneCount() const { return bondLaneCount; }
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swap;

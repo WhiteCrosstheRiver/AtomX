@@ -5,6 +5,7 @@
 #include "fragment_fusion.hpp"
 #include "hydrogen_adjust.hpp"
 #include "chemical_settings.hpp"
+#include "bond_insertion.hpp"
 #include "motion_groups.hpp"
 #include "layer_builder.hpp"
 #include "creation_display.hpp"
@@ -887,6 +888,11 @@ struct App {
     std::string creationAutoHydrogenMessage;
     int creationSketchOrder = 1, creationSketchAnchor = -1, creationSketchStartHit = -1;
     int creationSketchLastPlaced = -1;
+    bool creationSketchInsert=false;
+    int creationInsertHover=-1;
+    ImVec2 creationInsertMouse{-1,-1},creationInsertSize{},creationInsertOrigin{};
+    DirectX::XMFLOAT4X4 creationInsertMatrix{};
+    uint64_t creationInsertGeneration=0;
     Vec3 creationSketchPreview{};
     int creationRingSize=6;
     bool creationRingPreviewValid=false;
@@ -1627,6 +1633,7 @@ struct App {
         creationSketch = tab.creationSketch;
         creationSketchContinuous=tab.sketchContinuous; creationSketchOrder=tab.sketchOrder;
         creationAutoHydrogens=tab.autoHydrogens; creationAutoHydrogenMessage.clear();
+        creationSketchInsert=false;creationInsertHover=-1;creationInsertMouse={-1,-1};
         creationRingSize=tab.ringSize; creationRingPreviewValid=false;
         creationFragmentKey=tab.fragmentKey; creationFragmentConnector=tab.fragmentConnector;
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion(); showFragmentBrowser=false;
@@ -2140,6 +2147,23 @@ struct App {
             if(remappedLast)*remappedLast=affected.size()==2?affected.back():-1;
         });
         return true;
+    }
+    bool insertCreationAtom(int bond) {
+        if(!creationMode || documentsBusy() || !sameAtomCount() || bond<0 || size_t(bond)>=source.bonds.size())return false;
+        try {
+            const auto &b=source.bonds[size_t(bond)];
+            if(!creationAtomVisible(int(b.a)) || !creationAtomVisible(int(b.b)))throw std::invalid_argument("键端点不可见");
+            const auto edit=insertion::prepare(source,size_t(bond),creationElement[0]?creationElement:"C",creationSketchOrder);
+            int added=-1;
+            editStructure("键中插入 "+edit.element,[&](Dataset &data) {
+                added=insertion::apply(data,edit);data.bondStyle.visible=true;
+                std::vector<int> affected{int(edit.original.a),int(edit.original.b),added};
+                updateAutomaticHydrogens(data,affected);added=affected.back();
+            });
+            selectCreationAtom(added,false);
+            creationSketchAnchor=creationSketchLastPlaced=-1;creationSketchPreviewValid=false;creationInsertHover=-1;
+            return true;
+        }catch(const std::exception &e){status=e.what();return false;}
     }
     void commitCreationSketch(int hit,Vec3 at,bool isolated,bool finish,bool replace) {
         if (documentsBusy() || !creationMode) return;
@@ -4793,6 +4817,7 @@ struct App {
         ImGui::PopTextWrapPos();
     }
     void chooseCreationTool(CreationTool tool) {
+        creationSketchInsert=false;creationInsertHover=-1;
         geometryPending.clear(); geometryPanelMonitor=-1;
         geometryDragPlans[0].reset(); geometryDragPlans[1].reset();
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
@@ -5435,14 +5460,16 @@ struct App {
         const float w=std::abs(q.w)>1e-6f?q.w:1.f;
         return {q.x/w,q.y/w,q.z/w};
     }
-    // Bond picking runs only on Sketch click. A periodic boundary stub is
-    // not treated as a direct bond between the displayed atoms.
+    // Picking shares the renderer's lane offsets, cylinder/line fallback and
+    // per-endpoint presets. Periodic stubs are not direct editable bonds.
     int creationBondHit(ImVec2 p,ImVec2 size,const Camera &cam,ImVec2 mouse) {
-        if (!source.bondStyle.visible || source.bonds.size()>interactiveBondBudget) return -1;
-        const auto matrix=creationProjection(result.data,cam,size).combined;
-        auto project=[&](int index,ImVec2 &at,float &depth) {
-            if (!creationAtomVisible(index)) return false;
-            const auto &a=result.data.atoms[size_t(index)];
+        if (!source.bondStyle.visible || source.bonds.size()>interactiveBondBudget || gpu.bondsOmittedForPerformance()) return -1;
+        const auto projection=creationProjection(result.data,cam,size);
+        const auto matrix=projection.combined;
+        DirectX::XMFLOAT3 forward;
+        DirectX::XMStoreFloat3(&forward,DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0,0,1,0),
+            DirectX::XMMatrixInverse(nullptr,projection.view)));
+        auto project=[&](Vec3 a,ImVec2 &at,float &depth) {
             DirectX::XMFLOAT4 q;
             DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
                 DirectX::XMVectorSet(a.x,a.y,a.z,1),matrix));
@@ -5453,16 +5480,53 @@ struct App {
         int found=-1; float bestDepth=FLT_MAX;
         for (size_t i=0;i<source.bonds.size();++i) {
             const auto &bond=source.bonds[i];
-            if (bond.image!=std::array<int32_t,3>{}) continue;
-            ImVec2 a,b; float za,zb;
-            if (!project(int(bond.a),a,za) || !project(int(bond.b),b,zb)) continue;
-            const float dx=b.x-a.x,dy=b.y-a.y;
-            const float lengthSquared=dx*dx+dy*dy;
-            if (lengthSquared<1) continue;
-            const float t=std::clamp(((mouse.x-a.x)*dx+(mouse.y-a.y)*dy)/lengthSquared,0.f,1.f);
-            const float distance=std::hypot(mouse.x-a.x-t*dx,mouse.y-a.y-t*dy);
-            const float depth=za+(zb-za)*t;
-            if (distance<=U(6) && depth<bestDepth) { bestDepth=depth; found=int(i); }
+            if (bond.image!=std::array<int32_t,3>{} || !creationAtomVisible(int(bond.a)) || !creationAtomVisible(int(bond.b))) continue;
+            const auto first=hydrogens::point(result.data,int(bond.a)),last=hydrogens::point(result.data,int(bond.b));
+            const auto middle=authoring::add(authoring::scale(first,.5),authoring::scale(last,.5));
+            const auto delta=authoring::sub(last,first);const double len=authoring::length(delta);if(len<1e-6 || !std::isfinite(len))continue;
+            // Reject distant projected bounds before testing individual lanes.
+            ImVec2 boundA,boundB;float boundDepth;
+            if(!project(first,boundA,boundDepth) || !project(last,boundB,boundDepth))continue;
+            const auto axis=authoring::scale(delta,1/len);
+            auto side=authoring::cross(axis,{forward.x,forward.y,forward.z});
+            if(authoring::length(side)<1e-5)side=authoring::cross(axis,std::abs(axis.z)<.85f?Vec3{0,0,1}:Vec3{0,1,0});
+            side=authoring::scale(side,1/authoring::length(side));
+            const float widest=std::max(source.bondStyle.width,creationDisplay.lineWidth);
+            float padding=U(6)+widest*3.5f;
+            if(gpu.renderedBondLaneCount()<=cylinderBondBudget) {
+                const float extent=4*std::max(source.bondStyle.radius,creationDisplay.stickRadius);
+                ImVec2 edge;
+                if(project(authoring::add(first,authoring::scale(side,extent)),edge,boundDepth))padding=std::max(padding,U(6)+std::hypot(edge.x-boundA.x,edge.y-boundA.y));
+                if(project(authoring::add(last,authoring::scale(side,extent)),edge,boundDepth))padding=std::max(padding,U(6)+std::hypot(edge.x-boundB.x,edge.y-boundB.y));
+            }
+            if(mouse.x<std::min(boundA.x,boundB.x)-padding || mouse.x>std::max(boundA.x,boundB.x)+padding ||
+                mouse.y<std::min(boundA.y,boundB.y)-padding || mouse.y>std::max(boundA.y,boundB.y)+padding)continue;
+            const int order=bond.order==4?2:std::clamp(int(bond.order),1,3);
+            for(int half=0;half<2;++half) {
+                const auto preset=creationDisplay.presetAt(half?bond.b:bond.a);if(preset==4)continue;
+                float r=preset==1?0:preset>1?creationDisplay.stickRadius:source.bondStyle.radius;
+                if(gpu.renderedBondLaneCount()>cylinderBondBudget)r=0;
+                const float width=preset?creationDisplay.lineWidth:source.bondStyle.width;
+                const auto pa=half?middle:first,pb=half?last:middle;
+                for(int lane=-1;lane<order;++lane) {
+                    // Keep the centerline as a convenient target between lanes.
+                    const float offset=lane<0?0:bond.order==4?(lane?.5f:-.5f):float(lane)-float(order-1)*.5f;
+                    const auto shift=authoring::scale(side,offset*r*3);
+                    ImVec2 a,b;float za,zb;if(!project(authoring::add(pa,shift),a,za) || !project(authoring::add(pb,shift),b,zb))continue;
+                    const float dx=b.x-a.x,dy=b.y-a.y,lengthSquared=dx*dx+dy*dy;if(lengthSquared<1)continue;
+                    const float norm=std::sqrt(lengthSquared);
+                    if(r==0) { const float pixels=offset*std::max(width*3,4.f);a.x+=dy/norm*pixels;a.y-=dx/norm*pixels;
+                        b.x+=dy/norm*pixels;b.y-=dx/norm*pixels; }
+                    const float t=std::clamp(((mouse.x-a.x)*dx+(mouse.y-a.y)*dy)/lengthSquared,0.f,1.f);
+                    float tolerance=U(6)+width*.5f;
+                    if(r>0) {ImVec2 edge;float depth;
+                        const auto center=authoring::add(authoring::add(pa,shift),authoring::scale(authoring::sub(pb,pa),t));
+                        ImVec2 c;if(project(center,c,depth) && project(authoring::add(center,authoring::scale(side,r)),edge,depth))
+                            tolerance=U(6)+std::hypot(edge.x-c.x,edge.y-c.y);}
+                    const float distance=std::hypot(mouse.x-a.x-t*dx,mouse.y-a.y-t*dy),depth=za+(zb-za)*t;
+                    if(distance<=tolerance && depth<bestDepth) {bestDepth=depth;found=int(i);}
+                }
+            }
         }
         return found;
     }
@@ -5489,8 +5553,10 @@ struct App {
         if (io.AppFocusLost && (creationDrag==CreationDrag::Ring || creationDrag==CreationDrag::Fragment)) {
             creationDrag=CreationDrag::None; return false;
         }
-        if (io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape))
+        if (io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             creationSketchAnchor=creationSketchLastPlaced=-1;
+            creationSketchInsert=false;creationInsertHover=-1;
+        }
         // The first click may change the automatic camera bounds or start
         // an asynchronous pipeline update. Finish on the second press before
         // either can make the old screen coordinate create another atom.
@@ -5509,6 +5575,7 @@ struct App {
             creationRingPreviewValid=false;
             creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1};
             creationLastHoverMouse={-1,-1}; clearCreationFusion();
+            creationInsertHover=-1;creationInsertMouse={-1,-1};
             return false;
         }
         const ImVec2 mouse=io.MousePos;
@@ -5534,6 +5601,19 @@ struct App {
             creationHover=-1;
             creationLastHoverMouse={-1,-1};
         }
+        // Only an insertion gesture needs this preview. Cache by pointer,
+        // projection and dataset generation; an idle frame never scans bonds.
+        if(creationTool==CreationTool::Sketch && hovered && (creationSketchInsert || io.KeyAlt) &&
+            (creationDrag==CreationDrag::None || creationDrag==CreationDrag::Sketch) && creationHover<0) {
+            DirectX::XMFLOAT4X4 matrix;
+            DirectX::XMStoreFloat4x4(&matrix,creationProjection(result.data,cam,size).combined);
+            if(mouse.x!=creationInsertMouse.x || mouse.y!=creationInsertMouse.y ||
+                size.x!=creationInsertSize.x || size.y!=creationInsertSize.y || p.x!=creationInsertOrigin.x || p.y!=creationInsertOrigin.y || pipelineGeneration!=creationInsertGeneration ||
+                std::memcmp(&matrix,&creationInsertMatrix,sizeof(matrix))!=0) {
+                creationInsertHover=creationBondHit(p,size,cam,mouse);
+                creationInsertMouse=mouse;creationInsertSize=size;creationInsertOrigin=p;creationInsertMatrix=matrix;creationInsertGeneration=pipelineGeneration;
+            }
+        }else{creationInsertHover=-1;creationInsertMouse={-1,-1};}
         auto ringAt=[&](ImVec2 pointer) {
             const auto projection=creationProjection(result.data,cam,size);
             const int hit=creationHover;
@@ -5749,7 +5829,7 @@ struct App {
                 creationFragmentPreviewValid=hovered;
             }
             if (creationDrag==CreationDrag::Sketch && creationDragMoved) {
-                if (creationSketchStartHit>=0 && !io.KeyAlt) {
+                if (creationSketchStartHit>=0 && !io.KeyAlt && !creationSketchInsert) {
                     selectCreationAtom(creationSketchStartHit,false);
                     creationDrag=CreationDrag::Move; captureAtoms();
                 } else if (creationSketchAnchor<0) creationDrag=CreationDrag::Rotate;
@@ -5918,9 +5998,12 @@ struct App {
                 const auto placement=creationFragmentPreview;
                 commitCreationFragment(placement); creationFragmentPreviewValid=false;
             } else if (creationDrag==CreationDrag::Sketch && hovered && sketchPositionValid) {
-                const int bond=sketchHit<0 && creationSketchAnchor<0 && !io.KeyAlt && !creationDragMoved?
+                const bool inserting=creationSketchInsert || (io.KeyAlt && sketchHit<0);
+                const int bond=sketchHit<0 && (inserting || creationSketchAnchor<0) && !creationDragMoved?
                     creationBondHit(p,size,cam,mouse):-1;
-                if (bond>=0) {
+                if(inserting && bond>=0)insertCreationAtom(bond);
+                else if(creationSketchInsert)status="请点击可见的直接键；Esc 退出键中插入";
+                else if (bond>=0) {
                     const auto existing=source.bonds[size_t(bond)];
                     editCreationBond(int(existing.a),int(existing.b),existing.order==4?1:int(existing.order)%3+1);
                 } else {
@@ -6280,7 +6363,18 @@ struct App {
                     draw->AddText({projected[0].x+U(12),projected[0].y-U(24)},IM_COL32(255,218,103,230),caption.c_str());
                 }
             }
-            if (creationSketchPreviewValid && creationSketchAnchor>=0 && !pipelineBusy) {
+            if(creationInsertHover>=0 && size_t(creationInsertHover)<source.bonds.size() && !pipelineBusy) {
+                const auto &b=source.bonds[size_t(creationInsertHover)];
+                const auto at=authoring::add(authoring::scale(hydrogens::point(source,int(b.a)),.5),
+                                            authoring::scale(hydrogens::point(source,int(b.b)),.5));
+                DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),mvp));
+                if(q.w>0 && q.z>0 && q.z<q.w) {
+                    const ImVec2 center{p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};
+                    draw->AddCircle(center,U(9),IM_COL32(255,218,103,255),24,U(2));
+                    draw->AddText({center.x+U(13),center.y-U(18)},IM_COL32(255,218,103,255),"插入原子");
+                }
+            }
+            if (creationSketchPreviewValid && creationSketchAnchor>=0 && !pipelineBusy && !creationSketchInsert && creationInsertHover<0) {
                 const auto &anchor=source.atoms[size_t(creationSketchAnchor)];
                 auto project=[&](Vec3 world,ImVec2 &at) {
                     DirectX::XMFLOAT4 q;
@@ -8041,9 +8135,17 @@ struct App {
             recordUiTestItem("creation.sketch-order");
             ImGui::Checkbox("连续成链",&creationSketchContinuous);
             recordUiTestItem("creation.sketch-continuous");
+            if(ImGui::Checkbox("点击键中插入原子",&creationSketchInsert)) {
+                creationSketchAnchor=creationSketchLastPlaced=-1;creationSketchPreviewValid=false;
+                creationInsertHover=-1;creationInsertMouse={-1,-1};
+            }
+            recordUiTestItem("creation.sketch-insert");
+            ImGui::TextDisabled("插入中点 · 两条新键采用当前键级");
+            ImGui::TextDisabled("原端点固定 · 可用测量工具调整键长 / 角度");
             ImGui::TextDisabled("点击已有原子吸附连键");
             ImGui::TextDisabled("双击结束 · Esc 取消虚拟原子");
             ImGui::TextDisabled("Alt 点击替换元素 / 放置孤立原子");
+            ImGui::TextDisabled("Alt 点击键插入 · Esc 退出插入模式");
             ImGui::TextDisabled("Alt 拖动向里 · Shift + Alt 自由键长");
             if (creationSketchAnchor>=0) {
                 ImGui::Text("起点 #%d · 默认键长 %.2f Å",creationSketchAnchor,

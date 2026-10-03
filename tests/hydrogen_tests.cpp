@@ -1,5 +1,6 @@
 #include "../src/hydrogen_adjust.hpp"
 #include "../src/chemical_settings.hpp"
+#include "../src/bond_insertion.hpp"
 #include "../src/creation_document.hpp"
 #include <chrono>
 #include <iostream>
@@ -119,6 +120,31 @@ int main() {try {
     settings.scalarProperties["AtomX.Hybridization"]={};rejected=false;
     try{chemistry::apply(settings,chemistry::Edit{{0},0,3});}catch(const std::invalid_argument&){rejected=true;}
     requireH(rejected && chemistry::charge(settings,0)==1,"malformed requested rows cannot partially change formal charge");
+    auto split=molecule({"C","C","O"},{{0,0,0},{3,0,0},{6,0,0}});
+    split.bonds={{0,1,{},2},{1,2,{},1}};split.scalarProperties["Charge"]={.2,.3,.4};
+    split.vectorProperties["Force"]={{1,2,3},{4,5,6},{7,8,9}};split.scalarProperties["AtomX.MotionGroup"]={1,1,2};
+    split.scalarProperties["FormalCharge"]={-1,1,0};split.particleColors={{.1f,.2f,.3f},{.3f,.4f,.5f},{.5f,.6f,.7f}};
+    const auto splitEdit=insertion::prepare(split,0,"O",1);const int inserted=insertion::apply(split,splitEdit);
+    requireH(inserted==3 && split.atoms[3].x==1.5 && split.atoms[0].x==0 && split.atoms[1].x==3 && split.atoms[2].x==6,
+        "bond insertion fixes all existing coordinates and appends midpoint atom");
+    requireH(split.bonds.size()==3 && directBondIndex(split,0,1)<0 && split.bonds[0].order==1 && split.bonds[2].order==1 &&
+        directBondIndex(split,1,2)==1 && split.bonds[1].order==1,"one target edge replaced by two sketch-order edges; unrelated topology retained");
+    requireH(split.scalarProperties["Charge"][0]==.2 && std::isnan(split.scalarProperties["Charge"][3]) &&
+        split.vectorProperties["Force"][1].z==6 && std::isnan(split.vectorProperties["Force"][3].x) &&
+        split.scalarProperties["FormalCharge"][3]==0 && split.scalarProperties["AtomX.MotionGroup"][3]==0 && split.particleColors[3].x==-1,
+        "insertion preserves science and identities; unknown new science missing and chemical fields neutral");
+    rejected=false;try{insertion::apply(split,splitEdit);}catch(const std::invalid_argument&){rejected=true;}
+    requireH(rejected && split.atoms.size()==4,"stale insertion rejected without mutation");
+    auto periodicSplit=split;periodicSplit.bonds[0].image={1,0,0};rejected=false;
+    try{insertion::prepare(periodicSplit,0,"C",1);}catch(const std::invalid_argument&){rejected=true;}requireH(rejected,"cross-periodic bond insertion rejected");
+    auto overlapSplit=molecule({"C","C","H"},{{0,0,0},{3,0,0},{1.5f,0,0}});overlapSplit.bonds={{0,1,{},1}};rejected=false;
+    try{insertion::prepare(overlapSplit,0,"C",1);}catch(const std::invalid_argument&){rejected=true;}requireH(rejected,"occupied midpoint rejected before appending");
+    auto hSplit=molecule({"C","C"},{{0,0,0},{3,0,0}});hSplit.bonds={{0,1,{},1}};
+    Options onlyEndpoints;onlyEndpoints.all=false;onlyEndpoints.selection={0,1};apply(hSplit,prepare(hSplit,onlyEndpoints));
+    const int newC=insertion::apply(hSplit,insertion::prepare(hSplit,0,"C",1));
+    Options splitScope;splitScope.all=false;splitScope.selection={0,1,newC};const auto splitHydrogens=prepare(hSplit,splitScope);apply(hSplit,splitHydrogens);
+    requireH(splitHydrogens.invalid==1 && hSplit.atoms.size()==9 && hSplit.bonds.size()==8 && directBondIndex(hSplit,0,1)<0,
+        "collinear SP3 insertion is skipped by automatic H instead of fabricating tetrahedral geometry");
     for(size_t i=0;i<large.atoms.size();++i){large.atoms[i].x=float(i*5);if(i%2)large.bonds.push_back({uint32_t(i-1),uint32_t(i),{},3});}
     large.sourceCount=large.atoms.size();large.bounds();const auto start=std::chrono::steady_clock::now();auto bulk=prepare(large,all);
     const auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
