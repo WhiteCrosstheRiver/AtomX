@@ -2,7 +2,7 @@
 #include "creation_display.hpp"
 #include <bit>
 
-// AtomX document v7 (reads v1..v6): little-endian IEEE floats; explicit field order and
+// AtomX document v8 (reads v1..v7): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -13,7 +13,7 @@ struct View {
     int32_t ringSize=6;
     std::string fragmentKey="builtin/methyl";
     int32_t fragmentConnector=1;
-    bool fitSelected=false,continuous=true;
+    bool fitSelected=false,continuous=true,autoHydrogens=false;
     Vec3 fitLo{},fitHi{};
     float radius=.32f;
     std::string title,basedOn,element="C";
@@ -134,7 +134,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(7));
+    w.bytes(magic,8); w.value(uint32_t(8));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -188,6 +188,7 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     };
     color(display.defaultColor); w.value(uint64_t(display.colors.size()));
     for(const auto &[index,r]:display.colors) { w.value(int32_t(index)); color(r); }
+    w.flag(view.autoHydrogens);
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -196,7 +197,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version<1 || version>7) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>8) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -278,6 +279,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
         for(size_t i=0;i<n;++i) { const auto index=r.value<int32_t>(); auto c=color();
             valid(v.display.colors.emplace(index,std::move(c)).second); }
     }
+    if(version>=8) v.autoHydrogens=r.flag();
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size()); return result;
 }

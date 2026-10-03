@@ -86,6 +86,20 @@ int main() {try {
     const auto native=std::filesystem::temp_directory_path()/("AtomX-hydrogen-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".atomx");
     document::View view;view.creation=true;std::ofstream file(native,std::ios::binary);document::write(file,planar,view);file.close();
     const auto saved=document::read(native);requireH(saved.data.bonds.size()==3 && saved.data.scalarProperties.at("AtomX.Hybridization")[0]==2,"chemical settings native document round trip");std::filesystem::remove(native);
+    auto extended=molecule({"C"},{{0,0,0}});extended.scalarProperties["FormalCharge"]={0};
+    extended.scalarProperties["AtomX.Hybridization"]={0};extended.scalarProperties["Charge"]={.2};
+    extended.vectorProperties["Force"]={{1,2,3}};extended.particleColors={{.1f,.2f,.3f}};
+    extended.atoms.push_back({8,0,0,0});extendRows(extended,1);
+    requireH(extended.scalarProperties["FormalCharge"][1]==0 && extended.scalarProperties["AtomX.Hybridization"][1]==0 &&
+        std::isnan(extended.scalarProperties["Charge"][1]) && extended.vectorProperties["Force"][0].x==1,
+        "new sketch rows keep measured science missing and chemical settings neutral automatic");
+    Options localScope;localScope.all=false;localScope.selection={1};auto scoped=prepare(extended,localScope);
+    requireH(scoped.added.size()==4 && scoped.sites==1,"new chemical rows allow local automatic hydrogen");
+    requireH(remapIndex(7,{2,4,8})==5 && remapIndex(4,{2,4,8})==-1 && remapIndex(-1,{2})==-1,"compaction distinguishes removed and shifted selections");
+    Dataset ringDraft;ringDraft.scalarProperties["AtomX.Hybridization"]={};ringDraft.scalarProperties["Charge"]={};
+    const auto ringEdit=prepareRing(ringDraft,ringSketch(ringDraft,6,{4,4,0},{1,0,0},{0,0,1},-1,-1,true));
+    applyRing(ringDraft,ringEdit);requireH(prepare(ringDraft,all).added.size()==6 && std::isnan(ringDraft.scalarProperties["Charge"][0]),
+        "ring defaults preserve measured missing values and automatic chemical settings");
     Dataset large;large.species={"C"};large.atoms.resize(60000);
     for(size_t i=0;i<large.atoms.size();++i){large.atoms[i].x=float(i*5);if(i%2)large.bonds.push_back({uint32_t(i-1),uint32_t(i),{},3});}
     large.sourceCount=large.atoms.size();large.bounds();const auto start=std::chrono::steady_clock::now();auto bulk=prepare(large,all);

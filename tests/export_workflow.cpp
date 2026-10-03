@@ -977,6 +977,79 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("auto hydrogen UI fixture",[](Dataset &data) {
+                    data={};data.species={"C"};data.atoms={{2,2,2,0}};
+                    data.cell={12,0,0,0,12,0,0,0,12};data.scalarProperties["Charge"]={.25};
+                    data.scalarProperties["AtomX.FormalCharge"]={0};data.scalarProperties["AtomX.Hybridization"]={0};
+                    data.vectorProperties["Force"]={{1,2,3}};
+                });settlePipeline();app.creationDisplay={};app.creationSelection.clear();app.creationPick=-1;
+                app.cameras[3].mode=2;app.fitCamera(3,false);frame();
+                const auto enableHistory=app.authorUndo.size();
+                click("creation.tool-auto-hydrogen");frame();
+                requireExport(app.creationAutoHydrogens && app.source.atoms.size()==1 && app.authorUndo.size()==enableHistory,
+                    "automatic hydrogen toolbar toggles without modifying the structure or history");
+                const auto tab=app.captureTab();app.creationAutoHydrogens=false;app.restoreTab(tab);settlePipeline();frame();
+                requireExport(app.creationAutoHydrogens,"automatic hydrogen belongs to the creation tab");
+                click("creation.tool-draw");strcpy_s(app.creationElement,"C");app.creationSketchOrder=1;app.creationSketchContinuous=true;frame();
+                auto pointOf=[&](Vec3 at) {
+                    const auto vp=app.uiTestItems.at("creation.viewport");const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};
+                    const auto matrix=app.creationProjection(app.result.data,app.cameras[3],size).combined;
+                    DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),matrix));
+                    return ImVec2{vp.min.x+(q.x/q.w+1)*size.x*.5f,vp.min.y+(1-q.y/q.w)*size.y*.5f};
+                };
+                auto pointerClick=[&](ImVec2 at) {
+                    guiIO.AddMousePosEvent(at.x,at.y);frame();guiIO.AddMouseButtonEvent(0,true);frame();
+                    guiIO.AddMouseButtonEvent(0,false);frame();settlePipeline();frame();
+                };
+                pointerClick(pointOf({6,5,2}));
+                requireExport(app.source.atoms.size()==6 && app.source.bonds.size()==4 && app.creationSketchAnchor==1 &&
+                    app.source.scalarProperties.at("Charge")[0]==.25 && app.authorUndo.size()==enableHistory+1,
+                    "real pointer sketch adds CH4, leaves unrelated carbon unchanged and creates one undo step");
+                const auto last=app.source.atoms[size_t(app.creationSketchAnchor)];
+                pointerClick(pointOf({last.x+2,last.y+1,last.z}));
+                requireExport(app.source.atoms.size()==9 && app.source.bonds.size()==7 && app.creationSketchAnchor==5 &&
+                    hydrogens::atomicNumber(app.source,app.creationSketchAnchor)==6 && app.authorUndo.size()==enableHistory+2,
+                    ("continuous sketch substitutes one terminal H and remaps the new carbon anchor; N="+std::to_string(app.source.atoms.size())+" B="+std::to_string(app.source.bonds.size())+" anchor="+std::to_string(app.creationSketchAnchor)+" history="+std::to_string(app.authorUndo.size()-enableHistory)+" auto="+app.creationAutoHydrogenMessage+" status="+app.status).c_str());
+                const int carbon=app.creationSketchAnchor;const auto chain=app.source.bonds;
+                app.history(false);settlePipeline();requireExport(app.source.atoms.size()==6 && app.source.bonds.size()==4 &&
+                    app.creationAutoHydrogenMessage.empty(),"one undo removes entire new CH3 group and clears stale automatic feedback");
+                app.history(true);settlePipeline();requireExport(app.source.bonds==chain,"redo restores chain and its H together");
+                app.chooseCreationTool(App::CreationTool::Select);app.creationSelection={1,carbon};app.creationPick=carbon;frame();
+                app.editCreationBond(1,carbon,2);settlePipeline();
+                requireExport(app.source.atoms.size()==7 && app.source.bonds.size()==5 && hydrogens::atomicNumber(app.source,app.creationPick)==6,
+                    "bond order edit removes two H and keeps selected heavy atom indices valid");
+                const int movedCarbon=app.creationPick;
+                app.creationDisplay.setLabels(app.source.atoms.size(),{movedCarbon},{creation::LabelKind::Custom,"keep carbon"},false);
+                strcpy_s(app.creationElement,"O");app.creationSelection={movedCarbon};app.replacePickedElement();settlePipeline();
+                requireExport(app.source.atoms.size()==5 && app.source.bonds.size()==3 && hydrogens::atomicNumber(app.source,app.creationPick)==8 &&
+                    app.creationDisplay.labelAt(app.creationPick).text=="keep carbon","C to O removes only surplus H while preserving remapped label");
+                const auto atoms=app.source.atoms;app.editStructure("science property edit",[](Dataset &data){data.scalarProperties["Charge"][0]=.5;});settlePipeline();
+                requireExport(app.source.atoms.size()==atoms.size(),"ordinary property edits do not trigger automatic chemistry");
+                const auto native=dir/"automatic-hydrogen.atomx";io::ExportOptions options;options.documentView=app.captureDocumentView();
+                io::write(native,io::Format::AtomX,app.source,options);const auto saved=document::read(native);
+                requireExport(saved.view.autoHydrogens && saved.data.bonds==app.source.bonds,"automatic toggle and graph persist in native format");
+                app.restoreDocumentView(saved.view);settlePipeline();frame();requireExport(app.creationAutoHydrogens,"native reopen restores automatic hydrogen");
+                // restoreDocumentView intentionally starts a new history baseline; restore the captured fixture tab for cleanup.
+                app.tabs[size_t(app.activeTab)]=tab;app.restoreTab(tab);settlePipeline();
+                const auto ringHistory=app.authorUndo.size();
+                auto ring=authoring::ringSketch(app.source,6,{6,6,2},{1,0,0},{0,0,1},-1,-1,true);
+                app.commitCreationRing(ring);settlePipeline();
+                requireExport(app.source.atoms.size()==13 && app.source.bonds.size()==12 && app.authorUndo.size()==ringHistory+1 &&
+                    std::isnan(app.source.scalarProperties.at("Charge")[1]),"aromatic ring sketch and six H form one edit with missing science preserved");
+                app.selectCreationAtom(7,false);const auto beforeDelete=app.authorUndo.size();
+                app.deletePickedAtom();settlePipeline();
+                requireExport(app.source.atoms.size()==13 && app.source.bonds.size()==12 && app.authorUndo.size()==beforeDelete+1,
+                    "deleting a terminal H recalculates its surviving parent in the same transaction");
+                app.history(false);settlePipeline();app.history(false);settlePipeline();
+                Dataset huge;huge.species={"C"};huge.atoms.resize(100001);std::vector<int> touched{0};
+                app.updateAutomaticHydrogens(huge,touched);
+                requireExport(huge.atoms.size()==100001 && huge.bonds.empty() && app.creationAutoHydrogenMessage.find("后台预览")!=std::string::npos,
+                    "large automatic edits defer chemistry to the explicit background preview");
+                app.creationAutoHydrogens=false;
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
                     atom.x+=2; data.atoms.push_back(atom);

@@ -400,7 +400,10 @@ inline void applyRing(Dataset &data,const RingEdit &edit) {
     for (auto bond:edit.bonds) data.bonds.push_back(bond);
     for (auto index:edit.aromaticUpdates) data.bonds[size_t(index)].order=4;
     if (data.particleColors.size()==old && !data.particleColors.empty()) data.particleColors.resize(data.atoms.size(),{-1,-1,-1});
-    for (auto &[name,values]:data.scalarProperties) { (void)name; if (values.size()==old) values.resize(data.atoms.size(),NAN); }
+    for (auto &[name,values]:data.scalarProperties) {
+        if(values.size()==old)values.resize(data.atoms.size(),name=="AtomX.FormalCharge" || name=="FormalCharge" ||
+            name=="AtomX.Hybridization" || name=="AtomX.MotionGroup"?0:NAN);
+    }
     for (auto &[name,values]:data.vectorProperties) { (void)name; if (values.size()==old) values.resize(data.atoms.size(),{NAN,NAN,NAN}); }
     data.sourceCount=data.atoms.size(); data.bounds();
 }

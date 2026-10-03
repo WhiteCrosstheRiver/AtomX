@@ -54,7 +54,7 @@ int main() {
             view.display.setLabels(2,{1},{creation::LabelKind::Custom,"测试原子\n换行"},false);
             view.display.defaultPreset=3; view.display.presets[1]=4; view.display.ballRadius=.55f; view.display.cpkScale=.8f;
             view.display.monitors={{2,{0,1,-1,-1}}}; view.display.activeMonitor=0; view.display.monitorsVisible=false;
-            view.selection={1}; view.order=3; view.continuous=false; view.ringSize=5;
+            view.selection={1}; view.order=3; view.continuous=false; view.ringSize=5; view.autoHydrogens=true;
             const auto nativePath=dir/"model.atomx";
             io::write(nativePath,io::Format::AtomX,native,nativeOptions);
             auto decoded=document::read(nativePath);
@@ -62,7 +62,7 @@ int main() {
                     decoded.data.atoms[1].x==native.atoms[1].x && decoded.data.comment==native.comment,
                     "native document preserves explicit bond orders, images, cell and binary-safe strings");
             require(decoded.view.display==view.display && decoded.view.selection==view.selection &&
-                    decoded.view.camera==view.camera && decoded.view.title==view.title && !decoded.view.continuous && decoded.view.ringSize==5,
+                    decoded.view.camera==view.camera && decoded.view.title==view.title && !decoded.view.continuous && decoded.view.ringSize==5 && decoded.view.autoHydrogens,
                     "native document preserves UTF-8 labels, visibility, selection and camera");
             require(decoded.data.tables[0].name==native.tables[0].name &&
                     decoded.data.scalarProperties.at("Energy")==native.scalarProperties.at("Energy") &&
@@ -83,11 +83,17 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=8; rejectBytes(version);
+            auto version=bytes; version[8]=9; rejectBytes(version);
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
+            auto invalidAuto=bytes; invalidAuto[invalidAuto.size()-5]=2; rejectBytes(invalidAuto);
+            auto version7=bytes; version7[8]=7; version7.erase(version7.size()-5,1);
+            const auto version7Path=dir/"v7.atomx";
+            { std::ofstream out(version7Path,std::ios::binary); out.write(version7.data(),std::streamsize(version7.size())); }
+            require(!document::read(version7Path).view.autoHydrogens && document::read(version7Path).view.display==view.display,
+                "old documents default automatic chemistry to off");
             const size_t labelBytes=20+16*view.display.labels.size();
             const size_t colorBytes=44+view.display.defaultColor.property.size()+8;
-            auto version6=bytes; version6[8]=6; version6.erase(version6.size()-4-colorBytes,colorBytes);
+            auto version6=version7; version6[8]=6; version6.erase(version6.size()-4-colorBytes,colorBytes);
             const auto version6Path=dir/"v6.atomx";
             { std::ofstream out(version6Path,std::ios::binary); out.write(version6.data(),std::streamsize(version6.size())); }
             require(document::read(version6Path).view.display==view.display,"v6 labels remain compatible with source colors");
@@ -148,7 +154,7 @@ int main() {
             require(compositeRead.view.display==composite && creation::labelText(compositeRead.data,0,compositeRead.view.display.labelAt(0)).find("Energy = -2.5")!=std::string::npos,
                 "v6 restores composite property names, order, prefix, precision and sparse selected overrides");
             std::ifstream compositeIn(compositePath,std::ios::binary); std::string compositeBytes((std::istreambuf_iterator<char>(compositeIn)),{});
-            compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
+            compositeBytes.erase(compositeBytes.size()-5,1); compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
             auto badField=compositeBytes; badField[badField.size()-4-9]=char(255); rejectBytes(badField);
             auto badPrecision=compositeBytes; badPrecision[badPrecision.size()-4-21]=0; rejectBytes(badPrecision);
             creation::ColorRule color; color.kind=creation::ColorKind::Property; color.property="Energy";color.low=-4;color.high=2;color.gradient=8;color.reverse=true;
@@ -157,7 +163,7 @@ int main() {
             io::write(compositePath,io::Format::AtomX,native,compositeOptions);
             require(document::read(compositePath).view.display==composite,"v7 restores global color range and sparse custom overrides");
             std::ifstream colorIn(compositePath,std::ios::binary); std::string colorData((std::istreambuf_iterator<char>(colorIn)),{});
-            auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);
+            colorData.erase(colorData.size()-5,1);colorData[8]=7;auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }
             require(rejected && document::read(nativePath).data.bonds==native.bonds,

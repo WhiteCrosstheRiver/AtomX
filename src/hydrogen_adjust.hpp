@@ -67,6 +67,28 @@ inline void validateRows(const Dataset &d) {
     for(const auto &[name,rows]:d.vectorProperties){(void)name;if(rows.size()!=d.atoms.size())throw std::invalid_argument("向量属性行数不一致");}
     if(!d.particleColors.empty() && d.particleColors.size()!=d.atoms.size())throw std::invalid_argument("原子颜色行数不一致");
 }
+// Newly sketched atoms have missing measured science, neutral formal charge and
+// automatic hybridization. Existing values are never rewritten here.
+inline void extendRows(Dataset &d,size_t oldCount) {
+    for(auto &[name,rows]:d.scalarProperties) {
+        if(rows.size()!=oldCount)throw std::invalid_argument("标量属性行数不一致");
+        rows.resize(d.atoms.size(),name=="AtomX.FormalCharge" || name=="FormalCharge" ||
+            name=="AtomX.Hybridization" || name=="AtomX.MotionGroup"?0:NAN);
+    }
+    for(auto &[name,rows]:d.vectorProperties) {
+        (void)name;if(rows.size()!=oldCount)throw std::invalid_argument("向量属性行数不一致");
+        rows.resize(d.atoms.size(),{NAN,NAN,NAN});
+    }
+    if(!d.particleColors.empty()) {
+        if(d.particleColors.size()!=oldCount)throw std::invalid_argument("原子颜色行数不一致");
+        d.particleColors.resize(d.atoms.size(),{-1,-1,-1});
+    }
+}
+inline int remapIndex(int index,const std::vector<int> &removed) {
+    if(index<0)return -1;
+    const auto it=std::lower_bound(removed.begin(),removed.end(),index);
+    return it!=removed.end() && *it==index?-1:index-int(it-removed.begin());
+}
 inline int valence(int z,int charge) {
     switch(z) {
     case 5: return charge==0?3:charge==-1?4:-1;

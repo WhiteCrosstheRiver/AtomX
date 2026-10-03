@@ -851,6 +851,7 @@ struct App {
         bool creationMode = false;
         bool creationSketch = false;
         bool sketchContinuous = true;
+        bool autoHydrogens = false;
         int sketchOrder = 1;
         int ringSize = 6;
         std::string fragmentKey="builtin/methyl";
@@ -881,6 +882,8 @@ struct App {
     bool creationMode = false;
     bool creationSketch = false;
     bool creationSketchContinuous = true, creationSketchPreviewValid = false, creationSketchDoubleClick = false;
+    bool creationAutoHydrogens=false;
+    std::string creationAutoHydrogenMessage;
     int creationSketchOrder = 1, creationSketchAnchor = -1, creationSketchStartHit = -1;
     int creationSketchLastPlaced = -1;
     Vec3 creationSketchPreview{};
@@ -1574,6 +1577,7 @@ struct App {
         tab.creationMode = creationMode;
         tab.creationSketch = creationSketch;
         tab.sketchContinuous = creationSketchContinuous; tab.sketchOrder = creationSketchOrder;
+        tab.autoHydrogens=creationAutoHydrogens;
         tab.ringSize=creationRingSize;
         tab.fragmentKey=creationFragmentKey; tab.fragmentConnector=creationFragmentConnector;
         tab.creationTool = creationTool;
@@ -1616,6 +1620,7 @@ struct App {
         creationMode = tab.creationMode;
         creationSketch = tab.creationSketch;
         creationSketchContinuous=tab.sketchContinuous; creationSketchOrder=tab.sketchOrder;
+        creationAutoHydrogens=tab.autoHydrogens; creationAutoHydrogenMessage.clear();
         creationRingSize=tab.ringSize; creationRingPreviewValid=false;
         creationFragmentKey=tab.fragmentKey; creationFragmentConnector=tab.fragmentConnector;
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion(); showFragmentBrowser=false;
@@ -1931,6 +1936,7 @@ struct App {
         }
         geometryPanelMonitor=-1; geometryPending.clear();
         rememberStructure(message);
+        creationAutoHydrogenMessage.clear();
         creationRingPreviewValid=false;
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion();
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
@@ -1947,6 +1953,44 @@ struct App {
         syncAppearance(source.species);
         update();
         status = message;
+        if(!creationAutoHydrogenMessage.empty())status+=" · "+creationAutoHydrogenMessage;
+    }
+    // Run only at a committed chemical edit, never during hover or dragging.
+    // Hydrogen compaction also remaps the touched atoms and UI indices.
+    void updateAutomaticHydrogens(Dataset &data,std::vector<int> &affected) {
+        if(!creationMode || !creationAutoHydrogens || affected.empty())return;
+        if(data.atoms.size()>100000 || data.bonds.size()>interactiveBondBudget) {
+            creationAutoHydrogenMessage="自动氢未执行：大体系请使用 H+ 后台预览"; return;
+        }
+        try {
+            creationDisplay.normalize(data.atoms.size());
+            hydrogens::Options options; options.all=false;options.selection=affected;
+            auto hidden=creationDisplay.hidden;
+            for(size_t i=0;i<data.atoms.size();++i) {
+                const auto type=data.atoms[i].type;
+                if(!particles || (type<gpu.styles.size() && gpu.styles[type].visual[2]<=0)) {
+                    if(hidden.empty())hidden.resize(data.atoms.size());hidden[i]=1;
+                }
+            }
+            const auto plan=hydrogens::prepare(data,options,hidden);
+            if(plan.changes()) {
+                hydrogens::apply(data,plan);
+                if(!plan.removed.empty())creationDisplay.eraseAtoms(plan.atomCount,plan.removed);
+                auto remap=[&](std::vector<int> &indices) {
+                    for(auto &i:indices)i=hydrogens::remapIndex(i,plan.removed);
+                    indices.erase(std::remove(indices.begin(),indices.end(),-1),indices.end());
+                };
+                remap(affected);remap(creationSelection);
+                for(int *index:{&creationPick,&creationMeasure,&creationAngle,&creationDihedral})
+                    *index=hydrogens::remapIndex(*index,plan.removed);
+                creationAutoHydrogenMessage="自动氢：新增 "+std::to_string(plan.added.size())+" / 删除 "+std::to_string(plan.removed.size());
+            }
+            const size_t skipped=plan.unsupported+plan.ambiguous+plan.invalid+plan.periodic+plan.hidden;
+            if(skipped) {
+                if(!creationAutoHydrogenMessage.empty())creationAutoHydrogenMessage+=" · ";
+                creationAutoHydrogenMessage+="跳过 "+std::to_string(skipped)+" 个不可自动调整的位点";
+            }
+        } catch(const std::exception &e) { creationAutoHydrogenMessage=std::string("自动氢未执行：")+e.what(); }
     }
     void deletePickedAtom() {
         std::vector<int> selected=creationSelection;
@@ -1961,8 +2005,18 @@ struct App {
         std::sort(selected.begin(),selected.end());
         selected.erase(std::unique(selected.begin(),selected.end()),selected.end());
         editStructure("删除 " + std::to_string(selected.size()) + " 个原子", [&](Dataset &data) {
+            std::vector<int> affected;
+            if(creationAutoHydrogens && data.atoms.size()<=100000 && data.bonds.size()<=interactiveBondBudget) {
+                std::vector<uint8_t> removed(data.atoms.size());for(int i:selected)removed[size_t(i)]=1;
+                for(const auto &b:data.bonds)if(b.a<removed.size() && b.b<removed.size()) {
+                    if(removed[b.a] && !removed[b.b])affected.push_back(hydrogens::remapIndex(int(b.b),selected));
+                    if(removed[b.b] && !removed[b.a])affected.push_back(hydrogens::remapIndex(int(b.a),selected));
+                }
+            }
             creationDisplay.eraseAtoms(data.atoms.size(),selected);
             authoring::eraseAtoms(data,selected);
+            creationSelection.clear();creationPick=creationMeasure=creationAngle=creationDihedral=-1;
+            updateAutomaticHydrogens(data,affected);
         });
         creationSelection.clear();
         creationPick = creationMeasure = creationAngle = creationDihedral = -1;
@@ -1979,18 +2033,24 @@ struct App {
             const auto type=authoring::speciesIndex(data,symbol);
             for (int index:selected)
                 if (index>=0&&size_t(index)<data.atoms.size()) data.atoms[size_t(index)].type=type;
+            updateAutomaticHydrogens(data,selected);
         });
     }
     void addAtomAt(Vec3 position) {
+        if(documentsBusy() || !hydrogens::finite(position))return;
+        try {hydrogens::validateRows(source);} catch(const std::exception &e){status=e.what();return;}
         std::string symbol = creationElement[0] ? creationElement : "C";
         editStructure("Added " + symbol, [&](Dataset &data) {
+            const size_t old=data.atoms.size();
             uint32_t type = authoring::speciesIndex(data, symbol);
             data.atoms.push_back({position.x, position.y, position.z, type});
+            hydrogens::extendRows(data,old);
             creationPick = int(data.atoms.size() - 1);
             creationSelection={creationPick};
+            std::vector<int> affected{creationPick};updateAutomaticHydrogens(data,affected);
         });
     }
-    bool editCreationBond(int first,int last,int order) {
+    bool editCreationBond(int first,int last,int order,int *remappedLast=nullptr) {
         if (!creationMode || documentsBusy() || order<0 || order>4 || first<0 || last<0 || first==last ||
             size_t(first)>=source.atoms.size() || size_t(last)>=source.atoms.size()) return false;
         const int existing=authoring::directBondIndex(source,first,last);
@@ -2006,6 +2066,8 @@ struct App {
         editStructure(order?"设置键级 "+std::to_string(order):"断开键",[&](Dataset &data) {
             authoring::setDirectBond(data,first,last,order);
             if (order) data.bondStyle.visible=true;
+            std::vector<int> affected{first,last};updateAutomaticHydrogens(data,affected);
+            if(remappedLast)*remappedLast=affected.size()==2?affected.back():-1;
         });
         return true;
     }
@@ -2017,7 +2079,8 @@ struct App {
             creationSketchLastPlaced=-1;
             if (replace) { selectCreationAtom(hit,false); replacePickedElement(); return; }
             const int anchor=creationSketchAnchor;
-            if (anchor>=0 && anchor!=hit && !isolated) editCreationBond(anchor,hit,creationSketchOrder);
+            if (anchor>=0 && anchor!=hit && !isolated) editCreationBond(anchor,hit,creationSketchOrder,&hit);
+            if(hit<0){creationSketchAnchor=-1;return;}
             selectCreationAtom(hit,false);
             creationSketchAnchor=finish || (anchor>=0 && !creationSketchContinuous) || isolated?-1:hit;
             creationSketchPreviewValid=false;
@@ -2033,6 +2096,7 @@ struct App {
             if (authoring::length({at.x-a.x,at.y-a.y,at.z-a.z})<1e-6) return;
         }
         int added=-1;
+        try {hydrogens::validateRows(source);} catch(const std::exception &e){status=e.what();return;}
         editStructure(anchor>=0?"绘制 "+symbol+" 并连键":"绘制 "+symbol,[&](Dataset &data) {
             const uint32_t type=authoring::speciesIndex(data,symbol);
             added=int(data.atoms.size());
@@ -2040,18 +2104,13 @@ struct App {
             // New geometry has no measured per-particle properties yet.
             // Keep existing values; mark the new row as missing instead of
             // invalidating every old particle's property arrays.
-            if (!data.particleColors.empty() && data.particleColors.size()==size_t(added))
-                data.particleColors.push_back({-1,-1,-1});
-            for (auto &[name,values]:data.scalarProperties) {
-                (void)name; if (values.size()==size_t(added)) values.push_back(NAN);
-            }
-            for (auto &[name,values]:data.vectorProperties) {
-                (void)name; if (values.size()==size_t(added)) values.push_back({NAN,NAN,NAN});
-            }
+            hydrogens::extendRows(data,size_t(added));
             if (anchor>=0) {
                 authoring::setDirectBond(data,anchor,added,creationSketchOrder);
                 data.bondStyle.visible=true;
             }
+            std::vector<int> affected{anchor,added};updateAutomaticHydrogens(data,affected);
+            added=affected.back();
         });
         selectCreationAtom(added,false);
         creationSketchLastPlaced=added;
@@ -2060,12 +2119,15 @@ struct App {
     void commitCreationRing(const authoring::RingSketch &ring) {
         if (documentsBusy() || !creationMode || !sameAtomCount()) return;
         try {
+            hydrogens::validateRows(source);
             const auto edit=authoring::prepareRing(source,ring,creationDisplay.hidden);
+            std::vector<int> selected=edit.selection;
             if (!edit.changed()) { status="环已存在"; return; }
             editStructure(std::string(ring.aromatic?"绘制芳香环 · ":"绘制碳环 · ")+std::to_string(ring.size),[&](Dataset &data) {
                 authoring::applyRing(data,edit); data.bondStyle.visible=true;
+                updateAutomaticHydrogens(data,selected);
             });
-            creationSelection=edit.selection; creationPick=creationSelection.back();
+            creationSelection=std::move(selected); creationPick=creationSelection.empty()?-1:creationSelection.back();
         } catch (const std::exception &e) { status=e.what(); }
     }
     const fragments::Template *currentFragment() const {
@@ -2442,6 +2504,7 @@ struct App {
     }
     void history(bool forward) {
         if(creationColorBusy || hydrogenBusy) return;
+        creationAutoHydrogenMessage.clear();
         hydrogenPlan.reset();
         chooseCreationTool(creationTool);
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
@@ -2878,6 +2941,7 @@ struct App {
             v.ringSize=creationRingSize;
             v.fragmentKey=creationFragmentKey; v.fragmentConnector=creationFragmentConnector;
             v.continuous=creationSketchContinuous; v.propertyPage=creationPropertyPage;
+            v.autoHydrogens=creationAutoHydrogens;
             v.propertiesOpen=creationPropertiesOpen;
         }
         for (size_t i=0;i<result.data.species.size() && i<gpu.styles.size();++i) {
@@ -2901,6 +2965,7 @@ struct App {
         creationPick=creationSelection.empty()?-1:creationSelection.back();
         creationTool=CreationTool(v.tool); creationSketch=creationTool==CreationTool::Sketch;
         creationSketchOrder=v.order; creationSketchContinuous=v.continuous;
+        creationAutoHydrogens=v.autoHydrogens; creationAutoHydrogenMessage.clear();
         creationRingSize=v.ringSize; creationRingPreviewValid=false;
         creationFragmentKey=v.fragmentKey; creationFragmentConnector=v.fragmentConnector;
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion(); showFragmentBrowser=false;
@@ -3464,6 +3529,10 @@ struct App {
             line(9,7,9,4);line(9,4,15,4);line(15,4,15,7);line(10,11,10,17);line(14,11,14,17);
         } else if (name=="hydrogen") {
             draw->AddText(point(3,3),color,"H+");
+        } else if (name=="auto-hydrogen") {
+            line(5,6,5,17);line(11,6,11,17);line(5,11,11,11);
+            line(15,4,20,7);line(20,7,20,15);line(20,15,16,19);line(16,19,12,19);
+            line(16,15,16,19);line(16,19,20,19);
         } else if (name=="clean") {
             line(12,3,14,9);line(14,9,20,11);line(20,11,14,13);
             line(14,13,12,19);line(12,19,10,13);line(10,13,4,11);line(4,11,10,9);line(10,9,12,3);
@@ -3613,6 +3682,7 @@ struct App {
             if (ImGui::MenuItem("替换元素")) replacePickedElement();
             if (ImGui::MenuItem("删除 / 空位")) deletePickedAtom();
             if (ImGui::MenuItem("调整氢原子…")) addHydrogensCommand();
+            ImGui::MenuItem("自动更新氢",nullptr,&creationAutoHydrogens);
             if (ImGui::MenuItem("几何优化")) cleanGeometryCommand();
         });
         menu("构建", "##create-build", [&] {
@@ -3690,6 +3760,7 @@ struct App {
         }); divider();
         icon("delete",0xE74D,"X","Delete selected atom",red,false,[&]{deletePickedAtom();});
         icon("hydrogen",0xE8FA,"H+","调整氢原子 / Adjust Hydrogen",violet,false,[&]{addHydrogensCommand();});
+        icon("auto-hydrogen",0,"H","自动更新氢 · 绘制 / 换元素 / 改键级 / 接环",violet,creationAutoHydrogens,[&]{creationAutoHydrogens=!creationAutoHydrogens;});
         icon("clean",0xE734,"*","Clean geometry",violet,false,[&]{cleanGeometryCommand();}); divider();
         icon("distance",0xE8A0,"D","测量 / 修改距离",gold,creationTool==CreationTool::Distance,[&]{chooseCreationTool(CreationTool::Distance);});
         icon("angle",0xE8B1,"A","测量 / 修改角度",gold,creationTool==CreationTool::Angle,[&]{chooseCreationTool(CreationTool::Angle);});
@@ -7843,6 +7914,9 @@ struct App {
 
         fixed("Creation selection", w - rightW, y, rightW, bodyH);
         geometryPanel();
+        ImGui::Checkbox("自动更新氢",&creationAutoHydrogens);recordUiTestItem("creation.auto-hydrogen");
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("提交绘制、换元素、改键级、接环或删除时调整相邻位点；开关本身不改体系。\n默认关闭；大体系可用 H+ 后台预览。");
+        if(!creationAutoHydrogenMessage.empty())ImGui::TextWrapped("%s",creationAutoHydrogenMessage.c_str());
         if (creationTool==CreationTool::Fragment) {
             ImGui::SeparatorText("放置片段");
             if (const auto *t=currentFragment()) ImGui::TextWrapped("%s",t->name.c_str());
@@ -7881,7 +7955,7 @@ struct App {
             ImGui::TextDisabled("空白处放置 · 原子或键上接环");
             ImGui::TextDisabled("按住拖动调整朝向 · 松开提交");
             ImGui::TextDisabled("Alt 点击芳香环 · Esc 取消");
-            ImGui::TextDisabled("碳环不自动加氢");
+            ImGui::TextDisabled(creationAutoHydrogens?"自动氢：开启":"自动氢：关闭");
             ImGui::Separator();
         }
         if (creationTool==CreationTool::Sketch) {
