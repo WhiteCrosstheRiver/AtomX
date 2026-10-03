@@ -69,6 +69,13 @@ struct Display {
     uint8_t defaultPreset=0; // 0 original, 1 line, 2 stick, 3 ball/stick, 4 CPK.
     std::unordered_map<int,uint8_t> presets;
     float ballRadius=.4f,stickRadius=.2f,cpkScale=.7f,lineWidth=1.6f;
+    float bondRadius(int order,uint8_t preset,float original) const {
+        float radius=preset==1?0:preset>1?stickRadius:original;
+        const int lanes=order==4?2:std::clamp(order,1,3);
+        if(lanes>1 && (preset==2 || preset==3))
+            radius=std::min(radius,.95f*(preset==3?ballRadius:stickRadius)/(1+1.5f*(lanes-1)));
+        return radius;
+    }
     bool sameGpuAppearance(const Display &other) const {
         return defaultColor==other.defaultColor && colors==other.colors && hidden==other.hidden && defaultPreset==other.defaultPreset && presets==other.presets &&
             ballRadius==other.ballRadius && stickRadius==other.stickRadius && cpkScale==other.cpkScale && lineWidth==other.lineWidth;

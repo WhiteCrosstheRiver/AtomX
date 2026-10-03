@@ -98,6 +98,18 @@ struct BondLabels {
         }
         normalize(d);
     }
+    void setBonds(const Dataset &d,const std::vector<int> &rows,const BondLabel &rule,bool all) {
+        if(!validBondLabel(rule))throw std::invalid_argument("键标签规则无效");
+        if(all) {set(d,{},rule,true);return;}
+        auto next=labels;
+        for(int row:rows) {
+            if(row<0 || size_t(row)>=d.bonds.size())throw std::invalid_argument("键选择已失效");
+            const auto key=bondKey(d.bonds[size_t(row)]);
+            if(rule==defaultLabel)next.erase(key);else next[key]=rule;
+            if(next.size()>2000)throw std::runtime_error("局部键标签超过 2000 条，请缩小选择或应用到整个体系");
+        }
+        labels=std::move(next);normalize(d);
+    }
     void eraseAtoms(const std::vector<int> &remap) {
         std::map<BondKey,BondLabel> next;
         for(const auto &[k,l]:labels) if(k.a<remap.size() && k.b<remap.size() && remap[k.a]>=0 && remap[k.b]>=0) {

@@ -423,6 +423,32 @@ int main(int argc, char **argv) {
                 if (orderImages.size()!=4)
                     throw std::runtime_error("Single/double/triple/aromatic bonds must produce distinct GPU strand images");
             }
+            atomx::creation::Display attached;attached.defaultPreset=3;attached.ballRadius=.32f;attached.stickRadius=.2f;
+            front.fitSelected=true;front.fitLo={-5,-3,-3};front.fitHi={5,3,3};
+            auto verticalBounds=[&] {
+                D3D11_TEXTURE2D_DESC desc{};t.texture->GetDesc(&desc);desc.BindFlags=0;desc.MiscFlags=0;
+                desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                ComPtr<ID3D11Texture2D> copy;check(renderer.device->CreateTexture2D(&desc,nullptr,&copy),"Attached bond readback");
+                renderer.context->CopyResource(copy.Get(),t.texture.Get());D3D11_MAPPED_SUBRESOURCE map{};
+                check(renderer.context->Map(copy.Get(),0,D3D11_MAP_READ,0,&map),"Attached bond pixels");
+                int lo=int(desc.Height),hi=-1;
+                for(UINT y=0;y<desc.Height;++y)for(UINT x=0;x<desc.Width;++x) {
+                    const auto *p=static_cast<const unsigned char *>(map.pData)+y*map.RowPitch+x*4;
+                    if(std::max({p[0],p[1],p[2]})>8){lo=std::min(lo,int(y));hi=std::max(hi,int(y));}
+                }
+                renderer.context->Unmap(copy.Get(),0);return std::pair{lo,hi};
+            };
+            ordered.bondStyle.visible=false;renderer.upload(ordered,{},{},{},&attached);
+            renderer.draw(t,ordered,front,.3f,0,0,0,0,0,1,false,false,false,bg,true,false,.43f,&attached);
+            const auto sphereBounds=verticalBounds();ordered.bondStyle.visible=true;
+            for(int order:{2,3,4}) {
+                ordered.bonds[0].order=uint8_t(order);renderer.upload(ordered,{},{},{},&attached);
+                renderer.draw(t,ordered,front,.3f,0,0,0,0,0,1,false,false,false,bg,true,false,.43f,&attached);
+                const auto bounds=verticalBounds();
+                if(bounds.first<sphereBounds.first-2 || bounds.second>sphereBounds.second+2)
+                    throw std::runtime_error("Multiple bond strands must stay within the endpoint sphere envelope at default stick radius");
+                renderer.png(t,"build/shape-validation/attached-bond-"+std::to_string(order)+".png");
+            }
         }
         {
             atomx::Dataset styled;

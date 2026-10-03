@@ -1,6 +1,7 @@
 #include "../src/analysis.hpp"
 #include "../src/authoring.hpp"
 #include "../src/creation_display.hpp"
+#include "../src/creation_bonds.hpp"
 #include "../src/elements.hpp"
 #include <iostream>
 using namespace atomx;
@@ -3101,6 +3102,22 @@ int main() {
             all.fields={creation::BondField::Order,creation::BondField::Order};require(!creation::validBondLabel(all),"duplicate bond fields rejected");
             creation::Display display,changed;changed.bondLabels.defaultLabel=length;
             require(display!=changed && display.sameGpuAppearance(changed),"bond labels participate in display history without GPU appearance changes");
+        }
+        {
+            Dataset d;d.species={"C"};d.atoms={{1,0,0,0},{4,0,0,0},{7,0,0,0}};
+            d.cell={10,0,0,0,10,0,0,0,10};d.pbc={true,true,true};
+            d.bonds={{0,1,{},1},{0,1,{1,0,0},2},{1,2,{},1}};
+            d.scalarProperties["Charge"]={.1,.2,.3};const auto atoms=d.atoms;const auto science=d.scalarProperties;
+            creation::BondLabels labels;creation::BondLabel length{"selected image",{creation::BondField::Length},4};
+            labels.setBonds(d,{1},length,false);
+            require(labels.at(0).empty() && labels.at(1).text=="selected image" && labels.at(2).empty(),"explicit selection labels only that periodic image, not all edges sharing endpoints");
+            const auto affected=creation::editBonds(d,{1,1,2},3);
+            require(d.bonds[0].order==1 && d.bonds[1].order==3 && d.bonds[1].image[0]==1 && d.bonds[2].order==3 && affected==std::vector<int>({0,1,2}),"batch bond edit preserves identity/images and deduplicates endpoints");
+            labels.normalize(d);require(labels.at(1).text=="selected image","changing order retains the selected image label");
+            creation::editBonds(d,{1},0);labels.normalize(d);
+            require(d.bonds.size()==2 && d.bonds[0].image==std::array<int32_t,3>{} && d.scalarProperties==science && d.atoms[0].x==atoms[0].x && labels.labels.empty(),"breaking the periodic edge leaves the direct edge, atoms and scientific properties intact");
+            const auto before=d.bonds;bool rejected=false;try {creation::editBonds(d,{0,99},2);}catch(...){rejected=true;}
+            require(rejected && d.bonds==before,"invalid batch bond rows reject before mutation");
         }
         testLayerBuilder();
         std::filesystem::remove(p); std::filesystem::remove(poscar); std::filesystem::remove(cif); std::filesystem::remove(lmp);

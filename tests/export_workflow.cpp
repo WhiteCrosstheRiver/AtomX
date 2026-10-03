@@ -196,7 +196,9 @@ int main() {
                         " rect="+std::to_string(item.min.x)+","+std::to_string(item.min.y)+"-"+
                         std::to_string(item.max.x)+","+std::to_string(item.max.y)+
                         " hovered="+(down!=app.uiTestItems.end()&&down->second.hovered?"true":"false")+
-                        " clicked="+(down!=app.uiTestItems.end()&&down->second.clicked?"true":"false"));
+                        " clicked="+(down!=app.uiTestItems.end()&&down->second.clicked?"true":"false")+
+                        " hovered-window="+(ImGui::GetCurrentContext()->HoveredWindow?ImGui::GetCurrentContext()->HoveredWindow->Name:"none")+
+                        " popups="+std::to_string(ImGui::GetCurrentContext()->OpenPopupStack.size()));
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
             frame();
@@ -1180,6 +1182,10 @@ int main() {
                 app.creationDisplay.defaultPreset=1;app.creationDisplay.lineWidth=8;
                 requireExport(app.creationBondHit(bounds.min,pickSize,app.cameras[3],{middle.x,middle.y+12})==0,
                     "line bond picking follows width-dependent lane spacing");
+                app.source.bonds[0].order=4;
+                requireExport(app.creationBondHit(bounds.min,pickSize,app.cameras[3],{middle.x,middle.y-12})==0 &&
+                    app.creationBondHit(bounds.min,pickSize,app.cameras[3],{middle.x,middle.y+12})==0,"aromatic picking follows both signed lane offsets");
+                app.source.bonds[0].order=2;
                 app.creationDisplay.defaultPreset=3;app.creationDisplay.presets[0]=4;
                 requireExport(app.creationBondHit(bounds.min,pickSize,app.cameras[3],insertionPoint({2,1,1}))<0,
                     "CPK endpoint's omitted half-bond is not pickable");app.creationDisplay.presets.clear();
@@ -1219,10 +1225,83 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("independent bond selection fixture",[](Dataset &data) {
+                    data={};data.species={"C"};data.atoms={{-4,0,0,0},{0,0,0,0},{4,0,0,0}};
+                    data.bonds={{0,1,{},1},{1,2,{},2}};data.scalarProperties["Charge"]={-.2,.4,-.2};
+                });settlePipeline();app.creationDisplay={};app.creationDisplay.defaultPreset=3;
+                app.creationSelection.clear();app.creationPick=-1;app.cameras[3].mode=0;app.cameras[3].roll=0;
+                app.fitCamera(3,false);app.refreshCreationDisplay();frame();
+                auto point=[&](Vec3 at) {
+                    const auto vp=app.uiTestItems.at("creation.viewport");const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};
+                    DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),app.creationProjection(app.result.data,app.cameras[3],size).combined));
+                    return ImVec2{vp.min.x+(q.x/q.w+1)*size.x*.5f,vp.min.y+(1-q.y/q.w)*size.y*.5f};
+                };
+                auto edgeClick=[&](Vec3 at) {
+                    const auto p=point(at);guiIO.AddMousePosEvent(p.x,p.y);frame();guiIO.AddMouseButtonEvent(0,true);frame();
+                    guiIO.AddMouseButtonEvent(0,false);frame();
+                };
+                const auto selectionHistory=app.authorUndo.size(),generation=app.pipelineGeneration;
+                const auto uploads=app.gpu.dataUploadRevision();
+                edgeClick({-2,0,0});
+                requireExport(app.creationBondSelection==std::vector<int>{0} && app.creationSelection.empty() && app.creationPick<0,
+                    "real Select pointer picks the bond itself without selecting endpoints");
+                guiIO.AddKeyEvent(ImGuiMod_Shift,true);frame();edgeClick({2,0,0});guiIO.AddKeyEvent(ImGuiMod_Shift,false);frame();
+                requireExport(app.creationBondSelection==std::vector<int>({0,1}),"Shift adds another independent bond");
+                guiIO.AddKeyEvent(ImGuiMod_Ctrl,true);frame();edgeClick({-2,0,0});guiIO.AddKeyEvent(ImGuiMod_Ctrl,false);frame();
+                requireExport(app.creationBondSelection==std::vector<int>{1} && app.authorUndo.size()==selectionHistory && app.pipelineGeneration==generation &&
+                    !app.pipelineBusy && app.gpu.dataUploadRevision()==uploads,"Ctrl toggles bonds without editing science/history or reuploading atom buffers");
+                const auto tab=app.captureTab();app.selectCreationAtom(0,false);app.restoreTab(tab);settlePipeline();frame();
+                requireExport(app.creationBondSelection==std::vector<int>{1} && app.creationSelection.empty(),"tab state restores independent bond selection");
+                click("creation.selected-bond-order-3");settlePipeline();frame();
+                requireExport(app.source.bonds[0].order==1 && app.source.bonds[1].order==3 && app.creationBondSelection==std::vector<int>{1} &&
+                    app.source.atoms[0].x==-4 && app.source.scalarProperties.at("Charge")[0]==-.2 && app.authorUndo.size()==selectionHistory+1,
+                    "selected-bond inspector edits only the selected edge in one history step without moving atoms/science");
+                app.requestCreationBondLabels();frame();
+                requireExport(!app.creationBondLabelAll && app.creationBondLabelCount==1 && app.creationBondLabelRows==std::vector<int>{1},"local label dialog captures actual selected bond rows");
+                strcpy_s(app.creationBondLabelText,"picked edge");frame();click("creation.bond-label-apply");frame();click("creation.bond-label-close");frame();
+                requireExport(app.creationDisplay.bondLabels.at(0).empty() && app.creationDisplay.bondLabels.at(1).text=="picked edge","direct bond selection scopes labels without selecting endpoint atoms");
+                const auto selectedPath=dir/"selected-bonds.atomx";io::ExportOptions selectedOptions;selectedOptions.documentView=app.captureDocumentView();
+                io::write(selectedPath,io::Format::AtomX,app.source,selectedOptions);const auto savedSelection=document::read(selectedPath);
+                requireExport(savedSelection.view.bondSelection==std::vector<int32_t>{1} && savedSelection.data.bonds[1].order==3 && savedSelection.view.display.bondLabels.at(1).text=="picked edge","native document roundtrips independent selection, order and identity label");
+                click("creation.selected-bond-break");settlePipeline();frame();
+                requireExport(app.source.atoms.size()==3 && app.source.bonds.size()==1 && app.source.bonds[0].a==0 && app.creationBondSelection.empty() && app.creationDisplay.bondLabels.labels.empty(),"break selected bond removes only that edge and clears stale selection/label");
+                app.history(false);settlePipeline();frame();
+                requireExport(app.source.bonds.size()==2 && app.source.bonds[1].order==3 && app.creationBondSelection.empty() && app.creationDisplay.bondLabels.at(1).text=="picked edge","undo restores topology/label without reinterpreting stale row indices");
+                app.selectCreationBond(1,false);app.selectCreationAtom(0,true);app.deletePickedAtom();settlePipeline();frame();
+                requireExport(app.source.atoms.size()==2 && app.source.bonds.empty() && app.creationBondSelection.empty(),"mixed Delete removes selected atoms and separately selected bonds in one source edit");
+                app.history(false);settlePipeline();frame();
+                app.editStructure("periodic independent bond fixture",[](Dataset &d) {
+                    d.cell={10,0,0,0,10,0,0,0,10};d.pbc={true,true,true};
+                    d.atoms={{1,5,0,0},{9,5,0,0}};d.scalarProperties["Charge"]={-.2,.4};
+                    d.bonds={{0,1,{-1,0,0},1}};d.bondStyle.visible=true;d.bondStyle.showPeriodicImages=true;
+                });settlePipeline();app.creationDisplay={};app.creationDisplay.defaultPreset=1;app.creationDisplay.normalize(2);
+                app.selectCreationAtom(-1,false);app.fitCamera(3,false);app.refreshCreationDisplay();frame();
+                const auto vp=app.uiTestItems.at("creation.viewport");const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};const auto stub=point({.5f,5,0});
+                requireExport(app.creationBondHit(vp.min,size,app.cameras[3],stub,true)==0 && app.creationBondHit(vp.min,size,app.cameras[3],stub)<0,
+                    "periodic stub is selectable while sketch insertion and geometry tools still reject periodic edges");
+                app.selectCreationBond(0,false);app.editSelectedCreationBonds(2);settlePipeline();frame();
+                requireExport(app.source.bonds.size()==1 && app.source.bonds[0].image[0]==-1 && app.source.bonds[0].order==2 && authoring::directBondIndex(app.source,0,1)<0,"selected periodic bond edit preserves image and never creates a direct bond");
+                app.creationDisplay.defaultPreset=4;
+                requireExport(app.creationBondHit(vp.min,size,app.cameras[3],stub,true)<0,"CPK-hidden bonds cannot be picked");
+                app.creationDisplay.defaultPreset=1;app.creationDisplay.hidden={1,0};
+                requireExport(app.creationBondHit(vp.min,size,app.cameras[3],stub,true)<0,"bonds with hidden endpoints cannot be picked");
+                app.creationDisplay.hidden.clear();app.selectCreationBond(0,false);
+                const auto graphBefore=app.modifierGraph;Modifier calculatedBonds{Op::CreateBonds};calculatedBonds.value=2.5f;
+                app.modifierGraph.insert(app.makeNode(calculatedBonds));
+                app.update();settlePipeline();
+                requireExport(app.error.empty(),("bond-selection modifier fixture failed: "+app.error).c_str());
+                requireExport(app.creationBondSelection.empty() && app.captureDocumentView().bondSelection.empty(),"modifier evaluation clears source bond selection before it can point at a different output edge");
+                app.modifierGraph=graphBefore;app.update();settlePipeline();
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}app.authorRedo.clear();frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("bond label fixture",[](Dataset &data) {
                     data={};data.species={"C","O"};data.atoms={{-2,0,0,0},{0,0,0,1},{2,0,0,0}};
                     data.bonds={{0,1,{},1},{1,2,{},2}};data.scalarProperties["Charge"]={-.2,.4,-.2};
                 });settlePipeline();app.creationSelection.clear();app.creationPick=-1;frame();
+                requireExport(app.result.data.atoms.size()==app.source.atoms.size() && app.result.data.species==app.source.species,
+                    "source edit after removing modifiers must evaluate the current source instead of a stale zero-prefix checkpoint");
                 click("creation.edit-bond-labels");frame();click("creation.bond-label-field-1");frame();
                 const auto labelHistory=app.authorUndo.size(),generation=app.pipelineGeneration;
                 click("creation.bond-label-apply");frame();click("creation.bond-label-close");frame();

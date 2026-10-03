@@ -98,6 +98,7 @@ class Renderer {
     ComPtr<ID3D11RasterizerState> wireRaster;
     ComPtr<ID3D11DepthStencilState> depthState;
     std::vector<Chunk> chunks;
+    uint64_t uploadRevision=0;
     std::vector<ParticleStyle> cachedStyles;
     ComPtr<ID3D11Buffer> styleBuffer;
     ComPtr<ID3D11ShaderResourceView> styleView;
@@ -129,6 +130,7 @@ class Renderer {
     bool bondsUploaded() const { return bondVertexCount != 0; }
     bool bondsOmittedForPerformance() const { return bondDisplayOmitted; }
     size_t renderedBondLaneCount() const { return bondLaneCount; }
+    uint64_t dataUploadRevision() const { return uploadRevision; }
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swap;
@@ -400,8 +402,14 @@ P pixel(V i) {
   O o; o.p=mul(float4(p,1),vp); o.normal=n; o.c=c; o.progress=progress; o.dashed=dashed; o.typeColor=typeColor; stream.Append(o);
 }
  [maxvertexcount(72)] void bondGeometry(line V input[2], inout TriangleStream<O> stream) {
- if(input[0].preset>3.5) return;
- float localRadius=input[0].preset>.5 && input[0].preset<1.5?0:input[0].preset>1.5?styleParams.x:radius;
+ float preset=floor(input[0].preset+.001);
+ if(preset>3.5) return;
+ float strands=round(frac(input[0].preset)*10);
+ float localRadius=preset>.5 && preset<1.5?0:preset>1.5?styleParams.x:radius;
+ // Keep outer strands inside endpoint spheres instead of leaving floating
+ // rods. Order is packed into the existing preset float: no larger buffer.
+ if(strands>1.5 && preset>1.5 && preset<3.5)
+  localRadius=min(localRadius,.95*(preset>2.5?styleParams.w:styleParams.x)/(1+1.5*(strands-1)));
  if(styleParams.y<.5) localRadius=0;
  float3 pa=input[0].p, pb=input[1].p;
  // A lane sentinel carries the aromatic dash flag without a larger vertex.
@@ -525,6 +533,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
     void upload(const atomx::Dataset &d, const std::vector<uint8_t> &selected,
                 const std::vector<uint8_t> &colorSelected = {},
                 const std::vector<uint8_t> &hidden = {}, const atomx::creation::Display *display=nullptr) {
+        ++uploadRevision;
         if(d.species.size()>0x04000000) throw std::runtime_error("Too many particle types for interactive display");
         presetExtent=0;
         if(display) {
@@ -581,8 +590,9 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                 const int order=bond.order==4?2:std::clamp(int(bond.order),1,3);
                 for (int lane=0;lane<order;++lane) {
                     const float offset=bond.order==4 && lane==1?4.f:float(lane)-float(order-1)*.5f;
-                    bondVertices.push_back({{p1.x,p1.y,p1.z},c,offset,float(preset)});
-                    bondVertices.push_back({{p2.x,p2.y,p2.z},c,offset,float(preset)});
+                    const float packedPreset=float(preset)+.1f*float(order);
+                    bondVertices.push_back({{p1.x,p1.y,p1.z},c,offset,packedPreset});
+                    bondVertices.push_back({{p2.x,p2.y,p2.z},c,offset,packedPreset});
                 }
             };
             // Periodic-image bonds expand into both cell-translated halves so
@@ -878,7 +888,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             bondCamera.viewport={float(t.w),float(t.h)};
             bondCamera.width=d.bondStyle.width;
             bondCamera.radius=bondLaneCount > atomx::cylinderBondBudget ? 0.f : d.bondStyle.radius;
-            bondCamera.styleParams={display?display->stickRadius:.2f,bondLaneCount<=atomx::cylinderBondBudget?1.f:0.f,display?display->lineWidth:1.6f,0};
+            bondCamera.styleParams={display?display->stickRadius:.2f,bondLaneCount<=atomx::cylinderBondBudget?1.f:0.f,display?display->lineWidth:1.6f,display?display->ballRadius:.4f};
             DirectX::XMFLOAT3 viewForward;
             DirectX::XMStoreFloat3(&viewForward,DirectX::XMVector3TransformNormal(
                 DirectX::XMVectorSet(0,0,1,0),DirectX::XMMatrixInverse(nullptr,view)));

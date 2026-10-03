@@ -6,6 +6,7 @@
 #include "hydrogen_adjust.hpp"
 #include "chemical_settings.hpp"
 #include "bond_insertion.hpp"
+#include "creation_bonds.hpp"
 #include "motion_groups.hpp"
 #include "layer_builder.hpp"
 #include "creation_display.hpp"
@@ -859,7 +860,7 @@ struct App {
         std::string fragmentKey="builtin/methyl";
         int fragmentConnector=1;
         CreationTool creationTool = CreationTool::Select;
-        std::vector<int> selection;
+        std::vector<int> selection, bondSelection;
         int picked = -1;
         int measure = -1;
         int angleAtom = -1;
@@ -920,7 +921,7 @@ struct App {
     std::future<fragments::Template> fragmentSaveJob;
     uint64_t fragmentSaveTabId=0;
     CreationTool creationTool = CreationTool::Select;
-    std::vector<int> creationSelection;
+    std::vector<int> creationSelection, creationBondSelection;
     std::vector<CreationSnapshot> creationSnapshots;
     int creationSnapshotSelected = -1, creationPropertyPage = 0;
     bool creationPropertiesOpen = true;
@@ -995,7 +996,7 @@ struct App {
     uint64_t creationBondLabelTabId=0,creationBondLabelGeneration=0;
     creation::BondLabels creationBondLabelDraft;
     creation::BondLabel creationBondLabelRule;
-    std::vector<int> creationBondLabelSelection;
+    std::vector<int> creationBondLabelSelection, creationBondLabelRows;
     size_t creationBondLabelCount=0;
     char creationBondLabelText[1025]{};
     std::string creationBondLabelMessage;
@@ -1385,6 +1386,12 @@ struct App {
             });
     }
     void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
+        // Modifier output can reorder/replace bonds even with unchanged atom
+        // count. Source-row selections must not refer to evaluated bond rows.
+        if(!mods.empty())creationBondSelection.clear();
+        // With no modifier graph there is no reusable prefix: source/history
+        // edits must not revive the input cached before an old node zero.
+        else {pipelineCheckpoint.reset();pipelineCheckpointNode=SIZE_MAX;}
         ++motionRevision;
         const size_t first = dirtyFrom == SIZE_MAX
             ? (mods.empty() ? 0 : std::min(modifierGraph.selected, mods.size() - 1))
@@ -1604,7 +1611,7 @@ struct App {
         tab.ringSize=creationRingSize;
         tab.fragmentKey=creationFragmentKey; tab.fragmentConnector=creationFragmentConnector;
         tab.creationTool = creationTool;
-        tab.selection = creationSelection;
+        tab.selection = creationSelection; tab.bondSelection=creationBondSelection;
         tab.picked = creationPick;
         tab.measure = creationMeasure;
         tab.angleAtom = creationAngle;
@@ -1650,7 +1657,7 @@ struct App {
         creationFragmentPreviewValid=false; creationFragmentMouse={-1,-1}; clearCreationFusion(); showFragmentBrowser=false;
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationTool = tab.creationTool;
-        creationSelection = tab.selection;
+        creationSelection = tab.selection; creationBondSelection=tab.bondSelection;
         creationPick = creationSelection.empty() ? tab.picked : creationSelection.back();
         creationHover = -1;
         creationLastHoverMouse={-1,-1};
@@ -1885,7 +1892,7 @@ struct App {
         creationMode = true;
         creationSketch = false;
         creationTool = CreationTool::Select;
-        creationSelection.clear();
+        creationSelection.clear(); creationBondSelection.clear();
         creationSnapshots.clear();
         saveCreationSnapshot("原始 · " + basedOn);
         status = "Creation Mode: " + title;
@@ -1946,7 +1953,7 @@ struct App {
         mods.clear();
         modifierGraph.selected = 0;
         creationPick = creationMeasure = creationAngle = creationDihedral = -1;
-        creationSelection.clear();
+        creationSelection.clear(); creationBondSelection.clear();
         syncAppearance(source.species);
         update();
         status = message;
@@ -1966,6 +1973,7 @@ struct App {
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
+        creationBondSelection.clear();
         edit(source);
         creationDisplay.normalize(source.atoms.size()); creationDisplay.bondLabels.normalize(source);
         source.sourceCount = source.atoms.size();
@@ -2022,10 +2030,12 @@ struct App {
         selected.erase(std::remove_if(selected.begin(),selected.end(),[&](int index) {
             return index<0||size_t(index)>=source.atoms.size();
         }),selected.end());
-        if (selected.empty()) {
-            status = "Pick an atom in Creation Mode first";
+        if(selected.empty()) {
+            if(!creationBondSelection.empty())editSelectedCreationBonds(0);
+            else status="请先选中原子或键";
             return;
         }
+        const auto selectedBonds=creationBondSelection;
         std::sort(selected.begin(),selected.end());
         selected.erase(std::unique(selected.begin(),selected.end()),selected.end());
         editStructure("删除 " + std::to_string(selected.size()) + " 个原子", [&](Dataset &data) {
@@ -2036,6 +2046,11 @@ struct App {
                     if(removed[b.a] && !removed[b.b])affected.push_back(hydrogens::remapIndex(int(b.b),selected));
                     if(removed[b.b] && !removed[b.a])affected.push_back(hydrogens::remapIndex(int(b.a),selected));
                 }
+            }
+            auto disconnected=creation::editBonds(data,selectedBonds,0);
+            for(int atom:disconnected) {
+                const int remapped=hydrogens::remapIndex(atom,selected);
+                if(remapped>=0)affected.push_back(remapped);
             }
             creationDisplay.eraseAtoms(data.atoms.size(),selected);
             authoring::eraseAtoms(data,selected);
@@ -2627,7 +2642,7 @@ struct App {
                 creationSnapshotSelected=-1;
                 if (authorUndo.empty()) structureEditIsLatest = false;
                 creationPick = creationMeasure = creationAngle = creationDihedral = -1;
-                creationSelection.clear();
+                creationSelection.clear(); creationBondSelection.clear();
                 syncAppearance(source.species);
                 if (previous.data) update(); else refreshCreationDisplay(visibilityChanged);
                 status = "撤销："+previous.action;
@@ -2644,7 +2659,7 @@ struct App {
                 authorRedo.pop_back();
                 creationSnapshotSelected=-1;
                 creationPick = creationMeasure = creationAngle = creationDihedral = -1;
-                creationSelection.clear();
+                creationSelection.clear(); creationBondSelection.clear();
                 syncAppearance(source.species);
                 if (next.data) update(); else refreshCreationDisplay(visibilityChanged);
                 status = "重做："+next.action;
@@ -3044,6 +3059,7 @@ struct App {
         v.title=tabs[size_t(activeTab)].title; v.basedOn=creationBasedOn;
         if (creationMode) {
             v.display=creationDisplay; v.selection.assign(creationSelection.begin(),creationSelection.end());
+            v.bondSelection.assign(creationBondSelection.begin(),creationBondSelection.end());
             v.element=creationElement; v.tool=int(creationTool); v.order=creationSketchOrder;
             v.ringSize=creationRingSize;
             v.fragmentKey=creationFragmentKey; v.fragmentConnector=creationFragmentConnector;
@@ -3070,6 +3086,7 @@ struct App {
         for (size_t i=0;i<source.species.size();++i)
             appearanceMemory[source.species[i]]=gpu.styles[i];
         creationDisplay=v.display; creationSelection.assign(v.selection.begin(),v.selection.end());
+        creationBondSelection.assign(v.bondSelection.begin(),v.bondSelection.end());
         creationPick=creationSelection.empty()?-1:creationSelection.back();
         creationTool=CreationTool(v.tool); creationSketch=creationTool==CreationTool::Sketch;
         creationSketchOrder=v.order; creationSketchContinuous=v.continuous;
@@ -4854,6 +4871,7 @@ struct App {
     }
     void selectCreationAtom(int index, bool shift, bool toggle = false) {
         if (index>=0 && !creationAtomVisible(index)) return;
+        if(!shift)creationBondSelection.clear();
         if (index < 0) { if (!shift) creationSelection.clear(); }
         else if (!shift) creationSelection = {index};
         else {
@@ -4863,7 +4881,43 @@ struct App {
         }
         creationPick = creationSelection.empty() ? -1 : creationSelection.back();
     }
+    bool creationBondVisible(int row) const {
+        if(row<0 || size_t(row)>=source.bonds.size() || !mods.empty() || !source.bondStyle.visible ||
+            source.bonds.size()>interactiveBondBudget || gpu.bondsOmittedForPerformance())return false;
+        const auto &b=source.bonds[size_t(row)];
+        return creationAtomVisible(int(b.a)) && creationAtomVisible(int(b.b)) &&
+            (b.image==std::array<int32_t,3>{} || source.bondStyle.showPeriodicImages) &&
+            (creationDisplay.presetAt(b.a)!=4 || creationDisplay.presetAt(b.b)!=4);
+    }
+    void selectCreationBond(int row,bool shift,bool toggle=false) {
+        if(!creationBondVisible(row))return;
+        if(!shift) {creationSelection.clear();creationPick=-1;creationBondSelection.clear();}
+        auto found=std::find(creationBondSelection.begin(),creationBondSelection.end(),row);
+        if(found==creationBondSelection.end())creationBondSelection.push_back(row);
+        else if(toggle)creationBondSelection.erase(found);
+    }
+    bool editSelectedCreationBonds(int order) {
+        if(!creationMode || documentsBusy() || !sameAtomCount() || creationBondSelection.empty() || order<0 || order>4)return false;
+        const auto rows=creationBondSelection;
+        std::set<creation::BondKey> keys;bool changed=false;
+        for(int row:rows) {
+            if(row<0 || size_t(row)>=source.bonds.size())return false;
+            keys.insert(creation::bondKey(source.bonds[size_t(row)]));
+            changed|=source.bonds[size_t(row)].order!=order;
+        }
+        if(!changed)return false;
+        editStructure((order?"修改选中键级 · ":"断开选中键 · ")+std::to_string(rows.size()),[&](Dataset &d) {
+            auto affected=creation::editBonds(d,rows,order);
+            updateAutomaticHydrogens(d,affected);
+        });
+        // Hydrogen compaction may remap endpoints. Keep selection only when
+        // identities are unchanged; never reinterpret old row indices.
+        if(order && !creationAutoHydrogens)for(size_t i=0;i<source.bonds.size();++i)
+            if(keys.contains(creation::bondKey(source.bonds[i])))creationBondSelection.push_back(int(i));
+        return true;
+    }
     void selectCreationFragment(int index) {
+        creationBondSelection.clear();
         creationSelection=authoring::fragment(source,index);
         creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
             [&](int atom){return !creationAtomVisible(atom);}),creationSelection.end());
@@ -4910,6 +4964,8 @@ struct App {
         creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
             [&](int index){return !creationAtomVisible(index);}),creationSelection.end());
         creationPick=creationSelection.empty()?-1:creationSelection.back();
+        creationBondSelection.erase(std::remove_if(creationBondSelection.begin(),creationBondSelection.end(),
+            [&](int row){return !creationBondVisible(row);}),creationBondSelection.end());
         creationHover=-1; creationLastHoverMouse={-1,-1};
         queueCreationLabelFont();
         if (visibilityChanged && !documentsBusy() && sameAtomCount())
@@ -4955,12 +5011,14 @@ struct App {
     void requestCreationBondLabels() {
         if(!creationMode || documentsBusy())return;
         creationBondLabelTabId=tabs[size_t(activeTab)].id;creationBondLabelGeneration=pipelineGeneration;
-        creationBondLabelSelection=creationSelection;creationBondLabelAll=creationSelection.empty();
+        creationBondLabelSelection=creationSelection;creationBondLabelRows=creationBondSelection;
+        creationBondLabelAll=creationSelection.empty() && creationBondSelection.empty();
         creationBondLabelDraft=creationDisplay.bondLabels;
         creationBondLabelRule=creationBondLabelDraft.defaultLabel;
         const std::unordered_set<int> selected(creationSelection.begin(),creationSelection.end());
-        creationBondLabelCount=0;bool first=true;
-        for(size_t i=0;!selected.empty() && i<source.bonds.size();++i) {
+        creationBondLabelCount=creationBondLabelRows.size();bool first=creationBondLabelRows.empty();
+        if(!first)creationBondLabelRule=creationBondLabelDraft.at(source,size_t(creationBondLabelRows.front()));
+        for(size_t i=0;creationBondLabelRows.empty() && !selected.empty() && i<source.bonds.size();++i) {
             const auto &b=source.bonds[i];if(selected.contains(int(b.a)) && selected.contains(int(b.b))) {
                 ++creationBondLabelCount;if(first) {creationBondLabelRule=creationBondLabelDraft.at(source,i);first=false;}
             }
@@ -4986,6 +5044,7 @@ struct App {
     }
     bool selectMotionGroup(int key,bool movement=false) {
         const auto members=motion::members(source,key); if (members.empty()) return false;
+        creationBondSelection.clear();
         creationSelection.clear();
         for (int index:members) if (creationAtomVisible(index)) creationSelection.push_back(index);
         creationPick=creationSelection.empty()?-1:creationSelection.back();
@@ -5493,71 +5552,92 @@ struct App {
         const float w=std::abs(q.w)>1e-6f?q.w:1.f;
         return {q.x/w,q.y/w,q.z/w};
     }
-    // Picking shares the renderer's lane offsets, cylinder/line fallback and
-    // per-endpoint presets. Periodic stubs are not direct editable bonds.
-    int creationBondHit(ImVec2 p,ImVec2 size,const Camera &cam,ImVec2 mouse) {
-        if (!source.bondStyle.visible || source.bonds.size()>interactiveBondBudget || gpu.bondsOmittedForPerformance()) return -1;
+    struct CreationBondHalf { Vec3 p1,p2;uint8_t preset=0; };
+    std::vector<CreationBondHalf> creationBondHalves(int row) const {
+        std::vector<CreationBondHalf> halves;
+        if(row<0 || size_t(row)>=source.bonds.size())return halves;
+        const auto &b=source.bonds[size_t(row)];
+        if(b.a>=result.data.atoms.size() || b.b>=result.data.atoms.size())return halves;
+        const auto &a=result.data.atoms[b.a],&z=result.data.atoms[b.b];
+        const auto segments=bondSegments(result.data.cell,{a.x,a.y,a.z},{z.x,z.y,z.z},b.image);
+        const bool periodic=b.image!=std::array<int32_t,3>{};
+        for(size_t i=0;i<segments.size();++i) {
+            const auto &segment=segments[i];
+            if(periodic) {
+                const auto preset=creationDisplay.presetAt(i==0?b.a:b.b);
+                if(preset!=4)halves.push_back({segment.p1,segment.p2,preset});
+            } else {
+                const auto middle=authoring::scale(authoring::add(segment.p1,segment.p2),.5);
+                const auto pa=creationDisplay.presetAt(b.a),pb=creationDisplay.presetAt(b.b);
+                if(pa!=4)halves.push_back({segment.p1,middle,pa});
+                if(pb!=4)halves.push_back({middle,segment.p2,pb});
+            }
+        }
+        return halves;
+    }
+    // Match the renderer's lane spacing, endpoint presets and translated
+    // periodic stubs. Sketch/geometry tools still request direct edges only.
+    int creationBondHit(ImVec2 p,ImVec2 size,const Camera &cam,ImVec2 mouse,bool includePeriodic=false) {
+        if(!source.bondStyle.visible || source.bonds.size()>interactiveBondBudget || gpu.bondsOmittedForPerformance())return -1;
         const auto projection=creationProjection(result.data,cam,size);
         const auto matrix=projection.combined;
         DirectX::XMFLOAT3 forward;
         DirectX::XMStoreFloat3(&forward,DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0,0,1,0),
             DirectX::XMMatrixInverse(nullptr,projection.view)));
-        auto project=[&](Vec3 a,ImVec2 &at,float &depth) {
-            DirectX::XMFLOAT4 q;
-            DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
-                DirectX::XMVectorSet(a.x,a.y,a.z,1),matrix));
-            if (q.w<=0 || q.z<=0 || q.z>=q.w) return false;
-            at={p.x+(q.x/q.w+1)*size.x*.5f,p.y+(1-q.y/q.w)*size.y*.5f};
-            depth=q.z/q.w; return true;
+        auto project=[&](Vec3 at,ImVec2 &point,float &depth) {
+            DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),matrix));
+            if(q.w<=0 || q.z<=0 || q.z>=q.w)return false;
+            point={p.x+(q.x/q.w+1)*size.x*.5f,p.y+(1-q.y/q.w)*size.y*.5f};depth=q.z/q.w;return true;
         };
-        int found=-1; float bestDepth=FLT_MAX;
-        for (size_t i=0;i<source.bonds.size();++i) {
+        int found=-1;float bestDepth=FLT_MAX;
+        for(size_t i=0;i<source.bonds.size();++i) {
             const auto &bond=source.bonds[i];
-            if (bond.image!=std::array<int32_t,3>{} || !creationAtomVisible(int(bond.a)) || !creationAtomVisible(int(bond.b))) continue;
-            const auto first=hydrogens::point(result.data,int(bond.a)),last=hydrogens::point(result.data,int(bond.b));
-            const auto middle=authoring::add(authoring::scale(first,.5),authoring::scale(last,.5));
-            const auto delta=authoring::sub(last,first);const double len=authoring::length(delta);if(len<1e-6 || !std::isfinite(len))continue;
-            // Reject distant projected bounds before testing individual lanes.
-            ImVec2 boundA,boundB;float boundDepth;
-            if(!project(first,boundA,boundDepth) || !project(last,boundB,boundDepth))continue;
-            const auto axis=authoring::scale(delta,1/len);
-            auto side=authoring::cross(axis,{forward.x,forward.y,forward.z});
-            if(authoring::length(side)<1e-5)side=authoring::cross(axis,std::abs(axis.z)<.85f?Vec3{0,0,1}:Vec3{0,1,0});
-            side=authoring::scale(side,1/authoring::length(side));
-            const float widest=std::max(source.bondStyle.width,creationDisplay.lineWidth);
-            float padding=U(6)+widest*3.5f;
-            if(gpu.renderedBondLaneCount()<=cylinderBondBudget) {
-                const float extent=4*std::max(source.bondStyle.radius,creationDisplay.stickRadius);
-                ImVec2 edge;
-                if(project(authoring::add(first,authoring::scale(side,extent)),edge,boundDepth))padding=std::max(padding,U(6)+std::hypot(edge.x-boundA.x,edge.y-boundA.y));
-                if(project(authoring::add(last,authoring::scale(side,extent)),edge,boundDepth))padding=std::max(padding,U(6)+std::hypot(edge.x-boundB.x,edge.y-boundB.y));
-            }
-            if(mouse.x<std::min(boundA.x,boundB.x)-padding || mouse.x>std::max(boundA.x,boundB.x)+padding ||
-                mouse.y<std::min(boundA.y,boundB.y)-padding || mouse.y>std::max(boundA.y,boundB.y)+padding)continue;
+            if(!creationBondVisible(int(i)) || (!includePeriodic && bond.image!=std::array<int32_t,3>{}))continue;
             const int order=bond.order==4?2:std::clamp(int(bond.order),1,3);
-            for(int half=0;half<2;++half) {
-                const auto preset=creationDisplay.presetAt(half?bond.b:bond.a);if(preset==4)continue;
-                float r=preset==1?0:preset>1?creationDisplay.stickRadius:source.bondStyle.radius;
-                if(gpu.renderedBondLaneCount()>cylinderBondBudget)r=0;
+            for(const auto &segment:creationBondHalves(int(i))) {
+                const auto delta=authoring::sub(segment.p2,segment.p1);
+                const double len=authoring::length(delta);if(len<1e-6 || !std::isfinite(len))continue;
+                const auto axis=authoring::scale(delta,1/len);
+                auto side=authoring::cross(axis,{forward.x,forward.y,forward.z});
+                if(authoring::length(side)<1e-5)side=authoring::cross(axis,std::abs(axis.z)<.85f?Vec3{0,0,1}:Vec3{0,1,0});
+                side=authoring::scale(side,1/authoring::length(side));
+                const auto preset=segment.preset;
+                float radius=creationDisplay.bondRadius(bond.order,preset,source.bondStyle.radius);
+                if(gpu.renderedBondLaneCount()>cylinderBondBudget)radius=0;
                 const float width=preset?creationDisplay.lineWidth:source.bondStyle.width;
-                const auto pa=half?middle:first,pb=half?last:middle;
+                ImVec2 boundA,boundB;float depth;
+                if(!project(segment.p1,boundA,depth) || !project(segment.p2,boundB,depth))continue;
+                float padding=U(6)+width*std::max(3.f,float(order)*1.5f);
+                if(radius>0) {
+                    const double extent=radius*(1+1.5*order);ImVec2 edge;
+                    for(const auto at:{segment.p1,segment.p2})if(project(authoring::add(at,authoring::scale(side,extent)),edge,depth)) {
+                        ImVec2 center;if(project(at,center,depth))padding=std::max(padding,U(6)+std::hypot(edge.x-center.x,edge.y-center.y));
+                    }
+                }
+                if(mouse.x<std::min(boundA.x,boundB.x)-padding || mouse.x>std::max(boundA.x,boundB.x)+padding ||
+                    mouse.y<std::min(boundA.y,boundB.y)-padding || mouse.y>std::max(boundA.y,boundB.y)+padding)continue;
                 for(int lane=-1;lane<order;++lane) {
-                    // Keep the centerline as a convenient target between lanes.
+                    // The centerline is also a convenient target between lanes.
                     const float offset=lane<0?0:bond.order==4?(lane?.5f:-.5f):float(lane)-float(order-1)*.5f;
-                    const auto shift=authoring::scale(side,offset*r*3);
-                    ImVec2 a,b;float za,zb;if(!project(authoring::add(pa,shift),a,za) || !project(authoring::add(pb,shift),b,zb))continue;
+                    const auto shift=authoring::scale(side,offset*radius*3);
+                    ImVec2 a,b;float za,zb;
+                    if(!project(authoring::add(segment.p1,shift),a,za) || !project(authoring::add(segment.p2,shift),b,zb))continue;
                     const float dx=b.x-a.x,dy=b.y-a.y,lengthSquared=dx*dx+dy*dy;if(lengthSquared<1)continue;
                     const float norm=std::sqrt(lengthSquared);
-                    if(r==0) { const float pixels=offset*std::max(width*3,4.f);a.x+=dy/norm*pixels;a.y-=dx/norm*pixels;
-                        b.x+=dy/norm*pixels;b.y-=dx/norm*pixels; }
+                    if(radius==0) {
+                        const float pixels=offset*std::max(width*3,4.f);
+                        a.x+=dy/norm*pixels;a.y-=dx/norm*pixels;b.x+=dy/norm*pixels;b.y-=dx/norm*pixels;
+                    }
                     const float t=std::clamp(((mouse.x-a.x)*dx+(mouse.y-a.y)*dy)/lengthSquared,0.f,1.f);
                     float tolerance=U(6)+width*.5f;
-                    if(r>0) {ImVec2 edge;float depth;
-                        const auto center=authoring::add(authoring::add(pa,shift),authoring::scale(authoring::sub(pb,pa),t));
-                        ImVec2 c;if(project(center,c,depth) && project(authoring::add(center,authoring::scale(side,r)),edge,depth))
-                            tolerance=U(6)+std::hypot(edge.x-c.x,edge.y-c.y);}
-                    const float distance=std::hypot(mouse.x-a.x-t*dx,mouse.y-a.y-t*dy),depth=za+(zb-za)*t;
-                    if(distance<=tolerance && depth<bestDepth) {bestDepth=depth;found=int(i);}
+                    if(radius>0) {
+                        const auto center=authoring::add(authoring::add(segment.p1,shift),authoring::scale(delta,t));
+                        ImVec2 c,edge;
+                        if(project(center,c,depth) && project(authoring::add(center,authoring::scale(side,radius)),edge,depth))
+                            tolerance=U(6)+std::hypot(edge.x-c.x,edge.y-c.y);
+                    }
+                    const float distance=std::hypot(mouse.x-a.x-t*dx,mouse.y-a.y-t*dy),z=za+(zb-za)*t;
+                    if(distance<=tolerance && z<bestDepth) {bestDepth=z;found=int(i);}
                 }
             }
         }
@@ -5709,7 +5789,11 @@ struct App {
         }
         auto captureAtoms=[&]() {
             creationDragAtoms.clear(); creationDragCenter={};
-            for (int index:creationSelection)
+            std::set<int> selected(creationSelection.begin(),creationSelection.end());
+            for(int row:creationBondSelection)if(row>=0 && size_t(row)<source.bonds.size()) {
+                selected.insert(int(source.bonds[size_t(row)].a));selected.insert(int(source.bonds[size_t(row)].b));
+            }
+            for (int index:selected)
                 if (index>=0 && size_t(index)<source.atoms.size()) {
                     const auto &a=source.atoms[size_t(index)];
                     const Vec3 at{a.x,a.y,a.z};
@@ -5795,7 +5879,13 @@ struct App {
                     selectCreationAtom(hit,false);
                 creationDrag=CreationDrag::Move;
                 captureAtoms();
-            } else if (creationTool==CreationTool::Move) creationDrag=CreationDrag::Rotate;
+            } else if (creationTool==CreationTool::Move) {
+                const int bond=creationBondHit(p,size,cam,mouse,true);
+                if(bond>=0) {
+                    if(std::find(creationBondSelection.begin(),creationBondSelection.end(),bond)==creationBondSelection.end())selectCreationBond(bond,false);
+                    creationDrag=CreationDrag::Move;captureAtoms();
+                } else creationDrag=CreationDrag::Rotate;
+            }
             else if (creationTool==CreationTool::Sketch) {
                 creationDrag=CreationDrag::Sketch;
                 creationSketchStartHit=hit;
@@ -5821,7 +5911,11 @@ struct App {
                 else selectCreationAtom(hit,io.KeyShift||io.KeyCtrl,io.KeyCtrl);
                 creationDrag=CreationDrag::None;
             }
-            else { if (!creationDragShift) selectCreationAtom(-1,false); creationDrag=CreationDrag::Box; }
+            else {
+                const int bond=creationBondHit(p,size,cam,mouse,true);
+                if(bond>=0)selectCreationBond(bond,creationDragShift,creationDragToggle);
+                else {if(!creationDragShift)selectCreationAtom(-1,false);creationDrag=CreationDrag::Box;}
+            }
         }
         if (creationDrag!=CreationDrag::None &&
             (ImGui::IsMouseDown(creationDragButton) || ImGui::IsMouseReleased(creationDragButton))) {
@@ -6009,7 +6103,7 @@ struct App {
                 const auto matrix=creationProjection(result.data,cam,size).combined;
                 const float x0=std::min(creationDragStart.x,mouse.x),x1=std::max(creationDragStart.x,mouse.x);
                 const float y0=std::min(creationDragStart.y,mouse.y),y1=std::max(creationDragStart.y,mouse.y);
-                if (!creationDragShift) creationSelection.clear();
+                if (!creationDragShift) {creationSelection.clear();creationBondSelection.clear();}
                 std::vector<uint8_t> already(result.data.atoms.size(),0);
                 for (int selected:creationSelection)
                     if (selected>=0 && size_t(selected)<already.size()) already[size_t(selected)]=1;
@@ -6028,6 +6122,24 @@ struct App {
                 for (size_t index=0;index<already.size();++index)
                     if (already[index]) creationSelection.push_back(int(index));
                 creationPick=creationSelection.empty()?-1:creationSelection.back();
+                // A bond is inside the box when both endpoints of a displayed
+                // segment are inside it; periodic stubs use rendered geometry.
+                auto inside=[&](Vec3 at) {
+                    DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),matrix));
+                    if(q.w<=0 || q.z<=0 || q.z>=q.w)return false;
+                    const float x=p.x+(q.x/q.w+1)*size.x*.5f,y=p.y+(1-q.y/q.w)*size.y*.5f;
+                    return x>=x0 && x<=x1 && y>=y0 && y<=y1;
+                };
+                std::set<int> selectedBonds(creationBondSelection.begin(),creationBondSelection.end());
+                if(source.bonds.size()<=interactiveBondBudget)for(size_t row=0;row<source.bonds.size();++row) {
+                    if(!creationBondVisible(int(row)))continue;
+                    bool contained=false;
+                    for(const auto &segment:creationBondHalves(int(row)))
+                        contained|=inside(segment.p1) && inside(segment.p2);
+                    if(!contained)continue;
+                    if(creationDragToggle && selectedBonds.contains(int(row)))selectedBonds.erase(int(row));else selectedBonds.insert(int(row));
+                }
+                creationBondSelection.assign(selectedBonds.begin(),selectedBonds.end());
             } else if (creationDrag==CreationDrag::Move && creationDragMoved && !creationDragAtoms.empty()) {
                 const auto edits=creationDragAtoms;
                 const auto delta=creationMoveDelta;
@@ -6129,6 +6241,11 @@ struct App {
                 if (creationMode && creationHover>=0 &&
                     std::find(creationSelection.begin(),creationSelection.end(),creationHover)==creationSelection.end())
                     selectCreationAtom(creationHover,false);
+                else if(creationMode && creationHover<0) {
+                    const int bond=creationBondHit(p,avail,cam,io.MousePos,true);
+                    if(bond>=0 && std::find(creationBondSelection.begin(),creationBondSelection.end(),bond)==creationBondSelection.end())
+                        selectCreationBond(bond,false);
+                }
                 ImGui::OpenPopup("viewport-structure-menu");
             }
             if (!creationMode && ImGui::IsMouseDragging(0) && viewportTool == 2) {
@@ -6367,6 +6484,25 @@ struct App {
             auto mvp=projection.combined;
             draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
             geometryOverlay(p,avail,cam,draw);
+            if(!pipelineBusy && !staleResult) {
+                const size_t count=creationBondSelection.size(),limit=std::min(count,size_t(2000));
+                for(size_t j=0;j<limit;++j) {
+                    const int row=creationBondSelection[j*(count/limit)+(j*(count%limit))/limit];
+                    if(!creationBondVisible(row))continue;
+                    for(const auto &segment:creationBondHalves(row)) {
+                        ImVec2 points[2];bool visible=true;int k=0;
+                        for(const auto at:{segment.p1,segment.p2}) {
+                            DirectX::XMFLOAT4 q;DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),mvp));
+                            visible&=q.w>0 && q.z>0 && q.z<q.w;
+                            if(q.w>0)points[k]={p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};++k;
+                        }
+                        if(visible) {
+                            draw->AddLine(points[0],points[1],IM_COL32(255,204,81,85),U(9));
+                            draw->AddLine(points[0],points[1],IM_COL32(255,204,81,255),U(2));
+                        }
+                    }
+                }
+            }
             if (creationFusionSeed && !pipelineBusy) {
                 auto screen=[&](Vec3 at,ImVec2 &point) {
                     DirectX::XMFLOAT4 q; DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
@@ -6563,9 +6699,18 @@ struct App {
                 if (ImGui::MenuItem("复位视角")) fitCamera(i,false);
                 if (ImGui::MenuItem("导出结构...")) showDataExport=true;
             } else {
-                ImGui::TextDisabled("%zu 个原子已选中",creationSelection.size());
+                ImGui::TextDisabled("%zu 原子 · %zu 键已选中",creationSelection.size(),creationBondSelection.size());
                 ImGui::Separator();
-                if (ImGui::MenuItem("删除 · 制造空位",nullptr,false,!creationSelection.empty())) deletePickedAtom();
+                if(ImGui::BeginMenu("修改选中键",!creationBondSelection.empty())) {
+                    int order=1;
+                    for(const char *caption:{"单键","双键","三键","芳香键"}) {
+                        if(ImGui::MenuItem(caption))editSelectedCreationBonds(order);
+                        ++order;
+                    }
+                    if(ImGui::MenuItem("断开选中键"))editSelectedCreationBonds(0);
+                    ImGui::EndMenu();
+                }
+                if (ImGui::MenuItem("删除选中原子 / 键",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty())) deletePickedAtom();
                 if (ImGui::MenuItem("选中同元素",nullptr,false,creationPick>=0)) {
                     const uint32_t type=source.atoms[size_t(creationPick)].type;
                     creationSelection.clear();
@@ -7608,7 +7753,7 @@ struct App {
                 tabs[size_t(activeTab)].id==creationBondLabelTabId && pipelineGeneration==creationBondLabelGeneration;
             ImGui::TextDisabled("对象：显式键 · 数值跟随当前坐标和键级");
             ImGui::Checkbox("整个体系",&creationBondLabelAll);recordUiTestItem("creation.bond-label-all");
-            ImGui::TextDisabled("局部：两端原子都在打开窗口时的选择中");
+            ImGui::TextDisabled(creationBondLabelRows.empty()?"局部：两端原子都在打开窗口时的选择中":"局部：打开窗口时直接选中的键");
             ImGui::Text("作用范围：%zu 条键",creationBondLabelAll?source.bonds.size():creationBondLabelCount);
             ImGui::SeparatorText("属性（按勾选顺序组合）");
             static constexpr const char *captions[]={"键长 Length (Å)","键级 BondOrder","端点编号","中点 MidPoint (Å)","周期像 Image"};
@@ -7635,7 +7780,8 @@ struct App {
                     auto next=creationDisplay;
                     if(style) {next.bondLabels.fontSize=creationBondLabelDraft.fontSize;next.bondLabels.color=creationBondLabelDraft.color;
                         next.bondLabels.bold=creationBondLabelDraft.bold;next.bondLabels.visible=creationBondLabelDraft.visible;next.bondLabels.budget=creationBondLabelDraft.budget;}
-                    next.bondLabels.set(source,creationBondLabelSelection,rule,all);
+                    if(creationBondLabelRows.empty())next.bondLabels.set(source,creationBondLabelSelection,rule,all);
+                    else next.bondLabels.setBonds(source,creationBondLabelRows,rule,all);
                     editCreationDisplay(std::move(next),message);creationBondLabelMessage=message;
                 } catch(const std::exception &e) {creationBondLabelMessage=e.what();}
             };
@@ -8319,14 +8465,43 @@ struct App {
         if (headingFont) ImGui::PushFont(headingFont);
         ImGui::TextUnformatted("选中");
         if (headingFont) ImGui::PopFont();
-        if (creationSelection.empty()) {
-            ImGui::TextDisabled("点击原子选择");
+        if (creationSelection.empty() && creationBondSelection.empty()) {
+            ImGui::TextDisabled("点击原子或键选择");
             ImGui::TextDisabled("Shift + 点击 多选 · 拖动空白处 框选");
             ImGui::TextDisabled("中键拖动 旋转 · 滚轮 缩放");
             ImGui::TextDisabled("右键 更多操作");
         }
         ImGui::Separator();
-        if (creationSelection.size()==2) {
+        if(!creationBondSelection.empty()) {
+            ImGui::Text("已选中 %zu 条键",creationBondSelection.size());
+            const int row=creationBondSelection.back();
+            if(row>=0 && size_t(row)<source.bonds.size()) {
+                const auto &b=source.bonds[size_t(row)];const auto vector=bondVector(source,b);
+                ImGui::Text("键 #%d · #%u — #%u",row,b.a,b.b);
+                ImGui::Text("键长 %.4f Å",std::hypot(vector[0],vector[1],vector[2]));
+                ImGui::Text("键级 %s",b.order==4?"1.5 (芳香)":std::to_string(b.order).c_str());
+                if(b.image!=std::array<int32_t,3>{})ImGui::TextDisabled("周期像 (%d, %d, %d)",b.image[0],b.image[1],b.image[2]);
+                int order=1;
+                for(const char *caption:{"单键","双键","三键","芳香"}) {
+                    if(ImGui::Button(caption,{U(56),U(28)}))editSelectedCreationBonds(order);
+                    recordUiTestItem("creation.selected-bond-order-"+std::to_string(order));
+                    if(++order<5)ImGui::SameLine();
+                }
+                if(ImGui::Button("断开选中键",{-1,U(28)}))editSelectedCreationBonds(0);
+                recordUiTestItem("creation.selected-bond-break");
+                // Bond may have been removed by the button above this frame.
+                if(creationBondSelection.size()==1 && size_t(row)<source.bonds.size() && source.bonds[size_t(row)].image==std::array<int32_t,3>{}) {
+                    if(ImGui::Button("测量 / 修改此键长...",{-1,U(28)})) {
+                        const auto edge=source.bonds[size_t(row)];
+                        addGeometryMonitor({2,{int32_t(edge.a),int32_t(edge.b),-1,-1}});
+                        chooseCreationTool(CreationTool::Distance);
+                    }
+                    recordUiTestItem("creation.selected-bond-measure");
+                }
+            }
+            ImGui::Separator();
+        }
+        if (creationSelection.size()==2 && creationBondSelection.empty()) {
             ImGui::TextDisabled("连接选中原子 / 修改键级");
             int order=0;
             for (const char *label:{"断键","单键","双键","三键","芳香"}) {
@@ -10586,8 +10761,8 @@ struct App {
             ImGui::SameLine();
             ImGui::TextDisabled("点击选择 · Shift 添加 · Ctrl 切换 · 双击片段 · 右键/中键旋转 · Alt+右键平移 · 滚轮缩放");
             ImGui::SameLine(std::max(U(900),w-U(370)));
-            ImGui::TextDisabled("%zu 原子 · 选中 %zu  单位 Å (1 Å = 0.1 nm)",
-                source.atoms.size(),creationSelection.size());
+            ImGui::TextDisabled("%zu 原子 · 选中 %zu 原子 / %zu 键 · Å",
+                source.atoms.size(),creationSelection.size(),creationBondSelection.size());
             ImGui::End();
             return;
         }
@@ -10664,6 +10839,9 @@ struct App {
         if (creationMode && !io.WantTextInput) {
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) selectCreationAtom(-1,false);
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A)) {
+                creationBondSelection.clear();
+                if(source.bonds.size()<=interactiveBondBudget)for(size_t row=0;row<source.bonds.size();++row)
+                    if(creationBondVisible(int(row)))creationBondSelection.push_back(int(row));
                 creationSelection.clear();
                 for (size_t index=0;index<source.atoms.size();++index)
                     if (creationAtomVisible(int(index))) creationSelection.push_back(int(index));

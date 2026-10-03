@@ -2,7 +2,7 @@
 #include "creation_display.hpp"
 #include <bit>
 
-// AtomX document v10 (reads v1..v9): little-endian IEEE floats; explicit field order and
+// AtomX document v11 (reads v1..v10): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -20,6 +20,7 @@ struct View {
     std::string title,basedOn,element="C";
     std::vector<Style> styles;
     std::vector<int32_t> selection;
+    std::vector<int32_t> bondSelection;
     creation::Display display;
 };
 struct Content { Dataset data; View view; };
@@ -122,6 +123,8 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
     valid(std::isfinite(v.display.fontSize) && v.display.fontSize>=1 && v.display.fontSize<=200 &&
           v.display.labelBudget>=1 && v.display.labelBudget<=2000);
     for (auto index:v.selection) valid(index>=0 && size_t(index)<d.atoms.size());
+    std::unordered_set<int32_t> selectedBonds;
+    for(auto index:v.bondSelection)valid(index>=0 && size_t(index)<d.bonds.size() && selectedBonds.insert(index).second);
     auto colorValid=[](const auto &color){return std::all_of(color.begin(),color.end(),
         [](float x){return std::isfinite(x) && x>=0 && x<=1;});};
     valid(colorValid(v.display.color) && colorValid(d.bondStyle.color) &&
@@ -156,7 +159,7 @@ inline void writeBondLabels(Writer &w,const creation::BondLabels &bl) {
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(10));
+    w.bytes(magic,8); w.value(uint32_t(11));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -213,6 +216,7 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     w.flag(view.autoHydrogens);
     writeBondLabels(w,display.bondLabels);
     w.value(view.cameraRoll);
+    w.array(view.bondSelection);
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -221,7 +225,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version<1 || version>10) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>11) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -319,6 +323,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
         bl.bold=r.flag();bl.visible=r.flag();bl.budget=r.value<int32_t>();
     }
     if(version>=10) v.cameraRoll=r.value<float>();
+    if(version>=11) v.bondSelection=r.array<int32_t>(d.bonds.size());
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size());v.display.bondLabels.normalize(d);return result;
 }

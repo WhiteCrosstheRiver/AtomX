@@ -56,6 +56,7 @@ int main() {
             view.display.defaultPreset=3; view.display.presets[1]=4; view.display.ballRadius=.55f; view.display.cpkScale=.8f;
             view.display.monitors={{2,{0,1,-1,-1}}}; view.display.activeMonitor=0; view.display.monitorsVisible=false;
             view.selection={1}; view.order=3; view.continuous=false; view.ringSize=5; view.autoHydrogens=true;
+            view.bondSelection={0};
             const auto nativePath=dir/"model.atomx";
             io::write(nativePath,io::Format::AtomX,native,nativeOptions);
             auto decoded=document::read(nativePath);
@@ -63,6 +64,7 @@ int main() {
                     decoded.data.atoms[1].x==native.atoms[1].x && decoded.data.comment==native.comment,
                     "native document preserves explicit bond orders, images, cell and binary-safe strings");
             require(decoded.view.display==view.display && decoded.view.selection==view.selection &&
+                    decoded.view.bondSelection==view.bondSelection &&
                     decoded.view.camera==view.camera && decoded.view.cameraRoll==view.cameraRoll && decoded.view.title==view.title && !decoded.view.continuous && decoded.view.ringSize==5 && decoded.view.autoHydrogens,
                     "native document preserves UTF-8 labels, visibility, selection and camera");
             require(decoded.data.tables[0].name==native.tables[0].name &&
@@ -84,15 +86,25 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=11; rejectBytes(version);
+            const size_t selectionBytes=8+view.bondSelection.size()*4;
+            auto version=bytes; version[8]=12; rejectBytes(version);
             auto badRoll=bytes; const float nanRoll=std::numeric_limits<float>::quiet_NaN();
-            std::memcpy(badRoll.data()+badRoll.size()-8,&nanRoll,4);rejectBytes(badRoll);
+            std::memcpy(badRoll.data()+badRoll.size()-8-selectionBytes,&nanRoll,4);rejectBytes(badRoll);
+            auto badSelection=bytes;const int32_t missingBond=99;
+            std::memcpy(badSelection.data()+badSelection.size()-8,&missingBond,4);rejectBytes(badSelection);
+            auto invalidSelectionOptions=nativeOptions;invalidSelectionOptions.documentView.bondSelection={0,0};
+            bool selectionRejected=false;try {io::write(nativePath,io::Format::AtomX,native,invalidSelectionOptions);}catch(...) {selectionRejected=true;}
+            require(selectionRejected && document::read(nativePath).view.bondSelection==view.bondSelection,"duplicate bond selection is rejected without overwriting the saved document");
             auto invalidRollOptions=nativeOptions;invalidRollOptions.documentView.cameraRoll=nanRoll;
             bool rollRejected=false;try {io::write(nativePath,io::Format::AtomX,native,invalidRollOptions);}catch(...) {rollRejected=true;}
             require(rollRejected && document::read(nativePath).view.cameraRoll==view.cameraRoll,"nonfinite roll is rejected without replacing a saved document");
             auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
             std::ostringstream bondBlock(std::ios::binary); document::Writer bondWriter{bondBlock}; document::writeBondLabels(bondWriter,view.display.bondLabels); const size_t bondLabelBytes=bondBlock.str().size();
-            auto version9=bytes;version9[8]=9;version9.erase(version9.size()-8,4);
+            auto version10=bytes;version10[8]=10;version10.erase(version10.size()-4-selectionBytes,selectionBytes);
+            const auto v10Path=dir/"v10.atomx";
+            {std::ofstream out(v10Path,std::ios::binary);out.write(version10.data(),std::streamsize(version10.size()));}
+            require(document::read(v10Path).view.bondSelection.empty() && document::read(v10Path).view.cameraRoll==view.cameraRoll,"v10 documents retain roll and default to no independently selected bonds");
+            auto version9=version10;version9[8]=9;version9.erase(version9.size()-8,4);
             const auto v9Path=dir/"v9.atomx";
             {std::ofstream out(v9Path,std::ios::binary);out.write(version9.data(),std::streamsize(version9.size()));}
             require(document::read(v9Path).view.cameraRoll==0 && document::read(v9Path).view.camera==view.camera,"v9 documents retain prior cameras with zero screen roll");
@@ -118,8 +130,8 @@ int main() {
             bool invalidLabels=false;try {io::write(blPath,io::Format::AtomX,native,invalidOptions);}catch(...) {invalidLabels=true;}
             require(invalidLabels && document::read(blPath).view.display.bondLabels==bl,"invalid bond settings preserve existing destination");
             std::ifstream blIn(blPath,std::ios::binary);std::string blBytes((std::istreambuf_iterator<char>(blIn)),{});blIn.close();
-            auto badBondFlag=blBytes;badBondFlag[badBondFlag.size()-13]=2;rejectBytes(badBondFlag);
-            auto badBondBudget=blBytes;for(size_t i=blBytes.size()-12;i<blBytes.size()-8;++i)badBondBudget[i]=char(-1);rejectBytes(badBondBudget);
+            auto badBondFlag=blBytes;badBondFlag[badBondFlag.size()-13-selectionBytes]=2;rejectBytes(badBondFlag);
+            auto badBondBudget=blBytes;for(size_t i=blBytes.size()-12-selectionBytes;i<blBytes.size()-8-selectionBytes;++i)badBondBudget[i]=char(-1);rejectBytes(badBondBudget);
             const auto version7Path=dir/"v7.atomx";
             { std::ofstream out(version7Path,std::ios::binary); out.write(version7.data(),std::streamsize(version7.size())); }
             require(!document::read(version7Path).view.autoHydrogens && document::read(version7Path).view.display==view.display,
