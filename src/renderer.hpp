@@ -444,13 +444,15 @@ P pixel(V i) {
  cbuffer BondCamera : register(b0) { row_major float4x4 vp; float2 viewport; float width; float radius; float4 color; float colorByType; float3 padding; };
  struct I { float3 p:POSITION; float3 c:COLOR; float lane:TEXCOORD0; };
  struct V { float3 p:POSITION; float3 c:COLOR; float lane:TEXCOORD0; };
- struct O { float4 p:SV_POSITION; float3 normal:NORMAL; float3 c:COLOR; };
+ struct O { float4 p:SV_POSITION; float3 normal:NORMAL; float3 c:COLOR; float progress:TEXCOORD0; nointerpolation float dashed:TEXCOORD1; };
  V bondVertex(I i) { V o; o.p=i.p; o.c=i.c; o.lane=i.lane; return o; }
- void emit(float3 p,float3 n,float3 c,inout TriangleStream<O> stream) {
-  O o; o.p=mul(float4(p,1),vp); o.normal=n; o.c=c; stream.Append(o);
+ void emit(float3 p,float3 n,float3 c,float progress,float dashed,inout TriangleStream<O> stream) {
+  O o; o.p=mul(float4(p,1),vp); o.normal=n; o.c=c; o.progress=progress; o.dashed=dashed; stream.Append(o);
 }
- [maxvertexcount(96)] void bondGeometry(line V input[2], inout TriangleStream<O> stream) {
+ [maxvertexcount(72)] void bondGeometry(line V input[2], inout TriangleStream<O> stream) {
  float3 pa=input[0].p, pb=input[1].p;
+ // A lane sentinel carries the aromatic dash flag without a larger vertex.
+ float dashed=input[0].lane>2?1:0, lane=dashed>.5?.5:input[0].lane;
  if (radius>0) {
   float3 delta=pb-pa; float len=length(delta); if (len<1e-6) return;
   float3 axis=delta/len;
@@ -458,28 +460,30 @@ P pixel(V i) {
   float3 sideVector=cross(axis,padding);
   if (length(sideVector)<1e-5) sideVector=cross(axis,helper);
   float3 u=normalize(sideVector), v=normalize(cross(axis,u));
-  pa+=u*input[0].lane*radius*3; pb+=u*input[0].lane*radius*3;
+  pa+=u*lane*radius*3; pb+=u*lane*radius*3;
   const float tau=6.28318530718;
    [unroll] for (int side=0;side<12;side++) {
     float a0=tau*side/12, a1=tau*(side+1)/12;
    float3 n0=cos(a0)*u+sin(a0)*v, n1=cos(a1)*u+sin(a1)*v;
    float3 p0=pa+radius*n0, p1=pa+radius*n1, q0=pb+radius*n0, q1=pb+radius*n1;
-    emit(p0,n0,input[0].c,stream); emit(q0,n0,input[0].c,stream); emit(q1,n1,input[0].c,stream); stream.RestartStrip();
-    emit(p0,n0,input[0].c,stream); emit(q1,n1,input[0].c,stream); emit(p1,n1,input[0].c,stream); stream.RestartStrip();
+    emit(p0,n0,input[0].c,0,dashed,stream); emit(q0,n0,input[0].c,1,dashed,stream); emit(q1,n1,input[0].c,1,dashed,stream); stream.RestartStrip();
+    emit(p0,n0,input[0].c,0,dashed,stream); emit(q1,n1,input[0].c,1,dashed,stream); emit(p1,n1,input[0].c,0,dashed,stream); stream.RestartStrip();
   }
  } else {
   float4 ca=mul(float4(pa,1),vp), cb=mul(float4(pb,1),vp);
   float2 delta=(cb.xy/cb.w-ca.xy/ca.w)*viewport;
   float lengthDelta=max(length(delta),1e-5); float2 perpendicular=float2(-delta.y,delta.x)/lengthDelta;
   float2 offset=perpendicular*width/viewport;
-  float2 laneOffset=perpendicular*input[0].lane*max(width*3,4)*2/viewport;
+  float2 laneOffset=perpendicular*lane*max(width*3,4)*2/viewport;
   ca.xy+=laneOffset*ca.w; cb.xy+=laneOffset*cb.w;
    O a,b; a.normal=0; b.normal=0; a.c=input[0].c; b.c=input[0].c; a.p=ca; b.p=cb;
+   a.progress=0; b.progress=1; a.dashed=dashed; b.dashed=dashed;
   a.p.xy+=offset*a.p.w; b.p.xy+=offset*b.p.w; stream.Append(a); stream.Append(b);
   a.p=ca; b.p=cb; a.p.xy-=offset*a.p.w; b.p.xy-=offset*b.p.w; stream.Append(a); stream.Append(b);
  }
 }
 float4 bondPixel(O i):SV_TARGET {
+  if (i.dashed>.5 && frac(i.progress*3)>.55) discard;
   float3 base=colorByType>.5 ? i.c : color.rgb;
   if (radius<=0) return float4(base,color.a);
  float3 n=normalize(i.normal), light=normalize(float3(-.32,.48,.82));
@@ -570,7 +574,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         bondDisplayOmitted = d.bonds.size() > atomx::interactiveBondBudget;
         bondLaneCount=0;
         if (!bondDisplayOmitted) for (const auto &bond:d.bonds) {
-            bondLaneCount+=size_t(std::clamp(int(bond.order),1,3));
+            bondLaneCount+=size_t(bond.order==4?2:std::clamp(int(bond.order),1,3));
             if (bondLaneCount>atomx::interactiveBondBudget) { bondDisplayOmitted=true; break; }
         }
         if (!bondDisplayOmitted && d.bondStyle.visible)
@@ -599,9 +603,9 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             const auto colorA = atomColor(bond.a), colorB = atomColor(bond.b);
             const auto append = [&](const atomx::Vec3 &p1, const atomx::Vec3 &p2,
                                     const DirectX::XMFLOAT3 &c) {
-                const int order=std::clamp(int(bond.order),1,3);
+                const int order=bond.order==4?2:std::clamp(int(bond.order),1,3);
                 for (int lane=0;lane<order;++lane) {
-                    const float offset=float(lane)-float(order-1)*.5f;
+                    const float offset=bond.order==4 && lane==1?4.f:float(lane)-float(order-1)*.5f;
                     bondVertices.push_back({{p1.x,p1.y,p1.z},c,offset});
                     bondVertices.push_back({{p2.x,p2.y,p2.z},c,offset});
                 }

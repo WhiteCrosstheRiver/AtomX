@@ -41,7 +41,7 @@ inline int directBondIndex(const Dataset &data,int a,int b) {
 }
 inline bool setDirectBond(Dataset &data,int a,int b,int order) {
     if (a<0 || b<0 || a==b || size_t(a)>=data.atoms.size() || size_t(b)>=data.atoms.size() ||
-        order<0 || order>3) throw std::invalid_argument("连键需要两个不同原子，键级为 1-3");
+        order<0 || order>4) throw std::invalid_argument("连键需要两个不同原子，键级为 1-3 或芳香键");
     const int existing=directBondIndex(data,a,b);
     if (!order) {
         if (existing<0) return false;
@@ -260,6 +260,148 @@ inline uint32_t speciesIndex(Dataset &data, const std::string &symbol) {
         if (data.species[i] == symbol) return uint32_t(i);
     data.species.push_back(symbol);
     return uint32_t(data.species.size() - 1);
+}
+
+// Ring sketches are small value objects: preview never copies the structure.
+// Order 4 denotes aromatic (1.5), not a quadruple bond.
+struct RingSketch {
+    int size=6, anchor=-1, bond=-1;
+    bool aromatic=false;
+    std::array<Vec3,6> points{};
+    Vec3 center{}, rotationAxis{};
+};
+inline RingSketch ringSketch(const Dataset &data,int size,Vec3 at,Vec3 right,Vec3 normal,
+                             int anchor=-1,int bond=-1,bool aromatic=false) {
+    if (size<4 || size>6 || length(normal)<1e-8 || length(right)<1e-8)
+        throw std::invalid_argument("环需要 4、5 或 6 个顶点和有效绘制平面");
+    normal=scale(normal,1/length(normal));
+    right=sub(right,scale(normal,dot(right,normal)));
+    if (length(right)<1e-8) throw std::invalid_argument("绘制平面无效");
+    right=scale(right,1/length(right));
+    RingSketch ring; ring.size=size; ring.anchor=anchor; ring.bond=bond; ring.aromatic=aromatic;
+    const double turn=2*kPi/size;
+    if (bond>=0) {
+        if (size_t(bond)>=data.bonds.size()) throw std::invalid_argument("原有键已改变");
+        const auto &b=data.bonds[size_t(bond)];
+        if (b.image!=std::array<int32_t,3>{} || b.a>=data.atoms.size() || b.b>=data.atoms.size())
+            throw std::invalid_argument("只能在直接键上接环");
+        const auto &a=data.atoms[b.a],&z=data.atoms[b.b];
+        at={a.x,a.y,a.z}; const Vec3 end{z.x,z.y,z.z};
+        const Vec3 edge=sub(end,at); const double len=length(edge);
+        if (len<1e-6 || !std::isfinite(len)) throw std::invalid_argument("原有键长无效");
+        const Vec3 direction=scale(edge,1/len);
+        Vec3 inward=cross(normal,direction);
+        if (length(inward)<1e-5) inward=sub(right,scale(direction,dot(right,direction)));
+        if (length(inward)<1e-5) inward=cross(direction,std::abs(direction.z)<.8?Vec3{0,0,1}:Vec3{0,1,0});
+        inward=scale(inward,1/length(inward));
+        normal=cross(direction,inward);
+        ring.center=add(scale(add(at,end),.5),scale(inward,len/(2*std::tan(kPi/size))));
+        ring.rotationAxis=edge;
+        for (int i=0;i<size;++i) ring.points[size_t(i)]=rotatedPoint(at,ring.center,normal,i*turn);
+        ring.points[0]=at; ring.points[1]=end; // Exact shared endpoints.
+    } else {
+        if (anchor>=0) {
+            if (size_t(anchor)>=data.atoms.size()) throw std::invalid_argument("原有原子已改变");
+            const auto &a=data.atoms[size_t(anchor)]; at={a.x,a.y,a.z};
+            // Orient away from existing direct neighbors, without guessing valence.
+            Vec3 occupied{};
+            for (const auto &b:data.bonds) if (b.image==std::array<int32_t,3>{}) {
+                const int next=b.a==uint32_t(anchor)?int(b.b):b.b==uint32_t(anchor)?int(b.a):-1;
+                if (next>=0 && size_t(next)<data.atoms.size()) {
+                    const auto &n=data.atoms[size_t(next)];
+                    const auto d=sub({n.x,n.y,n.z},at);
+                    if (length(d)>1e-6) occupied=add(occupied,scale(d,1/length(d)));
+                }
+            }
+            occupied=sub(occupied,scale(normal,dot(occupied,normal)));
+            if (length(occupied)>1e-5) right=scale(occupied,-1/length(occupied));
+        }
+        const double radius=(aromatic?1.40:1.52)/(2*std::sin(kPi/size));
+        ring.center=add(at,scale(right,radius));
+        ring.rotationAxis=anchor>=0?right:normal;
+        for (int i=0;i<size;++i) ring.points[size_t(i)]=rotatedPoint(at,ring.center,normal,i*turn);
+        ring.points[0]=at;
+    }
+    return ring;
+}
+inline RingSketch rotatedRing(RingSketch ring,double radians) {
+    const Vec3 pivot=ring.points[0];
+    for (int i=1;i<ring.size;++i) ring.points[size_t(i)]=rotatedPoint(ring.points[size_t(i)],pivot,ring.rotationAxis,radians);
+    ring.center=rotatedPoint(ring.center,pivot,ring.rotationAxis,radians);
+    return ring;
+}
+struct RingEdit {
+    std::vector<Atom> atoms;
+    std::vector<Bond> bonds;
+    std::vector<int> selection;
+    std::vector<int> aromaticUpdates;
+    bool changed() const { return !atoms.empty() || !bonds.empty() || !aromaticUpdates.empty(); }
+};
+// Preflight before the caller records history. Coincident vertices merge at
+// 0.001 A; hidden coincident atoms reject placement rather than duplicate atoms.
+inline RingEdit prepareRing(const Dataset &data,const RingSketch &ring,const std::vector<uint8_t> &hidden={}) {
+    if (ring.size<4 || ring.size>6 || data.atoms.size()>size_t(INT32_MAX)-6)
+        throw std::invalid_argument("环大小或原子数量无效");
+    RingEdit edit; edit.selection.resize(size_t(ring.size),-1);
+    for (int i=0;i<ring.size;++i) {
+        const Vec3 at=ring.points[size_t(i)];
+        if (!std::isfinite(at.x)||!std::isfinite(at.y)||!std::isfinite(at.z))
+            throw std::invalid_argument("环坐标无效");
+    }
+    // One linear scan on commit, never during preview.
+    for (size_t index=0;index<data.atoms.size();++index) {
+        const auto &a=data.atoms[index];
+        for (int i=0;i<ring.size;++i) if (dot(sub({a.x,a.y,a.z},ring.points[size_t(i)]),sub({a.x,a.y,a.z},ring.points[size_t(i)]))<1e-6) {
+            if (index<hidden.size() && hidden[index]) throw std::invalid_argument("环与隐藏原子重合，请先显示原子");
+            if (edit.selection[size_t(i)]<0) edit.selection[size_t(i)]=int(index);
+        }
+    }
+    if (ring.bond>=0) {
+        if (size_t(ring.bond)>=data.bonds.size()) throw std::invalid_argument("原有键已改变");
+        const auto &b=data.bonds[size_t(ring.bond)];
+        if (b.image!=std::array<int32_t,3>{} || b.a>=data.atoms.size() || b.b>=data.atoms.size())
+            throw std::invalid_argument("只能在直接键上接环");
+        edit.selection[0]=int(b.a); edit.selection[1]=int(b.b);
+    } else if (ring.anchor>=0) {
+        if (size_t(ring.anchor)>=data.atoms.size()) throw std::invalid_argument("原有原子已改变");
+        edit.selection[0]=ring.anchor;
+    }
+    const int pinned=ring.bond>=0?2:ring.anchor>=0?1:0;
+    for (int i=0;i<pinned;++i) {
+        const int index=edit.selection[size_t(i)]; const auto &a=data.atoms[size_t(index)];
+        if ((size_t(index)<hidden.size() && hidden[size_t(index)]) ||
+            length(sub({a.x,a.y,a.z},ring.points[size_t(i)]))>=.001)
+            throw std::invalid_argument("接环起点已改变，请重新绘制");
+    }
+    for (int i=0;i<ring.size;++i) if (edit.selection[size_t(i)]<0) {
+        const auto at=ring.points[size_t(i)];
+        edit.selection[size_t(i)]=int(data.atoms.size()+edit.atoms.size());
+        edit.atoms.push_back({at.x,at.y,at.z,0});
+    }
+    for (int i=0;i<ring.size;++i) for (int j=i+1;j<ring.size;++j)
+        if (edit.selection[size_t(i)]==edit.selection[size_t(j)] ||
+            length(sub(ring.points[size_t(i)],ring.points[size_t(j)]))<.001)
+            throw std::invalid_argument("环顶点重合，请调整朝向");
+    for (int i=0;i<ring.size;++i) {
+        const int a=edit.selection[size_t(i)], b=edit.selection[size_t((i+1)%ring.size)];
+        const int existing=directBondIndex(data,a,b);
+        if (existing<0) edit.bonds.push_back({uint32_t(a),uint32_t(b),{},uint8_t(ring.aromatic?4:1)});
+        else if (ring.aromatic && data.bonds[size_t(existing)].order!=4) edit.aromaticUpdates.push_back(existing);
+    }
+    if (data.bonds.size()+edit.bonds.size()>interactiveBondBudget) throw std::invalid_argument("键数已达到交互显示上限");
+    return edit;
+}
+inline void applyRing(Dataset &data,const RingEdit &edit) {
+    const size_t old=data.atoms.size();
+    const uint32_t carbon=edit.atoms.empty()?0:speciesIndex(data,"C");
+    data.atoms.reserve(old+edit.atoms.size()); data.bonds.reserve(data.bonds.size()+edit.bonds.size());
+    for (auto atom:edit.atoms) { atom.type=carbon; data.atoms.push_back(atom); }
+    for (auto bond:edit.bonds) data.bonds.push_back(bond);
+    for (auto index:edit.aromaticUpdates) data.bonds[size_t(index)].order=4;
+    if (data.particleColors.size()==old && !data.particleColors.empty()) data.particleColors.resize(data.atoms.size(),{-1,-1,-1});
+    for (auto &[name,values]:data.scalarProperties) { (void)name; if (values.size()==old) values.resize(data.atoms.size(),NAN); }
+    for (auto &[name,values]:data.vectorProperties) { (void)name; if (values.size()==old) values.resize(data.atoms.size(),{NAN,NAN,NAN}); }
+    data.sourceCount=data.atoms.size(); data.bounds();
 }
 
 inline Dataset orthogonalCell(double a, double b, double c, const std::string &element) {

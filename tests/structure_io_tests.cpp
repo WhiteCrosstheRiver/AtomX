@@ -52,7 +52,7 @@ int main() {
             view.creation=true; view.camera={.8f,.3f,.5f,.1f,-.1f}; view.title="晶体 · 创作";
             view.display.visibility(2,{0},0);
             view.display.setLabels(2,{1},{creation::LabelKind::Custom,"测试原子\n换行"},false);
-            view.selection={1}; view.order=3; view.continuous=false;
+            view.selection={1}; view.order=3; view.continuous=false; view.ringSize=5;
             const auto nativePath=dir/"model.atomx";
             io::write(nativePath,io::Format::AtomX,native,nativeOptions);
             auto decoded=document::read(nativePath);
@@ -60,7 +60,7 @@ int main() {
                     decoded.data.atoms[1].x==native.atoms[1].x && decoded.data.comment==native.comment,
                     "native document preserves explicit bond orders, images, cell and binary-safe strings");
             require(decoded.view.display==view.display && decoded.view.selection==view.selection &&
-                    decoded.view.camera==view.camera && decoded.view.title==view.title && !decoded.view.continuous,
+                    decoded.view.camera==view.camera && decoded.view.title==view.title && !decoded.view.continuous && decoded.view.ringSize==5,
                     "native document preserves UTF-8 labels, visibility, selection and camera");
             require(decoded.data.tables[0].name==native.tables[0].name &&
                     decoded.data.scalarProperties.at("Energy")==native.scalarProperties.at("Energy") &&
@@ -81,8 +81,19 @@ int main() {
                 require(invalid,"malformed document rejected before publication");
             };
             rejectBytes(bytes.substr(0,bytes.size()-1));
-            auto version=bytes; version[8]=2; rejectBytes(version);
-            auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(0xff); rejectBytes(block);
+            auto version=bytes; version[8]=3; rejectBytes(version);
+            auto block=bytes; for (int i=12;i<20;++i) block[size_t(i)]=char(-1); rejectBytes(block);
+            auto legacy=bytes; legacy[8]=1; legacy.erase(legacy.size()-8,4);
+            const auto legacyPath=dir/"legacy.atomx";
+            { std::ofstream out(legacyPath,std::ios::binary); out.write(legacy.data(),std::streamsize(legacy.size())); }
+            require(document::read(legacyPath).view.ringSize==6 && document::read(legacyPath).data.bonds==native.bonds,
+                    "version 1 documents remain readable with default ring size");
+            auto aromatic=native; aromatic.bonds[0].order=4;
+            auto ringOptions=nativeOptions; ringOptions.documentView.tool=5;
+            const auto ringPath=dir/"aromatic.atomx";
+            io::write(ringPath,io::Format::AtomX,aromatic,ringOptions);
+            require(document::read(ringPath).data.bonds[0].order==4 && document::read(ringPath).view.tool==5,
+                    "version 2 retains aromatic topology and ring tool settings");
             rejectBytes(bytes+"trailing data");
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }

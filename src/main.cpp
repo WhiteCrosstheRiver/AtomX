@@ -797,8 +797,8 @@ struct App {
     std::filesystem::path colorRangePath;
     // One structure per browser-style tab. The live document stays in the
     // fields above; a tab is only a snapshot taken when leaving it.
-    enum class CreationTool { Select, Rotate, Pan, Move, Sketch };
-    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch };
+    enum class CreationTool { Select, Rotate, Pan, Move, Sketch, Ring };
+    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring };
     struct CreationHistoryState {
         std::optional<Dataset> data; // Display-only history does not copy a large structure.
         creation::Display display;
@@ -831,6 +831,7 @@ struct App {
         bool creationSketch = false;
         bool sketchContinuous = true;
         int sketchOrder = 1;
+        int ringSize = 6;
         CreationTool creationTool = CreationTool::Select;
         std::vector<int> selection;
         int picked = -1;
@@ -860,6 +861,10 @@ struct App {
     int creationSketchOrder = 1, creationSketchAnchor = -1, creationSketchStartHit = -1;
     int creationSketchLastPlaced = -1;
     Vec3 creationSketchPreview{};
+    int creationRingSize=6;
+    bool creationRingPreviewValid=false;
+    authoring::RingSketch creationRingPreview{}, creationRingStart{};
+    ImVec2 creationRingMouse{-1,-1};
     CreationTool creationTool = CreationTool::Select;
     std::vector<int> creationSelection;
     std::vector<CreationSnapshot> creationSnapshots;
@@ -1490,6 +1495,7 @@ struct App {
         tab.creationMode = creationMode;
         tab.creationSketch = creationSketch;
         tab.sketchContinuous = creationSketchContinuous; tab.sketchOrder = creationSketchOrder;
+        tab.ringSize=creationRingSize;
         tab.creationTool = creationTool;
         tab.selection = creationSelection;
         tab.picked = creationPick;
@@ -1529,6 +1535,7 @@ struct App {
         creationMode = tab.creationMode;
         creationSketch = tab.creationSketch;
         creationSketchContinuous=tab.sketchContinuous; creationSketchOrder=tab.sketchOrder;
+        creationRingSize=tab.ringSize; creationRingPreviewValid=false;
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationTool = tab.creationTool;
         creationSelection = tab.selection;
@@ -1833,6 +1840,7 @@ struct App {
             return;
         }
         rememberStructure(message);
+        creationRingPreviewValid=false;
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationSymmetry.reset(); creationSymmetryChecked=false;
         creationSnapshotSelected=-1;
@@ -1891,7 +1899,7 @@ struct App {
         });
     }
     bool editCreationBond(int first,int last,int order) {
-        if (!creationMode || documentsBusy() || order<0 || order>3 || first<0 || last<0 || first==last ||
+        if (!creationMode || documentsBusy() || order<0 || order>4 || first<0 || last<0 || first==last ||
             size_t(first)>=source.atoms.size() || size_t(last)>=source.atoms.size()) return false;
         const int existing=authoring::directBondIndex(source,first,last);
         if ((existing<0 && order==0) ||
@@ -1956,6 +1964,17 @@ struct App {
         selectCreationAtom(added,false);
         creationSketchLastPlaced=added;
         creationSketchAnchor=finish || !creationSketchContinuous || isolated?-1:added;
+    }
+    void commitCreationRing(const authoring::RingSketch &ring) {
+        if (documentsBusy() || !creationMode || !sameAtomCount()) return;
+        try {
+            const auto edit=authoring::prepareRing(source,ring,creationDisplay.hidden);
+            if (!edit.changed()) { status="环已存在"; return; }
+            editStructure(std::string(ring.aromatic?"绘制芳香环 · ":"绘制碳环 · ")+std::to_string(ring.size),[&](Dataset &data) {
+                authoring::applyRing(data,edit); data.bondStyle.visible=true;
+            });
+            creationSelection=edit.selection; creationPick=creationSelection.back();
+        } catch (const std::exception &e) { status=e.what(); }
     }
     void nudgePicked(int axis, float delta) {
         if (creationPick < 0 || size_t(creationPick) >= source.atoms.size()) {
@@ -2383,6 +2402,7 @@ struct App {
         if (creationMode) {
             v.display=creationDisplay; v.selection.assign(creationSelection.begin(),creationSelection.end());
             v.element=creationElement; v.tool=int(creationTool); v.order=creationSketchOrder;
+            v.ringSize=creationRingSize;
             v.continuous=creationSketchContinuous; v.propertyPage=creationPropertyPage;
             v.propertiesOpen=creationPropertiesOpen;
         }
@@ -2405,6 +2425,7 @@ struct App {
         creationPick=creationSelection.empty()?-1:creationSelection.back();
         creationTool=CreationTool(v.tool); creationSketch=creationTool==CreationTool::Sketch;
         creationSketchOrder=v.order; creationSketchContinuous=v.continuous;
+        creationRingSize=v.ringSize; creationRingPreviewValid=false;
         snprintf(creationElement,sizeof(creationElement),"%s",v.element.c_str());
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
         creationPropertiesOpen=v.propertiesOpen; creationPropertyPage=v.propertyPage;
@@ -2942,6 +2963,13 @@ struct App {
         } else if (name=="draw") {
             line(4,19,17,5);line(17,5,21,9);line(21,9,8,22);line(8,22,4,22);
             line(4,22,4,19);line(14,8,18,12);
+        } else if (name=="ring") {
+            ImVec2 vertices[6];
+            for (int i=0;i<6;++i) {
+                const float angle=float(i*authoring::kPi/3);
+                vertices[i]=point(12+9*std::cos(angle),12+9*std::sin(angle));
+            }
+            draw->AddPolyline(vertices,6,color,ImDrawFlags_Closed,U(1.8f));
         } else if (name=="delete") {
             line(4,7,20,7);line(7,7,8,20);line(8,20,16,20);line(16,20,17,7);
             line(9,7,9,4);line(9,4,15,4);line(15,4,15,7);line(10,11,10,17);line(14,11,14,17);
@@ -3071,6 +3099,8 @@ struct App {
         };
         menu("文件", "##create-file", [&] {
             if (ImGui::MenuItem("打开结构...", "Ctrl+O")) open();
+            if (ImGui::MenuItem("保存文档", "Ctrl+S")) saveSessionState(false);
+            if (ImGui::MenuItem("文档另存为...", "Ctrl+Shift+S")) saveSessionState(true);
             if (ImGui::MenuItem("导出结构...", "Ctrl+E")) showDataExport = true;
             if (ImGui::MenuItem("关闭创作标签")) leaveCreationTab();
         });
@@ -3095,6 +3125,15 @@ struct App {
             if (ImGui::MenuItem("几何优化")) cleanGeometryCommand();
         });
         menu("构建", "##create-build", [&] {
+            if (ImGui::BeginMenu("绘制碳环")) {
+                for (int size=4;size<=6;++size) {
+                    const auto caption=std::to_string(size)+" 元环";
+                    if (ImGui::MenuItem(caption.c_str(),nullptr,creationTool==CreationTool::Ring && creationRingSize==size)) {
+                        creationRingSize=size; chooseCreationTool(CreationTool::Ring);
+                    }
+                }
+                ImGui::EndMenu();
+            }
             if (ImGui::MenuItem("建晶体...")) openCrystalDialog = true;
             if (ImGui::MenuItem("超胞...")) openSupercellDialog = true;
             if (ImGui::MenuItem("切面·真空...")) openSurfaceDialog = true;
@@ -3118,6 +3157,7 @@ struct App {
             (void)codepoint; (void)fallback;
             ImGui::PushID(id);
             const bool pressed = ImGui::InvisibleButton("##icon", {U(35), U(35)});
+            recordUiTestItem(std::string("creation.tool-")+id);
             const bool hovered = ImGui::IsItemHovered();
             const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
             const ImVec4 bg = selected ? tone : ImVec4{tone.x * (hovered ? .30f : .14f),
@@ -3144,7 +3184,8 @@ struct App {
         icon("rotate",0xE7AD,"R","Rotate view",cyan,creationTool==CreationTool::Rotate,[&]{chooseCreationTool(CreationTool::Rotate);});
         icon("pan",0xE72A,"P","Pan view",green,creationTool==CreationTool::Pan,[&]{chooseCreationTool(CreationTool::Pan);});
         icon("move",0xE8AB,"M","Move selected atoms",orange,creationTool==CreationTool::Move,[&]{chooseCreationTool(CreationTool::Move);});
-        icon("draw",0xE70F,"+","Draw atoms",green,creationTool==CreationTool::Sketch,[&]{chooseCreationTool(CreationTool::Sketch);}); divider();
+        icon("draw",0xE70F,"+","Draw atoms",green,creationTool==CreationTool::Sketch,[&]{chooseCreationTool(CreationTool::Sketch);});
+        icon("ring",0,"6","绘制碳环 (4 / 5 / 6) · Alt 芳香环",green,creationTool==CreationTool::Ring,[&]{chooseCreationTool(CreationTool::Ring);}); divider();
         icon("delete",0xE74D,"X","Delete selected atom",red,false,[&]{deletePickedAtom();});
         icon("hydrogen",0xE8FA,"H+","Add hydrogens",violet,false,[&]{addHydrogensCommand();});
         icon("clean",0xE734,"*","Clean geometry",violet,false,[&]{cleanGeometryCommand();}); divider();
@@ -3954,12 +3995,20 @@ struct App {
     const char *views = "Top\0Bottom\0Front\0Back\0Left\0Right\0Ortho\0Perspective\0";
     void chooseCreationTool(CreationTool tool) {
         creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
+        if (!pipelineBusy && !creationDragAtoms.empty()) {
+            for (const auto &[index,original]:creationDragAtoms) if (index>=0 && size_t(index)<result.data.atoms.size()) {
+                auto &a=result.data.atoms[size_t(index)]; a.x=original.x; a.y=original.y; a.z=original.z;
+            }
+            uploadCreationDisplay(result.data,result.selected,result.colorSelected);
+        }
+        creationRingPreviewValid=false; creationDrag=CreationDrag::None; creationDragAtoms.clear();
         creationTool = tool;
         creationSketch = tool == CreationTool::Sketch;
         status = tool == CreationTool::Select ? "选择原子或拖动框选" :
                  tool == CreationTool::Rotate ? "拖动旋转" :
                  tool == CreationTool::Pan ? "拖动平移" :
-                 tool == CreationTool::Move ? "拖动选中原子" : "点击绘制或连键 · 双击结束 · Esc 取消";
+                 tool == CreationTool::Move ? "拖动选中原子" :
+                 tool == CreationTool::Ring ? "点击放置碳环 · 原子或键上接环 · 拖动调整朝向 · Alt 芳香环" : "点击绘制或连键 · 双击结束 · Esc 取消";
     }
     void selectCreationAtom(int index, bool shift, bool toggle = false) {
         if (index>=0 && !creationAtomVisible(index)) return;
@@ -4006,6 +4055,7 @@ struct App {
         for (const auto &[index,label]:creationDisplay.labels) { (void)index; missingGlyph(label.text); }
     }
     void refreshCreationDisplay(bool visibilityChanged=true) {
+        creationRingPreviewValid=false;
         creationDisplay.normalize(source.atoms.size());
         creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
             [&](int index){return !creationAtomVisible(index);}),creationSelection.end());
@@ -4224,6 +4274,11 @@ struct App {
     bool creationPointer(ImVec2 p, ImVec2 size, Camera &cam, bool hovered) {
         auto &io=ImGui::GetIO();
         creationSketchPreviewValid=false;
+        if (creationTool!=CreationTool::Ring || !hovered || io.AppFocusLost || io.MouseWheel!=0 ||
+            (creationDrag!=CreationDrag::None && creationDrag!=CreationDrag::Ring)) creationRingPreviewValid=false;
+        if (io.AppFocusLost && creationDrag==CreationDrag::Ring) {
+            creationDrag=CreationDrag::None; return false;
+        }
         if (io.AppFocusLost || ImGui::IsKeyPressed(ImGuiKey_Escape))
             creationSketchAnchor=creationSketchLastPlaced=-1;
         // The first click may change the automatic camera bounds or start
@@ -4241,6 +4296,7 @@ struct App {
             // Discard the old gesture rather than miss its single release
             // event and retain atom indexes from an outdated document.
             creationDrag=CreationDrag::None; creationDragAtoms.clear();
+            creationRingPreviewValid=false;
             creationLastHoverMouse={-1,-1};
             return false;
         }
@@ -4253,6 +4309,7 @@ struct App {
             }
             if (!creationDragAtoms.empty()) uploadCreationDisplay(result.data,result.selected,result.colorSelected);
             creationDragAtoms.clear(); creationDrag=CreationDrag::None;
+            creationRingPreviewValid=false;
             creationLastHoverMouse={-1,-1};
             return false;
         }
@@ -4264,6 +4321,32 @@ struct App {
         if (!hovered && creationDrag==CreationDrag::None) {
             creationHover=-1;
             creationLastHoverMouse={-1,-1};
+        }
+        auto ringAt=[&](ImVec2 pointer) {
+            const auto projection=creationProjection(result.data,cam,size);
+            const int hit=creationHover;
+            const int bond=hit<0?creationBondHit(p,size,cam,pointer):-1;
+            Vec3 center=authoring::cartesian(source,.5,.5,.5);
+            if (hit>=0) {
+                const auto &a=source.atoms[size_t(hit)]; center={a.x,a.y,a.z};
+            }
+            DirectX::XMFLOAT4 q;
+            DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                DirectX::XMVectorSet(center.x,center.y,center.z,1),projection.combined));
+            if (q.w<=0) throw std::invalid_argument("绘制位置在视图之外");
+            const auto inverse=DirectX::XMMatrixInverse(nullptr,projection.view);
+            DirectX::XMFLOAT3 right,normal;
+            DirectX::XMStoreFloat3(&right,DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(1,0,0,0),inverse));
+            DirectX::XMStoreFloat3(&normal,DirectX::XMVector3TransformNormal(DirectX::XMVectorSet(0,0,-1,0),inverse));
+            return authoring::ringSketch(source,creationRingSize,
+                creationWorldAt(pointer,q.z/q.w,p,size,projection.combined),
+                {right.x,right.y,right.z},{normal.x,normal.y,normal.z},hit,bond,io.KeyAlt);
+        };
+        if (creationTool==CreationTool::Ring && creationDrag==CreationDrag::None && hovered && !io.AppFocusLost &&
+            (!creationRingPreviewValid || mouse.x!=creationRingMouse.x || mouse.y!=creationRingMouse.y ||
+             creationRingPreview.aromatic!=io.KeyAlt)) {
+            try { creationRingPreview=ringAt(mouse); creationRingPreviewValid=true; creationRingMouse=mouse; }
+            catch (const std::exception &) { creationRingPreviewValid=false; }
         }
         auto captureAtoms=[&]() {
             creationDragAtoms.clear(); creationDragCenter={};
@@ -4314,6 +4397,11 @@ struct App {
                 creationSketchStartHit=hit;
                 creationSketchDoubleClick=ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
             }
+            else if (creationTool==CreationTool::Ring) {
+                if (creationRingPreviewValid) {
+                    creationRingStart=creationRingPreview; creationDrag=CreationDrag::Ring;
+                }
+            }
             else if (hit>=0) {
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) selectCreationFragment(hit);
                 else selectCreationAtom(hit,io.KeyShift||io.KeyCtrl,io.KeyCtrl);
@@ -4326,6 +4414,11 @@ struct App {
             if (std::abs(mouse.x-creationDragStart.x)+std::abs(mouse.y-creationDragStart.y)>U(3))
                 creationDragMoved=true;
             const float dx=mouse.x-creationDragPrevious.x,dy=mouse.y-creationDragPrevious.y;
+            if (creationDrag==CreationDrag::Ring) {
+                const double angle=(double(mouse.x-creationDragStart.x)+double(mouse.y-creationDragStart.y))*.012;
+                creationRingPreview=authoring::rotatedRing(creationRingStart,angle);
+                creationRingPreviewValid=hovered;
+            }
             if (creationDrag==CreationDrag::Sketch && creationDragMoved) {
                 if (creationSketchStartHit>=0 && !io.KeyAlt) {
                     selectCreationAtom(creationSketchStartHit,false);
@@ -4481,12 +4574,15 @@ struct App {
                         auto &a=data.atoms[size_t(index)]; a.x=at.x; a.y=at.y; a.z=at.z;
                     }
                 });
+            } else if (creationDrag==CreationDrag::Ring && hovered && creationRingPreviewValid) {
+                const auto ring=creationRingPreview;
+                commitCreationRing(ring); creationRingPreviewValid=false;
             } else if (creationDrag==CreationDrag::Sketch && hovered && sketchPositionValid) {
                 const int bond=sketchHit<0 && creationSketchAnchor<0 && !io.KeyAlt && !creationDragMoved?
                     creationBondHit(p,size,cam,mouse):-1;
                 if (bond>=0) {
                     const auto existing=source.bonds[size_t(bond)];
-                    editCreationBond(int(existing.a),int(existing.b),int(existing.order)%3+1);
+                    editCreationBond(int(existing.a),int(existing.b),existing.order==4?1:int(existing.order)%3+1);
                 } else {
                     if (io.KeyAlt && !creationDragMoved && sketchHit<0) {
                         const auto projection=creationProjection(result.data,cam,size);
@@ -4505,7 +4601,7 @@ struct App {
             creationLastHoverMouse={-1,-1};
         }
         if (hovered) {
-            if (creationTool==CreationTool::Sketch) g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
+            if (creationTool==CreationTool::Sketch || creationTool==CreationTool::Ring) g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
             else if (creationHover>=0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             else if (creationTool==CreationTool::Pan||creationTool==CreationTool::Move)
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
@@ -4771,6 +4867,26 @@ struct App {
             const auto projection=creationProjection(result.data,cam,avail);
             auto mvp=projection.combined;
             draw->PushClipRect(p,{p.x+avail.x,p.y+avail.y},true);
+            if (creationRingPreviewValid && !pipelineBusy) {
+                const auto &ring=creationRingPreview;
+                ImVec2 projected[6]; bool visible[6]{};
+                for (int vertex=0;vertex<ring.size;++vertex) {
+                    const auto at=ring.points[size_t(vertex)];
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x,at.y,at.z,1),mvp));
+                    visible[vertex]=q.w>0 && q.z>0 && q.z<q.w;
+                    if (visible[vertex]) projected[vertex]={p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};
+                }
+                for (int vertex=0;vertex<ring.size;++vertex) {
+                    const int next=(vertex+1)%ring.size;
+                    if (visible[vertex] && visible[next]) draw->AddLine(projected[vertex],projected[next],IM_COL32(255,218,103,210),U(2));
+                    if (visible[vertex]) draw->AddCircle(projected[vertex],U(5),IM_COL32(255,218,103,210),16,U(1.5f));
+                }
+                if (visible[0]) {
+                    const auto caption=std::to_string(ring.size)+(ring.aromatic?" 元芳香环":" 元碳环");
+                    draw->AddText({projected[0].x+U(12),projected[0].y-U(24)},IM_COL32(255,218,103,230),caption.c_str());
+                }
+            }
             if (creationSketchPreviewValid && creationSketchAnchor>=0 && !pipelineBusy) {
                 const auto &anchor=source.atoms[size_t(creationSketchAnchor)];
                 auto project=[&](Vec3 world,ImVec2 &at) {
@@ -6421,6 +6537,23 @@ struct App {
         ImGui::End();
 
         fixed("Creation selection", w - rightW, y, rightW, bodyH);
+        if (creationTool==CreationTool::Ring) {
+            ImGui::SeparatorText("绘制碳环");
+            ImGui::TextDisabled("环大小"); ImGui::SameLine();
+            for (int size=4;size<=6;++size) {
+                const auto caption=std::to_string(size)+" 元";
+                if (ImGui::RadioButton(caption.c_str(),creationRingSize==size)) {
+                    creationRingSize=size; creationRingPreviewValid=false;
+                }
+                recordUiTestItem("creation.ring-size-"+std::to_string(size));
+                if (size<6) ImGui::SameLine();
+            }
+            ImGui::TextDisabled("空白处放置 · 原子或键上接环");
+            ImGui::TextDisabled("按住拖动调整朝向 · 松开提交");
+            ImGui::TextDisabled("Alt 点击芳香环 · Esc 取消");
+            ImGui::TextDisabled("碳环不自动加氢");
+            ImGui::Separator();
+        }
         if (creationTool==CreationTool::Sketch) {
             ImGui::SeparatorText("绘制原子与键");
             ImGui::SetNextItemWidth(U(75));
@@ -6459,7 +6592,7 @@ struct App {
         if (creationSelection.size()==2) {
             ImGui::TextDisabled("连接选中原子 / 修改键级");
             int order=0;
-            for (const char *label:{"断键","单键","双键","三键"}) {
+            for (const char *label:{"断键","单键","双键","三键","芳香"}) {
                 ImGui::PushID(order);
                 if (ImGui::Button(label,{U(58),U(28)}))
                     editCreationBond(creationSelection[0],creationSelection[1],order);
@@ -8172,6 +8305,7 @@ struct App {
         chineseBuilder.AddText("隐藏选中仅显示选中显示全部已隐藏原子标签对象默认显示元素和编号整个体系内容无标签笛卡尔坐标分数坐标自定义文字字号粗体颜色显示标签屏幕标签上限大体系自动抽样优先显示选中原子的标签隐藏原子不显示标签上限默认应用移除移除全部编辑原子标签撤销重做");
         chineseBuilder.AddText(creationDisplay.defaultLabel.text.c_str());
         chineseBuilder.AddText("绘制原子与键键级单键双键三键连续成链点击已有原子吸附连键双击结束取消虚拟原子替换元素放置孤立原子拖动向里自由键长起点默认键长结束成链连接选中原子修改键级断键设置断开请选择有效元素无法连键重合坐标或键数已达上限");
+        chineseBuilder.AddText("绘制碳环元芳香环大小空白处放置原子或键上接环按住拖动调整朝向松开提交取消环已存在环顶点重合请调整朝向环与隐藏原子重合请先显示原子碳环不自动加氢保存文档文档另存为");
         for (const auto &[index,label]:creationDisplay.labels) { (void)index; chineseBuilder.AddText(label.text.c_str()); }
         static const ImWchar extraRanges[] = {0x0370,0x03ff,0x2070,0x209f,0};
         chineseBuilder.AddRanges(extraRanges);

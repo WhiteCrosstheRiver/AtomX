@@ -2858,6 +2858,55 @@ int main() {
                     "sketch projection retains bond length, supports screen depth and free length");
         }
         {
+            Dataset empty;
+            for (int size=4;size<=6;++size) {
+                const auto ring=authoring::ringSketch(empty,size,{0,0,0},{1,0,0},{0,0,1});
+                for (int i=0;i<size;++i)
+                    require(std::abs(authoring::length(authoring::sub(ring.points[size_t(i)],ring.points[size_t((i+1)%size)]))-1.52)<1e-5 &&
+                            ring.points[size_t(i)].z==0,"ring is a closed regular carbon polygon of the selected size");
+                auto data=empty; const auto edit=authoring::prepareRing(data,ring);
+                authoring::applyRing(data,edit);
+                require(data.atoms.size()==size_t(size) && data.bonds.size()==size_t(size) && data.species==std::vector<std::string>{"C"},
+                        "isolated ring creates exactly one carbon per vertex and closes explicit topology");
+                require(!authoring::prepareRing(data,ring).changed(),"coincident existing ring is reused without duplicate atoms or bonds");
+            }
+            Dataset molecule; molecule.species={"O"}; molecule.atoms={{0,0,0,0},{-1.4f,0,0,0}};
+            molecule.bonds={{0,1,{},2}};
+            molecule.particleColors={{1,0,0},{0,1,0}};
+            molecule.scalarProperties["Charge"]={-.4,.4};
+            molecule.vectorProperties["Force"]={{1,2,3},{4,5,6}};
+            const auto atomRing=authoring::ringSketch(molecule,5,{}, {1,0,0},{0,0,1},0);
+            const auto tilted=authoring::rotatedRing(atomRing,authoring::kPi/3);
+            const auto edit=authoring::prepareRing(molecule,tilted);
+            require(edit.atoms.size()==4 && edit.selection[0]==0 && tilted.points[0].x==0 && tilted.points[1].z!=0,
+                    "atom attached ring reuses the anchor and rotates around center to anchor axis");
+            authoring::applyRing(molecule,edit);
+            require(molecule.atoms.size()==6 && molecule.bonds.size()==6 && molecule.atoms[0].type==0 &&
+                    molecule.species[molecule.atoms[2].type]=="C" && molecule.bonds[0].order==2 &&
+                    molecule.scalarProperties["Charge"][0]==-.4 && std::isnan(molecule.scalarProperties["Charge"][2]) &&
+                    molecule.vectorProperties["Force"][0].z==3 && std::isnan(molecule.vectorProperties["Force"][2].x) &&
+                    molecule.particleColors[2].x==-1,
+                    "ring preserves original elements, bond orders and measured properties while extending missing rows");
+            const auto bondRing=authoring::ringSketch(molecule,6,{}, {1,0,0},{0,0,1},-1,0,true);
+            const auto bonded=authoring::rotatedRing(bondRing,.6);
+            const auto shared=authoring::prepareRing(molecule,bonded);
+            require(shared.atoms.size()==4 && shared.bonds.size()==5 && shared.selection[0]==0 && shared.selection[1]==1,
+                    "bond attached ring shares both original endpoints and its edge");
+            authoring::applyRing(molecule,shared);
+            require(molecule.atoms.size()==10 && molecule.bonds.size()==11 && molecule.bonds[0].order==4 &&
+                    molecule.bonds.back().order==4,"aromatic ring retains explicit aromatic topology including shared edge");
+            bool invalid=false; auto bad=atomRing; bad.points[2]=bad.points[1];
+            try { (void)authoring::prepareRing(molecule,bad); } catch (...) { invalid=true; }
+            require(invalid && molecule.atoms.size()==10 && molecule.bonds.size()==11,"invalid ring rejects before modifying structure");
+            invalid=false;
+            try { (void)authoring::prepareRing(molecule,atomRing,{1}); } catch (...) { invalid=true; }
+            require(invalid,"hidden coincident anchor rejects instead of creating a duplicate atom");
+            Dataset aromatic;
+            const auto benzene=authoring::ringSketch(aromatic,6,{}, {1,0,0},{0,0,1},-1,-1,true);
+            require(std::abs(authoring::length(authoring::sub(benzene.points[0],benzene.points[1]))-1.4)<1e-5,
+                    "isolated aromatic ring uses explicit 1.4 angstrom carbon edges");
+        }
+        {
             Dataset molecule;
             molecule.species={"C"};
             molecule.atoms={{1,0,0,0},{0,0,0,0},{0,1,0,0},{8,8,8,0}};

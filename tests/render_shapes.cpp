@@ -380,7 +380,7 @@ int main(int argc, char **argv) {
             for (float cylinderRadius:{0.f,.1f}) {
                 ordered.bondStyle.radius=cylinderRadius;
                 std::set<uint64_t> orderImages;
-                for (int order=1;order<=3;++order) {
+                for (int order=1;order<=4;++order) {
                     ordered.bonds[0].order=uint8_t(order);
                     renderer.upload(ordered,{});
                     renderer.draw(t,ordered,front,.22f,0,0,0,0,0,1,false,false,false,bg);
@@ -388,8 +388,8 @@ int main(int argc, char **argv) {
                     renderer.png(t,"build/shape-validation/bond-order-"+std::to_string(order)+
                         (cylinderRadius>0?"-cylinder.png":"-line.png"));
                 }
-                if (orderImages.size()!=3)
-                    throw std::runtime_error("Single/double/triple bonds must produce distinct GPU strand images");
+                if (orderImages.size()!=4)
+                    throw std::runtime_error("Single/double/triple/aromatic bonds must produce distinct GPU strand images");
             }
         }
         renderer.upload(typed, {});

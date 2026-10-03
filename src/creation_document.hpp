@@ -2,7 +2,7 @@
 #include "creation_display.hpp"
 #include <bit>
 
-// AtomX document v1: little-endian IEEE floats; explicit field order and
+// AtomX document v2 (reads v1): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -10,6 +10,7 @@ struct View {
     bool creation=false,cell=true,particles=true,propertiesOpen=true;
     std::array<float,5> camera{.65f,.48f,1,0,0};
     int32_t cameraMode=7,shape=0,tool=0,order=1,propertyPage=0;
+    int32_t ringSize=6;
     bool fitSelected=false,continuous=true;
     Vec3 fitLo{},fitHi{};
     float radius=.32f;
@@ -86,7 +87,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
     for (size_t i=0;i<d.bonds.size();++i) {
         if (!(i%4096)) checkpoint(cancel);
         const auto &bond=d.bonds[i];
-        valid(bond.a<d.atoms.size() && bond.b<d.atoms.size() && bond.order>=1 && bond.order<=3);
+        valid(bond.a<d.atoms.size() && bond.b<d.atoms.size() && bond.order>=1 && bond.order<=4);
         (void)bondVector(d,bond);
     }
     auto validRows=[&](size_t size){valid(!size || size==d.atoms.size());};
@@ -100,7 +101,8 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
         valid(index>=0 && size_t(index)<d.atoms.size() && int(label.kind)>=0 && int(label.kind)<=6);
     valid(std::isfinite(v.radius) && v.radius>0 && v.shape>=0 && v.shape<=6 && v.cameraMode>=0 && v.cameraMode<=7);
     valid(std::all_of(v.camera.begin(),v.camera.end(),[](float x){return std::isfinite(x);}) && v.camera[2]>0);
-    valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=4 && v.order>=1 && v.order<=3);
+    valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=5 && v.order>=1 && v.order<=3);
+    valid(v.ringSize>=4 && v.ringSize<=6);
     valid(v.propertyPage>=0 && v.propertyPage<=2 && (v.styles.empty() || v.styles.size()==d.species.size()));
     valid(std::isfinite(v.display.fontSize) && v.display.fontSize>=1 && v.display.fontSize<=200 &&
           v.display.labelBudget>=1 && v.display.labelBudget<=2000);
@@ -118,7 +120,7 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(1));
+    w.bytes(magic,8); w.value(uint32_t(2));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -152,6 +154,7 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     for (const auto &[index,l]:display.labels) { w.value(int32_t(index)); label(l); }
     w.value(display.fontSize); for (auto x:display.color) w.value(x);
     w.flag(display.bold); w.flag(display.labelsVisible); w.value(int32_t(display.labelBudget));
+    w.value(view.ringSize);
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -159,7 +162,8 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     file.seekg(0,std::ios::end); const auto size=file.tellg(); valid(size>=12); file.seekg(0);
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
-    if (r.value<uint32_t>()!=1) throw std::runtime_error("Unsupported AtomX document version");
+    const auto version=r.value<uint32_t>();
+    if (version!=1 && version!=2) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -201,6 +205,11 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     for (size_t i=0;i<labels;++i) { auto index=r.value<int32_t>(); auto l=label(); valid(v.display.labels.emplace(index,std::move(l)).second); }
     v.display.fontSize=r.value<float>(); for (auto &x:v.display.color) x=r.value<float>();
     v.display.bold=r.flag(); v.display.labelsVisible=r.flag(); v.display.labelBudget=r.value<int32_t>();
+    if (version>=2) v.ringSize=r.value<int32_t>();
+    else {
+        valid(v.tool<=4);
+        for (const auto &bond:d.bonds) valid(bond.order<=3);
+    }
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size()); return result;
 }

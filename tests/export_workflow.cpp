@@ -528,6 +528,77 @@ int main() {
             }
             {
                 const size_t baseline=app.authorUndo.size();
+                app.editStructure("ring fixture",[](Dataset &data) {
+                    data.species={"C"}; data.pbc={false,false,false};
+                    data.cell={10,0,0,0,10,0,0,0,10};
+                    data.atoms={{2,2,2,0},{3.52f,2,2,0}}; data.bonds={{0,1,{}}};
+                    data.scalarProperties.clear(); data.vectorProperties.clear(); data.particleColors.clear();
+                }); settlePipeline();
+                app.cameras[3].mode=2; app.cell=true; app.fitCamera(3,false); frame();
+                click("creation.tool-ring"); frame();
+                requireExport(app.creationTool==App::CreationTool::Ring && app.uiTestItems.contains("creation.ring-size-4"),
+                              "ring toolbar opens size controls in the existing creation view");
+                auto pointOf=[&](Vec3 a) {
+                    const auto vp=app.uiTestItems.at("creation.viewport");
+                    const ImVec2 size{vp.max.x-vp.min.x,vp.max.y-vp.min.y};
+                    const auto matrix=app.creationProjection(app.result.data,app.cameras[3],size).combined;
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(DirectX::XMVectorSet(a.x,a.y,a.z,1),matrix));
+                    return ImVec2{vp.min.x+(q.x/q.w+1)*size.x*.5f,vp.min.y+(1-q.y/q.w)*size.y*.5f};
+                };
+                auto pointerClick=[&](ImVec2 at) {
+                    guiIO.AddMousePosEvent(at.x,at.y); frame();
+                    guiIO.AddMouseButtonEvent(0,true); frame();
+                    guiIO.AddMouseButtonEvent(0,false); frame(); settlePipeline();
+                };
+                const size_t start=app.authorUndo.size();
+                auto blank=pointOf({6,5,2});
+                guiIO.AddMousePosEvent(blank.x,blank.y); frame();
+                const auto topology=app.source.bonds;
+                requireExport(app.creationRingPreviewValid && app.source.atoms.size()==2,"ring follows mouse as an uncommitted preview");
+                for (int i=0;i<6;++i) frame();
+                requireExport(app.authorUndo.size()==start && app.source.bonds==topology,"idle ring preview keeps source topology and history untouched");
+                pointerClick(blank);
+                requireExport(app.source.atoms.size()==8 && app.source.bonds.size()==7 && app.authorUndo.size()==start+1 && app.creationSelection.size()==6,
+                              "isolated six member ring adds six atoms and six bonds in one history step");
+                app.history(false); settlePipeline();
+                requireExport(app.source.atoms.size()==2 && app.source.bonds.size()==1,"one undo removes the whole ring");
+                click("creation.ring-size-4"); frame();
+                auto anchor=pointOf({2,2,2});
+                guiIO.AddMousePosEvent(anchor.x,anchor.y); frame(); guiIO.AddMouseButtonEvent(0,true); frame();
+                guiIO.AddMousePosEvent(anchor.x+35,anchor.y+20); frame();
+                requireExport(app.creationDrag==App::CreationDrag::Ring && app.creationRingPreviewValid && app.source.atoms.size()==2 &&
+                              std::abs(app.creationRingPreview.points[1].z-app.creationRingStart.points[1].z)>.01,
+                              "held atom attached ring rotates its preview without mutating the source");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true); frame(); guiIO.AddKeyEvent(ImGuiKey_Escape,false); frame();
+                guiIO.AddMouseButtonEvent(0,false); frame();
+                requireExport(app.source.atoms.size()==2 && app.authorUndo.size()==start,"Escape cancels ring placement with no history step");
+                pointerClick(pointOf({2,2,2}));
+                requireExport(app.source.atoms.size()==5 && app.source.bonds.size()==5 && app.creationSelection[0]==0,
+                              "four member ring placed on existing atom shares its anchor");
+                app.history(false); settlePipeline();
+                click("creation.ring-size-6"); frame();
+                guiIO.AddKeyEvent(ImGuiMod_Alt,true); frame();
+                pointerClick(pointOf({2.76f,2,2}));
+                guiIO.AddKeyEvent(ImGuiMod_Alt,false); frame();
+                requireExport(app.source.atoms.size()==6 && app.source.bonds.size()==6 &&
+                              std::all_of(app.source.bonds.begin(),app.source.bonds.end(),[](const Bond &b){return b.order==4;}),
+                              "Alt bond placement shares two endpoints and creates explicit aromatic ring topology");
+                const auto ringFile=dir/"gui-ring.atomx";
+                io::ExportOptions ringOptions; ringOptions.documentView=app.captureDocumentView();
+                io::write(ringFile,io::Format::AtomX,app.source,ringOptions);
+                const auto restored=document::read(ringFile);
+                requireExport(restored.data.bonds==app.source.bonds && restored.view.tool==5 && restored.view.ringSize==6,
+                              "ring topology and active tool persist in the native document");
+                const auto saved=app.captureTab(); app.creationRingSize=4; app.restoreTab(saved);
+                requireExport(app.creationRingSize==6 && !app.creationRingPreviewValid && app.creationDrag==App::CreationDrag::None,
+                              "tab restoration restores its ring size and discards the old provisional gesture");
+                settlePipeline();
+                while (app.authorUndo.size()>baseline) { app.history(false); settlePipeline(); }
+                app.authorRedo.clear(); app.chooseCreationTool(App::CreationTool::Select); app.cameras[3].mode=7; frame();
+            }
+            {
+                const size_t baseline=app.authorUndo.size();
                 app.editStructure("display fixture",[](Dataset &data) {
                     auto atom=data.atoms[0]; atom.x+=2; data.atoms.push_back(atom);
                     atom.x+=2; data.atoms.push_back(atom);
