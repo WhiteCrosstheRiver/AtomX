@@ -7,8 +7,31 @@ inline constexpr size_t monitorLimit=256;
 struct Monitor {
     uint8_t count=2;
     std::array<int32_t,4> atoms{-1,-1,-1,-1};
+    bool fixed=false; // Simulation metadata, never a manual geometry-edit lock.
     bool operator==(const Monitor &) const = default;
 };
+inline bool sameMeasurement(const Monitor &a,const Monitor &b) {return a.count==b.count && a.atoms==b.atoms;}
+// -2 absent, -1 mixed, 0 free, 1 fixed. Choices: 0 keep, 1 free, 2 fixed.
+inline std::array<int,3> fixedSummary(const std::vector<Monitor> &monitors,const std::vector<int> &rows) {
+    std::array<int,3> out{-2,-2,-2};
+    for(int row:rows) {
+        if(row<0 || size_t(row)>=monitors.size())throw std::invalid_argument("测量选择已改变");
+        const auto &m=monitors[size_t(row)];
+        if(m.count<2 || m.count>4)throw std::invalid_argument("测量类型无效");
+        auto &state=out[size_t(m.count-2)];
+        if(state==-2)state=int(m.fixed);else if(state!=int(m.fixed))state=-1;
+    }
+    return out;
+}
+inline bool setFixed(std::vector<Monitor> &monitors,const std::vector<int> &rows,const std::array<int,3> &choices) {
+    if(rows.empty())throw std::invalid_argument("请选择测量标记");
+    (void)fixedSummary(monitors,rows);
+    for(int c:choices)if(c<0 || c>2)throw std::invalid_argument("测量约束选项无效");
+    bool changed=false;
+    for(int row:rows) {auto &m=monitors[size_t(row)];const int c=choices[size_t(m.count-2)];
+        if(c && m.fixed!=(c==2)){m.fixed=c==2;changed=true;}}
+    return changed;
+}
 inline bool valid(const Monitor &m,size_t count) {
     if(m.count<2 || m.count>4) return false;
     for(size_t i=0;i<m.count;++i) {

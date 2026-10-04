@@ -28,6 +28,9 @@ int main() {
         guiIO.Fonts->Build();
         {
             App app(window, testRenderer);
+            requireExport(ImGui::GetFont()==nullptr,"startup fixture precedes the first ImGui frame");
+            app.refreshFont=false;app.queueCreationLabelFont();
+            requireExport(app.refreshFont,"font glyph checks defer safely during hidden startup import");
             if (app.pipelineJob.valid()) app.pipelineJob.wait();
             app.poll();
             // Appearance follows element identity across reordered/missing trajectory types.
@@ -757,8 +760,24 @@ int main() {
                 click("creation.tool-torsion"); frame();
                 pointerClick(pointOf(0)); pointerClick(pointOf(1)); pointerClick(pointOf(2)); pointerClick(pointOf(3));
                 requireExport(app.creationDisplay.monitors.size()==3 && app.creationDisplay.monitors[2].count==4,"four pointer picks create signed torsion monitor");
+                const auto beforeConstraints=app.authorUndo.size();const auto constraintsGpu=app.gpu.dataUploadRevision();
+                const auto constraintsSource=app.source;
+                click("creation.edit-measurement-constraints");frame();click("creation.measurement-select-all");frame();
+                click("creation.measurement-choice-0");frame();click("creation.measurement-choice-0-2");frame();
+                click("creation.measurement-choice-2");frame();click("creation.measurement-choice-2-2");frame();
+                click("creation.measurement-apply");frame();
+                requireExport(app.creationDisplay.monitors[0].fixed && !app.creationDisplay.monitors[1].fixed && app.creationDisplay.monitors[2].fixed &&
+                    app.authorUndo.size()==beforeConstraints+1 && !app.authorUndo.back().data && app.gpu.dataUploadRevision()==constraintsGpu &&
+                    app.source.atoms[4].x==constraintsSource.atoms[4].x && app.source.bonds==constraintsSource.bonds,
+                    "actual measurement combos set only chosen types with metadata history and no GPU reupload");
+                app.history(false);frame();requireExport(!app.creationDisplay.monitors[0].fixed && !app.creationDisplay.monitors[2].fixed,"undo measurement constraints");
+                app.history(true);frame();requireExport(app.creationDisplay.monitors[0].fixed && app.creationDisplay.monitors[2].fixed,"redo measurement constraints");
+                click("creation.edit-measurement-constraints");frame();click("creation.measurement-apply");frame();
+                requireExport(app.authorUndo.size()==beforeConstraints+1,"keep measurement constraints adds no history");
+                const auto countBeforeDuplicate=app.creationDisplay.monitors.size();app.addGeometryMonitor({4,{0,1,2,3}});frame();
+                requireExport(app.creationDisplay.monitors.size()==countBeforeDuplicate && app.creationDisplay.monitors[2].fixed,"re-picking a fixed measurement reuses its identity");
                 app.geometryTarget=-60; frame(); click("creation.geometry-apply"); settlePipeline();
-                requireExport(std::abs(authoring::dihedralAngle(app.source,0,1,2,3)+60)<1e-4,"torsion numeric apply reaches signed target");
+                requireExport(std::abs(authoring::dihedralAngle(app.source,0,1,2,3)+60)<1e-4 && app.creationDisplay.monitors[2].fixed,"fixed simulation monitor still allows numeric torsion editing");
                 const auto monitorTab=app.captureTab(); app.restoreTab(monitorTab); frame();
                 requireExport(app.creationDisplay.monitors.size()==3 && app.geometryPending.empty(),"tab restore retains independent monitors and cancels unfinished picks");
                 const auto monitorFile=dir/"geometry.atomx"; io::ExportOptions monitorOptions;
@@ -766,6 +785,15 @@ int main() {
                 requireExport(document::read(monitorFile).view.display.monitors==app.creationDisplay.monitors,"GUI-created monitors persist in native document");
                 click("creation.geometry-remove"); requireExport(app.creationDisplay.monitors.size()==2,"remove control deletes monitor only");
                 app.history(false); frame(); requireExport(app.creationDisplay.monitors.size()==3,"display-only undo restores removed monitor");
+                click("creation.edit-measurement-constraints");frame();click("creation.measurement-select-none");frame();
+                click("creation.measurement-row-1");frame();click("creation.measurement-choice-1");frame();click("creation.measurement-choice-1-2");frame();
+                click("creation.measurement-cancel");frame();requireExport(!app.creationDisplay.monitors[1].fixed,"cancel leaves measurement constraints untouched");
+                click("creation.edit-measurement-constraints");frame();app.measurementConstraintChoices[2]=1;
+                app.editStructure("invalidate measurement constraints",[](Dataset &data){data.atoms[4].x+=1;});settlePipeline();frame();
+                const auto staleConstraints=app.authorUndo.size();
+                requireExport(!app.applyMeasurementConstraints() && app.authorUndo.size()==staleConstraints && app.creationDisplay.monitors[2].fixed,"stale geometry version rejects captured measurement edits");
+                frame();frame(); // Let the stale-state notice finish modal auto sizing before pointer input.
+                click("creation.measurement-cancel");frame();
                 while(app.authorUndo.size()>baseline) { app.history(false); settlePipeline(); }
                 app.authorRedo.clear(); app.chooseCreationTool(App::CreationTool::Select); frame();
             }

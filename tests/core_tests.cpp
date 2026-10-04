@@ -3164,8 +3164,22 @@ int main() {
             try { (void)geometry::positions(plan,181); } catch(...) { blocked=true; }
             require(blocked,"out of range angle rejected");
             creation::Display display; display.monitors={distance,torsion}; display.activeMonitor=1;
+            display.monitors[0].fixed=true;
             display.eraseAtoms(6,{0});
             require(display.monitors.size()==1 && display.monitors[0].atoms==std::array<int32_t,4>{0,1,-1,-1} && display.activeMonitor==-1,"deleted endpoint removes monitor and surviving monitor remaps");
+            require(display.monitors[0].fixed,"surviving fixed measurement follows remapped endpoints");
+            std::vector<geometry::Monitor> constraints{distance,distance,angle,torsion};constraints[0].fixed=true;
+            require(geometry::sameMeasurement(constraints[0],distance) && geometry::fixedSummary(constraints,{0,1,2,3})==std::array<int,3>{-1,0,0},
+                "measurement identity ignores fixed flag; mixed summary is per geometry type");
+            require(!geometry::setFixed(constraints,{0,1,2,3},{0,0,0}) && constraints[0].fixed && !constraints[1].fixed,"keep preserves mixed flags without mutation");
+            require(geometry::setFixed(constraints,{0,1,2,3},{2,0,2}) && constraints[0].fixed && constraints[1].fixed && !constraints[2].fixed && constraints[3].fixed,
+                "batch fixed edits affect chosen geometry types only");
+            require(!geometry::setFixed(constraints,{0,1,2,3},{2,0,2}),"same measurement flags are a no-op");
+            const auto beforeConstraints=constraints;bool rejectedConstraint=false;
+            try{geometry::setFixed(constraints,{1,99},{1,1,1});}catch(...){rejectedConstraint=true;}
+            require(rejectedConstraint && constraints==beforeConstraints,"invalid measurement row rejects all edits atomically");
+            auto manuallyEdited=molecule;const auto fixedPlan=geometry::prepare(manuallyEdited,constraints[3]);geometry::apply(manuallyEdited,fixedPlan,45);
+            require(std::abs(*geometry::value(manuallyEdited,constraints[3])-45)<1e-4 && constraints[3].fixed,"fixed simulation monitor still permits manual geometry edits");
         }
         {
             Dataset d;d.species={"C","O"};d.atoms={{0,0,0,0},{2,0,0,1},{4,0,0,0},{9,0,0,0}};

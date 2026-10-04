@@ -78,7 +78,9 @@ int main() {
             try { (void)document::read(nativePath,1); } catch (...) { rejected=true; }
             require(rejected,"native document refuses a sampled import that would lose topology and annotations");
             std::ifstream bytesIn(nativePath,std::ios::binary);
-            const std::string bytes((std::istreambuf_iterator<char>(bytesIn)),{}); bytesIn.close();
+            const std::string version13Bytes((std::istreambuf_iterator<char>(bytesIn)),{}); bytesIn.close();
+            const size_t measurementBytes=8+view.display.monitors.size();
+            auto bytes=version13Bytes;bytes[8]=12;bytes.erase(bytes.size()-4-measurementBytes,measurementBytes);
             auto rejectBytes=[&](std::string corrupted) {
                 const auto badPath=dir/"bad.atomx";
                 { std::ofstream output(badPath,std::ios::binary); output.write(corrupted.data(),std::streamsize(corrupted.size())); }
@@ -88,7 +90,16 @@ int main() {
             rejectBytes(bytes.substr(0,bytes.size()-1));
             const size_t selectionBytes=8+view.bondSelection.size()*4;
             const size_t visibilityBytes=9; // No local rules in this legacy compatibility fixture.
-            auto version=bytes; version[8]=13; rejectBytes(version);
+            auto version=bytes; version[8]=14; rejectBytes(version);
+            auto invalidFixed=version13Bytes;invalidFixed[invalidFixed.size()-5]=2;rejectBytes(invalidFixed);
+            auto invalidFixedCount=version13Bytes;invalidFixedCount[invalidFixedCount.size()-4-measurementBytes]=2;rejectBytes(invalidFixedCount);
+            const auto v12Path=dir/"v12.atomx";
+            {std::ofstream out(v12Path,std::ios::binary);out.write(bytes.data(),std::streamsize(bytes.size()));}
+            require(document::read(v12Path).view.display==view.display,"v12 retains measurements and defaults constraints to free");
+            auto fixedOptions=nativeOptions;fixedOptions.documentView.display.monitors[0].fixed=true;
+            const auto fixedPath=dir/"fixed-measurements.atomx";io::write(fixedPath,io::Format::AtomX,native,fixedOptions);
+            require(document::read(fixedPath).view.display==fixedOptions.documentView.display && !document::read(fixedPath).view.display.monitorsVisible,
+                "v13 persists fixed measurement independently of monitor visibility and restores selected monitor");
             auto badRoll=bytes; const float nanRoll=std::numeric_limits<float>::quiet_NaN();
             std::memcpy(badRoll.data()+badRoll.size()-8-selectionBytes-visibilityBytes,&nanRoll,4);rejectBytes(badRoll);
             auto badSelection=bytes;const int32_t missingBond=99;
@@ -227,6 +238,8 @@ int main() {
             require(compositeRead.view.display==composite && creation::labelText(compositeRead.data,0,compositeRead.view.display.labelAt(0)).find("Energy = -2.5")!=std::string::npos,
                 "v6 restores composite property names, order, prefix, precision and sparse selected overrides");
             std::ifstream compositeIn(compositePath,std::ios::binary); std::string compositeBytes((std::istreambuf_iterator<char>(compositeIn)),{});
+            compositeBytes.erase(compositeBytes.size()-4-measurementBytes,measurementBytes);
+            compositeBytes.erase(compositeBytes.size()-4-visibilityBytes,visibilityBytes);compositeBytes.erase(compositeBytes.size()-4-selectionBytes,selectionBytes);
             compositeBytes.erase(compositeBytes.size()-8,4);compositeBytes.erase(compositeBytes.size()-4-bondLabelBytes,bondLabelBytes);compositeBytes.erase(compositeBytes.size()-5,1); compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
             auto badField=compositeBytes; badField[badField.size()-4-9]=char(255); rejectBytes(badField);
             auto badPrecision=compositeBytes; badPrecision[badPrecision.size()-4-21]=0; rejectBytes(badPrecision);
@@ -236,6 +249,8 @@ int main() {
             io::write(compositePath,io::Format::AtomX,native,compositeOptions);
             require(document::read(compositePath).view.display==composite,"v7 restores global color range and sparse custom overrides");
             std::ifstream colorIn(compositePath,std::ios::binary); std::string colorData((std::istreambuf_iterator<char>(colorIn)),{});
+            colorData.erase(colorData.size()-4-measurementBytes,measurementBytes);
+            colorData.erase(colorData.size()-4-visibilityBytes,visibilityBytes);colorData.erase(colorData.size()-4-selectionBytes,selectionBytes);
             colorData.erase(colorData.size()-8,4);colorData.erase(colorData.size()-4-bondLabelBytes,bondLabelBytes);colorData.erase(colorData.size()-5,1);colorData[8]=7;auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);
             auto invalid=native; invalid.bonds[0].a=999;
             rejected=false; try { io::write(nativePath,io::Format::AtomX,invalid,nativeOptions); } catch (...) { rejected=true; }

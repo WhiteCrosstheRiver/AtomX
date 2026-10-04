@@ -825,6 +825,12 @@ struct App {
     double geometryTarget=0,geometryDragTarget=0;
     bool geometryInverted=false,geometryDragInverted=false;
     int geometryPanelMonitor=-1;
+    bool openMeasurementConstraints=false;
+    uint64_t measurementConstraintTab=0,measurementConstraintGeneration=0;
+    std::vector<geometry::Monitor> measurementConstraintSource;
+    std::vector<int> measurementConstraintRows;
+    std::array<int,3> measurementConstraintChoices{};
+    std::string measurementConstraintMessage;
     struct CreationHistoryState {
         std::optional<Dataset> data; // Display-only history does not copy a large structure.
         creation::Display display;
@@ -3958,6 +3964,7 @@ struct App {
         menu("修改", "##create-modify", [&] {
             if(ImGui::MenuItem("原子数值属性...",nullptr,false,!creationSelection.empty()))requestAtomProperties();
             if(ImGui::MenuItem("原子模拟约束...",nullptr,false,!creationSelection.empty()))requestAtomConstraints();
+            if(ImGui::MenuItem("测量模拟约束...",nullptr,false,!creationDisplay.monitors.empty()))requestMeasurementConstraints();
             if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
             if (ImGui::MenuItem("运动分组...")) requestMotionGroups();
             if (ImGui::MenuItem("替换元素")) replacePickedElement();
@@ -4857,7 +4864,7 @@ struct App {
         if(!geometry::valid(m,source.atoms.size())) return;
         if(!geometry::value(source,m)) { status="测量点重合或扭转角未定义"; geometryPending.clear(); return; }
         auto next=creationDisplay;
-        const auto found=std::find(next.monitors.begin(),next.monitors.end(),m);
+        const auto found=std::find_if(next.monitors.begin(),next.monitors.end(),[&](const auto &other){return geometry::sameMeasurement(other,m);});
         if(found!=next.monitors.end()) { activateGeometry(int(found-next.monitors.begin())); return; }
         if(next.monitors.size()>=geometry::monitorLimit) { status="测量标记最多 256 个"; geometryPending.clear(); return; }
         next.monitors.push_back(m); next.activeMonitor=int(next.monitors.size())-1; next.monitorsVisible=true;
@@ -4881,6 +4888,73 @@ struct App {
             geometryPanelMonitor=-1;
         } catch(const std::exception &e) { status=e.what(); }
     }
+    void requestMeasurementConstraints() {
+        if(!creationMode || documentsBusy() || !sameAtomCount() || creationDisplay.monitors.empty())return;
+        measurementConstraintTab=tabs[size_t(activeTab)].id;measurementConstraintGeneration=pipelineGeneration;
+        measurementConstraintSource=creationDisplay.monitors;measurementConstraintRows.clear();
+        if(creationDisplay.activeMonitor>=0 && size_t(creationDisplay.activeMonitor)<measurementConstraintSource.size())
+            measurementConstraintRows.push_back(creationDisplay.activeMonitor);
+        measurementConstraintChoices={};measurementConstraintMessage.clear();openMeasurementConstraints=true;
+    }
+    bool validMeasurementConstraints() const {
+        return creationMode && activeTab>=0 && activeTab<int(tabs.size()) && tabs[size_t(activeTab)].id==measurementConstraintTab &&
+            pipelineGeneration==measurementConstraintGeneration && !documentsBusy() && creationDisplay.monitors==measurementConstraintSource;
+    }
+    bool applyMeasurementConstraints() {
+        if(!validMeasurementConstraints()){measurementConstraintMessage="体系或测量已改变，请重新打开";return false;}
+        try {auto next=creationDisplay;
+            if(geometry::setFixed(next.monitors,measurementConstraintRows,measurementConstraintChoices))
+                editCreationDisplay(std::move(next),"修改测量模拟约束");
+            else status="测量约束没有变化";
+            return true;
+        }catch(const std::exception &e){measurementConstraintMessage=e.what();return false;}
+    }
+    void measurementConstraintsDialog() {
+        if(openMeasurementConstraints){ImGui::OpenPopup("测量模拟约束##measurement-constraints");openMeasurementConstraints=false;}
+        const auto *vp=ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->GetWorkCenter(),ImGuiCond_Appearing,{.5f,.5f});
+        ImGui::SetNextWindowSizeConstraints({U(500),0},{std::max(U(500),vp->WorkSize.x-U(24)),vp->WorkSize.y-U(24)});
+        if(!ImGui::BeginPopupModal("测量模拟约束##measurement-constraints",nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+U(500));
+        const bool valid=validMeasurementConstraints();ImGui::BeginDisabled(!valid);
+        ImGui::TextUnformatted("选择已有测量，可同时修改多种类型");
+        if(ImGui::Button("全选测量")){measurementConstraintRows.resize(measurementConstraintSource.size());std::iota(measurementConstraintRows.begin(),measurementConstraintRows.end(),0);}
+        recordUiTestItem("creation.measurement-select-all");ImGui::SameLine();
+        if(ImGui::Button("清空测量选择"))measurementConstraintRows.clear();recordUiTestItem("creation.measurement-select-none");
+        ImGui::BeginChild("##measurement-selection",{U(500),U(std::min(160.f,30.f*float(measurementConstraintSource.size())+8))},ImGuiChildFlags_Borders);
+        for(size_t i=0;i<measurementConstraintSource.size();++i) {
+            const auto &m=measurementConstraintSource[i];const auto measured=geometry::value(source,m);
+            std::string label=std::string(geometryName(m.count))+" "+std::to_string(i+1)+" · ";
+            for(size_t j=0;j<m.count;++j)label+="#"+std::to_string(m.atoms[j])+(j+1<m.count?" → ":"");
+            char number[64];if(measured)snprintf(number,sizeof(number)," · %.3f %s",*measured,m.count==2?"Å":"°");else snprintf(number,sizeof(number)," · 未定义");
+            label+=number;label+=m.fixed?" · 固定":" · 自由";label+="##constraint-"+std::to_string(i);
+            auto it=std::find(measurementConstraintRows.begin(),measurementConstraintRows.end(),int(i));bool selected=it!=measurementConstraintRows.end();
+            if(ImGui::Checkbox(label.c_str(),&selected)){if(selected)measurementConstraintRows.push_back(int(i));else measurementConstraintRows.erase(it);}
+            recordUiTestItem("creation.measurement-row-"+std::to_string(i));
+        }ImGui::EndChild();
+        const auto summary=geometry::fixedSummary(measurementConstraintSource,measurementConstraintRows);
+        ImGui::Text("已选 %zu 个测量",measurementConstraintRows.size());
+        for(int k=0;k<3;++k) {
+            ImGui::PushID(k);ImGui::BeginDisabled(summary[size_t(k)]==-2);
+            ImGui::Text("%s：%s",geometryName(uint8_t(k+2)),summary[size_t(k)]==-2?"未选择":summary[size_t(k)]==-1?"混合":summary[size_t(k)]?"固定":"自由");
+            ImGui::SameLine();ImGui::SetNextItemWidth(U(155));const char *labels[]{"保持当前值","解除固定","固定"};
+            const bool open=ImGui::BeginCombo("##choice",labels[measurementConstraintChoices[size_t(k)]]);
+            recordUiTestItem("creation.measurement-choice-"+std::to_string(k));
+            if(open){for(int c=0;c<3;++c){if(ImGui::Selectable(labels[c],measurementConstraintChoices[size_t(k)]==c))measurementConstraintChoices[size_t(k)]=c;
+                recordUiTestItem("creation.measurement-choice-"+std::to_string(k)+"-"+std::to_string(c));}ImGui::EndCombo();}
+            ImGui::EndDisabled();ImGui::PopID();
+        }
+        ImGui::TextWrapped("固定距离、角度或扭转角是模拟属性；仍可手工修改几何。当前值随坐标更新，AtomX 不执行模拟求解。");
+        ImGui::TextWrapped("约束随测量保存在 .atomx 中；标准结构导出不保留测量。移除测量或删除其端点会同时移除该约束。");
+        ImGui::EndDisabled();
+        if(!valid)ImGui::TextWrapped("体系或测量已改变，请重新打开。");
+        else if(!measurementConstraintMessage.empty())ImGui::TextWrapped("%s",measurementConstraintMessage.c_str());
+        ImGui::BeginDisabled(!valid || measurementConstraintRows.empty());
+        if(ImGui::Button("应用",{U(110),U(30)}) && applyMeasurementConstraints())ImGui::CloseCurrentPopup();recordUiTestItem("creation.measurement-apply");
+        ImGui::EndDisabled();ImGui::SameLine();
+        if(ImGui::Button("取消",{U(110),U(30)}) || ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();recordUiTestItem("creation.measurement-cancel");
+        ImGui::PopTextWrapPos();ImGui::EndPopup();
+    }
     // Small fixed monitor budget; these overlays never scan all atoms.
     void geometryOverlay(ImVec2 p,ImVec2 size,Camera &cam,ImDrawList *draw=nullptr,int *hit=nullptr) {
         if(!sameAtomCount() || !creationDisplay.monitorsVisible) return;
@@ -4900,7 +4974,7 @@ struct App {
             for(size_t j=0;j<m.count;++j) visible=visible && creationAtomVisible(m.atoms[j]) && project(geometry::at(result.data,m.atoms[j]),pts[j]);
             if(!visible) continue;
             const auto measured=geometry::value(result.data,m);
-            char caption[80]; if(measured) snprintf(caption,sizeof(caption),m.count==2?"%.3f Å":"%.2f°",*measured); else snprintf(caption,sizeof(caption),"未定义");
+            char caption[80]; if(measured) snprintf(caption,sizeof(caption),m.count==2?"%.3f Å%s":"%.2f°%s",*measured,m.fixed?" · 固定":""); else snprintf(caption,sizeof(caption),"未定义%s",m.fixed?" · 固定":"");
             ImVec2 anchor=m.count==2?ImVec2{(pts[0].x+pts[1].x)*.5f,(pts[0].y+pts[1].y)*.5f}:
                 m.count==3?pts[1]:ImVec2{(pts[1].x+pts[2].x)*.5f,(pts[1].y+pts[2].y)*.5f};
             anchor.x+=U(8); anchor.y+=U(m.count==4?8.f:-24.f);
@@ -4973,14 +5047,15 @@ struct App {
             ImGui::BeginChild("##monitors",{0,U(std::min(130.f,float(creationDisplay.monitors.size())*29+6))},ImGuiChildFlags_Borders);
             for(size_t i=0;i<creationDisplay.monitors.size();++i) {
                 const auto &m=creationDisplay.monitors[i]; const auto measured=geometry::value(result.data,m);
-                char label[160]; if(measured) snprintf(label,sizeof(label),"%s %zu  %.3f %s##%zu",geometryName(m.count),i+1,*measured,m.count==2?"Å":"°",i);
-                else snprintf(label,sizeof(label),"%s %zu  未定义##%zu",geometryName(m.count),i+1,i);
+                char label[160]; if(measured) snprintf(label,sizeof(label),"%s %zu  %.3f %s%s##%zu",geometryName(m.count),i+1,*measured,m.count==2?"Å":"°",m.fixed?" · 固定":"",i);
+                else snprintf(label,sizeof(label),"%s %zu  未定义%s##%zu",geometryName(m.count),i+1,m.fixed?" · 固定":"",i);
                 if(ImGui::Selectable(label,creationDisplay.activeMonitor==int(i))) activateGeometry(int(i));
                 recordUiTestItem("creation.monitor-"+std::to_string(i));
             }
             ImGui::EndChild();
             bool visible=creationDisplay.monitorsVisible;
             if(ImGui::Checkbox("显示测量标记",&visible)) { auto next=creationDisplay; next.monitorsVisible=visible; editCreationDisplay(std::move(next),"显示测量标记"); }
+            if(ImGui::Button("测量模拟约束...",{-1,U(30)}))requestMeasurementConstraints();recordUiTestItem("creation.edit-measurement-constraints");
         }
         const int i=creationDisplay.activeMonitor;
         if(i>=0 && size_t(i)<creationDisplay.monitors.size()) {
@@ -5123,13 +5198,17 @@ struct App {
             creationMode && data.atoms.size()==source.atoms.size()?&creationDisplay:nullptr);
     }
     void queueCreationLabelFont() {
+        // File loading can finish while hidden, before the first ImGui frame.
+        // Defer glyph inspection until a current font has been selected.
+        ImFont *currentFont=ImGui::GetFont();
+        if(!currentFont){refreshFont=true;return;}
         auto missingGlyph=[&](const std::string &text) {
             const char *cursor=text.c_str();
             while (*cursor) {
                 unsigned character=0;
                 const int length=ImTextCharFromUtf8(&character,cursor,nullptr);
                 if (length<=0) break;
-                if (!ImGui::GetFont()->FindGlyphNoFallback(ImWchar(character))) refreshFont=true;
+                if (!currentFont->FindGlyphNoFallback(ImWchar(character))) refreshFont=true;
                 cursor+=length;
             }
         };
@@ -6929,6 +7008,7 @@ struct App {
                 if (ImGui::MenuItem("编辑坐标...",nullptr,false,creationPick>=0)) requestCreationPosition();
                 if(ImGui::MenuItem("原子数值属性...",nullptr,false,!creationSelection.empty()))requestAtomProperties();
                 if(ImGui::MenuItem("原子模拟约束...",nullptr,false,!creationSelection.empty()))requestAtomConstraints();
+                if(ImGui::MenuItem("测量模拟约束...",nullptr,false,!creationDisplay.monitors.empty()))requestMeasurementConstraints();
                 if(ImGui::MenuItem("原子化学设置...",nullptr,false,!creationSelection.empty()))requestCreationChemistry();
                 if (ImGui::MenuItem("精准移动 / 旋转...",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty()))
                     requestCreationMovement();
@@ -10441,6 +10521,7 @@ struct App {
         // the atlas's active destination. The heading font is added later.
         ImFontGlyphRangesBuilder chineseBuilder;
         chineseBuilder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+        chineseBuilder.AddText("测量模拟约束选择已有可同时修改多种类型全选清空测量选择已选未选择当前值随坐标更新约束随测量保存在中标准结构导出不保留测量移除测量或删除其端点会同时移除该约束体系或测量已改变请重新打开测量类型无效测量选择已改变测量约束选项无效");
         chineseBuilder.AddText("原子模拟约束整原子固定当前晶格方向保持各原子当前值解除固定笛卡尔同时部分轴及其旋转后的方向约束尚未支持分数分量固定全部解除全部晶格方向需要有效的三维周期晶胞这些是属性手工移动与旋转仍可使用不执行模拟求解保持当前值可保留多选中的不同约束保存两类保存晶格方向整原子笛卡尔固定需保存在中导出时须显式取消约束保留没有变化标志必须为零或一属性类型不正确层构建会重设晶格基矢请先解除来源的晶格方向约束片段库不保留来源晶格方向");
         chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位转换原胞对称操作识别失败三维周期晶面重排沿法向添加关闭边界编号须标准设置参数相容基元无效");
         chineseBuilder.AddText("精准移动旋转选中原子的几何中心不移动晶胞屏幕轴体系轴距离视图比例步长角度以打开窗口时视图的较短边为选中中心所在深度上下左右向里向外右手方向反向使用负角度坐标未改变已记录一步历史原标签已改变请关闭并重新打开位移与角度必须为有限数值旋转轴不能为零选中原子已改变请重新选择原子坐标无效位移超出坐标范围连接片段分数坐标切换添加约束←→↑↓−°Å");
@@ -11172,6 +11253,7 @@ struct App {
         chemistryDialog();
         atomPropertiesDialog();
         atomConstraintsDialog();
+        measurementConstraintsDialog();
         hydrogenDialog();
         motionGroupsDialog();
         creationStylesDialog();

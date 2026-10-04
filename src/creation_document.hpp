@@ -3,7 +3,7 @@
 #include "atom_constraints.hpp"
 #include <bit>
 
-// AtomX document v12 (reads v1..v11): little-endian IEEE floats; explicit field order and
+// AtomX document v13 (reads v1..v12): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -172,7 +172,7 @@ inline void writeBondLabels(Writer &w,const creation::BondLabels &bl) {
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(12));
+    w.bytes(magic,8); w.value(uint32_t(13));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -235,6 +235,7 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     for(const auto &[key,hidden]:display.bondVisibility.exceptions) {
         w.value(key.a);w.value(key.b);for(auto x:key.image)w.value(x);w.flag(hidden);
     }
+    w.value(uint64_t(display.monitors.size()));for(const auto &m:display.monitors)w.flag(m.fixed);
     w.bytes("DONE",4);
 }
 inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
@@ -243,7 +244,7 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version<1 || version>12) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>13) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -350,6 +351,8 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
             const bool hidden=r.flag();valid(bv.exceptions.emplace(key,hidden).second);
         }
     }
+    if(version>=13) {const auto n=r.count(1,geometry::monitorLimit);valid(n==v.display.monitors.size());
+        for(auto &m:v.display.monitors)m.fixed=r.flag();}
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size());v.display.normalizeBonds(d);return result;
 }
