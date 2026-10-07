@@ -180,6 +180,13 @@ int main(int argc,char **argv) {
             auto p = dir / L"序列_000001.vasp";
             result = io::read(p, io::index(p)[0]);
             requireExport(result.atoms[0].x == 3, "sequence contents");
+            app.startDataExport(dir / L"POSCAR");
+            finish();
+            p = dir / L"frame_000001" / L"POSCAR";
+            requireExport(std::filesystem::exists(p) && !p.has_extension() &&
+                          io::read(p, io::index(p)[0]).atoms[0].x == 3,
+                          "default POSCAR sequence keeps a bare filename in each frame folder");
+            requireExport(app.preferences.exportDirectory == dir.wstring(), "export remembers the chosen folder");
             app.exportRange = false;
             app.exportFormat = 0;
             bool failed = false;

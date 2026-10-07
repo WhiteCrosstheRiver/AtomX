@@ -24,6 +24,7 @@
 #include "backends/imgui_impl_dx11.h"
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <future>
 #include <chrono>
 #include <cmath>
@@ -250,8 +251,12 @@ static LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 static std::filesystem::path dialog(HWND window, bool save, const wchar_t *filter,
-                                    const wchar_t *ext) {
+                                    const wchar_t *ext, const std::filesystem::path &suggested = {}) {
     wchar_t path[32768]{};
+    const auto filename = suggested.filename().wstring();
+    if (filename.size() >= std::size(path)) throw std::runtime_error("Suggested filename is too long");
+    std::copy(filename.begin(), filename.end(), path);
+    const auto directory = suggested.parent_path().wstring();
     OPENFILENAMEW of{};
     of.lStructSize = sizeof(of);
     of.hwndOwner = window;
@@ -259,6 +264,7 @@ static std::filesystem::path dialog(HWND window, bool save, const wchar_t *filte
     of.lpstrFile = path;
     of.nMaxFile = 32768;
     of.lpstrDefExt = ext;
+    of.lpstrInitialDir = directory.empty() ? nullptr : directory.c_str();
     of.Flags =
         OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     const bool accepted=save ? GetSaveFileNameW(&of)!=FALSE : GetOpenFileNameW(&of)!=FALSE;
@@ -3408,7 +3414,7 @@ struct App {
         // one another, and keep all remaining files when one fails to load.
         std::vector<wchar_t> buffer(65536);OPENFILENAMEW of{};of.lStructSize=sizeof(of);of.hwndOwner=window;
         of.lpstrFile=buffer.data();of.nMaxFile=DWORD(buffer.size());of.lpstrDefExt=L"xyz";
-        of.lpstrFilter=L"Atom structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*.data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro;*.atomx;*.atomx-project\0All files\0*.*\0";
+        of.lpstrFilter=L"Atom structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*.data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro;*.mol;*.sdf;*.sd;*.xsf;*.atomx;*.atomx-project\0All files\0*.*\0";
         of.Flags=OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|OFN_FILEMUSTEXIST|OFN_EXPLORER|OFN_ALLOWMULTISELECT;
         const bool accepted=GetOpenFileNameW(&of)!=FALSE;
         if(ImGui::GetCurrentContext()){auto &io=ImGui::GetIO();io.ClearEventsQueue();io.ClearInputKeys();io.ClearInputMouse();}
@@ -10883,6 +10889,8 @@ struct App {
             valid = ext == ".data" || ext == ".lmp";
         if (fmt == io::Format::LammpsDump)
             valid = ext == ".dump" || ext == ".lammpstrj";
+        if (fmt == io::Format::SDF) valid = ext == ".sdf" || ext == ".sd";
+        if (fmt == io::Format::PDB) valid = ext == ".pdb" || ext == ".ent";
         if (!valid)
             throw std::runtime_error(
                 "Filename extension does not match the selected export format");
@@ -10897,6 +10905,7 @@ struct App {
                                                     atomBudget = budget,
                                                     allowPreview = exportPreview]() {
             std::vector<std::pair<std::filesystem::path, std::filesystem::path>> staged;
+            std::vector<std::filesystem::path> createdDirectories;
             auto nonce =
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
             auto cleanup = [&]() {
@@ -10904,20 +10913,22 @@ struct App {
                     std::error_code ec;
                     std::filesystem::remove(temp, ec);
                 }
+                for (auto it = createdDirectories.rbegin(); it != createdDirectories.rend(); ++it) {
+                    std::error_code ec; std::filesystem::remove(*it, ec); // Only empty directories created by this export.
+                }
             };
             try {
                 int total = (last - first) / step + 1;
                 for (int i = 0; i < (sequence ? total : 1); ++i) {
                     auto target = destination;
                     if (sequence) {
-                        std::wostringstream n;
-                        n << destination.stem().wstring() << L'_' << std::setw(6)
-                          << std::setfill(L'0') << first + i * step
-                          << destination.extension().wstring();
-                        target = destination.parent_path() / n.str();
+                        target = io::sequenceExportPath(destination, fmt, first + i * step);
                         if (std::filesystem::exists(target))
                             throw std::runtime_error("Sequence target already exists: " +
                                                      utf8(target.wstring()));
+                        if (target.parent_path() != destination.parent_path() &&
+                            std::filesystem::create_directory(target.parent_path()))
+                            createdDirectories.push_back(target.parent_path());
                     }
                     auto temp = target;
                     temp += L".atomx-" + std::wstring(nonce.begin(), nonce.end()) + L".tmp";
@@ -10976,6 +10987,8 @@ struct App {
             }
         });
         exporting = true;
+        preferences.exportDirectory = destination.parent_path().wstring();
+        layoutDirty = true;
     }
     void dataExportDialog() {
         if (showDataExport) {
@@ -11006,17 +11019,23 @@ struct App {
                 ImGui::Checkbox("Separate file per frame", &exportSequence);
             else
                 ImGui::TextDisabled("This format exports one file per frame.");
-            ImGui::TextDisabled("Sequence naming: name_000000.ext");
+            ImGui::TextDisabled(fmt == io::Format::POSCAR ? "Default POSCAR sequence: frame_000000/POSCAR" : "Sequence naming: name_000000.ext");
         } else
             ImGui::Text("Current frame: %d", current);
         ImGui::SeparatorText("Format options");
         if (fmt==io::Format::AtomX)
             ImGui::TextWrapped("Saves the current result with cell/PBC, explicit bonds and orders, all particle properties, atom labels/visibility, particle styles and camera. Undo history, workspace snapshots and modifier steps are not stored. Open the .atomx file to continue editing.");
-        else if (fmt != io::Format::GRO)
+        else if (fmt != io::Format::GRO && fmt != io::Format::PDB && fmt != io::Format::MOL && fmt != io::Format::SDF)
             ImGui::SliderInt("Numeric precision", &exportOptions.precision, 1, 17);
-        else
+        else if (fmt == io::Format::GRO)
             ImGui::TextWrapped("GRO uses nm, fixed-width 3 decimal coordinates, and at most 99999 "
                                "atoms. Residues are exported as MOL; topology is not retained.");
+        if (fmt == io::Format::MOL || fmt == io::Format::SDF)
+            ImGui::TextWrapped("V2000: coordinates (4 decimals), single/double/triple/aromatic bonds and formal charges. Maximum 999 atoms and 999 bonds per record. Cell/PBC, periodic-image bonds, stereochemistry and arbitrary properties are not stored. SDF supports multiple records as frames.");
+        if (fmt == io::Format::PDB)
+            ImGui::TextWrapped("PDB: coordinates (3 decimals), single-bond connectivity and formal charges; maximum 99999 atoms. Periodic cells use the conventional orientation. PBC axes, bond order, residues and arbitrary properties are not retained. Choose MOL/SDF for bond orders.");
+        if (fmt == io::Format::XSF)
+            ImGui::TextWrapped("XSF: lattice vectors and positions in Angstroms, with X / XY / XYZ periodicity. Cell origin is subtracted from positions. Bonds, arbitrary properties, grids and animations are not stored.");
         if (fmt == io::Format::POSCAR) {
             ImGui::Checkbox("Fractional coordinates (Direct)", &exportOptions.fractionalPOSCAR);
             if (result.data.vectorProperties.count("MoveMask") || result.data.scalarProperties.count(constraints::cartesianProperty))
@@ -11075,10 +11094,24 @@ struct App {
                 std::wstring ext(e.begin(), e.end());
                 std::wstring exportFilter = L"Selected format";
                 exportFilter.push_back(0);
-                exportFilter += L"*." + ext;
+                // POSCAR has no suffix. A wildcard filter avoids the shell inferring .vasp.
+                exportFilter += fmt == io::Format::POSCAR ? L"*.*" : L"*." + ext;
                 exportFilter.push_back(0);
                 exportFilter.push_back(0);
-                auto p = dialog(window, true, exportFilter.c_str(), ext.c_str());
+                const auto &exportTitle = tabs[size_t(activeTab)].title;
+                auto exportSource = path.empty() ? std::filesystem::path(std::u8string(
+                    reinterpret_cast<const char8_t *>(exportTitle.data()), exportTitle.size())) : path;
+                std::filesystem::path folder = preferences.exportDirectory;
+                if (!folder.empty() && !std::filesystem::is_directory(folder)) folder.clear();
+                if (folder.empty()) folder = path.parent_path();
+                if (folder.empty()) folder = projectPath.parent_path();
+                if (folder.empty()) {
+                    wchar_t documents[MAX_PATH]{};
+                    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, documents))) folder = documents;
+                    else folder = std::filesystem::current_path();
+                }
+                auto suggested = io::defaultExportPath(exportSource, fmt, folder);
+                auto p = dialog(window, true, exportFilter.c_str(), fmt == io::Format::POSCAR ? nullptr : ext.c_str(), suggested);
                 if (!p.empty()) {
                     startDataExport(p);
                     ImGui::CloseCurrentPopup();

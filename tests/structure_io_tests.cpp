@@ -39,6 +39,54 @@ int main() {
         };
         io::ExportOptions opt;
         {
+            require(io::defaultExportPath(dir / L"NaCl.xyz", io::Format::POSCAR) == dir / L"POSCAR", "POSCAR default is the bare POSCAR filename");
+            require(io::defaultExportPath({}, io::Format::POSCAR, dir) == dir / L"POSCAR", "generated structures use bare POSCAR too");
+            require(io::defaultExportPath(dir / L"NaCl.xyz", io::Format::XYZ) == dir / L"NaCl-export.xyz", "default does not overwrite source");
+            require(io::defaultExportPath(dir / L"NaCl.xyz", io::Format::SDF, dir / L"exports") == dir / L"exports" / L"NaCl.sdf", "remembered folder wins");
+            Dataset molecule; molecule.species={"C","O","N"};
+            molecule.atoms={{-1.25f,0,0,0},{0,.5f,0,1},{1.25f,0,0,2}};
+            molecule.bonds={{0,1,{},2},{1,2,{},4}}; molecule.sourceCount=3;
+            molecule.scalarProperties["AtomX.FormalCharge"]={1,-1,0}; molecule.bounds();
+            for (auto fmt : {io::Format::MOL, io::Format::SDF}) {
+                auto file=dir/(std::string("molecule.")+io::info(fmt).extension);
+                io::write(file,fmt,molecule); auto indexed=io::index(file); auto restored=io::read(file,indexed[0]);
+                require(restored.atoms.size()==3 && restored.atoms[0].x==-1.25f && restored.bonds==molecule.bonds,
+                        "MOL/SDF fixed-width coordinates and aromatic/multiple bonds roundtrip");
+                require(restored.scalarProperties.at("FormalCharge")==std::vector<double>{1,-1,0}, "MOL/SDF formal charges roundtrip");
+                auto sampled=io::read(file,indexed[0],1);
+                require(sampled.atoms.size()==1 && sampled.bonds.empty() && sampled.scalarProperties.at("FormalCharge").size()==1,
+                        "sampled molecular input drops nonresident bonds and keeps property alignment");
+            }
+            const auto sdf=dir/"frames.sdf";
+            {std::ofstream f(sdf); io::writeFrame(f,io::Format::SDF,molecule,{}); molecule.atoms[0].x=4.25f; io::writeFrame(f,io::Format::SDF,molecule,{});}
+            auto indexed=io::index(sdf); require(indexed.size()==2 && io::read(sdf,indexed[1]).atoms[0].x==4.25f,"SDF frame seek and multi-record output");
+            const auto bad=dir/"bad.sdf";
+            {std::ofstream f(bad);io::writeFrame(f,io::Format::MOL,molecule,{});}
+            bool rejected=false;try{(void)io::index(bad);}catch(...){rejected=true;}require(rejected,"truncated SDF delimiter rejected");
+            molecule.bonds={{0,1,{},1},{1,2,{},1}};
+            const auto pdb=dir/"molecule.pdb";io::write(pdb,io::Format::PDB,molecule);
+            auto pdbData=io::read(pdb,{});
+            require(pdbData.bonds==molecule.bonds && pdbData.species==molecule.species && pdbData.atoms[0].x==4.25f &&
+                    pdbData.scalarProperties.at("FormalCharge")==std::vector<double>{1,-1,0},"PDB element columns, CONECT deduplication and charge roundtrip");
+            molecule.bonds[0].order=2;rejected=false;try{io::write(pdb,io::Format::PDB,molecule);}catch(...){rejected=true;}
+            require(rejected && io::read(pdb,{}).bonds[0].order==1,"unsupported PDB bond order does not truncate destination");
+            auto crystal=d;crystal.pbc={true,true,true};crystal.origin={.25f,.5f,.75f};
+            const auto xsf=dir/"crystal.xsf";io::write(xsf,io::Format::XSF,crystal);
+            auto xsfData=io::read(xsf,{});
+            require(xsfData.cell==crystal.cell && xsfData.pbc==crystal.pbc && xsfData.atoms[0].x==.75f,"XSF triclinic cell and origin-relative coordinates");
+            const auto slab=dir/"slab.xsf";crystal.pbc={true,true,false};io::write(slab,io::Format::XSF,crystal);
+            require(io::read(slab,{}).pbc==crystal.pbc,"XSF slab dimensionality");
+            crystal.pbc={false,true,true};rejected=false;try{io::write(slab,io::Format::XSF,crystal);}catch(...){rejected=true;}
+            require(rejected,"XSF rejects PBC axes it cannot represent");
+            crystal=d;crystal.pbc={true,true,true};io::write(dir/"periodic.pdb",io::Format::PDB,crystal);
+            auto periodic=io::read(dir/"periodic.pdb",{});
+            require(std::abs(periodic.cell[3]-crystal.cell[3])<.002 && std::abs(periodic.atoms[0].z-crystal.atoms[0].z)<.002,
+                    "PDB CRYST1 and conventional coordinates roundtrip within fixed field precision");
+            molecule.atoms.resize(1000,molecule.atoms[0]);molecule.sourceCount=1000;
+            rejected=false;try{io::write(dir/"large.mol",io::Format::MOL,molecule);}catch(...){rejected=true;}
+            require(rejected,"MOL V2000 capacity enforced");
+        }
+        {
             auto native=d;
             native.bonds={{0,1,{1,0,0},3}}; native.bondStyle.radius=.12f;
             native.comment="原子结构\n二进制\r\n";

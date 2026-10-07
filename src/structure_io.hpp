@@ -6,7 +6,7 @@
 #include <optional>
 
 namespace atomx::io {
-enum class Format { XYZ, POSCAR, CIF, LammpsData, LammpsDump, PDB, GRO, AtomX };
+enum class Format { XYZ, POSCAR, CIF, LammpsData, LammpsDump, PDB, GRO, AtomX, MOL, SDF, XSF };
 struct FormatInfo {
     Format id;
     const char *name;
@@ -20,9 +20,12 @@ inline constexpr FormatInfo formats[] = {
     {Format::CIF, "CIF (P1 structure)", "cif", false, true},
     {Format::LammpsData, "LAMMPS data (atomic)", "data", false, true},
     {Format::LammpsDump, "LAMMPS text dump", "dump", true, true},
-    {Format::PDB, "PDB coordinates", "pdb", false, false},
+    {Format::PDB, "PDB coordinates / connectivity", "pdb", false, true},
     {Format::GRO, "GROMACS GRO", "gro", false, true},
-    {Format::AtomX, "AtomX document (structure + display)", "atomx", false, true}};
+    {Format::AtomX, "AtomX document (structure + display)", "atomx", false, true},
+    {Format::MOL, "MDL MOL (V2000 molecule)", "mol", false, true},
+    {Format::SDF, "MDL SDF (V2000 molecules / frames)", "sdf", true, true},
+    {Format::XSF, "XCrySDen XSF (structure)", "xsf", false, true}};
 inline std::string trim(std::string s) {
     auto a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
     return a == std::string::npos ? "" : s.substr(a, b - a + 1);
@@ -125,6 +128,9 @@ inline Format detect(const std::filesystem::path &path) {
         return Format::PDB;
     if (ext == ".gro")
         return Format::GRO;
+    if (ext == ".mol") return Format::MOL;
+    if (ext == ".sdf" || ext == ".sd") return Format::SDF;
+    if (ext == ".xsf") return Format::XSF;
     std::ifstream f(path);
     if (!f)
         throw std::runtime_error("Cannot open input file");
@@ -136,7 +142,7 @@ inline Format detect(const std::filesystem::path &path) {
         (!trim(s).empty() && trim(s).find_first_not_of("0123456789") == std::string::npos))
         return Format::XYZ;
     throw std::runtime_error(
-        "Unrecognized structure format; use XYZ, POSCAR, CIF, LAMMPS data/dump, PDB or GRO");
+        "Unrecognized structure format; use XYZ, POSCAR, CIF, LAMMPS data/dump, PDB, GRO, MOL, SDF or XSF");
 }
 inline const FormatInfo &info(Format id) {
     for (const auto &f : formats)
@@ -144,6 +150,8 @@ inline const FormatInfo &info(Format id) {
             return f;
     throw std::runtime_error("Unknown format");
 }
+
+#include "structure_exchange.hpp"
 
 struct DumpHeader {
     uint64_t n;
@@ -201,6 +209,7 @@ inline std::vector<Frame> index(const std::filesystem::path &path,
     auto fmt = detect(path);
     if (fmt == Format::XYZ)
         return indexXYZ(path, progress, cancel);
+    if (fmt == Format::SDF) return indexSDF(path, progress, cancel);
     if (fmt != Format::LammpsDump)
         return {Frame{0, 0, info(fmt).name}};
     std::ifstream f(path, std::ios::binary);
@@ -347,10 +356,18 @@ inline Dataset readPDB(const std::filesystem::path &path, std::atomic<bool> *can
     Dataset d;
     std::string s;
     int models = 0;
+    std::unordered_map<int, uint32_t> serials;
+    std::vector<std::pair<int, int>> connections;
     while (std::getline(f, s)) {
         checkpoint(cancel);
         if (s.rfind("MODEL ", 0) == 0 && ++models > 1)
             throw std::runtime_error("PDB reader currently accepts one model per file");
+        if (s.rfind("CONECT", 0) == 0) {
+            if (s.size() < 11) throw std::runtime_error("Truncated PDB CONECT");
+            const int from = smallInteger(s.substr(6, 5), 1, 99999);
+            for (size_t k = 11; k + 5 <= std::min<size_t>(31, s.size()); k += 5)
+                if (!trim(s.substr(k, 5)).empty()) connections.emplace_back(from, smallInteger(s.substr(k, 5), 1, 99999));
+        }
         if (s.rfind("CRYST1", 0) == 0) {
             if (s.size() < 54)
                 throw std::runtime_error("Truncated PDB CRYST1");
@@ -377,13 +394,32 @@ inline Dataset readPDB(const std::filesystem::path &path, std::atomic<bool> *can
             name = "X";
         atom(d, number(trim(s.substr(30, 8))), number(trim(s.substr(38, 8))),
              number(trim(s.substr(46, 8))), name);
+        int serial = smallInteger(s.substr(6, 5), 1, 99999);
+        if (!serials.emplace(serial, uint32_t(d.atoms.size() - 1)).second)
+            throw std::runtime_error("Duplicate PDB atom serial");
+        double charge = 0;
+        if (s.size() >= 80 && !trim(s.substr(78, 2)).empty()) {
+            if ((s[79] != '+' && s[79] != '-') || s[78] < '0' || s[78] > '9')
+                throw std::runtime_error("Invalid PDB formal charge");
+            charge = (s[78] - '0') * (s[79] == '+' ? 1 : -1);
+        }
+        d.scalarProperties["FormalCharge"].push_back(charge);
         if (d.atoms.size() > 20000000)
             throw std::runtime_error("PDB reader limit: 20 million atoms");
     }
     if (d.atoms.empty())
         throw std::runtime_error("No PDB atoms");
     d.sourceCount = d.atoms.size();
-    d.comment = "PDB coordinates (residue topology is not imported)";
+    std::set<std::pair<uint32_t, uint32_t>> unique;
+    for (const auto &[a, b] : connections) {
+        // Alternate locations excluded above can have their own connectivity.
+        if (!serials.count(a) || !serials.count(b)) continue;
+        auto x = serials.at(a), y = serials.at(b);
+        if (x == y) throw std::runtime_error("PDB self bond is unsupported");
+        if (x > y) std::swap(x, y);
+        if (unique.emplace(x, y).second) d.bonds.push_back({x, y, {}, 1});
+    }
+    d.comment = "PDB coordinates and connectivity (residue metadata is not imported)";
     d.bounds();
     return d;
 }
@@ -608,7 +644,9 @@ inline Dataset read(const std::filesystem::path &path, const Frame &frame,
         return readXYZ(path, frame, budget, progress, cancel);
     if (fmt == Format::LammpsDump)
         return readDump(path, frame, budget, progress, cancel);
-    Dataset d = fmt == Format::PDB          ? readPDB(path, cancel)
+    Dataset d = fmt == Format::MOL || fmt == Format::SDF ? readMol(path, frame, fmt == Format::SDF, cancel)
+                : fmt == Format::XSF        ? readXSF(path, cancel)
+                : fmt == Format::PDB          ? readPDB(path, cancel)
                 : fmt == Format::GRO        ? readGRO(path, cancel)
                 : fmt == Format::CIF        ? readCifP1(path, cancel)
                 : fmt == Format::LammpsData ? readAtomicData(path, cancel)
@@ -617,6 +655,12 @@ inline Dataset read(const std::filesystem::path &path, const Frame &frame,
         throw std::runtime_error("Budget must be positive");
     d.stride = std::max<uint64_t>(1, d.atoms.size() / budget + (d.atoms.size() % budget != 0));
     if (d.stride > 1) {
+        std::vector<Bond> sampledBonds;
+        for (auto b : d.bonds)
+            if (b.a % d.stride == 0 && b.b % d.stride == 0) {
+                b.a = uint32_t(b.a / d.stride); b.b = uint32_t(b.b / d.stride); sampledBonds.push_back(b);
+            }
+        d.bonds = std::move(sampledBonds);
         size_t out = 0;
         for (size_t i = 0; i < d.atoms.size(); i += size_t(d.stride)) {
             d.atoms[out] = d.atoms[i];
@@ -689,12 +733,14 @@ inline void writeFrame(std::ostream &f, Format fmt, const Dataset &d, const Expo
         applicableOptions.scalarProperties.clear();
         applicableOptions.vectorProperties.clear();
     }
-    if (fmt == Format::GRO)
+    if (fmt == Format::GRO || fmt == Format::PDB || fmt == Format::MOL || fmt == Format::SDF)
         applicableOptions.precision = 10; // GRO field precision is fixed by the writer.
     validate(d, applicableOptions);
     f.imbue(std::locale::classic());
     f << std::setprecision(o.precision);
-    if (fmt == Format::XYZ) {
+    if (fmt == Format::MOL || fmt == Format::SDF || fmt == Format::XSF || fmt == Format::PDB) {
+        writeExchange(f, fmt, d, o.precision);
+    } else if (fmt == Format::XYZ) {
         f << d.atoms.size() << '\n';
         if (o.extendedXYZ) {
             f << "Lattice=\"";

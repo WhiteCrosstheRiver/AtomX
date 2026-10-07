@@ -24,8 +24,12 @@ struct Preferences {
     // File > Recent Files submenu. Newest entry first, at most 8 kept.
     static constexpr int maxRecentFiles = 8;
     std::vector<std::wstring> recentFiles;
+    std::wstring exportDirectory;
     void load() {
         auto p = settingsPath().wstring();
+        wchar_t exportFolder[32768]{};
+        GetPrivateProfileStringW(L"Export", L"Directory", L"", exportFolder, 32768, p.c_str());
+        exportDirectory = exportFolder;
         theme = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Theme", 0, p.c_str())), 0, 2);
         font = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Font", 0, p.c_str())), 0, 2);
         size = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Size", 18, p.c_str())), 14, 20);
@@ -44,6 +48,8 @@ struct Preferences {
     }
     void save() const {
         auto p = settingsPath().wstring();
+        if (!WritePrivateProfileStringW(L"Export", L"Directory", exportDirectory.c_str(), p.c_str()))
+            throw std::runtime_error("Unable to save export directory");
         for (auto entry : {std::pair{L"Theme", theme}, {L"Font", font}, {L"Size", size}})
             if (!WritePrivateProfileStringW(L"Appearance", entry.first,
                                             std::to_wstring(entry.second).c_str(), p.c_str()))
