@@ -8,7 +8,7 @@ void requireExport(bool ok, const char *message) {
     if (!ok)
         throw std::runtime_error(message);
 }
-int main() {
+int main(int argc,char **argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     HWND window = CreateWindowExW(0, L"STATIC", L"Export validation", WS_OVERLAPPEDWINDOW, 0, 0,
                                   256, 256, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -34,6 +34,87 @@ int main() {
             if (app.pipelineJob.valid()) app.pipelineJob.wait();
             app.poll();
             // Appearance follows element identity across reordered/missing trajectory types.
+            // Structure clipboard: scientific data, topology and transaction boundaries.
+            {
+                auto priorTabs=app.tabs;const int priorActive=app.activeTab;priorTabs[size_t(priorActive)]=app.captureTab();
+                auto settle=[&]{for(int i=0;i<12 && app.pipelineBusy;++i){if(app.pipelineJob.valid())app.pipelineJob.wait();app.poll();}
+                    requireExport(!app.pipelineBusy,"clipboard fixture pipeline settles");};
+                Dataset original;original.species={"C","O"};original.atoms={{0,0,0,0},{1.4f,0,0,1},{2.8f,.5f,0,0}};
+                original.sourceCount=3;original.bonds={{0,1,{},2},{1,2,{},1}};
+                original.scalarProperties["Charge"]={.1,.2,.3};original.scalarProperties[constraints::cartesianProperty]={1,0,0};
+                original.vectorProperties["Force"]={{1,2,3},{4,5,6},{7,8,9}};
+                motion::create(original,{0,1},"fragment",1);original.bounds();
+                creation::Display display;display.labels[0]={creation::LabelKind::Custom,"anchor"};display.presets[1]=4;
+                display.monitors.push_back({2,{0,1,-1,-1},true});display.normalize(3);
+                auto copied=clipboard::copy(original,display,{1,0,1});
+                auto packet=clipboard::decode(clipboard::encode(copied.content));
+                requireExport(packet.data.atoms.size()==2 && packet.data.bonds.size()==1 && packet.data.bonds[0].order==2,
+                              "Clipboard remaps internal bond endpoints and preserves order");
+                requireExport(packet.view.display.monitors[0].fixed && packet.view.display.labelAt(0).text=="anchor",
+                              "Clipboard preserves complete monitors and per-atom labels");
+                auto pasted=clipboard::prepare(original,display,packet);
+                requireExport(pasted.rows==std::vector<int>{3,4} && pasted.data.atoms.size()==5 && pasted.data.bonds[2].a==3,
+                              "Paste appends and selects the independent fragment");
+                requireExport(pasted.data.scalarProperties.at("Charge")[4]==.2 && pasted.data.vectorProperties.at("Force")[3].z==3 &&
+                              constraints::cartesian(pasted.data,3) && motion::id(pasted.data.scalarProperties.at(motion::property)[3])!=1,
+                              "Paste preserves scientific properties and prevents motion-group collisions");
+                Dataset incompatible=original;incompatible.vectorProperties["Charge"].resize(3);bool rejected=false;
+                try{(void)clipboard::prepare(incompatible,display,packet);}catch(const std::exception &){rejected=true;}
+                requireExport(rejected && incompatible.atoms.size()==3,"Property conflicts fail before mutation");
+                auto corrupt=clipboard::encode(packet);corrupt.pop_back();rejected=false;
+                try{(void)clipboard::decode(corrupt);}catch(const std::exception &){rejected=true;}
+                requireExport(rejected,"Truncated clipboard packet rejected");
+                app.newStructureTab(original,"Clipboard fixture");settle();app.openCreationTab();
+                settle();
+                app.creationDisplay=display;const auto historyCount=app.authorUndo.size();app.pasteCreationContent(packet);
+                settle();
+                requireExport(app.source.atoms.size()==5 && app.authorUndo.size()==historyCount+1,"Paste creates exactly one undo transaction");
+                app.history(false);settle();
+                requireExport(app.source.atoms.size()==3 && app.creationDisplay.monitors.size()==1,"Undo paste restores dataset and display");
+                app.history(true);settle();
+                requireExport(app.source.atoms.size()==5,"Redo paste restores independent fragment");
+                app.chooseCreationTool(App::CreationTool::Zoom);app.tabs[size_t(app.activeTab)]=app.captureTab();
+                auto projectFile=dir/"中文 workspace.atomx-project";
+                auto savedTabs=app.tabs;savedTabs[0].title="Saved Cu/Ni title";
+                ModifierNode modifier{Op::Translate,true,1.25f,1};modifier.outputProperty="preserved";modifier.manualSelection={1,2};
+                modifier.affineTransform[3]=4.5;modifier.bondTypeCutoffs={1.1f,2.2f};savedTabs[0].graph.nodes={modifier};
+                App::writeProject(projectFile,savedTabs,app.activeTab);
+                auto recovered=App::readProject(projectFile,2000000);
+                requireExport(recovered.tabs.size()==app.tabs.size() && recovered.active==app.activeTab,
+                              "Project preserves browser tabs and active document");
+                requireExport(recovered.tabs[0].graph.nodes[0].value==1.25f && recovered.tabs[0].graph.nodes[0].affineTransform[3]==4.5 &&
+                              recovered.tabs[0].graph.nodes[0].manualSelection==std::vector<uint32_t>{1,2},"Project preserves real modifier parameters");
+                const auto &creation=recovered.tabs[size_t(recovered.active)];
+                requireExport(creation.source.atoms.size()==5 && creation.creationTool==App::CreationTool::Zoom &&
+                              creation.authorUndo.size()==app.authorUndo.size() && !creation.snapshots.empty(),
+                              "Project preserves creation history, snapshots and sticky tool");
+                app.loadProject(projectFile);app.projectJob.wait();app.poll();
+                settle();
+                requireExport(app.source.atoms.size()==5 && app.creationMode,"Actual async project workflow publishes restored creation document");
+                const int creationIndex=app.activeTab;const int loadedView=int(app.tabs.size()-recovered.tabs.size());app.switchTab(loadedView);settle();
+                requireExport(app.tabTitle()=="Saved Cu/Ni title","Viewer tab title survives restoration instead of showing an XYZ metadata comment");
+                app.switchTab(creationIndex);settle();
+                app.creationSelection={0};app.creationViewportSize={800,600};app.cameras[3].zoom=1.7f;
+                app.centerCreationSelection();const auto projection=app.creationProjection(app.result.data,app.cameras[3],{800,600});
+                DirectX::XMFLOAT3 centered;const auto &atom=app.result.data.atoms[0];
+                DirectX::XMStoreFloat3(&centered,DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(atom.x,atom.y,atom.z,1),projection.view));
+                requireExport(std::abs(centered.x)<1e-4f && std::abs(centered.y)<1e-4f && app.cameras[3].zoom==1.7f,
+                              "Center selection preserves zoom and centers in camera space");
+                auto truncated=dir/"truncated.atomx-project";std::filesystem::copy_file(projectFile,truncated);
+                std::filesystem::resize_file(truncated,std::filesystem::file_size(truncated)-1);rejected=false;
+                try{(void)App::readProject(truncated,2000000);}catch(const std::exception &){rejected=true;}
+                requireExport(rejected,"Truncated project rejected before publication");
+                app.creationMode=false;app.tabs.clear();app.newHomeTab();settle();
+                auto droppedDocument=dir/"drop.atomx";
+                {std::ofstream output(droppedDocument,std::ios::binary);document::write(output,packet.data,packet.view);}
+                droppedFiles.push_back(droppedDocument);droppedFiles.push_back(droppedDocument);
+                for(int i=0;i<16 && (app.documentsBusy() || !droppedFiles.empty());++i) {
+                    if(app.job.valid() && app.busy)app.job.wait();if(app.pipelineJob.valid() && app.pipelineBusy)app.pipelineJob.wait();app.poll();
+                }
+                requireExport(droppedFiles.empty() && app.tabs.size()==2 && app.source.atoms.size()==2,
+                              "Multi-file queue replaces blank home then creates each independent tab");
+                app.tabs=std::move(priorTabs);app.activeTab=priorActive;app.restoreTab(app.tabs[size_t(priorActive)]);settle();
+            }
             app.syncAppearance({"Si", "Ge"});
             testRenderer.styles[0].color = {.1f,.2f,.3f,1};
             testRenderer.styles[0].visual = {.73f,2,1,0};
@@ -276,6 +357,19 @@ int main() {
                               app.uiTestItems.contains("creation.return-view"),
                           "Creation Mode opens an editable copy in a separate workspace tab");
             settlePipeline();
+            {
+                const auto camera=app.cameras[3];const auto history=app.authorUndo.size();
+                click("creation.tool-zoom");
+                const auto viewport=app.uiTestItems.at("creation.viewport");
+                const float x=viewport.min.x+25,y=viewport.min.y+80;
+                guiIO.AddMousePosEvent(x,y);frame();guiIO.AddMouseButtonEvent(0,true);frame();
+                guiIO.AddMousePosEvent(x,y+60);frame();guiIO.AddMouseButtonEvent(0,false);frame();
+                requireExport(app.cameras[3].zoom>camera.zoom*1.3f && app.creationTool==App::CreationTool::Zoom && app.authorUndo.size()==history,
+                              "Sticky left-drag zoom changes camera without a structure edit");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true);frame();guiIO.AddKeyEvent(ImGuiKey_Escape,false);frame();
+                requireExport(app.creationTool==App::CreationTool::Select,"Escape exits sticky view tool");
+                app.cameras[3]=camera;frame();
+            }
             {
                 const auto viewport=app.uiTestItems.at("creation.viewport");
                 const float x=(viewport.min.x+viewport.max.x)*.5f;
@@ -2301,6 +2395,19 @@ int main() {
                           tabs.creationSnapshots.size()==2 && !tabs.creationPropertiesOpen &&
                           tabs.creationDisplay.hiddenCount==2 && tabs.creationDisplay.labelAt(1).text=="isolated site",
                           "creation copy restores its own structure, workspace and panel state");
+        }
+        if(argc>1 && std::string_view(argv[1])=="--write-acceptance") {
+            std::vector<App::StructureTab> workspace;
+            auto nacl=document::read("build/nacl-reference-creation.atomx");
+            App::StructureTab view;view.id=1;view.title="NaCl · 查看";view.source=nacl.data;view.path="build/nacl-reference.xyz";
+            view.cameras[3].mode=7;workspace.push_back(view);
+            auto creation=view;creation.id=2;creation.sourceTabId=1;creation.title="NaCl · 创作";creation.basedOn="NaCl";creation.creationMode=true;
+            creation.display=nacl.view.display;creation.cameras[3].mode=7;creation.snapshots.push_back({std::make_shared<const Dataset>(creation.source),"原始 NaCl","验收",creation.display});
+            creation.propertyPage=3;creation.display.monitors.push_back({2,{0,1,-1,-1},false});workspace.push_back(creation);
+            App::StructureTab large;large.id=3;large.title="Cu/Ni · 55,296 原子";
+            auto frames=io::index("build/cuni-55296.xyz");large.source=io::read("build/cuni-55296.xyz",frames[0]);large.cameras[3].mode=7;
+            workspace.push_back(std::move(large));
+            App::writeProject("build/noncalc-workspace-acceptance.atomx-project",workspace,1);
         }
         ImGui::DestroyContext();
         for (const auto &e : std::filesystem::directory_iterator(dir)) {

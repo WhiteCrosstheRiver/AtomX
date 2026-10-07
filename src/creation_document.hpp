@@ -3,7 +3,7 @@
 #include "atom_constraints.hpp"
 #include <bit>
 
-// AtomX document v13 (reads v1..v12): little-endian IEEE floats; explicit field order and
+// AtomX document v14 (reads v1..v13): little-endian IEEE floats; explicit field order and
 // length-prefixed UTF-8 strings. No C++ struct padding is persisted.
 namespace atomx::document {
 struct Style { std::array<float,4> color{},visual{},axes{}; };
@@ -115,13 +115,13 @@ inline void validate(const Dataset &d,const View &v,std::atomic<bool> *cancel=nu
         valid(index>=0 && size_t(index)<d.atoms.size() && creation::validLabel(label));
     valid(std::isfinite(v.radius) && v.radius>0 && v.shape>=0 && v.shape<=6 && v.cameraMode>=0 && v.cameraMode<=7);
     valid(std::all_of(v.camera.begin(),v.camera.end(),[](float x){return std::isfinite(x);}) && v.camera[2]>0 && std::isfinite(v.cameraRoll));
-    valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=9 && v.order>=1 && v.order<=3);
+    valid(finite(v.fitLo) && finite(v.fitHi) && v.tool>=0 && v.tool<=10 && v.order>=1 && v.order<=3);
     valid(v.display.monitors.size()<=geometry::monitorLimit && v.display.activeMonitor>=-1 &&
         (v.display.activeMonitor<0 || size_t(v.display.activeMonitor)<v.display.monitors.size()));
     for(const auto &m:v.display.monitors) valid(geometry::valid(m,d.atoms.size()));
     valid(v.ringSize>=4 && v.ringSize<=6);
     valid(v.fragmentKey.size()<=256 && v.fragmentConnector>=0 && v.fragmentConnector<512);
-    valid(v.propertyPage>=0 && v.propertyPage<=2 && (v.styles.empty() || v.styles.size()==d.species.size()));
+    valid(v.propertyPage>=0 && v.propertyPage<=3 && (v.styles.empty() || v.styles.size()==d.species.size()));
     valid(std::isfinite(v.display.fontSize) && v.display.fontSize>=1 && v.display.fontSize<=200 &&
           v.display.labelBudget>=1 && v.display.labelBudget<=2000);
     for (auto index:v.selection) valid(index>=0 && size_t(index)<d.atoms.size());
@@ -172,7 +172,7 @@ inline void writeBondLabels(Writer &w,const creation::BondLabels &bl) {
 }
 inline void write(std::ostream &file,const Dataset &d,const View &view={},std::atomic<bool> *cancel=nullptr) {
     validate(d,view,cancel); Writer w{file,cancel};
-    w.bytes(magic,8); w.value(uint32_t(13));
+    w.bytes(magic,8); w.value(uint32_t(14));
     w.value(uint64_t(d.species.size())); for (const auto &s:d.species) w.text(s);
     w.array(d.atoms); for (double x:d.cell) w.value(x); for (bool x:d.pbc) w.flag(x);
     w.vec(d.origin); w.text(d.comment);
@@ -238,13 +238,12 @@ inline void write(std::ostream &file,const Dataset &d,const View &view={},std::a
     w.value(uint64_t(display.monitors.size()));for(const auto &m:display.monitors)w.flag(m.fixed);
     w.bytes("DONE",4);
 }
-inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
-    std::ifstream file(path,std::ios::binary); if (!file) throw std::runtime_error("Cannot open AtomX document");
-    file.seekg(0,std::ios::end); const auto size=file.tellg(); valid(size>=12); file.seekg(0);
+inline Content read(std::istream &file,uint64_t size,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
+    valid(size>=12);
     Reader r{file,uint64_t(size),cancel}; char signature[8]; r.bytes(signature,8);
     valid(std::equal(signature,signature+8,magic));
     const auto version=r.value<uint32_t>();
-    if (version<1 || version>13) throw std::runtime_error("Unsupported AtomX document version");
+    if (version<1 || version>14) throw std::runtime_error("Unsupported AtomX document version");
     Content result; auto &d=result.data; auto &v=result.view;
     const size_t types=r.count(8); d.species.reserve(types); for (size_t i=0;i<types;++i) d.species.push_back(r.text());
     const auto atomCount=r.value<uint64_t>();
@@ -354,6 +353,12 @@ inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64
     if(version>=13) {const auto n=r.count(1,geometry::monitorLimit);valid(n==v.display.monitors.size());
         for(auto &m:v.display.monitors)m.fixed=r.flag();}
     char end[4]; r.bytes(end,4); valid(std::string_view(end,4)=="DONE" && r.remaining==0);
+    if(version<14) valid(v.tool<=9 && v.propertyPage<=2);
     validate(d,v,cancel); d.bounds(); v.display.normalize(d.atoms.size());v.display.normalizeBonds(d);return result;
+}
+inline Content read(const std::filesystem::path &path,uint64_t atomBudget=UINT64_MAX,std::atomic<bool> *cancel=nullptr) {
+    std::ifstream file(path,std::ios::binary); if(!file) throw std::runtime_error("Cannot open AtomX document");
+    file.seekg(0,std::ios::end); const auto size=file.tellg(); valid(size>=12); file.seekg(0);
+    return read(file,uint64_t(size),atomBudget,cancel);
 }
 } // namespace atomx::document

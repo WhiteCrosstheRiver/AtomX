@@ -7,6 +7,8 @@
 #include "chemical_settings.hpp"
 #include "atom_properties.hpp"
 #include "atom_constraints.hpp"
+#include "structure_clipboard.hpp"
+#include "project_archive.hpp"
 #include "bond_insertion.hpp"
 #include "creation_bonds.hpp"
 #include "motion_groups.hpp"
@@ -32,6 +34,7 @@
 #include <memory>
 #include <cctype>
 #include <numeric>
+#include <deque>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -44,8 +47,7 @@ using namespace atomx;
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 static Renderer *renderer = nullptr;
 static bool resized = false;
-static std::filesystem::path dropped;
-static int droppedExtra = 0; // Additional files in a multi-file drop (first wins).
+static std::deque<std::filesystem::path> droppedFiles;
 // Viewport tool cursors. ImGui never draws the OS cursor itself; its win32
 // backend maps ImGui::GetMouseCursor() onto the stock shapes during
 // WM_SETCURSOR, so Pan (hand) and Orbit (4-way) ride that existing path via
@@ -233,11 +235,8 @@ static LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DROPFILES: {
         HDROP hDrop = (HDROP)wp;
         wchar_t p[32768];
-        // Keep it simple: the first dropped file is opened; any further files
-        // are ignored and reported through the status bar.
-        droppedExtra = std::max(0, int(DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0)) - 1);
-        DragQueryFileW(hDrop, 0, p, 32768);
-        dropped = p;
+        const UINT count=DragQueryFileW(hDrop,0xFFFFFFFF,nullptr,0);
+        for(UINT i=0;i<count;++i){if(DragQueryFileW(hDrop,i,p,32768))droppedFiles.emplace_back(p);}
         DragFinish(hDrop);
         return 0;
     }
@@ -818,13 +817,15 @@ struct App {
     std::filesystem::path colorRangePath;
     // One structure per browser-style tab. The live document stays in the
     // fields above; a tab is only a snapshot taken when leaving it.
-    enum class CreationTool { Select, Rotate, Pan, Move, Sketch, Ring, Fragment, Distance, Angle, Torsion };
-    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring, Fragment, Fusion, Geometry };
+    enum class CreationTool { Select, Rotate, Pan, Move, Sketch, Ring, Fragment, Distance, Angle, Torsion, Zoom };
+    enum class CreationDrag { None, Box, Move, Spin, Rotate, Pan, Sketch, Ring, Fragment, Fusion, Geometry, Zoom };
     std::vector<int> geometryPending;
     std::optional<geometry::Plan> geometryDragPlans[2];
     double geometryTarget=0,geometryDragTarget=0;
     bool geometryInverted=false,geometryDragInverted=false;
     int geometryPanelMonitor=-1;
+    int creationMonitorFilter=0;
+    char creationPropertyFilter[128]{};
     bool openMeasurementConstraints=false;
     uint64_t measurementConstraintTab=0,measurementConstraintGeneration=0;
     std::vector<geometry::Monitor> measurementConstraintSource;
@@ -876,12 +877,131 @@ struct App {
         std::vector<CreationHistoryState> authorUndo, authorRedo;
         creation::Display display;
         std::vector<CreationSnapshot> snapshots;
-        int selectedSnapshot = -1, propertyPage = 0;
+        int selectedSnapshot = -1, propertyPage = 0, monitorFilter = 0;
+        std::string propertyFilter;
         bool propertiesOpen = true;
         std::optional<symmetry::Info> symmetryInfo;
         bool symmetryChecked = false;
         char element[16] = "O";
     };
+    struct ProjectResult { std::vector<StructureTab> tabs;int active=0;std::string message;std::filesystem::path path; };
+    std::future<ProjectResult> projectJob;
+    std::atomic<bool> projectCancel{false};
+    bool projectBusy=false;
+    std::filesystem::path projectPath;
+    static document::View projectView(const StructureTab &t) {
+        document::View v;v.creation=t.creationMode;v.cell=t.cell;v.particles=t.particles;v.radius=t.radius;
+        v.title=t.title;v.basedOn=t.basedOn;v.shape=t.particleShape;v.tool=int(t.creationTool);
+        v.order=t.sketchOrder;v.ringSize=t.ringSize;v.fragmentKey=t.fragmentKey;v.fragmentConnector=t.fragmentConnector;
+        v.element=t.element;v.continuous=t.sketchContinuous;v.autoHydrogens=t.autoHydrogens;
+        v.propertiesOpen=t.propertiesOpen;v.propertyPage=t.propertyPage;
+        if(t.creationMode){v.display=t.display;v.selection.assign(t.selection.begin(),t.selection.end());v.bondSelection.assign(t.bondSelection.begin(),t.bondSelection.end());}
+        const auto &c=t.cameras[3];v.camera={c.yaw,c.pitch,c.zoom,c.panX,c.panY};v.cameraRoll=c.roll;
+        v.cameraMode=c.mode;v.fitSelected=c.fitSelected;v.fitLo=c.fitLo;v.fitHi=c.fitHi;
+        if(t.styles.size()==t.source.species.size())for(const auto &s:t.styles)v.styles.push_back({s.color,s.visual,s.axes});
+        return v;
+    }
+    static void writeProject(const std::filesystem::path &destination,const std::vector<StructureTab> &saved,int active,std::atomic<bool> *cancel=nullptr) {
+        document::valid(!saved.empty() && saved.size()<=64 && active>=0 && size_t(active)<saved.size());
+        auto temporary=destination;temporary+=L".tmp-"+std::to_wstring(std::chrono::steady_clock::now().time_since_epoch().count());
+        try {
+            std::ofstream file(temporary,std::ios::binary|std::ios::trunc);if(!file)throw std::runtime_error("Cannot create project file");
+            project::Writer w{file,cancel};w.bytes("ATOMXPRJ",8);w.value(uint32_t(2));w.value(int32_t(active));w.value(uint64_t(saved.size()));
+            for(const auto &t:saved) {
+                w.value(t.id);w.value(t.sourceTabId);w.flag(t.home);
+                w.text(t.path.empty()?"":utf8(std::filesystem::absolute(t.path).wstring()));w.text(t.documentPath.empty()?"":utf8(std::filesystem::absolute(t.documentPath).wstring()));w.text(t.readerName);
+                project::writeDocument(w,t.source,projectView(t));
+                for(const auto &c:t.cameras)project::writeCamera(w,c);
+                w.flag(t.quad);w.value(int32_t(t.viewportTool));w.value(int32_t(t.current));
+                w.value(int32_t(t.picked));w.value(int32_t(t.measure));w.value(int32_t(t.angleAtom));w.value(int32_t(t.dihedralAtom));
+                w.value(int32_t(t.monitorFilter));w.text(t.propertyFilter);
+                w.value(int32_t(t.selectedSnapshot));w.value(uint64_t(t.graph.selected));project::writeGraph(w,t.graph.nodes);
+                for(const auto *stack:{&t.undo,&t.redo}) {w.value(uint64_t(stack->size()));for(const auto &nodes:*stack)project::writeGraph(w,nodes);}
+                w.value(uint64_t(t.frames.size()));for(const auto &f:t.frames){w.value(f.count);w.value(int64_t(f.offset));w.text(f.comment);}
+                std::error_code ec;const auto bytes=t.frames.empty()?uintmax_t(0):std::filesystem::file_size(t.path,ec);
+                const bool external=!t.frames.empty() && !ec;w.flag(external);
+                if(external){w.value(uint64_t(bytes));const auto stamp=std::filesystem::last_write_time(t.path,ec);
+                    if(ec)throw std::runtime_error("Cannot inspect trajectory dependency");w.value(int64_t(stamp.time_since_epoch().count()));}
+                w.value(uint64_t(t.snapshots.size()));for(const auto &snap:t.snapshots) {
+                    document::valid(bool(snap.data));w.text(snap.name);w.text(snap.time);
+                    document::View v;v.creation=true;v.display=snap.display;project::writeDocument(w,*snap.data,v);
+                }
+                for(const auto *stack:{&t.authorUndo,&t.authorRedo}) {
+                    w.value(uint64_t(stack->size()));const Dataset *state=&t.source;
+                    // Resolve display-only entries from newest to oldest without cloning their datasets.
+                    std::vector<const Dataset *> states(stack->size());
+                    for(size_t i=stack->size();i>0;--i){const auto &h=(*stack)[i-1];if(h.data)state=&*h.data;states[i-1]=state;}
+                    for(size_t i=0;i<stack->size();++i){const auto &h=(*stack)[i];w.flag(bool(h.data));w.text(h.action);
+                        document::View v;v.creation=true;v.display=h.display;project::writeDocument(w,*states[i],v);}
+                }
+            }
+            w.bytes("DONE",4);file.flush();document::checkpoint(cancel);
+            if(!file || uint64_t(file.tellp())>project::byteLimit)throw std::runtime_error("Project exceeds 2 GiB or could not be written");
+            file.close();
+            if(!MoveFileExW(temporary.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot publish project file");
+        }catch(...){std::error_code ec;std::filesystem::remove(temporary,ec);throw;}
+    }
+    static ProjectResult readProject(const std::filesystem::path &path,uint64_t atomBudget,std::atomic<bool> *cancel=nullptr) {
+        std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("Cannot open project");
+        file.seekg(0,std::ios::end);const auto size=file.tellg();document::valid(size>=24 && uint64_t(size)<=project::byteLimit);file.seekg(0);
+        project::Reader r{file,uint64_t(size),cancel};char signature[8];r.bytes(signature,8);
+        document::valid(std::string_view(signature,8)=="ATOMXPRJ");const auto version=r.value<uint32_t>();document::valid(version>=1 && version<=2);
+        ProjectResult result;result.path=path;result.active=r.value<int32_t>();result.tabs.resize(r.count(8,64));
+        document::valid(!result.tabs.empty() && result.active>=0 && size_t(result.active)<result.tabs.size());std::set<uint64_t> ids;
+        bool missingTrajectory=false;
+        for(auto &t:result.tabs) {
+            t.id=r.value<uint64_t>();t.sourceTabId=r.value<uint64_t>();t.home=r.flag();document::valid(t.id>0 && t.id<UINT64_MAX && ids.insert(t.id).second);
+            t.path=project::pathFromUtf8(r.text());t.documentPath=project::pathFromUtf8(r.text());t.readerName=r.text();
+            auto content=project::readDocument(r,atomBudget);auto &v=content.view;t.source=std::move(content.data);
+            t.title=v.title;t.basedOn=v.basedOn;t.creationMode=v.creation;t.cell=v.cell;t.particles=v.particles;t.radius=v.radius;
+            t.particleShape=v.shape;t.creationTool=CreationTool(v.tool);t.creationSketch=t.creationTool==CreationTool::Sketch;
+            t.sketchOrder=v.order;t.ringSize=v.ringSize;t.fragmentKey=v.fragmentKey;t.fragmentConnector=v.fragmentConnector;
+            t.sketchContinuous=v.continuous;t.autoHydrogens=v.autoHydrogens;t.propertiesOpen=v.propertiesOpen;t.propertyPage=v.propertyPage;
+            snprintf(t.element,sizeof(t.element),"%s",v.element.c_str());t.selection.assign(v.selection.begin(),v.selection.end());
+            t.bondSelection.assign(v.bondSelection.begin(),v.bondSelection.end());t.display=std::move(v.display);
+            for(const auto &s:v.styles)t.styles.push_back({s.color,s.visual,s.axes});
+            for(auto &c:t.cameras)c=project::readCamera(r);
+            t.quad=r.flag();t.viewportTool=r.value<int32_t>();t.current=r.value<int32_t>();
+            t.picked=r.value<int32_t>();t.measure=r.value<int32_t>();t.angleAtom=r.value<int32_t>();t.dihedralAtom=r.value<int32_t>();
+            if(version>=2){t.monitorFilter=r.value<int32_t>();t.propertyFilter=r.text();document::valid(t.monitorFilter>=0 && t.monitorFilter<=3 && t.propertyFilter.size()<128);}
+            t.selectedSnapshot=r.value<int32_t>();const auto selected=r.value<uint64_t>();t.graph.nodes=project::readGraph(r);
+            document::valid((t.graph.nodes.empty()?selected==0:selected<t.graph.nodes.size()) && t.viewportTool>=0 && t.viewportTool<=3);t.graph.selected=size_t(selected);
+            for(auto *stack:{&t.undo,&t.redo}){stack->resize(r.count(8,128));for(auto &nodes:*stack)nodes=project::readGraph(r);}
+            t.frames.resize(r.count(24,1000000));for(auto &f:t.frames){f.count=r.value<uint64_t>();f.offset=std::streamoff(r.value<int64_t>());f.comment=r.text();document::valid(f.offset>=0);}
+            document::valid(t.current>=0 && (t.frames.empty()?t.current==0:size_t(t.current)<t.frames.size()));
+            const bool external=r.flag();uint64_t dependencySize=0;int64_t dependencyStamp=0;
+            if(external){dependencySize=r.value<uint64_t>();dependencyStamp=r.value<int64_t>();}
+            t.snapshots.resize(r.count(16,24));for(auto &snap:t.snapshots){snap.name=r.text();snap.time=r.text();
+                auto c=project::readDocument(r,atomBudget);snap.display=std::move(c.view.display);snap.data=std::make_shared<const Dataset>(std::move(c.data));}
+            document::valid(t.selectedSnapshot>=-1 && (t.selectedSnapshot<0 || size_t(t.selectedSnapshot)<t.snapshots.size()));
+            for(auto *stack:{&t.authorUndo,&t.authorRedo}){stack->resize(r.count(9,64));for(auto &h:*stack){
+                const bool hasData=r.flag();h.action=r.text();auto c=project::readDocument(r,atomBudget);h.display=std::move(c.view.display);if(hasData)h.data=std::move(c.data);}}
+            if(!t.frames.empty()) {
+                std::error_code ec;const auto bytes=std::filesystem::file_size(t.path,ec);bool matches=external && !ec && bytes==dependencySize;
+                if(matches){const auto stamp=std::filesystem::last_write_time(t.path,ec);matches=!ec && int64_t(stamp.time_since_epoch().count())==dependencyStamp;}
+                if(!matches){t.frames.clear();t.current=0;missingTrajectory=true;}
+            }
+        }
+        char end[4];r.bytes(end,4);document::valid(std::string_view(end,4)=="DONE" && r.remaining==0);
+        result.message=missingTrajectory?"工作区已恢复；外部轨迹缺失或已改变，保留内嵌当前帧":"工作区已恢复（标签、管线、暂存与历史）";return result;
+    }
+    void saveProject(const std::filesystem::path &destination) {
+        if(documentsBusy() || exporting || creationDrag!=CreationDrag::None){status="Wait for the current operation before saving a workspace";return;}
+        if(lowerExtension(destination)!=".atomx-project"){status="Use the .atomx-project extension";return;}
+        tabs[size_t(activeTab)]=captureTab();projectCancel=false;
+        projectJob=std::async(std::launch::async,[saved=tabs,active=activeTab,destination,this] {
+            writeProject(destination,saved,active,&projectCancel);ProjectResult r;r.path=destination;r.message="工作区已保存";return r;
+        });projectBusy=true;status="正在保存工作区…";
+    }
+    void loadProject(const std::filesystem::path &file) {
+        if(documentsBusy() || exporting || creationDrag!=CreationDrag::None){status="Wait for the current operation before opening a workspace";return;}
+        projectCancel=false;projectJob=std::async(std::launch::async,[file,atomBudget=uint64_t(budget),this]{return readProject(file,atomBudget,&projectCancel);});
+        projectBusy=true;status="正在打开工作区…";
+    }
+    void projectDialog(bool save) {
+        const auto chosen=dialog(window,save,L"AtomX workspace (*.atomx-project)\0*.atomx-project\0\0",L"atomx-project");
+        if(chosen.empty())return;if(save)saveProject(chosen);else loadProject(chosen);
+    }
     std::vector<StructureTab> tabs;
     int activeTab = 0;
     int displayedTab = -1;
@@ -1078,6 +1198,7 @@ struct App {
         activeTab = 0;
     }
     ~App() {
+        projectCancel=true;if(projectJob.valid())projectJob.wait();
         Shell_NotifyIconW(NIM_DELETE, &desktop::tray);
         if (icon) DestroyIcon(icon);
         cancel = true;
@@ -1591,7 +1712,7 @@ struct App {
     bool structureEditIsLatest = false;
     std::string tabTitle() const {
         if (homeMode) return "新标签页";
-        if (creationMode && activeTab >= 0 && activeTab < int(tabs.size()))
+        if (activeTab >= 0 && activeTab < int(tabs.size()) && !tabs[size_t(activeTab)].title.empty() && tabs[size_t(activeTab)].title!="Structure")
             return tabs[size_t(activeTab)].title;
         if (!path.empty()) return utf8(path.filename().wstring());
         if (!source.comment.empty()) {
@@ -1644,7 +1765,7 @@ struct App {
         tab.display = creationDisplay;
         tab.snapshots = creationSnapshots;
         tab.selectedSnapshot = creationSnapshotSelected;
-        tab.propertyPage = creationPropertyPage;
+        tab.propertyPage = creationPropertyPage;tab.monitorFilter=creationMonitorFilter;tab.propertyFilter=creationPropertyFilter;
         tab.propertiesOpen = creationPropertiesOpen;
         tab.symmetryInfo = creationSymmetry;
         tab.symmetryChecked = creationSymmetryChecked;
@@ -1696,7 +1817,8 @@ struct App {
         creationDisplay.normalize(source.atoms.size()); creationDisplay.normalizeBonds(source);
         creationSnapshots = tab.snapshots;
         creationSnapshotSelected = tab.selectedSnapshot;
-        creationPropertyPage = tab.propertyPage;
+        creationPropertyPage = tab.propertyPage;creationMonitorFilter=tab.monitorFilter;
+        snprintf(creationPropertyFilter,sizeof(creationPropertyFilter),"%s",tab.propertyFilter.c_str());
         creationPropertiesOpen = tab.propertiesOpen;
         creationSymmetry = tab.symmetryInfo;
         creationSymmetryChecked = tab.symmetryChecked;
@@ -1715,7 +1837,7 @@ struct App {
         queueCreationLabelFont();
         update();
     }
-    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy || layerBuildBusy || creationColorBusy || hydrogenBusy; }
+    bool documentsBusy() const { return busy || pipelineBusy || indexing || motionGroupBusy || layerBuildBusy || creationColorBusy || hydrogenBusy || projectBusy; }
     void switchTab(int index) {
         if (index < 0 || index >= int(tabs.size()) || index == activeTab) return;
         if (documentsBusy()) {
@@ -1747,6 +1869,12 @@ struct App {
         else { tabs.push_back(std::move(tab)); activeTab = int(tabs.size()) - 1; }
         restoreTab(tabs[activeTab]);
         status = "New tab: " + title;
+    }
+    void newBlankCreation() {
+        if(documentsBusy())return;
+        auto empty=authoring::orthogonalCell(10,10,10,"C");empty.atoms.clear();empty.sourceCount=0;empty.bounds();
+        newStructureTab(std::move(empty),"未命名 · 创作");creationMode=true;
+        chooseCreationTool(CreationTool::Sketch);saveCreationSnapshot("空白结构");
     }
     void newHomeTab() {
         if (documentsBusy()) { status = "Wait for the current operation before opening a tab"; return; }
@@ -1841,6 +1969,7 @@ struct App {
         return data;
     }
     void openFileTab(const std::filesystem::path &file) {
+        if(lowerExtension(file)==".atomx-project"){loadProject(file);return;}
         if (file.empty()) return;
         if (documentsBusy()) { status = "Wait for the current operation before opening a file"; return; }
         if (!tabs.empty()) tabs[size_t(activeTab)] = captureTab();
@@ -2046,6 +2175,88 @@ struct App {
                 creationAutoHydrogenMessage+="跳过 "+std::to_string(skipped)+" 个不可自动调整的位点";
             }
         } catch(const std::exception &e) { creationAutoHydrogenMessage=std::string("自动氢未执行：")+e.what(); }
+    }
+    static UINT structureClipboardFormat() {
+        static const UINT format=RegisterClipboardFormatW(L"AtomX.Structure.v1");return format;
+    }
+    std::vector<int> clipboardRows() const {
+        auto rows=creationSelection;
+        for(int row:creationBondSelection)if(row>=0 && size_t(row)<source.bonds.size()) {
+            const auto &b=source.bonds[size_t(row)];rows.push_back(int(b.a));rows.push_back(int(b.b));
+        }
+        rows.erase(std::remove_if(rows.begin(),rows.end(),[&](int row){return !creationAtomVisible(row);}),rows.end());
+        std::sort(rows.begin(),rows.end());rows.erase(std::unique(rows.begin(),rows.end()),rows.end());return rows;
+    }
+    void copyCreationSelection(bool cut=false) {
+        if(!creationMode || documentsBusy() || creationDrag!=CreationDrag::None)return;
+        try {
+            if(!mods.empty())throw std::runtime_error("Clear creation modifiers before copying");
+            auto copied=clipboard::copy(source,creationDisplay,clipboardRows());
+            const auto bytes=clipboard::encode(copied.content);const uint64_t length=bytes.size();
+            HGLOBAL memory=GlobalAlloc(GMEM_MOVEABLE,sizeof(length)+bytes.size());
+            if(!memory)throw std::runtime_error("Clipboard allocation failed");
+            auto *data=static_cast<char *>(GlobalLock(memory));
+            if(!data){GlobalFree(memory);throw std::runtime_error("Clipboard allocation failed");}
+            memcpy(data,&length,sizeof(length));memcpy(data+sizeof(length),bytes.data(),bytes.size());GlobalUnlock(memory);
+            if(!OpenClipboard(window)){GlobalFree(memory);throw std::runtime_error("Clipboard is in use; try again");}
+            const UINT format=structureClipboardFormat();
+            const bool accepted=format && EmptyClipboard() && SetClipboardData(format,memory);
+            CloseClipboard();if(!accepted){GlobalFree(memory);throw std::runtime_error("Cannot publish structure clipboard");}
+            if(cut) {
+                const auto count=source.atoms.size();
+                editStructure("剪切 "+std::to_string(copied.rows.size())+" 个原子",[&](Dataset &d){
+                    creationDisplay.eraseAtoms(count,copied.rows);authoring::eraseAtoms(d,copied.rows);
+                    creationSelection.clear();creationPick=creationMeasure=creationAngle=creationDihedral=-1;
+                });
+            } else status="已复制 "+std::to_string(copied.rows.size())+" 个原子（保留坐标与内部键）";
+        }catch(const std::exception &e){status=e.what();}
+    }
+    void pasteCreationContent(const document::Content &content) {
+        if(!creationMode || documentsBusy() || creationDrag!=CreationDrag::None)return;
+        if(!mods.empty())throw std::runtime_error("Clear creation modifiers before pasting");
+        auto prepared=clipboard::prepare(source,creationDisplay,content);
+        editStructure("粘贴 "+std::to_string(prepared.rows.size())+" 个原子",[&](Dataset &d){
+            d=std::move(prepared.data);creationDisplay=std::move(prepared.display);
+            creationSelection=std::move(prepared.rows);creationPick=creationSelection.back();
+            creationMeasure=creationAngle=creationDihedral=-1;
+        });queueCreationLabelFont();
+    }
+    void pasteCreationSelection() {
+        try {
+            if(!OpenClipboard(window))throw std::runtime_error("Clipboard is in use; try again");
+            std::string bytes;std::string error;
+            const auto memory=GetClipboardData(structureClipboardFormat());
+            const auto size=memory?GlobalSize(memory):0;
+            if(size<sizeof(uint64_t))error="剪贴板没有 AtomX 体系";
+            else if(const auto *data=static_cast<const char *>(GlobalLock(memory))) {
+                uint64_t length=0;memcpy(&length,data,sizeof(length));
+                if(length>clipboard::byteLimit || length>size-sizeof(length))error="Invalid structure clipboard size";
+                else bytes.assign(data+sizeof(length),size_t(length));
+                GlobalUnlock(memory);
+            }else error="Cannot read structure clipboard";
+            CloseClipboard();if(!error.empty())throw std::runtime_error(error);
+            pasteCreationContent(clipboard::decode(bytes));
+        }catch(const std::exception &e){status=e.what();}
+    }
+    void centerCreationSelection() {
+        auto rows=clipboardRows();if(rows.empty()){status="请先选中原子或键";return;}
+        auto &cam=cameras[3];const auto projected=creationProjection(result.data,cam,creationViewportSize);
+        Vec3 center{};for(int row:rows)center=authoring::add(center,Vec3{result.data.atoms[size_t(row)].x,result.data.atoms[size_t(row)].y,result.data.atoms[size_t(row)].z});
+        center=authoring::scale(center,1./rows.size());
+        DirectX::XMFLOAT3 point;DirectX::XMStoreFloat3(&point,DirectX::XMVector3TransformCoord(
+            DirectX::XMVectorSet(center.x,center.y,center.z,1),projected.view));
+        // Derive the pan scale from two matrices, including cell/preset bounds.
+        auto translated=cam;translated.panX+=1;
+        const auto second=creationProjection(result.data,translated,creationViewportSize);
+        DirectX::XMFLOAT3 shifted;DirectX::XMStoreFloat3(&shifted,DirectX::XMVector3TransformCoord(
+            DirectX::XMVectorSet(center.x,center.y,center.z,1),second.view));
+        const float span=shifted.x-point.x;
+        if(std::isfinite(span) && span>0){cam.panX-=point.x/span;cam.panY-=point.y/span;status="选中对象已居中";}
+    }
+    void setCreationView(int mode) {
+        if(mode<0 || mode>7)return;
+        chooseCreationTool(creationTool);cameras[3].mode=mode;cameras[3].roll=0;
+        fitCamera(3,false);status="标准视角";
     }
     void deletePickedAtom() {
         std::vector<int> selected=creationSelection;
@@ -2941,6 +3152,22 @@ struct App {
             });
     }
     void poll() {
+        if(projectBusy && projectJob.valid() && projectJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            projectBusy=false;
+            try {
+                auto loaded=projectJob.get();projectPath=loaded.path;
+                if(!loaded.tabs.empty()) {
+                    tabs[size_t(activeTab)]=captureTab();
+                    const bool replaceHome=tabs.size()==1 && homeMode;
+                    if(replaceHome)tabs.clear();
+                    const int offset=int(tabs.size());std::map<uint64_t,uint64_t> remap;
+                    for(auto &t:loaded.tabs){const auto old=t.id;remap[old]=nextTabId++;t.id=remap[old];}
+                    for(auto &t:loaded.tabs){t.sourceTabId=remap.contains(t.sourceTabId)?remap.at(t.sourceTabId):0;tabs.push_back(std::move(t));}
+                    activeTab=offset+loaded.active;restoreTab(tabs[size_t(activeTab)]);
+                }
+                status=loaded.message;
+            }catch(const std::exception &e){status=std::string("Workspace: ")+e.what();}
+        }
         if(hydrogenBusy && hydrogenJob.valid() && hydrogenJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             hydrogenBusy=false;
             try {
@@ -3142,6 +3369,7 @@ struct App {
                 frames = std::move(l.frames);
                 path = l.path;
                 current = l.frame;
+                if(changed && activeTab>=0 && activeTab<int(tabs.size()))tabs[size_t(activeTab)].title=utf8(l.path.filename().wstring());
                 pushRecent(l.path);
                 if (changed) {
                     appearanceType = 0;
@@ -3170,25 +3398,24 @@ struct App {
             int requested = pendingFrame; pendingFrame = -1;
             if (requested != current) load(path, requested);
         }
-        if (!dropped.empty()) {
-            auto droppedPath = std::move(dropped);
-            dropped.clear();
-            const int extraFiles = droppedExtra;
-            droppedExtra = 0;
-            // Same loading path as the Open button and the CLI file argument;
-            // unsupported formats surface through the existing error popup.
-            dropNotice = extraFiles > 0
-                ? " (" + std::to_string(extraFiles) + " more dropped file(s) ignored)"
-                : "";
-            openFileTab(droppedPath);
+        if (!droppedFiles.empty() && !documentsBusy() && error.empty()) {
+            auto file=std::move(droppedFiles.front());droppedFiles.pop_front();openFileTab(file);
         }
     }
     void open() {
-        openFileTab(dialog(window, false,
-                    L"Atom "
-                    L"structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*."
-                    L"data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro;*.atomx\0All files\0*.*\0",
-                    L"xyz"));
+        // Explorer's multi-select buffer is directory + individual filenames,
+        // or one full path. Queue each file so asynchronous loads cannot cancel
+        // one another, and keep all remaining files when one fails to load.
+        std::vector<wchar_t> buffer(65536);OPENFILENAMEW of{};of.lStructSize=sizeof(of);of.hwndOwner=window;
+        of.lpstrFile=buffer.data();of.nMaxFile=DWORD(buffer.size());of.lpstrDefExt=L"xyz";
+        of.lpstrFilter=L"Atom structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*.data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro;*.atomx;*.atomx-project\0All files\0*.*\0";
+        of.Flags=OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|OFN_FILEMUSTEXIST|OFN_EXPLORER|OFN_ALLOWMULTISELECT;
+        const bool accepted=GetOpenFileNameW(&of)!=FALSE;
+        if(ImGui::GetCurrentContext()){auto &io=ImGui::GetIO();io.ClearEventsQueue();io.ClearInputKeys();io.ClearInputMouse();}
+        if(!accepted){if(CommDlgExtendedError()==FNERR_BUFFERTOOSMALL)status="Too many selected paths; open fewer files at once";return;}
+        const std::filesystem::path first=buffer.data();size_t cursor=wcslen(buffer.data())+1;
+        if(buffer[cursor]==L'\0')droppedFiles.push_back(first);
+        else while(cursor<buffer.size() && buffer[cursor]!=L'\0') {droppedFiles.push_back(first/(buffer.data()+cursor));cursor+=wcslen(buffer.data()+cursor)+1;}
     }
     // Remember a successfully opened file for File > Recent Files (newest
     // first, deduplicated, persisted immediately). Persistence failures are
@@ -3788,6 +4015,8 @@ struct App {
             draw->AddPolyline(pts,4,color,ImDrawFlags_Closed,U(1.8f));
         } else if (name=="rotate") {
             circle(12,12,8); line(19,4,20,9); line(20,9,15,9);
+        } else if (name=="zoom") {
+            circle(10,10,6);line(15,15,21,21);line(7,10,13,10);line(10,7,10,13);
         } else if (name=="pan") {
             line(12,2,12,22);line(2,12,22,12);
             line(12,2,9,5);line(12,2,15,5);line(12,22,9,19);line(12,22,15,19);
@@ -3942,15 +4171,25 @@ struct App {
             ImGui::SameLine(0, U(3));
         };
         menu("文件", "##create-file", [&] {
+            if (ImGui::MenuItem("新建标签", "Ctrl+T")) newHomeTab();
+            if(ImGui::MenuItem("新建 3D 原子结构"))newBlankCreation();
             if (ImGui::MenuItem("打开结构...", "Ctrl+O")) open();
             if (ImGui::MenuItem("保存文档", "Ctrl+S")) saveSessionState(false);
             if (ImGui::MenuItem("文档另存为...", "Ctrl+Shift+S")) saveSessionState(true);
+            ImGui::Separator();
+            if(ImGui::MenuItem("保存整个工作区..."))projectDialog(true);
+            if(ImGui::MenuItem("追加打开工作区..."))projectDialog(false);
             if (ImGui::MenuItem("导出结构...", "Ctrl+E")) showDataExport = true;
             if (ImGui::MenuItem("关闭创作标签")) leaveCreationTab();
         });
         menu("编辑", "##create-edit", [&] {
             if (ImGui::MenuItem("撤销", "Ctrl+Z")) history(false);
             if (ImGui::MenuItem("重做", "Ctrl+Y")) history(true);
+            ImGui::Separator();
+            const bool selected=!creationSelection.empty() || !creationBondSelection.empty();
+            if(ImGui::MenuItem("剪切", "Ctrl+X",false,selected))copyCreationSelection(true);
+            if(ImGui::MenuItem("复制", "Ctrl+C",false,selected))copyCreationSelection();
+            if(ImGui::MenuItem("粘贴", "Ctrl+V",false,IsClipboardFormatAvailable(structureClipboardFormat())!=FALSE))pasteCreationSelection();
             if (ImGui::MenuItem("删除选中", "Del")) deletePickedAtom();
         });
         menu("视图", "##create-view", [&] {
@@ -3960,6 +4199,16 @@ struct App {
             }
             if (ImGui::MenuItem("显示样式...")) requestCreationStyles();
             if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
+            if(ImGui::MenuItem("选中居中",nullptr,false,!creationSelection.empty() || !creationBondSelection.empty()))centerCreationSelection();
+            if(ImGui::MenuItem("持续缩放",nullptr,creationTool==CreationTool::Zoom))chooseCreationTool(CreationTool::Zoom);
+            if(ImGui::MenuItem("逆时针旋转 90°"))cameras[3].roll=std::remainder(cameras[3].roll+DirectX::XM_PIDIV2,DirectX::XM_2PI);
+            if(ImGui::MenuItem("顺时针旋转 90°"))cameras[3].roll=std::remainder(cameras[3].roll-DirectX::XM_PIDIV2,DirectX::XM_2PI);
+            if(ImGui::BeginMenu("标准视角")) {
+                const char *names[]={"顶视图","底视图","前视图","后视图","左视图","右视图","正交","透视"};
+                for(int mode=0;mode<8;++mode)if(ImGui::MenuItem(names[mode],nullptr,cameras[3].mode==mode))setCreationView(mode);
+                ImGui::EndMenu();
+            }
+            ImGui::MenuItem("体系属性栏",nullptr,&creationPropertiesOpen);
         });
         menu("修改", "##create-modify", [&] {
             if(ImGui::MenuItem("原子数值属性...",nullptr,false,!creationSelection.empty()))requestAtomProperties();
@@ -3998,6 +4247,16 @@ struct App {
             ImGui::Separator();
             if (ImGui::MenuItem("重置视角")) resetView();
             if (ImGui::MenuItem("适应视窗")) fitCamera(3, false);
+        });
+        menu("窗口", "##create-window", [&] {
+            for(int index=0;index<int(tabs.size());++index){ImGui::PushID(index);
+                if(ImGui::MenuItem(tabs[size_t(index)].title.c_str(),nullptr,index==activeTab))switchTab(index);ImGui::PopID();}
+            if(ImGui::MenuItem("关闭当前标签", "Ctrl+W"))closeTab(activeTab);
+        });
+        menu("帮助", "##create-help", [&] {
+            if(ImGui::MenuItem("用户手册", "F1"))openUrl("https://github.com/WhiteCrosstheRiver/AtomX#readme");
+            if(ImGui::MenuItem("系统信息"))showSystemInfo=true;
+            if(ImGui::MenuItem("关于 AtomX"))showAbout=true;
         });
         const std::string base = "基于 " + creationBasedOn;
         const float textWidth = ImGui::CalcTextSize(base.c_str()).x;
@@ -4040,6 +4299,7 @@ struct App {
         icon("select",0xE7C9,"S","Select atoms",cyan,creationTool==CreationTool::Select,[&]{chooseCreationTool(CreationTool::Select);});
         icon("rotate",0xE7AD,"R","Rotate view (X/Y/Z constrain axis; right drag near edge rolls screen)",cyan,creationTool==CreationTool::Rotate,[&]{chooseCreationTool(CreationTool::Rotate);});
         icon("pan",0xE72A,"P","Pan view",green,creationTool==CreationTool::Pan,[&]{chooseCreationTool(CreationTool::Pan);});
+        icon("zoom",0,"Z","拖动持续缩放",blue,creationTool==CreationTool::Zoom,[&]{chooseCreationTool(CreationTool::Zoom);});
         icon("move",0xE8AB,"M","Move selected atoms",orange,creationTool==CreationTool::Move,[&]{chooseCreationTool(CreationTool::Move);});
         icon("draw",0xE70F,"+","Draw atoms",green,creationTool==CreationTool::Sketch,[&]{chooseCreationTool(CreationTool::Sketch);});
         icon("ring",0,"6","绘制碳环 (4 / 5 / 6) · Alt 芳香环",green,creationTool==CreationTool::Ring,[&]{chooseCreationTool(CreationTool::Ring);});
@@ -4126,6 +4386,9 @@ struct App {
             const bool fileOpen = ImGui::BeginMenu("File");
             recordUiTestItem("menu.file", "File");
             if (fileOpen) {
+                if(ImGui::MenuItem("New 3D Atomistic Structure"))newBlankCreation();
+                if(ImGui::MenuItem("Save Workspace..."))projectDialog(true);
+                if(ImGui::MenuItem("Append Workspace..."))projectDialog(false);
                 if (enabledItem("New Tab", "menu.file.new-tab", "Ctrl+T"))
                     newHomeTab();
                 if (enabledItem("Load File...", "menu.file.load-file", "Ctrl+I")) open();
@@ -5095,6 +5358,7 @@ struct App {
                  isGeometryTool(tool) ? "依次点击测量点 · 点击标记后拖动空白处修改 · Alt 反向 · Esc 取消" :
                  tool == CreationTool::Rotate ? "拖动旋转" :
                  tool == CreationTool::Pan ? "拖动平移" :
+                 tool == CreationTool::Zoom ? "上下拖动缩放 · Esc 返回选择" :
                  tool == CreationTool::Move ? "拖动选中原子" :
                  tool == CreationTool::Fragment ? "点击放置片段 · Alt 点击连接已有片段 · 拖动调整朝向 · Esc 取消" :
                  tool == CreationTool::Ring ? "点击放置碳环 · 原子或键上接环 · 拖动调整朝向 · Alt 芳香环" : "点击绘制或连键 · 双击结束 · Esc 取消";
@@ -5978,7 +6242,7 @@ struct App {
         const ImVec2 mouse=io.MousePos;
         bool contextRequested=false;
         if (creationDrag!=CreationDrag::None && (ImGui::IsKeyPressed(ImGuiKey_Escape) || io.AppFocusLost)) {
-            if(creationDrag==CreationDrag::Rotate || creationDrag==CreationDrag::Pan) cam=creationDragCamera;
+            if(creationDrag==CreationDrag::Rotate || creationDrag==CreationDrag::Pan || creationDrag==CreationDrag::Zoom) cam=creationDragCamera;
             for (const auto &[index,original]:creationDragAtoms) {
                 auto &a=result.data.atoms[size_t(index)];
                 a.x=original.x; a.y=original.y; a.z=original.z;
@@ -6155,6 +6419,7 @@ struct App {
                 }
             } else if (creationTool==CreationTool::Rotate) creationDrag=CreationDrag::Rotate;
             else if (creationTool==CreationTool::Pan) creationDrag=CreationDrag::Pan;
+            else if (creationTool==CreationTool::Zoom) creationDrag=CreationDrag::Zoom;
             else if (creationTool==CreationTool::Move && hit>=0) {
                 if (std::find(creationSelection.begin(),creationSelection.end(),hit)==creationSelection.end())
                     selectCreationAtom(hit,false);
@@ -6275,6 +6540,8 @@ struct App {
             } else if (creationDrag==CreationDrag::Pan && creationDragMoved) {
                 cam.panX+=dx/std::max(size.x,1.f)*cam.zoom;
                 cam.panY-=dy/std::max(size.y,1.f)*cam.zoom;
+            } else if (creationDrag==CreationDrag::Zoom && creationDragMoved) {
+                cam.zoom=std::clamp(cam.zoom*std::exp(dy*.008f),.02f,100.f);
             } else if (creationDrag==CreationDrag::Move && creationDragMoved && !creationDragAtoms.empty()) {
                 const auto matrix=creationDragMatrix;
                 const auto &anchor=creationDragAtoms.front().second;
@@ -6484,6 +6751,7 @@ struct App {
             if (isGeometryTool(creationTool) || creationTool==CreationTool::Sketch || creationTool==CreationTool::Ring || creationTool==CreationTool::Fragment) {
                 if(!g_cursorOverride) g_cursorOverride=LoadCursor(nullptr,IDC_CROSS);
             }
+            else if(creationTool==CreationTool::Zoom)g_cursorOverride=g_magnifierCursor?g_magnifierCursor:LoadCursor(nullptr,IDC_SIZEALL);
             else if (creationHover>=0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             else if (creationTool==CreationTool::Pan||creationTool==CreationTool::Move)
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
@@ -8013,15 +8281,7 @@ struct App {
         ImGui::SetCursorPosX(std::max(U(24),w*.5f-cardW*1.55f));
         if (ImGui::Button("打开结构文件", {cardW,U(100)})) open();
         ImGui::SameLine(0,U(16));
-        if (ImGui::Button("新建空白结构", {cardW,U(100)})) {
-            newStructureTab(authoring::orthogonalCell(10,10,10,"C"),"未命名 · 创作");
-            creationMode = true;
-            creationSketch = true;
-            creationTool = CreationTool::Sketch;
-            source.atoms.clear();
-            update();
-            saveCreationSnapshot("空白结构");
-        }
+        if (ImGui::Button("新建空白结构", {cardW,U(100)})) newBlankCreation();
         ImGui::SameLine(0,U(16));
         if (ImGui::Button("从晶体开始", {cardW,U(100)})) openCrystalDialog = true;
         ImGui::End();
@@ -8451,6 +8711,19 @@ struct App {
         if (ImGui::Button("暂存",{U(50),U(26)})) saveCreationSnapshot();
         ImGui::PopStyleColor(2);
         ImGui::Separator();
+        if(ImGui::CollapsingHeader("文档")) {
+            if(ImGui::SmallButton("按名称排序")) {
+                tabs[size_t(activeTab)]=captureTab();const auto selectedId=tabs[size_t(activeTab)].id;
+                std::stable_sort(tabs.begin(),tabs.end(),[](const auto &a,const auto &b){return a.title<b.title;});
+                for(size_t index=0;index<tabs.size();++index)if(tabs[index].id==selectedId)activeTab=int(index);
+            }
+            ImGui::SameLine();if(ImGui::SmallButton("打开…"))open();
+            ImGui::SameLine();if(ImGui::SmallButton("刷新")){update();status="已刷新当前体系显示";}
+            for(int index=0;index<int(tabs.size());++index) {ImGui::PushID(index);
+                if(ImGui::Selectable(tabs[size_t(index)].title.c_str(),index==activeTab))switchTab(index);
+                ImGui::PopID();}
+            if(ImGui::SmallButton("保存工作区…"))projectDialog(true);
+        }
         ImGui::Text("%s",creationBasedOn.empty()?"未命名结构":creationBasedOn.c_str());
         ImGui::SameLine();
         ImGui::TextDisabled("%zu 快照",creationSnapshots.size());
@@ -8487,17 +8760,8 @@ struct App {
 
         if (creationPropertiesOpen) {
             fixed("Creation file properties",0,y+workH,leftW,propertyH);
-            ImGui::TextDisabled("属性");
-            ImGui::SameLine();
-            const char *pages[]{"晶格 3D","组成","选中"};
-            for (int page=0;page<3;++page) {
-                if (page) ImGui::SameLine(0,U(2));
-                const bool selected=creationPropertyPage==page;
-                if (selected)
-                    ImGui::PushStyleColor(ImGuiCol_Button,{.23f,.25f,.29f,1});
-                if (ImGui::SmallButton(pages[page])) creationPropertyPage=page;
-                if (selected) ImGui::PopStyleColor();
-            }
+            ImGui::TextDisabled("体系属性");
+            creationPropertyPage=segmented("##creation-property-pages",creationPropertyPage,{"晶格","组成","选中","测量"},ImGui::GetContentRegionAvail().x);
             ImGui::Separator();
             auto propertyRow=[&](const char *name,const std::string &value) {
                 ImGui::TextDisabled("%s",name);
@@ -8587,7 +8851,7 @@ struct App {
                     }
                     ImGui::PopID();
                 }
-            } else {
+            } else if(creationPropertyPage==2) {
                 propertyRow("已选中",std::to_string(creationSelection.size()));
                 if (creationPick>=0 && size_t(creationPick)<source.atoms.size()) {
                     const auto &atom=source.atoms[size_t(creationPick)];
@@ -8596,6 +8860,29 @@ struct App {
                     snprintf(position,sizeof(position),"%.3f, %.3f, %.3f",atom.x,atom.y,atom.z);
                     propertyRow("位置",position);
                 }
+            }
+            if(creationPropertyPage==3) {
+                ImGui::SetNextItemWidth(-1);ImGui::Combo("##measurement-filter",&creationMonitorFilter,"全部测量\0距离\0角度\0二面角\0");
+                recordUiTestItem("creation.properties-measurement-filter");
+                ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##property-filter","按元素或编号筛选…",creationPropertyFilter,sizeof(creationPropertyFilter));
+                ImGui::TextDisabled("点击对象，在右侧修改几何或约束");
+                for(size_t row=0;row<creationDisplay.monitors.size();++row) {
+                    const auto &m=creationDisplay.monitors[row];if(creationMonitorFilter && m.count!=creationMonitorFilter+1)continue;
+                    std::string name;
+                    for(int k=0;k<m.count;++k){if(k)name+="–";const int index=m.atoms[size_t(k)];
+                        if(index>=0 && size_t(index)<source.atoms.size()) {
+                            const auto type=source.atoms[size_t(index)].type;name+=(type<source.species.size()?source.species[type]:"?")+std::string("#")+std::to_string(index);
+                        }}
+                    if(creationPropertyFilter[0] && name.find(creationPropertyFilter)==std::string::npos)continue;
+                    const auto measured=geometry::value(result.data,m);char value[80];
+                    if(measured)snprintf(value,sizeof(value),"%.5f %s",*measured,m.count==2?"Å":"°");else snprintf(value,sizeof(value),"未定义");
+                    ImGui::PushID(int(row));
+                    if(ImGui::Selectable(name.c_str(),creationDisplay.activeMonitor==int(row)))activateGeometry(int(row));
+                    recordUiTestItem("creation.properties-measurement-"+std::to_string(row));
+                    propertyRow(geometryName(m.count),value);propertyRow("约束",m.fixed?"固定":"自由");
+                    ImGui::PopID();
+                }
+                if(creationDisplay.monitors.empty())ImGui::TextDisabled("用尺子工具点击原子创建测量。");
             }
             if (ImGui::BeginPopupModal("编辑模拟晶胞",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::TextUnformatted("晶格常数 (Å)");
@@ -11141,6 +11428,9 @@ struct App {
             else deletePickedAtom();
         }
         if (creationMode && !io.WantTextInput) {
+            if(io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_C,false))copyCreationSelection();
+            if(io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_X,false))copyCreationSelection(true);
+            if(io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_V,false))pasteCreationSelection();
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) selectCreationAtom(-1,false);
             if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A)) {
                 creationBondSelection.clear();
@@ -11159,6 +11449,7 @@ struct App {
                 if (ImGui::IsKeyPressed(ImGuiKey_P)) chooseCreationTool(CreationTool::Sketch);
             }
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                if(creationDrag==CreationDrag::None && geometryPending.empty() && creationSketchAnchor<0 && !creationFusionSeed)chooseCreationTool(CreationTool::Select);
                 creationSketchAnchor=creationSketchLastPlaced=-1; creationSketchPreviewValid=false;
                 selectCreationAtom(-1,false);
             }
@@ -11469,7 +11760,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                               "Browser tabs must receive pointer clicks");
                 std::ofstream("build/desktop-test.txt") << "PASS: minimize, maximize, close-to-tray, restore, title drag hit test\n";
             }
-            if (!input.empty()) app.load(input);
+            if (!input.empty()) {if(lowerExtension(input)==".atomx-project")app.loadProject(input);else app.load(input);}
             else {
                 app.source={};
                 app.result={};
