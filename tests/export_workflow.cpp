@@ -293,6 +293,65 @@ int main(int argc,char **argv) {
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
             frame();
+            // Live localization must not change widget identity or scientific data.
+            {
+                const auto originalLanguage=loc::current;
+                for(const auto &entry:loc::entries) {
+                    loc::current=loc::Language::Chinese;
+                    const auto id=ImHashStr(loc::label(entry.source));
+                    for(auto language:{loc::Language::Chinese,loc::Language::English}) {
+                        loc::current=language;
+                        requireExport(ImHashStr(loc::label(entry.source))==id,
+                                      "translated labels retain stable ImGui IDs across languages");
+                    }
+                }
+                loc::current=loc::Language::English;
+                requireExport(std::string(loc::text("建晶体"))=="Build crystal" &&
+                              std::string(loc::text("Force"))=="Force" &&
+                              std::string(loc::text("NaCl.xyz"))=="NaCl.xyz",
+                              "UI translations leave scientific keys and filenames alone");
+                const auto stable=ImHashStr(loc::label("键级##sketch"));
+                loc::current=loc::Language::Chinese;
+                requireExport(ImHashStr(loc::label("键级##sketch"))==stable,
+                              "hidden widget suffix survives language switching");
+                const char *chineseItems=loc::items("Top\0Bottom\0");
+                requireExport(std::string(chineseItems)=="顶视图" &&
+                              std::string(chineseItems+std::strlen(chineseItems)+1)=="底视图",
+                              "combo translation retains embedded NUL item separators");
+                loc::current=originalLanguage;
+                const auto prefFile=dir/L"language settings.ini";
+                auto preferences=app.preferences;preferences.language=loc::Language::English;
+                preferences.save(prefFile);desktop::Preferences loaded;loaded.load(prefFile);
+                requireExport(loaded.language==loc::Language::English,"English persists across a fresh preference load");
+                WritePrivateProfileStringW(L"General",L"Language",L"unsupported",prefFile.c_str());
+                loaded.load(prefFile);
+                requireExport(loaded.language==loc::Language::Chinese,"unknown language falls back to Simplified Chinese");
+                struct RestoreLanguage {App &app;loc::Language old;~RestoreLanguage(){app.setLanguage(old);}} restore{app,app.preferences.language};
+                const auto tabCount=app.tabs.size(),undoCount=app.authorUndo.size();
+                app.setLanguage(loc::Language::Chinese);frame();
+                const auto settingsId=app.uiTestItems.at("title.settings").id;
+                click("title.settings");frame();
+                requireExport(app.uiTestItems.contains("settings.language"),"title gear opens global settings in viewer");
+                const auto languageId=app.uiTestItems.at("settings.language").id;
+                click("settings.language");frame();click("settings.language.1");frame();
+                requireExport(app.preferences.language==loc::Language::English &&
+                              app.uiTestItems.at("settings.language").id==languageId &&
+                              app.uiTestItems.contains("settings.done"),"live language choice keeps the modal and controls alive");
+                desktop::Preferences reloaded;reloaded.load();
+                requireExport(reloaded.language==loc::Language::English,"language selected through actual UI is saved immediately");
+                click("settings.done");frame();
+                requireExport(!app.uiTestItems.contains("settings.language") &&
+                              app.uiTestItems.at("title.settings").id==settingsId &&
+                              app.tabs.size()==tabCount && app.authorUndo.size()==undoCount,
+                              "language switch keeps tabs/history intact and settings remains reusable");
+                const bool wasHome=app.homeMode,wasCreation=app.creationMode;
+                app.homeMode=true;frame();click("title.settings");frame();
+                requireExport(app.uiTestItems.contains("settings.language"),"title settings works on home tab");
+                click("settings.done");app.homeMode=false;app.creationMode=true;frame();click("title.settings");frame();
+                requireExport(app.uiTestItems.contains("settings.language"),"title settings works on creation tab");
+                click("settings.done");app.homeMode=wasHome;app.creationMode=wasCreation;frame();
+            }
+            frame();
             app.pipelinePane = 268.f;
             app.propertiesPane = 316.f;
             app.workspacePane = 220.f;

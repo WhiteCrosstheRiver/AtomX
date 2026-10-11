@@ -2,6 +2,7 @@
 #include "renderer.hpp"
 #include <shellapi.h>
 #include <windowsx.h>
+#include "localization.hpp"
 
 namespace desktop {
 inline NOTIFYICONDATAW tray{};
@@ -17,6 +18,7 @@ inline std::filesystem::path settingsPath() {
     return path / "settings.ini";
 }
 struct Preferences {
+    localization::Language language = localization::Language::Chinese;
     int theme = 0, font = 0, size = 18;
     int workspacePane = 220, pipelinePane = 268, propertiesPane = 316;
     int inspectorPane = 180, timelinePane = 94;
@@ -26,8 +28,11 @@ struct Preferences {
     static constexpr int maxRecentFiles = 8;
     std::vector<std::wstring> recentFiles;
     std::wstring exportDirectory;
-    void load() {
-        auto p = settingsPath().wstring();
+    void load(const std::filesystem::path &file = settingsPath()) {
+        auto p = file.wstring();
+        wchar_t languageCode[32]{};
+        GetPrivateProfileStringW(L"General", L"Language", L"zh-CN", languageCode, 32, p.c_str());
+        language = localization::fromCode(languageCode);
         wchar_t exportFolder[32768]{};
         GetPrivateProfileStringW(L"Export", L"Directory", L"", exportFolder, 32768, p.c_str());
         exportDirectory = exportFolder;
@@ -48,8 +53,10 @@ struct Preferences {
             if (buffer[0]) recentFiles.push_back(buffer);
         }
     }
-    void save() const {
-        auto p = settingsPath().wstring();
+    void save(const std::filesystem::path &file = settingsPath()) const {
+        auto p = file.wstring();
+        if (!WritePrivateProfileStringW(L"General", L"Language", localization::code(language), p.c_str()))
+            throw std::runtime_error("Unable to save language settings");
         if (!WritePrivateProfileStringW(L"Export", L"Directory", exportDirectory.c_str(), p.c_str()))
             throw std::runtime_error("Unable to save export directory");
         for (auto entry : {std::pair{L"Theme", theme}, {L"Font", font}, {L"Size", size}})
