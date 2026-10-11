@@ -365,6 +365,45 @@ int main(int argc,char **argv) {
                           "Creation Mode opens an editable copy in a separate workspace tab");
             settlePipeline();
             {
+                // Creation duplicates own live data/display/history and have no
+                // parent save destination; named immutable snapshots remain safe.
+                const auto parent=app.captureTab();const int parentIndex=app.activeTab;
+                app.creationDisplay.labels[0]={creation::LabelKind::Custom,"copy label"};
+                app.creationDisplay.normalize(app.source.atoms.size());app.cameras[3].roll=.37f;
+                const auto copiedDisplay=app.creationDisplay;const size_t history=app.authorUndo.size();
+                app.duplicateCreationTab();settlePipeline();frame();
+                requireExport(app.tabs.size()==originalTabCount+2 && app.creationMode &&
+                    app.authorUndo.size()==history && app.creationDisplay.labelAt(0).text=="copy label" &&
+                    app.cameras[3].roll==.37f && app.path.empty() && app.tabs[size_t(app.activeTab)].documentPath.empty(),
+                    "Duplicate preserves display/camera/history without sharing save destination");
+                app.editStructure("independent duplicate",[](Dataset &d){d.atoms[0].x+=.4f;});settlePipeline();
+                requireExport(app.tabs[size_t(parentIndex)].source.atoms[0].x==parent.source.atoms[0].x,
+                    "Editing duplicate leaves original dataset unchanged");
+                app.duplicateCreationTab(parentIndex);settlePipeline();
+                requireExport(app.tabs.size()==originalTabCount+3 && app.source.atoms[0].x==parent.source.atoms[0].x,
+                    "Repeated copy from inactive creation document is independent");
+                app.closeTab(app.activeTab);settlePipeline();app.closeTab(app.activeTab);settlePipeline();
+                requireExport(app.activeTab==parentIndex,"Duplicate cleanup returns to parent");
+                app.creationDisplay=parent.display;app.cameras[3]=parent.cameras[3];
+                // Actual LJ dialog and async publication, including a stale result
+                // that may not attach to a changed document.
+                click("creation.lj-open");frame();
+                requireExport(app.showLJ && app.ljDocumentCurrent() && app.uiTestItems.contains("sources.lj"),
+                    "LJ toolbar opens bound dialog with clickable provenance");
+                app.ljPreset=2;app.resetLJParameters();app.ljOptions.periodic=false;frame();
+                click("lj.calculate");app.ljJob.wait();app.poll();frame();
+                requireExport(app.ljResult && !app.ljBusy,"LJ background calculation publishes a result");
+                const size_t before=app.authorUndo.size();click("lj.apply");settlePipeline();frame();
+                requireExport(app.source.vectorProperties.contains("LJ force (eV/A)") &&
+                    app.source.scalarProperties.at("LJ energy (eV)").size()==app.source.atoms.size() &&
+                    app.authorUndo.size()==before+1,"LJ result writes one undoable scientific-data transaction");
+                app.history(false);settlePipeline();frame();
+                requireExport(!app.source.vectorProperties.contains("LJ force (eV/A)"),"Undo removes LJ properties");
+                const size_t staleHistory=app.authorUndo.size();app.applyLJ();
+                requireExport(app.authorUndo.size()==staleHistory,"Stale LJ result cannot overwrite changed document");
+                app.showLJ=false;frame();
+            }
+            {
                 const size_t baseline=app.authorUndo.size();
                 app.showModelingActions=true;
                 app.editStructure("toolbar fixture",[](Dataset &data) {

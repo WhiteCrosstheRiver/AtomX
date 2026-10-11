@@ -1,0 +1,23 @@
+#pragma once
+#include <string_view>
+namespace atomx::references {
+struct Entry {const char *group,*title,*detail,*url;};
+inline constexpr Entry entries[]={
+    {"lj","OpenKIM Universal LJ · Elliott & Akerson","MO_959249795837_003 (2018 revision of 2015 model); DOI 10.25950/962b4967. Parameters: Angstrom/eV, 4 sigma cutoff, energy shift, Lorentz-Berthelot. Fitted to dimers only. CDDL-1.0; original package and license: third_party/openkim-lj.","https://openkim.org/id/LJ_ElliottAkerson_2015_Universal__MO_959249795837_003"},
+    {"lj","LJ equations, mixing and cutoff conventions","LAMMPS official documentation is the equation/convention reference. AtomX implements its own evaluator; LAMMPS is not linked or required.","https://docs.lammps.org/pair_lj.html"},
+    {"lj","Lorentz-Berthelot / geometric mixing","LAMMPS pair_modify: arithmetic sigma and geometric epsilon; geometric sigma/epsilon alternative. Energy shifting does not shift forces.","https://docs.lammps.org/pair_modify.html"},
+    {"lj","UFF · Rappe et al. (1992)","JACS 114, 10024-10035; DOI 10.1021/ja00051a040. Only LJ parameters are used, not the complete UFF force field. Select types explicitly. sigma=x/2^(1/6), epsilon=D * 0.043364104241800934 eV per kcal/mol.","https://doi.org/10.1021/ja00051a040"},
+    {"lj","Imported UFF CSV data origin","User-supplied Desktop CSV was derived from Open Babel data/UFF.prm. That table is imported at runtime, not embedded in AtomX. Open Babel distribution: GPL-2.0; see upstream notices. Import does not perform chemical atom typing.","https://github.com/openbabel/openbabel/blob/master/data/UFF.prm"},
+    {"elements","Covalent radii · Cordero et al. (2008)","Covalent radii revisited, Dalton Transactions, 2832-2846; DOI 10.1039/B801115J. Used for displayed element defaults and geometric bond/hydrogen heuristics, not an energy model.","https://doi.org/10.1039/B801115J"},
+    {"elements","Van der Waals radii · Bondi (1964)","J. Phys. Chem. 68, 441-451; DOI 10.1021/j100785a001. Undefined entries have explicit fallback display sizes.","https://doi.org/10.1021/j100785a001"},
+    {"elements","Jmol / CPK element colors","Reference for element RGB colors in src/elements.hpp. AtomX does not embed the Jmol application.","https://jmol.sourceforge.net/jscolors/"},
+    {"symmetry","Spglib 2.7.0","Crystal symmetry, space-group operations, primitive-cell conversion. BSD-3-Clause; license and source: third_party/spglib. Togo et al., Sci. Technol. Adv. Mater. Methods 4 (2024), 2384822.","https://doi.org/10.1080/27660400.2024.2384822"},
+    {"symmetry","Spglib conventions","Column lattice vectors in Spglib; row lattice vectors in AtomX. Coordinate/cell conversion follows these definitions.","https://spglib.readthedocs.io/en/stable/definition.html"},
+    {"modeling","Materials Studio UI reference","BIOVIA Materials Studio: workflow/UI reference, together with the user's MS UI operation record. AtomX tools are independently implemented; this is not an MS calculation backend.","https://www.3ds.com/products/biovia/materials-studio"},
+    {"analysis","OVITO workflow and modifier documentation","Workflow reference for AtomX's independently implemented pipeline/analysis tools. Per-feature audit notes: docs/parity/reference. Algorithm limitations are documented in those notes; this does not claim identical implementation.","https://docs.ovito.org/reference/pipelines/modifiers/index.html"},
+    {"formats","VASP POSCAR format","Official file-format reference; POSCAR export uses the literal default filename POSCAR.","https://www.vasp.at/wiki/index.php/POSCAR"},
+    {"formats","LAMMPS data / dump formats","Official data/dump format references. AtomX's readers/writers are independent implementations.","https://docs.lammps.org/read_data.html"},
+    {"software","Dear ImGui","MIT license; bundled source/license: third_party/imgui. Used for the native interface.","https://github.com/ocornut/imgui"},
+    {"software","Direct3D 11","Microsoft Windows SDK graphics API, used for GPU viewport rendering.","https://learn.microsoft.com/en-us/windows/win32/direct3d11/atoc-dx-graphics-direct3d-11"},
+};
+}

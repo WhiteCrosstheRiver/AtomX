@@ -16,6 +16,8 @@
 #include "creation_display.hpp"
 #include "symmetry.hpp"
 #include "structure_io.hpp"
+#include "lj.hpp"
+#include "references.hpp"
 #include "desktop.hpp"
 #include "imgui.h"
 #include "imgui_guard.hpp"
@@ -1181,6 +1183,17 @@ struct App {
     layers::Options layerOptions;
     std::future<layers::Built> layerBuildJob;
     std::string layerBuilderMessage;
+    bool showLJ=false,ljBusy=false;
+    int ljPreset=0;
+    uint64_t ljTabId=0,ljGeneration=0;
+    std::string ljTitle,ljMessage;
+    lj::Options ljOptions;
+    std::vector<lj::Parameter> ljUff;
+    std::vector<int> ljUffChoice;
+    std::optional<lj::Result> ljResult;
+    std::future<lj::Result> ljJob;
+    std::atomic<bool> ljCancel{false};
+    std::atomic<float> ljProgress{0};
     bool crystalReplaceCurrent = true;
     struct CrystalBasis { char element[8] = "Na"; float fractional[3]{}; };
     std::vector<CrystalBasis> crystalBasis;
@@ -1210,6 +1223,7 @@ struct App {
         activeTab = 0;
     }
     ~App() {
+        ljCancel=true;if(ljJob.valid())ljJob.wait();
         projectCancel=true;if(projectJob.valid())projectJob.wait();
         Shell_NotifyIconW(NIM_DELETE, &desktop::tray);
         if (icon) DestroyIcon(icon);
@@ -1993,6 +2007,164 @@ struct App {
         restoreTab(tabs[size_t(activeTab)]);
         load(file);
     }
+    void referenceHelp(const char *group) {
+        ImGui::PushID(group);
+        if(ImGui::SmallButton("?##sources"))ImGui::OpenPopup("Sources / References");
+        recordUiTestItem(std::string("sources.")+group);
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("Sources, papers and software licenses");
+        ImGui::SetNextWindowSize({U(600),U(440)},ImGuiCond_Appearing);
+        if(ImGui::BeginPopup("Sources / References")) {
+            ImGui::TextUnformatted("Sources / References");ImGui::Separator();
+            ImGui::BeginChild("source-list",{0,-U(34)},false);
+            int index=0;
+            for(const auto &entry:references::entries) {
+                const std::string_view sourceGroup=group;
+                if(sourceGroup!="all" && sourceGroup!=entry.group &&
+                   !(sourceGroup=="modeling" && (std::string_view(entry.group)=="elements" || std::string_view(entry.group)=="symmetry")))continue;
+                ImGui::PushID(index++);ImGui::TextWrapped("%s",entry.title);
+                ImGui::TextWrapped("%s",entry.detail);
+                if(ImGui::Button("Open official source"))openUrl(entry.url);
+                ImGui::SameLine();if(ImGui::SmallButton("Copy citation"))
+                    ImGui::SetClipboardText((std::string(entry.title)+"\n"+entry.detail+"\n"+entry.url).c_str());
+                ImGui::Separator();ImGui::PopID();
+            }
+            ImGui::EndChild();
+            if(ImGui::Button("Close"))ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+    void resetLJParameters() {
+        ljResult.reset();ljMessage.clear();ljOptions.types.clear();
+        ljOptions.geometric=ljPreset==1;
+        ljUffChoice.assign(result.data.species.size(),-1);
+        for(const auto &name:result.data.species) {
+            if(ljPreset==0) {
+                try {ljOptions.types.push_back(lj::openkim(name));}
+                catch(const std::exception &) {ljOptions.types.push_back({"UNASSIGNED",0,0,0});}
+            } else ljOptions.types.push_back({ljPreset==1?"UNASSIGNED":"Manual",ljPreset==1?0.:1.,ljPreset==1?0.:1.,ljPreset==1?0.:4.});
+        }
+    }
+    void requestLJ() {
+        if(homeMode || documentsBusy() || ljBusy || result.data.atoms.empty())return;
+        if(ljUff.empty()) {
+            PWSTR desktopFolder=nullptr;
+            if(SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop,0,nullptr,&desktopFolder))) {
+                const auto csv=std::filesystem::path(desktopFolder)/L"lj_uff.csv";CoTaskMemFree(desktopFolder);
+                if(std::filesystem::exists(csv))try{ljUff=lj::readUff(csv);}catch(const std::exception &){/* explicit import remains available */}
+            }
+        }
+        ljTabId=tabs[size_t(activeTab)].id;ljGeneration=pipelineGeneration;
+        ljTitle=tabTitle();showLJ=true;resetLJParameters();refreshFont=true;
+    }
+    bool ljDocumentCurrent() const {
+        return !tabs.empty() && tabs[size_t(activeTab)].id==ljTabId && pipelineGeneration==ljGeneration;
+    }
+    void startLJ() {
+        if(ljBusy || documentsBusy() || !ljDocumentCurrent())return;
+        Dataset data;data.atoms=result.data.atoms;data.species=result.data.species;data.cell=result.data.cell;
+        data.origin=result.data.origin;data.pbc=result.data.pbc;data.sourceCount=result.data.sourceCount;data.stride=result.data.stride;
+        ljCancel=false;ljProgress=0;ljResult.reset();ljMessage="后台计算中...";
+        const auto options=ljOptions;
+        ljJob=std::async(std::launch::async,[this,data=std::move(data),options]{return lj::calculate(data,options,&ljCancel,&ljProgress);});
+        ljBusy=true;
+    }
+    void applyLJ() {
+        if(!ljResult || ljBusy || documentsBusy() || !ljDocumentCurrent() || !creationMode || !mods.empty())return;
+        std::vector<Vec3> forces;forces.reserve(ljResult->forces.size());
+        for(const auto &f:ljResult->forces) {
+            for(double v:f)if(std::abs(v)>std::numeric_limits<float>::max()){ljMessage="Force exceeds property storage range";return;}
+            forces.push_back({float(f[0]),float(f[1]),float(f[2])});
+        }
+        const auto energies=ljResult->atomicEnergy;const double energy=ljResult->energy;
+        DataTable parameters;parameters.name="LJ parameters";
+        parameters.columns={"Species","Parameter type","sigma (A)","epsilon (eV)","cutoff (A)","Mixing","Energy shift","Boundary","Source"};
+        for(size_t i=0;i<ljOptions.types.size();++i){const auto &p=ljOptions.types[i];
+            parameters.rows.push_back({source.species[i],p.name,formatDataNumber(p.sigma),formatDataNumber(p.epsilon),formatDataNumber(p.cutoff),
+                ljOptions.geometric?"geometric":"Lorentz-Berthelot",ljOptions.shift?"yes":"no",ljOptions.periodic?"document PBC":"isolated",
+                ljPreset==0?"10.25950/962b4967 (editable parameters)":ljPreset==1?"UFF LJ only; 10.1021/ja00051a040 (editable parameters)":"User parameters"});}
+        editStructure("LJ 单点计算结果",[&](Dataset &d){
+            d.scalarProperties["LJ energy (eV)"]=energies;d.vectorProperties["LJ force (eV/A)"]=std::move(forces);
+            d.globalAttributes["LJ potential energy (eV)"]=energy;
+            d.tables.erase(std::remove_if(d.tables.begin(),d.tables.end(),[](const auto &t){return t.name=="LJ parameters";}),d.tables.end());
+            d.tables.push_back(std::move(parameters));
+        });
+        ljGeneration=pipelineGeneration;ljMessage="已写入 LJ energy / LJ force 属性；可撤销";
+    }
+    void ljDialog() {
+        if(!showLJ)return;
+        ImGui::SetNextWindowSize({U(720),U(640)},ImGuiCond_Appearing);
+        const auto *vp=ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->GetCenter(),ImGuiCond_Appearing,{.5f,.5f});
+        ImGui::SetNextWindowSizeConstraints({U(520),U(380)},{vp->WorkSize.x-U(20),vp->WorkSize.y-U(20)});
+        if(ImGui::Begin("LJ 单点计算##lj",&showLJ,ImGuiWindowFlags_NoCollapse)) {
+            ImGui::Text("%s",ljTitle.c_str());ImGui::SameLine();referenceHelp("lj");
+            const bool currentLJ=ljDocumentCurrent();
+            if(!currentLJ)ImGui::TextWrapped("体系已改变；请关闭窗口并重新打开 LJ，以使用当前结构。");
+            ImGui::TextUnformatted("U(r) = 4 epsilon [(sigma/r)^12 - (sigma/r)^6]");
+            ImGui::TextDisabled("Angstrom / eV / eV per Angstrom · all pairs, including bonded atoms");
+            ImGui::TextWrapped("仅 LJ 单点能量与力；不含电荷、键角项、长程修正或结构优化。");
+            ImGui::BeginDisabled(ljBusy || !currentLJ);
+            const char *presets[]={"OpenKIM Universal · 二聚体拟合","UFF · 仅 LJ 参数（导入 CSV）","手动参数"};
+            bool changed=ImGui::Combo("参数方案",&ljPreset,presets,3);
+            if(changed)resetLJParameters();
+            if(ljPreset==0)ImGui::TextWrapped("注意：OpenKIM 的 epsilon 是键解离能，仅拟合二聚体；不作为通用吸附/非键参数。");
+            if(ljPreset==1) {
+                if(ImGui::Button("导入 UFF CSV...")) {
+                    wchar_t file[32768]=L"lj_uff.csv";OPENFILENAMEW dialog{sizeof(dialog)};dialog.hwndOwner=window;
+                    dialog.lpstrFilter=L"UFF parameters (*.csv)\0*.csv\0";dialog.lpstrFile=file;dialog.nMaxFile=32768;
+                    dialog.Flags=OFN_FILEMUSTEXIST|OFN_NOCHANGEDIR;
+                    if(GetOpenFileNameW(&dialog))try{ljUff=lj::readUff(file);resetLJParameters();ljMessage="UFF CSV loaded: "+std::to_string(ljUff.size())+" types";}
+                    catch(const std::exception &e){ljMessage=e.what();}
+                }
+                ImGui::TextWrapped("逐个指定原子类型；不自动判断杂化。此计算包含所有原子对，不是完整 UFF。默认截断为 4 sigma（可编辑）。");
+            }
+            bool geometric=ljOptions.geometric;
+            if(ImGui::Checkbox("Geometric sigma / cutoff mixing",&geometric)){ljOptions.geometric=geometric;changed=true;}
+            changed|=ImGui::Checkbox("Energy shift to zero at cutoff",&ljOptions.shift);
+            changed|=ImGui::Checkbox("Use document periodic boundaries",&ljOptions.periodic);
+            ImGui::TextDisabled("Unchecked mixing: Lorentz-Berthelot (arithmetic sigma/cutoff, geometric epsilon)");
+            ImGui::BeginChild("lj-parameters",{0,U(155)},true);
+            if(ImGui::BeginTable("parameters",5,ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_BordersInnerV)) {
+                ImGui::TableSetupColumn("Species",ImGuiTableColumnFlags_WidthFixed,U(55));
+                ImGui::TableSetupColumn("Type",ImGuiTableColumnFlags_WidthFixed,U(125));
+                for(const char *name:{"sigma (A)","epsilon (eV)","cutoff (A)"})
+                    ImGui::TableSetupColumn(name,ImGuiTableColumnFlags_WidthStretch,1);
+                ImGui::TableHeadersRow();
+                for(size_t i=0;i<ljOptions.types.size();++i){auto &p=ljOptions.types[i];ImGui::PushID(int(i));ImGui::TableNextRow();
+                    ImGui::TableNextColumn();ImGui::TextUnformatted(i<result.data.species.size()?result.data.species[i].c_str():"?");
+                    ImGui::TableNextColumn();
+                    if(ljPreset==1 && ImGui::BeginCombo("##type",p.name.c_str())) {
+                        for(size_t j=0;j<ljUff.size();++j)if(ImGui::Selectable(ljUff[j].name.c_str(),ljUffChoice[i]==int(j))){
+                            ljUffChoice[i]=int(j);p=ljUff[j];changed=true;}
+                        ImGui::EndCombo();
+                    } else if(ljPreset!=1)ImGui::TextUnformatted(p.name.c_str());
+                    ImGui::TableNextColumn();ImGui::SetNextItemWidth(-1);changed|=ImGui::InputDouble("##sigma",&p.sigma,0,0,"%.7g");
+                    ImGui::TableNextColumn();ImGui::SetNextItemWidth(-1);changed|=ImGui::InputDouble("##epsilon",&p.epsilon,0,0,"%.7g");
+                    ImGui::TableNextColumn();ImGui::SetNextItemWidth(-1);changed|=ImGui::InputDouble("##cutoff",&p.cutoff,0,0,"%.7g");
+                    ImGui::PopID();
+                }ImGui::EndTable();
+            }ImGui::EndChild();
+            if(changed)ljResult.reset();
+            bool valid=currentLJ && !documentsBusy() && !ljOptions.types.empty();
+            for(const auto &p:ljOptions.types)valid&=std::isfinite(p.sigma)&&p.sigma>0&&std::isfinite(p.epsilon)&&p.epsilon>=0&&std::isfinite(p.cutoff)&&p.cutoff>0;
+            ImGui::BeginDisabled(!valid);
+            if(ImGui::Button("计算能量与力",{U(150),0}))startLJ();recordUiTestItem("lj.calculate");
+            ImGui::EndDisabled();ImGui::EndDisabled();
+            if(ljBusy){ImGui::SameLine();if(ImGui::Button("Cancel"))ljCancel=true;
+                ImGui::ProgressBar(ljProgress.load(),{-1,U(12)});}
+            if(ljResult) {
+                ImGui::Text("Energy: %.12g eV    E/atom: %.8g eV",ljResult->energy,ljResult->energy/double(ljResult->forces.size()));
+                ImGui::Text("Max |force|: %.8g eV/A    %llu pairs    %.3f s",ljResult->maxForce,
+                    static_cast<unsigned long long>(ljResult->pairs),ljResult->seconds);
+                ImGui::BeginDisabled(!currentLJ || documentsBusy() || !creationMode || !mods.empty());
+                if(ImGui::Button("写入体系属性（可撤销）"))applyLJ();recordUiTestItem("lj.apply");ImGui::EndDisabled();
+                ImGui::TextDisabled("LJ energy (eV), LJ force (eV/A); view/edit/export via the data inspector.");
+            }
+            ImGui::TextWrapped("%s",ljMessage.c_str());
+        }ImGui::End();
+        if(!showLJ && ljBusy)ljCancel=true;
+    }
     void openCreationTab() {
         if (documentsBusy()) {
             status = "Wait for the current operation before opening Creation Mode";
@@ -2002,6 +2174,7 @@ struct App {
             status = "Cannot edit a sampled preview; load the complete structure first";
             return;
         }
+        if(creationMode) { duplicateCreationTab(); return; }
         const int origin = activeTab;
         const uint64_t originId = tabs[size_t(origin)].id;
         const Camera viewCamera = cameras[active];
@@ -2060,6 +2233,24 @@ struct App {
         creationSnapshots.clear();
         saveCreationSnapshot("原始 · " + basedOn);
         status = "Creation Mode: " + title;
+    }
+    void duplicateCreationTab(int index=-1) {
+        if(documentsBusy() || tabs.empty() || creationDrag!=CreationDrag::None)return;
+        if(index<0)index=activeTab;
+        if(index>=int(tabs.size()) || (index==activeTab?!creationMode:!tabs[size_t(index)].creationMode))return;
+        tabs[size_t(activeTab)]=captureTab();
+        auto copy=tabs[size_t(index)];
+        const auto originalId=copy.id;
+        copy.id=nextTabId++;copy.sourceTabId=originalId;
+        copy.title+=" · 副本";
+        // A copy must never save over its parent's document or source file.
+        copy.documentPath.clear();copy.path.clear();copy.frames.clear();copy.current=0;
+        copy.readerName="Copied creation document";
+        // Dataset/history/display vectors own their data. Snapshots are immutable
+        // shared_ptr<const Dataset> values and restored by value before editing.
+        tabs.push_back(std::move(copy));activeTab=int(tabs.size())-1;
+        restoreTab(tabs.back());active=3;
+        status="已复制为独立创作标签";refreshFont=true;
     }
     void leaveCreationTab() {
         const uint64_t sourceId = activeTab >= 0 && activeTab < int(tabs.size())
@@ -2938,6 +3129,7 @@ struct App {
         ImGui::SetNextWindowSize({U(550),std::min(U(560),viewport->WorkSize.y-U(50))},ImGuiCond_Appearing);
         ImGui::SetNextWindowSizeConstraints({U(430),U(300)},{viewport->WorkSize.x-U(30),viewport->WorkSize.y-U(30)});
         if(ImGui::Begin("调整氢原子##hydrogen-adjust",&showHydrogenAdjust,ImGuiWindowFlags_NoCollapse)) {
+            referenceHelp("elements");
             ImGui::BeginChild("##hydrogen-body",{0,-U(78)});
             ImGui::TextUnformatted("按显式键级调整数量与局部 SP / SP2 / SP3 几何");
             ImGui::TextDisabled("重原子坐标不变；形式电荷与文件中的部分电荷分开处理");
@@ -3164,6 +3356,11 @@ struct App {
             });
     }
     void poll() {
+        if(ljBusy && ljJob.valid() && ljJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            ljBusy=false;
+            try {ljResult=ljJob.get();ljMessage="计算完成；坐标未改变";}
+            catch(const std::exception &e){ljResult.reset();ljMessage=e.what();}
+        }
         if(projectBusy && projectJob.valid() && projectJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             projectBusy=false;
             try {
@@ -4161,6 +4358,7 @@ struct App {
                 status=creationSymmetry?"空间群 "+creationSymmetry->symbol+" ("+std::to_string(creationSymmetry->number)+")":"对称性识别失败";
             });
         }
+        button("actions.lj",0,"LJ","LJ single-point energy / forces",idle && !homeMode && !ljBusy,[&]{requestLJ();});
         button("actions.hide",0xE70E,"Hide","收起操作栏；视图菜单可重新打开",true,[&]{toggleModelingActions();});
         ImGui::PopStyleVar();ImGui::End();
     }
@@ -4266,7 +4464,7 @@ struct App {
         ImGui::BeginChild("##browser-tab-scroll",{tabWidth,titleH-U(2)},ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoBackground);
         ImGui::SetCursorPosY(U(3));
-        int closing = -1;
+        int closing = -1,duplicate=-1;
         for (int index = 0; index < int(tabs.size()); ++index) {
             ImGui::PushID(index);
             const bool selected = index == activeTab;
@@ -4275,6 +4473,12 @@ struct App {
             const std::string label = name;
             if (ImGui::Button(label.c_str(), {U(212), U(32)})) switchTab(index);
             recordUiTestItem("tabs.tab."+std::to_string(index),label.c_str());
+            if(ImGui::BeginPopupContextItem("tab-actions")) {
+                const bool authored=index==activeTab?creationMode:tabs[size_t(index)].creationMode;
+                if(ImGui::MenuItem("复制为新创作标签",nullptr,false,authored && !documentsBusy()))duplicate=index;
+                recordUiTestItem("tabs.duplicate."+std::to_string(index));
+                ImGui::EndPopup();
+            }
             if (selected && displayedTab != activeTab) {
                 ImGui::SetScrollHereX(.5f);
                 displayedTab=activeTab;
@@ -4323,6 +4527,7 @@ struct App {
         control("##exit", 3, "Exit AtomX");
         ImGui::End();
         if (closing >= 0) closeTab(closing);
+        if (duplicate >= 0) duplicateCreationTab(duplicate);
     }
     void creationTop(float w) {
         const float titleH = titleBarHeight();
@@ -4410,6 +4615,9 @@ struct App {
             if (ImGui::MenuItem("切面·真空...")) openSurfaceDialog = true;
             if (ImGui::MenuItem("构建叠层...")) requestLayerBuilder();
             recordUiTestItem("creation.layers-open");
+        });
+        menu("计算", "##create-calc", [&] {
+            if(ImGui::MenuItem("LJ 单点能量与力...",nullptr,false,!ljBusy))requestLJ();
         });
         menu("工具", "##create-tools", [&] {
             if(ImGui::MenuItem("测量 / 修改距离")) chooseCreationTool(CreationTool::Distance);
@@ -4511,6 +4719,10 @@ struct App {
         buildButton("crystal","建晶体",90,true,[&]{openCrystalDialog=true;});
         buildButton("supercell","超胞",76,false,[&]{openSupercellDialog=true;});
         buildButton("surf","切面·真空",116,false,[&]{openSurfaceDialog=true;});
+        ImGui::BeginDisabled(ljBusy || documentsBusy());
+        if(ImGui::Button("LJ",{U(44),U(35)}))requestLJ();recordUiTestItem("creation.lj-open");
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("LJ single-point energy / forces");
+        ImGui::EndDisabled();ImGui::SameLine(0,U(4));
         divider();
         icon("home",0xE80F,"H","Reset camera",gray,false,[&]{resetView();});
         icon("fit",0xE8AA,"F","Fit structure",gray,false,[&]{fitCamera(3,false);});
@@ -5780,6 +5992,7 @@ struct App {
         ImGui::SetNextWindowSize({U(440),U(560)},ImGuiCond_Appearing);
         ImGui::SetNextWindowSizeConstraints({U(300),U(250)},{U(700),std::max(U(250),ImGui::GetMainViewport()->WorkSize.y-U(24))});
         if(ImGui::Begin("显示样式##creation-styles",&showCreationStyles)) {
+            referenceHelp("elements");
             ImGui::BeginDisabled(documentsBusy());
             ImGui::Checkbox("整个体系",&creationStyleAll); recordUiTestItem("creation.style-all");
             ImGui::EndDisabled();
@@ -6002,6 +6215,7 @@ struct App {
         if (openLayerBuilder) { ImGui::OpenPopup("构建叠层##layer-builder"); openLayerBuilder=false; }
         ImGui::SetNextWindowSize({U(630),U(545)},ImGuiCond_Appearing);
         if (!ImGui::BeginPopupModal("构建叠层##layer-builder",nullptr,ImGuiWindowFlags_NoSavedSettings)) return;
+        referenceHelp("modeling");
         if (layerBuildCompleted) {
             layerBuildCompleted=false; ImGui::CloseCurrentPopup(); ImGui::EndPopup(); return;
         }
@@ -7473,7 +7687,8 @@ struct App {
                     status="在空白处点击以添加原子";
                 }
                 if (ImGui::MenuItem("复位视角")) fitCamera(i,false);
-                if (ImGui::MenuItem("复制为新创作标签")) openCreationTab();
+                if (ImGui::MenuItem("复制为新创作标签")) duplicateCreationTab();
+                recordUiTestItem("creation.context-duplicate");
             }
             ImGui::EndPopup();
         }
@@ -8736,6 +8951,7 @@ struct App {
         }
         ImGui::SetNextWindowSize({U(580),U(580)},ImGuiCond_Appearing);
         if (ImGui::BeginPopupModal("建晶体##v2",nullptr,ImGuiWindowFlags_NoSavedSettings)) {
+            referenceHelp("symmetry");
             const char *presets="Cu · FCC\0NaCl · 岩盐\0Si · 金刚石\0Fe · BCC\0Mg · HCP\0自定义 P1\0按空间群构建\0";
             int preset=crystalPreset;
             if (ImGui::Combo("结构模板",&preset,presets)) configureCrystalPreset(preset);
@@ -8807,6 +9023,7 @@ struct App {
         }
         if (openSupercellDialog) { ImGui::OpenPopup("超胞##v2"); openSupercellDialog=false; }
         if (ImGui::BeginPopupModal("超胞##v2",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            referenceHelp("modeling");
             ImGui::TextUnformatted("沿晶胞 a / b / c 方向重复");
             ImGui::InputInt3("重复次数",supercellFactor);
             const uint64_t count=uint64_t(source.atoms.size())*
@@ -8828,6 +9045,7 @@ struct App {
         }
         if (openSurfaceDialog) { ImGui::OpenPopup("切面·真空##v2"); openSurfaceDialog=false; }
         if (ImGui::BeginPopupModal("切面·真空##v2",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            referenceHelp("modeling");
             ImGui::InputInt3("Miller 指数 (h k l)",surfaceMiller);
             ImGui::InputInt("层数",&surfaceLayers);
             ImGui::InputFloat("真空厚度 (Å)",&surfaceVacuum,1.f,5.f,"%.2f");
@@ -8954,7 +9172,7 @@ struct App {
 
         if (creationPropertiesOpen) {
             fixed("Creation file properties",0,y+workH,leftW,propertyH);
-            ImGui::TextDisabled("体系属性");
+            ImGui::TextDisabled("体系属性");ImGui::SameLine();referenceHelp("modeling");
             creationPropertyPage=segmented("##creation-property-pages",creationPropertyPage,{"晶格","组成","选中","测量"},ImGui::GetContentRegionAvail().x);
             ImGui::Separator();
             auto propertyRow=[&](const char *name,const std::string &value) {
@@ -9079,6 +9297,7 @@ struct App {
                 if(creationDisplay.monitors.empty())ImGui::TextDisabled("用尺子工具点击原子创建测量。");
             }
             if (ImGui::BeginPopupModal("编辑模拟晶胞",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            referenceHelp("symmetry");
             ImGui::TextUnformatted("晶格常数 (Å)");
             for (int axis=0;axis<3;++axis) {
                 ImGui::PushID(axis);
@@ -9389,6 +9608,7 @@ struct App {
     void right(float w, float h) {
         fixed("Properties", w - rightWidth(), topInset(), rightWidth(),
               h - topInset() - statusHeight());
+        referenceHelp("analysis");ImGui::SameLine();
         // Tighter than the global theme so checkboxes, combos and sliders hug
         // their labels. release() runs before End(): End() asserts
         // "Missing PopStyleVar()" (and blocks startup) if these are still pushed.
@@ -11012,6 +11232,7 @@ struct App {
         chineseBuilder.AddText(creationDisplay.bondLabels.defaultLabel.text.c_str());
         chineseBuilder.AddText("键标签对象显式键数值跟随当前坐标键级局部两端原子都在打开窗口时的选择中作用范围条键属性按勾选顺序组合键长端点编号中点周期像显示大体系抽样隐藏不标注已改变请关闭后重新打开编辑移除全部规则无效超过缩小选择应用到整个体系");
         for(const auto &[key,label]:creationDisplay.bondLabels.labels) { (void)key;chineseBuilder.AddText(label.text.c_str()); }
+        chineseBuilder.AddText("计算单点能量与力二聚体拟合仅参数导入方案手动注意解离通用吸附非键逐个指定类型不自动判断杂化包含所有原子对完整默认截断可编辑体系已改变请关闭窗口并重新打开以使用当前结构电荷长程修正优化后台中完成坐标未写入属性撤销结果副本独立");
         chineseBuilder.AddText("属性组合可组合至多项按勾选顺序排列元素名称原子序数质量列优先没有该列时用元素质量缺失值为清空属性有效数字");
         chineseBuilder.AddText("原子与半键着色来源颜色元素颜色自定义颜色属性渐变分类编号着色方式自定义色按当前范围调整正在后台读取范围已更新范围属性没有有限数值下限上限渐变反转颜色段显示全体系图例缺失值为灰色颜色随数据更新范围仅手动调整应用着色来源颜色保留文件配色元素颜色使用当前元素外观着色不修改科学属性或键拓扑非负整数编号保持固定颜色可选择运动分组或层编号其他值为灰色编辑原子着色");
         chineseBuilder.AddText(creationDisplay.defaultColor.property.c_str());
@@ -11188,6 +11409,7 @@ struct App {
         if (!ImGui::BeginPopupModal("Data export settings", nullptr,
                                     ImGuiWindowFlags_AlwaysAutoResize))
             return;
+        referenceHelp("formats");
         if (ImGui::BeginCombo("Format", io::formats[exportFormat].name)) {
             for (int i = 0; i < int(std::size(io::formats)); ++i)
                 if (io::formats[i].writable &&
@@ -11763,6 +11985,7 @@ struct App {
         }
         statusStrip(w, h);
         creationDialogs();
+        ljDialog();
         fragmentBrowser();
         chemistryDialog();
         atomPropertiesDialog();
@@ -11799,6 +12022,7 @@ struct App {
         }
         if (ImGui::BeginPopupModal("About AtomX", nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            referenceHelp("all");
             if (logo.Get()) {
                 ImGui::Image((ImTextureID)(intptr_t)logo.Get(), {U(48), U(48)});
                 ImGui::SameLine();

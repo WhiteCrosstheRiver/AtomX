@@ -1,0 +1,2 @@
+# Keep the verified upstream package byte-for-byte, including its formatting.
+third_party/openkim-lj/** -text -whitespace
