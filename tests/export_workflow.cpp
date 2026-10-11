@@ -365,6 +365,63 @@ int main(int argc,char **argv) {
                           "Creation Mode opens an editable copy in a separate workspace tab");
             settlePipeline();
             {
+                const size_t baseline=app.authorUndo.size();
+                app.showModelingActions=true;
+                app.editStructure("toolbar fixture",[](Dataset &data) {
+                    data={};data.species={"C"};data.pbc={false,false,false};
+                    data.cell={10,0,0,0,10,0,0,0,10};
+                    data.atoms={{1,1,1,0},{3,1,1,0}};data.bonds={{0,1,{},1}};
+                });settlePipeline();frame();
+                click("actions.element");frame();click("actions.element.N");frame();
+                requireExport(std::string(app.creationElement)=="N" && app.creationTool==App::CreationTool::Sketch,
+                    "element toolbar selects actual sketch element and sticky tool");
+                click("actions.bonds");frame();click("actions.draw-order.2");frame();
+                requireExport(app.creationSketchOrder==2,"bond dropdown changes drawing order");
+                app.selectCreationBond(0,false);frame();
+                click("actions.bonds");frame();click("actions.bond-order.2");settlePipeline();frame();
+                requireExport(app.source.bonds[0].order==2,"bond toolbar commits selected topology change");
+                app.selectCreationBond(0,false);app.creationMovementScreenAxes=false;
+                app.creationMovementPercent=false;app.creationMovementDistance=.25f;frame();
+                click("actions.movement");frame();click("creation.movement-right");settlePipeline();frame();
+                requireExport(std::abs(app.source.atoms[0].x-1.25f)<1e-6 && std::abs(app.source.atoms[1].x-3.25f)<1e-6,
+                    "movement toolbar opens real dialog and moves both selected edge endpoints");
+                click("creation.movement-close");frame();
+                click("actions.undo-list");frame();click("actions.undo-list.1");settlePipeline();frame();
+                requireExport(app.source.atoms[0].x==1 && app.source.bonds[0].order==1 && app.authorUndo.size()==baseline+1,
+                    "undo dropdown reverts requested two edits without crossing history domain");
+                click("actions.redo-list");frame();click("actions.redo-list.1");settlePipeline();frame();
+                requireExport(app.source.atoms[0].x==1.25f && app.source.bonds[0].order==2,
+                    "redo dropdown replays both scientific edits");
+                app.selectCreationAtom(0,false);const auto zoom=app.cameras[3].zoom;frame();
+                click("actions.center");frame();
+                requireExport(app.cameras[3].zoom==zoom,"center toolbar preserves magnification");
+                click("actions.views");frame();click("actions.view.2");frame();
+                requireExport(app.cameras[3].mode==2,"standard-view dropdown applies front view");
+                const auto roll=app.cameras[3].roll;
+                click("actions.views");frame();click("actions.view-roll");frame();
+                requireExport(std::abs(app.cameras[3].roll-roll)>1,"quarter-turn dropdown changes camera only");
+                const float inset=app.topInset();click("actions.hide");frame();
+                requireExport(!app.showModelingActions && app.topInset()==inset-U(36),"hiding action bar returns height to viewport");
+                app.toggleModelingActions();frame();
+                const auto currentId=app.tabs[size_t(app.activeTab)].id;
+                app.newHomeTab();const auto temporaryId=app.tabs[size_t(app.activeTab)].id;
+                app.switchTab(int(std::find_if(app.tabs.begin(),app.tabs.end(),[&](const auto &t){return t.id==currentId;})-app.tabs.begin()));
+                settlePipeline();frame();click("explorer.documents");frame();
+                click("explorer.document."+std::to_string(temporaryId));frame();
+                requireExport(app.tabs[size_t(app.activeTab)].id==currentId && app.explorerSelectedId==temporaryId,
+                    "single explorer click selects independently from active document");
+                click("explorer.sort");frame();
+                requireExport(app.tabs[size_t(app.activeTab)].id==currentId && app.source.bonds[0].order==2,
+                    "explorer sorting keeps active document, geometry and history");
+                click("explorer.close");frame();
+                requireExport(std::none_of(app.tabs.begin(),app.tabs.end(),[&](const auto &t){return t.id==temporaryId;}) &&
+                    app.tabs[size_t(app.activeTab)].id==currentId,"explorer close removes only selected temporary tab");
+                click("explorer.documents");frame();
+                while(app.authorUndo.size()>baseline){app.history(false);settlePipeline();}
+                app.authorRedo.clear();app.creationSketchOrder=1;strcpy_s(app.creationElement,"C");
+                app.chooseCreationTool(App::CreationTool::Select);frame();
+            }
+            {
                 const auto camera=app.cameras[3];const auto history=app.authorUndo.size();
                 click("creation.tool-zoom");
                 const auto viewport=app.uiTestItems.at("creation.viewport");

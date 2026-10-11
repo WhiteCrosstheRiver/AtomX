@@ -654,6 +654,8 @@ struct App {
     ImVec2 catalogAnchor{};
     char modifierSearch[128]{};
     bool showWorkspace = false, indexing = false;
+    bool showModelingActions = true;
+    uint64_t explorerSelectedId = 0;
     float workspacePane = 220, pipelinePane = 268, propertiesPane = 316;
     float inspectorPane = 180, timelinePane = 94;
     bool layoutDirty = false;
@@ -1188,6 +1190,7 @@ struct App {
         propertiesPane = float(preferences.propertiesPane);
         inspectorPane = float(preferences.inspectorPane);
         timelinePane = float(preferences.timelinePane);
+        showModelingActions = preferences.modelingActions;
         theme(preferences.theme);
         refreshFont = true;
         logo = desktop::loadLogo(gpu.device.Get(), icon);
@@ -3548,12 +3551,13 @@ struct App {
         ImGui::SetNextWindowPos({x, y});
         ImGui::SetNextWindowSize({std::max(w, 1.f), std::max(h, 1.f)});
         const std::string_view panel=name;
+        const bool actionBar=panel=="Modeling actions";
         const bool scrollableCreationPanel=panel=="Creation snapshots" ||
             panel=="Creation file properties" || panel=="Creation selection";
         ImGui::Begin(name, nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                         ImGuiWindowFlags_NoSavedSettings | ((panel == "Title" ||
+                         ImGuiWindowFlags_NoSavedSettings | (actionBar?ImGuiWindowFlags_HorizontalScrollbar:0) | ((panel == "Title" ||
                          (creationMode && panel.starts_with("Creation") &&
                           !scrollableCreationPanel)) ?
                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
@@ -3999,7 +4003,163 @@ struct App {
     float statusHeight() const { return U(24); }     // P12 bottom status strip
     float titleBarHeight() const { return U(42); }
     float toolBarHeight() const { return U(34); }
-    float topInset() const { return titleBarHeight() + (homeMode ? 0.f : creationMode ? U(94) : titleBarHeight() + toolBarHeight()); }
+    float modelingActionsHeight() const { return U(ImGui::GetIO().DisplaySize.x<U(1150)?50.f:36.f); }
+    float topInset() const { return titleBarHeight() + (homeMode ? 0.f :
+        (creationMode ? U(94) : titleBarHeight() + toolBarHeight()) + (showModelingActions ? modelingActionsHeight() : 0.f)); }
+    void toggleModelingActions() {
+        showModelingActions=!showModelingActions;
+        preferences.modelingActions=showModelingActions;layoutDirty=true;
+    }
+    void sortDocuments() {
+        if(documentsBusy() || tabs.empty())return;
+        tabs[size_t(activeTab)]=captureTab();const auto selectedId=tabs[size_t(activeTab)].id;
+        std::stable_sort(tabs.begin(),tabs.end(),[](const auto &a,const auto &b){return a.title<b.title;});
+        for(size_t i=0;i<tabs.size();++i)if(tabs[i].id==selectedId)activeTab=int(i);
+    }
+    // Every dropdown uses the same transaction path as menus and shortcuts.
+    // No scene copies, symmetry searches or clipboard decoding during idle frames.
+    bool authorHistoryActive() const { return creationMode || structureEditIsLatest || !authorRedo.empty(); }
+    size_t historyAvailable(bool forward) const {
+        if(authorHistoryActive())return forward?authorRedo.size():authorUndo.size();
+        return forward?redo.size():undo.size();
+    }
+    void historySteps(bool forward,size_t count) {
+        if(documentsBusy())return;
+        count=std::min(count,historyAvailable(forward));
+        // Capture the history domain before the last authoring undo. It must
+        // never spill into the unrelated modifier history in the same click.
+        for(size_t i=0;i<count;++i)history(forward);
+    }
+    void historyDropdown(bool forward) {
+        const char *key=forward?"actions.redo-list":"actions.undo-list";
+        ImGui::PushID(key);
+        ImGui::BeginDisabled(documentsBusy() || !historyAvailable(forward));
+        if(ImGui::ArrowButton("##list",ImGuiDir_Down))ImGui::OpenPopup("##history");
+        recordUiTestItem(key);ImGui::EndDisabled();
+        if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))ImGui::SetTooltip(forward?"重做历史":"撤销历史");
+        if(ImGui::BeginPopup("##history")) {
+            const size_t count=historyAvailable(forward);int chosen=-1;
+            ImGui::TextDisabled(forward?"重做到此操作":"撤销到此操作之前");
+            for(size_t i=0;i<count;++i) {
+                std::string label=std::to_string(i+1)+"  ";
+                if(authorHistoryActive()) {
+                    const auto &stack=forward?authorRedo:authorUndo;
+                    label+=stack[stack.size()-1-i].action;
+                } else label+="Pipeline edit";
+                if(ImGui::Selectable(label.c_str()))chosen=int(i+1);
+                recordUiTestItem(std::string(key)+"."+std::to_string(i));
+            }
+            if(chosen>0)historySteps(forward,size_t(chosen));
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();ImGui::SameLine(0,U(3));
+    }
+    void modelingActions(float w) {
+        if(homeMode || !showModelingActions)return;
+        const float y=titleBarHeight()+(creationMode?U(94):titleBarHeight()+toolBarHeight());
+        fixed("Modeling actions",0,y,w,modelingActionsHeight());
+        ImGui::SetCursorPosY(U(4));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{U(3),U(3)});
+        auto button=[&](const char *id,unsigned glyph,const char *text,const char *tip,bool enabled,auto &&fn) {
+            ImGui::BeginDisabled(!enabled);
+            if(iconButton(id,glyph,text,tip,false,U(27)))fn();
+            ImGui::EndDisabled();ImGui::SameLine(0,U(3));
+        };
+        auto popup=[&](const char *id,const char *label,bool enabled,auto &&contents) {
+            ImGui::PushID(id);ImGui::BeginDisabled(!enabled);
+            if(ImGui::Button(label,{0,U(27)}))ImGui::OpenPopup("##popup");
+            recordUiTestItem(id);ImGui::EndDisabled();
+            if(ImGui::BeginPopup("##popup")){contents();ImGui::EndPopup();}
+            ImGui::PopID();ImGui::SameLine(0,U(3));
+        };
+        const bool idle=!documentsBusy(), editing=idle && creationMode;
+        const bool selected=!creationSelection.empty() || !creationBondSelection.empty();
+        popup("actions.new","新建 v",idle,[&] {
+            if(ImGui::MenuItem("空白首页", "Ctrl+T"))newHomeTab();
+            if(ImGui::MenuItem("3D 原子结构"))newBlankCreation();
+            recordUiTestItem("actions.new-structure");
+        });
+        button("actions.open",0xE8E5,"Open","打开结构 / 工作区",idle,[&]{open();});
+        button("actions.save",0xE74E,"Save","保存当前文档 · Ctrl+S",idle,[&]{saveSessionState(false);});
+        popup("actions.save-more","v",idle,[&] {
+            if(ImGui::MenuItem("文档另存为..."))saveSessionState(true);
+            if(ImGui::MenuItem("保存整个工作区..."))projectDialog(true);
+            if(ImGui::MenuItem("导出结构..."))showDataExport=true;
+        });
+        toolbarSeparator(U(27));
+        button("actions.undo",0xE7A7,"Undo","撤销 · Ctrl+Z",idle && historyAvailable(false),[&]{historySteps(false,1);});
+        historyDropdown(false);
+        button("actions.redo",0xE7A6,"Redo","重做 · Ctrl+Y",idle && historyAvailable(true),[&]{historySteps(true,1);});
+        historyDropdown(true);
+        button("actions.cut",0xE8C6,"Cut","剪切选中片段 · Ctrl+X",editing && selected,[&]{copyCreationSelection(true);});
+        button("actions.copy",0xE8C8,"Copy","复制选中片段 · Ctrl+C",editing && selected,[&]{copyCreationSelection();});
+        button("actions.paste",0xE77F,"Paste","粘贴 AtomX 结构片段 · Ctrl+V",editing && IsClipboardFormatAvailable(structureClipboardFormat()),[&]{pasteCreationSelection();});
+        toolbarSeparator(U(27));
+        button("actions.center",0xE81D,"Center","选中居中，保留缩放",editing && selected,[&]{centerCreationSelection();});
+        popup("actions.views","视角 v",idle,[&] {
+            const char *names[]={"顶视图","底视图","前视图","后视图","左视图","右视图","正交","透视"};
+            const int view=creationMode?3:active;
+            for(int i=0;i<8;++i) {
+                if(ImGui::MenuItem(names[i],nullptr,cameras[view].mode==i)) {
+                    if(creationMode)setCreationView(i);else {cameras[view].mode=i;fitCamera(view,false);}
+                }
+                recordUiTestItem("actions.view."+std::to_string(i));
+            }
+            ImGui::Separator();
+            if(ImGui::MenuItem("逆时针旋转 90°"))cameras[view].roll=std::remainder(cameras[view].roll+DirectX::XM_PIDIV2,DirectX::XM_2PI);
+            recordUiTestItem("actions.view-roll");
+            if(ImGui::MenuItem("顺时针旋转 90°"))cameras[view].roll=std::remainder(cameras[view].roll-DirectX::XM_PIDIV2,DirectX::XM_2PI);
+            if(ImGui::MenuItem("重置视角"))resetView();
+        });
+        if(creationMode) {
+            toolbarSeparator(U(27));
+            const std::string element=std::string(creationElement)+" v";
+            popup("actions.element",element.c_str(),editing,[&] {
+                for(const char *symbol:{"C","H","N","O","Si","P","S","F","Cl","Na","Fe","Cu","Ni"}) {
+                    if(ImGui::MenuItem(symbol,nullptr,std::string_view(creationElement)==symbol)) {
+                        strcpy_s(creationElement,symbol);chooseCreationTool(CreationTool::Sketch);
+                    }
+                    recordUiTestItem(std::string("actions.element.")+symbol);
+                }
+                ImGui::Separator();ImGui::SetNextItemWidth(U(100));
+                ImGui::InputText("元素符号",creationElement,sizeof(creationElement));
+                if(ImGui::Button("绘制原子")){chooseCreationTool(CreationTool::Sketch);ImGui::CloseCurrentPopup();}
+            });
+            popup("actions.rings","环 v",editing,[&] {
+                for(int size=4;size<=6;++size) {
+                    const auto label=std::to_string(size)+" 元碳环";
+                    if(ImGui::MenuItem(label.c_str())){creationRingSize=size;chooseCreationTool(CreationTool::Ring);}
+                    recordUiTestItem("actions.ring."+std::to_string(size));
+                }
+            });
+            popup("actions.bonds","键 v",editing,[&] {
+                ImGui::TextDisabled("绘制键级");
+                const char *names[]={"单键","双键","三键"};
+                for(int i=1;i<=3;++i) {
+                    if(ImGui::MenuItem(names[i-1],nullptr,creationSketchOrder==i)){creationSketchOrder=i;chooseCreationTool(CreationTool::Sketch);}
+                    recordUiTestItem("actions.draw-order."+std::to_string(i));
+                }
+                ImGui::Separator();ImGui::TextDisabled("修改选中键");
+                for(int order=0;order<=4;++order) {
+                    const char *caption=order==0?"断开选中键":order==4?"芳香键":names[order-1];
+                    if(ImGui::MenuItem(caption,nullptr,false,!creationBondSelection.empty()))editSelectedCreationBonds(order);
+                    recordUiTestItem("actions.bond-order."+std::to_string(order));
+                }
+            });
+            popup("actions.hydrogen","氢 v",editing,[&] {
+                if(ImGui::MenuItem("调整氢原子..."))addHydrogensCommand();
+                ImGui::MenuItem("自动更新氢",nullptr,&creationAutoHydrogens);
+            });
+            button("actions.movement",0xE8AB,"Move","精准移动 / 旋转选中原子与键端点",editing && selected,[&]{requestCreationMovement();});
+            button("actions.symmetry",0xE8D4,"Sym","查找对称性 · 三维周期 / 最多 512 原子",editing && symmetry::prepared(source),[&]{
+                creationSymmetry=symmetry::analyze(source);creationSymmetryChecked=true;
+                creationPropertiesOpen=true;creationPropertyPage=0;
+                status=creationSymmetry?"空间群 "+creationSymmetry->symbol+" ("+std::to_string(creationSymmetry->number)+")":"对称性识别失败";
+            });
+        }
+        button("actions.hide",0xE70E,"Hide","收起操作栏；视图菜单可重新打开",true,[&]{toggleModelingActions();});
+        ImGui::PopStyleVar();ImGui::End();
+    }
     void drawCreationIcon(ImDrawList *draw, ImVec2 center, std::string_view name, ImU32 color) {
         auto point=[&](float x,float y) { return ImVec2{center.x+U(x-12),center.y+U(y-12)}; };
         auto line=[&](float x,float y,float a,float b) {
@@ -4215,6 +4375,7 @@ struct App {
                 ImGui::EndMenu();
             }
             ImGui::MenuItem("体系属性栏",nullptr,&creationPropertiesOpen);
+            if(ImGui::MenuItem("建模操作栏",nullptr,showModelingActions))toggleModelingActions();
         });
         menu("修改", "##create-modify", [&] {
             if(ImGui::MenuItem("原子数值属性...",nullptr,false,!creationSelection.empty()))requestAtomProperties();
@@ -4463,6 +4624,7 @@ struct App {
             const bool viewOpen = ImGui::BeginMenu("View");
             recordUiTestItem("menu.view", "View");
             if (viewOpen) {
+                if(ImGui::MenuItem("Modeling Actions",nullptr,showModelingActions))toggleModelingActions();
                 if (enabledItem("Reset Camera", "menu.view.reset-camera")) resetView();
                 if (enabledItem("Fit Structure in View", "menu.view.fit")) {
                     for (int i = 0; i < 4; ++i) fitCamera(i, false);
@@ -8717,17 +8879,39 @@ struct App {
         if (ImGui::Button("暂存",{U(50),U(26)})) saveCreationSnapshot();
         ImGui::PopStyleColor(2);
         ImGui::Separator();
-        if(ImGui::CollapsingHeader("文档")) {
-            if(ImGui::SmallButton("按名称排序")) {
-                tabs[size_t(activeTab)]=captureTab();const auto selectedId=tabs[size_t(activeTab)].id;
-                std::stable_sort(tabs.begin(),tabs.end(),[](const auto &a,const auto &b){return a.title<b.title;});
-                for(size_t index=0;index<tabs.size();++index)if(tabs[index].id==selectedId)activeTab=int(index);
+        const bool documentsExpanded=ImGui::CollapsingHeader("文档");
+        recordUiTestItem("explorer.documents");
+        if(documentsExpanded) {
+            int selected=-1;
+            for(int i=0;i<int(tabs.size());++i)if(tabs[size_t(i)].id==explorerSelectedId)selected=i;
+            if(selected<0){selected=activeTab;explorerSelectedId=tabs[size_t(activeTab)].id;}
+            int openIndex=-1,closeIndex=-1;
+            auto action=[&](const char *id,unsigned glyph,const char *fallback,const char *tip,bool enabled,auto &&fn) {
+                ImGui::BeginDisabled(!enabled);if(iconButton(id,glyph,fallback,tip,false,U(25)))fn();
+                ImGui::EndDisabled();ImGui::SameLine(0,U(3));
+            };
+            const bool idle=!documentsBusy();
+            action("explorer.open",0xE8A5,"Open","打开选中的文档；双击文档也可打开",idle,[&]{openIndex=selected;});
+            action("explorer.close",0xE74D,"Close","关闭选中的标签，不删除磁盘文件",idle,[&]{closeIndex=selected;});
+            action("explorer.refresh",0xE72C,"Refresh","重新生成当前体系的管线与显示，不从磁盘覆盖编辑",idle,[&]{update();status="已刷新当前体系显示";});
+            action("explorer.sort",0xE8CB,"Sort","按名称排序，保留当前体系和各标签历史",idle,[&]{sortDocuments();});
+            action("explorer.help",0xE897,"Help","显示工作区操作说明",true,[&]{ImGui::OpenPopup("Workspace help");});
+            ImGui::NewLine();
+            if(ImGui::BeginPopup("Workspace help")) {
+                ImGui::TextUnformatted("单击选择文档，双击或打开按钮切换标签。");
+                ImGui::TextUnformatted("暂存结果保留在当前创作标签，载入快照可撤销。");
+                ImGui::TextUnformatted("保存工作区可保留全部标签、快照与历史。");
+                ImGui::EndPopup();
             }
-            ImGui::SameLine();if(ImGui::SmallButton("打开…"))open();
-            ImGui::SameLine();if(ImGui::SmallButton("刷新")){update();status="已刷新当前体系显示";}
             for(int index=0;index<int(tabs.size());++index) {ImGui::PushID(index);
-                if(ImGui::Selectable(tabs[size_t(index)].title.c_str(),index==activeTab))switchTab(index);
+                if(ImGui::Selectable(tabs[size_t(index)].title.c_str(),tabs[size_t(index)].id==explorerSelectedId,ImGuiSelectableFlags_AllowDoubleClick)) {
+                    explorerSelectedId=tabs[size_t(index)].id;
+                    if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))openIndex=index;
+                }
+                recordUiTestItem("explorer.document."+std::to_string(tabs[size_t(index)].id));
                 ImGui::PopID();}
+            if(openIndex>=0)switchTab(openIndex);
+            if(closeIndex>=0){closeTab(closeIndex);explorerSelectedId=0;}
             if(ImGui::SmallButton("保存工作区…"))projectDialog(true);
         }
         ImGui::Text("%s",creationBasedOn.empty()?"未命名结构":creationBasedOn.c_str());
@@ -10817,6 +11001,7 @@ struct App {
         chineseBuilder.AddText("测量模拟约束选择已有可同时修改多种类型全选清空测量选择已选未选择当前值随坐标更新约束随测量保存在中标准结构导出不保留测量移除测量或删除其端点会同时移除该约束体系或测量已改变请重新打开测量类型无效测量选择已改变测量约束选项无效");
         chineseBuilder.AddText("原子模拟约束整原子固定当前晶格方向保持各原子当前值解除固定笛卡尔同时部分轴及其旋转后的方向约束尚未支持分数分量固定全部解除全部晶格方向需要有效的三维周期晶胞这些是属性手工移动与旋转仍可使用不执行模拟求解保持当前值可保留多选中的不同约束保存两类保存晶格方向整原子笛卡尔固定需保存在中导出时须显式取消约束保留没有变化标志必须为零或一属性类型不正确层构建会重设晶格基矢请先解除来源的晶格方向约束片段库不保留来源晶格方向");
         chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位转换原胞对称操作识别失败三维周期晶面重排沿法向添加关闭边界编号须标准设置参数相容基元无效");
+        chineseBuilder.AddText("建模操作栏空白首页原子结构保存整个工作区查找对称性收起重新打开快捷文档刷新排序选中居中保留缩放逆时针顺时针视角绘制键级修改选中键断开芳香调整氢原子元素符号单击选择文档双击或打开按钮切换标签暂存结果保留在当前创作标签载入快照可撤销保存工作区可保留全部标签快照与历史关闭选中的标签不删除磁盘文件重新生成当前体系的管线与显示不从磁盘覆盖编辑显示工作区操作说明重做到此操作撤销到此操作之前");
         chineseBuilder.AddText("精准移动旋转选中原子的几何中心不移动晶胞屏幕轴体系轴距离视图比例步长角度以打开窗口时视图的较短边为选中中心所在深度上下左右向里向外右手方向反向使用负角度坐标未改变已记录一步历史原标签已改变请关闭并重新打开位移与角度必须为有限数值旋转轴不能为零选中原子已改变请重新选择原子坐标无效位移超出坐标范围连接片段分数坐标切换添加约束←→↑↓−°Å");
         chineseBuilder.AddText("隐藏选中仅显示选中显示全部已隐藏原子标签对象默认显示元素和编号整个体系内容无标签笛卡尔坐标分数坐标自定义文字字号粗体颜色显示标签屏幕标签上限大体系自动抽样优先显示选中原子的标签隐藏原子不显示标签上限默认应用移除移除全部编辑原子标签撤销重做");
         chineseBuilder.AddText(creationDisplay.defaultLabel.text.c_str());
@@ -11551,6 +11736,7 @@ struct App {
         }
         float w = io.DisplaySize.x, h = io.DisplaySize.y;
         top(w);
+        modelingActions(w);
         if (homeMode) {
             homeWorkspace(w, h);
         } else if (creationMode) {

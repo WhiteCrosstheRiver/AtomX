@@ -20,6 +20,7 @@ struct Preferences {
     int theme = 0, font = 0, size = 18;
     int workspacePane = 220, pipelinePane = 268, propertiesPane = 316;
     int inspectorPane = 180, timelinePane = 94;
+    bool modelingActions = true;
     // Most recently opened files, persisted across launches and shown by the
     // File > Recent Files submenu. Newest entry first, at most 8 kept.
     static constexpr int maxRecentFiles = 8;
@@ -38,6 +39,7 @@ struct Preferences {
         propertiesPane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"PropertiesWidth", 316, p.c_str())), 200, 560);
         inspectorPane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"InspectorHeight", 180, p.c_str())), 90, 900);
         timelinePane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"TimelineHeight", 94, p.c_str())), 56, 300);
+        modelingActions = GetPrivateProfileIntW(L"Layout", L"ModelingActions", 1, p.c_str()) != 0;
         recentFiles.clear();
         for (int i = 0; i < maxRecentFiles; ++i) {
             wchar_t buffer[32768]{};
@@ -56,7 +58,8 @@ struct Preferences {
                 throw std::runtime_error("Unable to save appearance settings");
         for (auto entry : {std::pair{L"WorkspaceWidth",workspacePane},
                            {L"PipelineWidth",pipelinePane}, {L"PropertiesWidth",propertiesPane},
-                           {L"InspectorHeight",inspectorPane}, {L"TimelineHeight",timelinePane}})
+                           {L"InspectorHeight",inspectorPane}, {L"TimelineHeight",timelinePane},
+                           {L"ModelingActions",int(modelingActions)}})
             if (!WritePrivateProfileStringW(L"Layout",entry.first,
                                             std::to_wstring(entry.second).c_str(),p.c_str()))
                 throw std::runtime_error("Unable to save panel layout");
