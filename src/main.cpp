@@ -323,6 +323,9 @@ static const ImWchar iconGlyphRanges[] = {
     0xE8FA,0xE8FA, 0xE91B,0xE91B,
     0xE72C,0xE72C, 0xE74D,0xE74D, 0xE7F4,0xE7F4, 0xE192,0xE192,
     0xE9D9,0xE9D9,
+    0xE74E,0xE74E, 0xE77F,0xE77F, 0xE81D,0xE81D,
+    0xE897,0xE897, 0xE8A5,0xE8A5, 0xE8C6,0xE8C6,
+    0xE8CB,0xE8CB, 0xE8D4,0xE8D4,
     0};
 // Encodes a Unicode codepoint as UTF-8 (NUL terminated), returns the length.
 static int glyphUtf8(unsigned codepoint, char out[8]) {
@@ -3722,7 +3725,7 @@ struct App {
     // reads as selected rather than pressed.
     bool iconButton(const char *name, unsigned glyph, const char *fallbackText,
                     const char *tip, bool highlight = false, float square = 0,
-                    const char *recordName = nullptr) {
+                    const char *recordName = nullptr, float height = 0) {
         char label[8];
         const bool useGlyph = glyphAvailable(glyph);
         if (useGlyph)
@@ -3736,7 +3739,7 @@ struct App {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.66f, 0.80f, 0.94f, 1.f});
             ImGui::PushStyleColor(ImGuiCol_Text, {0.05f, 0.25f, 0.45f, 1.f});
         }
-        const ImVec2 size = square > 0 ? ImVec2{square, square} : ImVec2{0, 0};
+        const ImVec2 size = square > 0 ? ImVec2{square, height>0?height:square} : ImVec2{0, 0};
         const bool pressed = ImGui::Button(label, size);
         if (highlight) ImGui::PopStyleColor(4);
         ImGui::PopID();
@@ -4062,7 +4065,8 @@ struct App {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{U(3),U(3)});
         auto button=[&](const char *id,unsigned glyph,const char *text,const char *tip,bool enabled,auto &&fn) {
             ImGui::BeginDisabled(!enabled);
-            if(iconButton(id,glyph,text,tip,false,U(27)))fn();
+            const float width=glyphAvailable(glyph)?U(27):std::max(U(27),ImGui::CalcTextSize(text).x+U(12));
+            if(iconButton(id,glyph,text,tip,false,width,nullptr,U(27)))fn();
             ImGui::EndDisabled();ImGui::SameLine(0,U(3));
         };
         auto popup=[&](const char *id,const char *label,bool enabled,auto &&contents) {
@@ -8891,11 +8895,11 @@ struct App {
                 ImGui::EndDisabled();ImGui::SameLine(0,U(3));
             };
             const bool idle=!documentsBusy();
-            action("explorer.open",0xE8A5,"Open","打开选中的文档；双击文档也可打开",idle,[&]{openIndex=selected;});
-            action("explorer.close",0xE74D,"Close","关闭选中的标签，不删除磁盘文件",idle,[&]{closeIndex=selected;});
-            action("explorer.refresh",0xE72C,"Refresh","重新生成当前体系的管线与显示，不从磁盘覆盖编辑",idle,[&]{update();status="已刷新当前体系显示";});
-            action("explorer.sort",0xE8CB,"Sort","按名称排序，保留当前体系和各标签历史",idle,[&]{sortDocuments();});
-            action("explorer.help",0xE897,"Help","显示工作区操作说明",true,[&]{ImGui::OpenPopup("Workspace help");});
+            action("explorer.open",0xE8A5,"O","打开选中的文档；双击文档也可打开",idle,[&]{openIndex=selected;});
+            action("explorer.close",0xE74D,"X","关闭选中的标签，不删除磁盘文件",idle,[&]{closeIndex=selected;});
+            action("explorer.refresh",0xE72C,"R","重新生成当前体系的管线与显示，不从磁盘覆盖编辑",idle,[&]{update();status="已刷新当前体系显示";});
+            action("explorer.sort",0xE8CB,"A","按名称排序，保留当前体系和各标签历史",idle,[&]{sortDocuments();});
+            action("explorer.help",0xE897,"?","显示工作区操作说明",true,[&]{ImGui::OpenPopup("Workspace help");});
             ImGui::NewLine();
             if(ImGui::BeginPopup("Workspace help")) {
                 ImGui::TextUnformatted("单击选择文档，双击或打开按钮切换标签。");
