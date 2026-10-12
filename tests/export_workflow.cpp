@@ -88,7 +88,7 @@ int main(int argc,char **argv) {
                 requireExport(app.source.atoms.size()==5,"Redo paste restores independent fragment");
                 app.chooseCreationTool(App::CreationTool::Zoom);app.tabs[size_t(app.activeTab)]=app.captureTab();
                 auto projectFile=dir/"中文 workspace.atomx-project";
-                auto savedTabs=app.tabs;savedTabs[0].title="Saved Cu/Ni title";
+                auto savedTabs=app.tabs;savedTabs[0].title="Saved Cu/Ni title";savedTabs[0].pinned=true;
                 ModifierNode modifier{Op::Translate,true,1.25f,1};modifier.outputProperty="preserved";modifier.manualSelection={1,2};
                 modifier.affineTransform[3]=4.5;modifier.bondTypeCutoffs={1.1f,2.2f};savedTabs[0].graph.nodes={modifier};
                 App::writeProject(projectFile,savedTabs,app.activeTab);
@@ -97,6 +97,7 @@ int main(int argc,char **argv) {
                               "Project preserves browser tabs and active document");
                 requireExport(recovered.tabs[0].graph.nodes[0].value==1.25f && recovered.tabs[0].graph.nodes[0].affineTransform[3]==4.5 &&
                               recovered.tabs[0].graph.nodes[0].manualSelection==std::vector<uint32_t>{1,2},"Project preserves real modifier parameters");
+                requireExport(recovered.tabs[0].pinned,"Project preserves pinned tab state");
                 const auto &creation=recovered.tabs[size_t(recovered.active)];
                 requireExport(creation.source.atoms.size()==5 && creation.creationTool==App::CreationTool::Zoom &&
                               creation.authorUndo.size()==app.authorUndo.size() && !creation.snapshots.empty(),
@@ -486,6 +487,18 @@ int main(int argc,char **argv) {
                     "Repeated copy from inactive creation document is independent");
                 app.closeTab(app.activeTab);settlePipeline();app.closeTab(app.activeTab);settlePipeline();
                 requireExport(app.activeTab==parentIndex,"Duplicate cleanup returns to parent");
+                const auto parentId=app.tabs[size_t(app.activeTab)].id;
+                app.duplicateTab(app.activeTab);settlePipeline();
+                const auto duplicateId=app.tabs[size_t(app.activeTab)].id;
+                const auto duplicateHistory=app.authorUndo.size();
+                app.tabs[size_t(app.activeTab)].pinned=true;app.normalizeTabPins();
+                requireExport(app.activeTab==0 && app.captureTab().pinned,"Pin moves active document without losing its identity");
+                app.closeTab(app.activeTab);settlePipeline();app.reopenTab();settlePipeline();
+                requireExport(app.tabs[size_t(app.activeTab)].id==duplicateId && app.authorUndo.size()==duplicateHistory && app.tabs[size_t(app.activeTab)].pinned,
+                    "Reopening restores pinned document and full undo history");
+                app.closeTab(app.activeTab);settlePipeline();
+                for(int i=0;i<int(app.tabs.size());++i)if(app.tabs[size_t(i)].id==parentId){app.switchTab(i);break;}
+                settlePipeline();
                 app.creationDisplay=parent.display;app.cameras[3]=parent.cameras[3];
                 // Actual LJ dialog and async publication, including a stale result
                 // that may not attach to a changed document.

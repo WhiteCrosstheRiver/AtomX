@@ -43,3 +43,25 @@ wrapping, hamburger pinning, plus/inset close controls and command search with
 the toolbar hidden. The harness restores the user preferences it tests.
 Native Windows inspection covers the reference palette and actual viewer and
 creation windows with NaCl and the 55,296 atom Cu/Ni fixture.
+
+## Tab and context-menu follow-up (2026-10-12)
+
+Implemented the v5 tab commands: duplicate view or creation documents, rename
+(F2 or double click), pin/unpin, close others/right (preserving pinned tabs),
+reopen (Ctrl+Shift+T), search the tab list, and directional drag insertion.
+Edited creation documents prompt before UI close. Reopened documents retain
+camera/display/history; the recent-close cache is bounded to eight documents
+and prunes older documents above a two-million atom/history-row budget (one
+recent document is always retained). Project format 3 persists pins and still
+reads format 1 and 2.
+
+Viewport context actions now add an atom at the original right-click point
+on the cell-center view plane, offer distance measurement from the picked
+atom, and provide XYZ/POSCAR export shortcuts. The right inspector source
+button is aligned at the end of its header. The trajectory cluster accounts
+for the loop control and wraps below its caption when required.
+
+Verification: optimized Windows build and the application export/real ImGui
+interaction suite pass, including new pin/project and close/reopen history
+checks. Native inspection verified the tab context menu, rename dialog,
+inspector header and complete trajectory controls at 1560 x 1000.

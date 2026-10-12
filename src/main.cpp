@@ -875,6 +875,7 @@ struct App {
         uint64_t id = 0, sourceTabId = 0;
         std::string title = "Structure";
         bool home = false;
+        bool pinned = false;
         std::string basedOn;
         Dataset source;
         PipelineGraph graph;
@@ -935,9 +936,9 @@ struct App {
         auto temporary=destination;temporary+=L".tmp-"+std::to_wstring(std::chrono::steady_clock::now().time_since_epoch().count());
         try {
             std::ofstream file(temporary,std::ios::binary|std::ios::trunc);if(!file)throw std::runtime_error("Cannot create project file");
-            project::Writer w{file,cancel};w.bytes("ATOMXPRJ",8);w.value(uint32_t(2));w.value(int32_t(active));w.value(uint64_t(saved.size()));
+            project::Writer w{file,cancel};w.bytes("ATOMXPRJ",8);w.value(uint32_t(3));w.value(int32_t(active));w.value(uint64_t(saved.size()));
             for(const auto &t:saved) {
-                w.value(t.id);w.value(t.sourceTabId);w.flag(t.home);
+                w.value(t.id);w.value(t.sourceTabId);w.flag(t.home);w.flag(t.pinned);
                 w.text(t.path.empty()?"":utf8(std::filesystem::absolute(t.path).wstring()));w.text(t.documentPath.empty()?"":utf8(std::filesystem::absolute(t.documentPath).wstring()));w.text(t.readerName);
                 project::writeDocument(w,t.source,projectView(t));
                 for(const auto &c:t.cameras)project::writeCamera(w,c);
@@ -974,12 +975,12 @@ struct App {
         std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("Cannot open project");
         file.seekg(0,std::ios::end);const auto size=file.tellg();document::valid(size>=24 && uint64_t(size)<=project::byteLimit);file.seekg(0);
         project::Reader r{file,uint64_t(size),cancel};char signature[8];r.bytes(signature,8);
-        document::valid(std::string_view(signature,8)=="ATOMXPRJ");const auto version=r.value<uint32_t>();document::valid(version>=1 && version<=2);
+        document::valid(std::string_view(signature,8)=="ATOMXPRJ");const auto version=r.value<uint32_t>();document::valid(version>=1 && version<=3);
         ProjectResult result;result.path=path;result.active=r.value<int32_t>();result.tabs.resize(r.count(8,64));
         document::valid(!result.tabs.empty() && result.active>=0 && size_t(result.active)<result.tabs.size());std::set<uint64_t> ids;
         bool missingTrajectory=false;
         for(auto &t:result.tabs) {
-            t.id=r.value<uint64_t>();t.sourceTabId=r.value<uint64_t>();t.home=r.flag();document::valid(t.id>0 && t.id<UINT64_MAX && ids.insert(t.id).second);
+            t.id=r.value<uint64_t>();t.sourceTabId=r.value<uint64_t>();t.home=r.flag();if(version>=3)t.pinned=r.flag();document::valid(t.id>0 && t.id<UINT64_MAX && ids.insert(t.id).second);
             t.path=project::pathFromUtf8(r.text());t.documentPath=project::pathFromUtf8(r.text());t.readerName=r.text();
             auto content=project::readDocument(r,atomBudget);auto &v=content.view;t.source=std::move(content.data);
             t.title=v.title;t.basedOn=v.basedOn;t.creationMode=v.creation;t.cell=v.cell;t.particles=v.particles;t.radius=v.radius;
@@ -1035,6 +1036,10 @@ struct App {
     int activeTab = 0;
     int displayedTab = -1;
     uint64_t nextTabId = 1;
+    std::vector<StructureTab> closedTabs;
+    std::vector<uint64_t> pendingTabCloses; bool confirmTabClose=false;
+    ImVec2 creationContextPoint{};
+    uint64_t renameTabId=0; char renameTabText[256]{}, tabSearch[128]{};
     uint64_t pendingTabId = 0;
     bool homeMode = false;
     int creationReturnTab = -1;
@@ -1769,6 +1774,7 @@ struct App {
         StructureTab tab;
         if (activeTab >= 0 && activeTab < int(tabs.size())) {
             tab.id = tabs[size_t(activeTab)].id;
+            tab.pinned = tabs[size_t(activeTab)].pinned;
             tab.sourceTabId = tabs[size_t(activeTab)].sourceTabId;
             tab.documentPath = tabs[size_t(activeTab)].documentPath;
         }
@@ -2276,31 +2282,75 @@ struct App {
             if (sourceId && tabs[size_t(index)].id == sourceId) { switchTab(index); return; }
         newHomeTab();
     }
+    void normalizeTabPins() {
+        const auto id=tabs[size_t(activeTab)].id;
+        std::stable_partition(tabs.begin(),tabs.end(),[](const auto &t){return t.pinned;});
+        for(int i=0;i<int(tabs.size());++i)if(tabs[size_t(i)].id==id)activeTab=i;
+        displayedTab=-1;
+    }
+    void duplicateTab(int index) {
+        if(documentsBusy() || index<0 || index>=int(tabs.size()))return;
+        tabs[size_t(activeTab)]=captureTab();
+        auto copy=tabs[size_t(index)];copy.id=nextTabId++;copy.pinned=false;
+        copy.title+=" (copy)";copy.documentPath.clear();
+        tabs.insert(tabs.begin()+index+1,std::move(copy));activeTab=index+1;
+        normalizeTabPins();restoreTab(tabs[size_t(activeTab)]);
+    }
+    void beginTabRename(int index) {
+        if(index<0 || index>=int(tabs.size()))return;
+        renameTabId=tabs[size_t(index)].id;
+        snprintf(renameTabText,sizeof(renameTabText),"%s",tabs[size_t(index)].title.c_str());
+    }
+    void reopenTab() {
+        if(documentsBusy() || closedTabs.empty())return;
+        tabs[size_t(activeTab)]=captureTab();
+        tabs.push_back(std::move(closedTabs.back()));closedTabs.pop_back();
+        activeTab=int(tabs.size())-1;normalizeTabPins();restoreTab(tabs[size_t(activeTab)]);
+    }
+    void finishTabCloses() {
+        const auto live=tabs[size_t(activeTab)].id;
+        const auto ids=std::move(pendingTabCloses);pendingTabCloses.clear();confirmTabClose=false;
+        for(int i=int(tabs.size())-1;i>=0;--i)
+            if(tabs[size_t(i)].id!=live && std::find(ids.begin(),ids.end(),tabs[size_t(i)].id)!=ids.end())closeTab(i);
+        if(std::find(ids.begin(),ids.end(),live)!=ids.end())closeTab(activeTab);
+    }
+    void requestTabClose(int index,int group=0) {
+        if(documentsBusy() || index<0 || index>=int(tabs.size()))return;
+        pendingTabCloses.clear();bool dirty=false;
+        for(int i=0;i<int(tabs.size());++i) {
+            const auto &t=tabs[size_t(i)];
+            if(group==0?i!=index:(i==index || t.pinned || (group==2 && i<index)))continue;
+            pendingTabCloses.push_back(t.id);
+            dirty|=i==activeTab?(creationMode && !authorUndo.empty() && creationSnapshotSelected<0):
+                (t.creationMode && !t.authorUndo.empty() && t.selectedSnapshot<0);
+        }
+        if(dirty)confirmTabClose=true;else finishTabCloses();
+    }
     void closeTab(int index) {
-        if (index < 0 || index >= int(tabs.size())) return;
-        if (documentsBusy()) {
-            status = "Wait for the current load or pipeline to finish before closing a tab";
-            return;
+        if(index<0 || index>=int(tabs.size()) || documentsBusy())return;
+        tabs[size_t(activeTab)]=captureTab();
+        if(!tabs[size_t(index)].home) {
+            closedTabs.push_back(std::move(tabs[size_t(index)]));
+            // Retain editable history without making another deep copy; bound retained atom data.
+            size_t atoms=0;
+            for(auto it=closedTabs.rbegin();it!=closedTabs.rend();++it) {
+                atoms+=it->source.atoms.size();
+                for(const auto &h:it->authorUndo)if(h.data)atoms+=h.data->atoms.size();
+                for(const auto &h:it->authorRedo)if(h.data)atoms+=h.data->atoms.size();
+            }
+            while(closedTabs.size()>8 || (atoms>2000000 && closedTabs.size()>1)) {
+                const auto &t=closedTabs.front();atoms-=t.source.atoms.size();
+                for(const auto &h:t.authorUndo)if(h.data)atoms-=h.data->atoms.size();
+                for(const auto &h:t.authorRedo)if(h.data)atoms-=h.data->atoms.size();
+                closedTabs.erase(closedTabs.begin());
+            }
         }
-        if (tabs.size() == 1) {
-            tabs.clear();
-            activeTab = 0;
-            newHomeTab();
-            return;
-        }
-        if (index == activeTab) {
-            tabs[activeTab] = captureTab();
-            int next = index + 1 < int(tabs.size()) ? index + 1 : index - 1;
-            StructureTab keep = tabs[next];
-            tabs.erase(tabs.begin() + index);
-            activeTab = next > index ? next - 1 : next;
-            restoreTab(tabs[activeTab]);
-            (void)keep;
-        } else {
-            tabs.erase(tabs.begin() + index);
-            if (index < activeTab) --activeTab;
-        }
-        status = "Closed structure tab";
+        tabs.erase(tabs.begin()+index);
+        if(tabs.empty()){activeTab=-1;newHomeTab();return;}
+        if(index==activeTab){activeTab=std::min(index,int(tabs.size())-1);restoreTab(tabs[size_t(activeTab)]);}
+        else if(index<activeTab)--activeTab;
+        displayedTab=-1;
+        status="Closed structure tab";
     }
     bool sameAtomCount() const { return source.atoms.size() == result.data.atoms.size(); }
     void rememberStructure(const std::string &action = {}) {
@@ -4574,7 +4624,7 @@ struct App {
         const float regionW=std::max(U(70),w-tabStart-U(327));
         ImGui::BeginChild("##browser-tab-scroll",{regionW,titleH},ImGuiChildFlags_None,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoBackground);
         ImGui::SetCursorPos({0,U(6)});
-        int closing=-1,duplicate=-1,moveFrom=-1,moveTo=-1;
+        int closing=-1,duplicate=-1,moveFrom=-1,moveTo=-1,pinning=-1,groupClose=-1,createFrom=-1; bool closeRight=false,reopen=false,moveAfter=false;
         const float tabW=std::clamp((regionW-U(4))/float(std::max(size_t(1),tabs.size())),U(130),U(215));
         for(int index=0;index<int(tabs.size());++index) {
             ImGui::PushID(tabs[size_t(index)].id);
@@ -4594,17 +4644,40 @@ struct App {
             d->PushClipRect({lo.x+U(30),lo.y},{hi.x-U(29),hi.y},true);
             d->AddText({lo.x+U(32),lo.y+(U(34)-ImGui::GetFontSize())*.5f},ImGui::GetColorU32(selected?ImGuiCol_Text:ImGuiCol_TextDisabled),name.c_str());
             d->PopClipRect();
-            if(hover)ImGui::SetTooltip("%s",name.c_str());
+            if(hover) {
+                ImGui::SetTooltip("%s\n%s · %zu atoms",name.c_str(),authored?"Creation":"View",selected?source.atoms.size():tabs[size_t(index)].source.atoms.size());
+                if(ImGui::IsMouseDoubleClicked(0))beginTabRename(index);
+            }
+            if(tabs[size_t(index)].pinned)d->AddCircleFilled({lo.x+U(5),lo.y+U(17)},U(2),ImGui::GetColorU32(tone));
             if(hover && ImGui::IsMouseClicked(ImGuiMouseButton_Middle))closing=index;
             if(ImGui::BeginPopupContextItem("tab-actions")) {
-                if(ImGui::MenuItem(loc::label("复制为新创作标签"),nullptr,false,authored&&!documentsBusy()))duplicate=index;
+                ImGui::BeginDisabled(documentsBusy());
+                if(ImGui::MenuItem(loc::label("新建标签"),"Ctrl+T"))newHomeTab();
+                if(!home && !authored && ImGui::MenuItem(loc::label("在创作模式中打开")))createFrom=index;
+                ImGui::Separator();
+                if(ImGui::MenuItem(loc::label("复制标签页"),"Ctrl+Shift+K"))duplicate=index;
                 recordUiTestItem("tabs.duplicate."+std::to_string(index));
+                if(ImGui::MenuItem(loc::label("重命名"),"F2"))beginTabRename(index);
+                if(ImGui::MenuItem(loc::label(tabs[size_t(index)].pinned?"取消固定":"固定标签页")))pinning=index;
+                ImGui::Separator();
                 if(ImGui::MenuItem(loc::label("关闭当前标签"),"Ctrl+W"))closing=index;
+                if(ImGui::MenuItem(loc::label("关闭其他标签页")))groupClose=index;
+                if(ImGui::MenuItem(loc::label("关闭右侧标签页"))){groupClose=index;closeRight=true;}
+                ImGui::Separator();
+                if(ImGui::MenuItem(loc::label("重新打开关闭的标签页"),"Ctrl+Shift+T",false,!closedTabs.empty()))reopen=true;
+                ImGui::EndDisabled();
+                ImGui::Separator();referenceHelp("interface");
                 ImGui::EndPopup();
             }
             if(ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
                 ImGui::SetDragDropPayload("ATOMX_TAB",&index,sizeof(index));ImGui::TextUnformatted(name.c_str());ImGui::EndDragDropSource();}
-            if(ImGui::BeginDragDropTarget()) {if(auto payload=ImGui::AcceptDragDropPayload("ATOMX_TAB")){moveFrom=*static_cast<const int*>(payload->Data);moveTo=index;}ImGui::EndDragDropTarget();}
+            if(ImGui::BeginDragDropTarget()) {
+                if(auto payload=ImGui::AcceptDragDropPayload("ATOMX_TAB",ImGuiDragDropFlags_AcceptBeforeDelivery)) {
+                    const bool after=ImGui::GetIO().MousePos.x>(lo.x+hi.x)*.5f;
+                    const float x=after?hi.x:lo.x;d->AddLine({x,lo.y+U(3)},{x,hi.y-U(3)},ImGui::GetColorU32(tone),U(3));
+                    if(payload->IsDelivery()){moveFrom=*static_cast<const int*>(payload->Data);moveTo=index;moveAfter=after;}
+                }ImGui::EndDragDropTarget();
+            }
             if(selected && displayedTab!=activeTab){ImGui::SetScrollHereX(.5f);displayedTab=activeTab;}
             ImGui::SetCursorScreenPos({hi.x-U(26),lo.y+U(6)});
             if(ImGui::InvisibleButton("##close",{U(22),U(22)}))closing=index;
@@ -4621,8 +4694,12 @@ struct App {
         if(ImGui::Button((std::to_string(tabs.size())+" v##all-tabs").c_str(),{U(44),U(30)}))ImGui::OpenPopup("##all-tabs-popup");
         recordUiTestItem("tabs.switcher");
         if(ImGui::BeginPopup("##all-tabs-popup")) {
-            for(int i=0;i<int(tabs.size());++i){ImGui::PushID(i);
+            ImGui::SetNextItemWidth(U(260));ImGui::InputTextWithHint("##tab-search",loc::text("搜索标签页"),tabSearch,sizeof(tabSearch));
+            ImGui::Separator();
+            for(int i=0;i<int(tabs.size());++i){
                 const std::string name=i==activeTab?tabTitle():tabs[size_t(i)].title;
+                if(*tabSearch && name.find(tabSearch)==std::string::npos)continue;
+                ImGui::PushID(i);
                 if(ImGui::Selectable(name.c_str(),i==activeTab))switchTab(i);ImGui::PopID();}
             ImGui::EndPopup();}
         ImGui::SameLine(0,U(3));if(ImGui::Button("+##new-tab",{U(30),U(30)}))newHomeTab();recordUiTestItem("tabs.new");
@@ -4633,13 +4710,40 @@ struct App {
         control("##maximize",1,"Maximize / restore");ImGui::SameLine(0,0);
         control("##tray",2,"Close to system tray");ImGui::SameLine(0,0);
         control("##exit",3,"Exit AtomX");ImGui::PopStyleColor();ImGui::End();
-        if(closing>=0)closeTab(closing);
-        else if(duplicate>=0)duplicateCreationTab(duplicate);
+        if(closing>=0)requestTabClose(closing);
+        else if(duplicate>=0)duplicateTab(duplicate);
+        else if(createFrom>=0){switchTab(createFrom);openCreationTab();}
+        else if(reopen)reopenTab();
+        else if(pinning>=0){tabs[size_t(pinning)].pinned=!tabs[size_t(pinning)].pinned;normalizeTabPins();}
+        else if(groupClose>=0)requestTabClose(groupClose,closeRight?2:1);
         else if(moveFrom>=0 && moveTo>=0 && moveFrom!=moveTo && !documentsBusy()) {
             tabs[size_t(activeTab)]=captureTab();const auto id=tabs[size_t(activeTab)].id;
-            auto tab=std::move(tabs[size_t(moveFrom)]);tabs.erase(tabs.begin()+moveFrom);tabs.insert(tabs.begin()+moveTo,std::move(tab));
+            const bool pin=tabs[size_t(moveTo)].pinned;
+            int destination=moveTo+(moveAfter?1:0);if(moveFrom<destination)--destination;
+            auto tab=std::move(tabs[size_t(moveFrom)]);tab.pinned=pin;
+            tabs.erase(tabs.begin()+moveFrom);tabs.insert(tabs.begin()+destination,std::move(tab));
             for(int i=0;i<int(tabs.size());++i)if(tabs[size_t(i)].id==id)activeTab=i;
-            displayedTab=-1;
+            normalizeTabPins();
+        }
+        if(confirmTabClose && !ImGui::IsPopupOpen(loc::label("关闭编辑标签##close-edited-tabs")))ImGui::OpenPopup(loc::label("关闭编辑标签##close-edited-tabs"));
+        if(ImGui::BeginPopupModal(loc::label("关闭编辑标签##close-edited-tabs"),nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted(loc::text("标签页包含未暂存的编辑，确定关闭？"));
+            if(ImGui::Button(loc::label("关闭标签页"))){finishTabCloses();ImGui::CloseCurrentPopup();}
+            ImGui::SameLine();
+            if(ImGui::Button(loc::label("取消")) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                pendingTabCloses.clear();confirmTabClose=false;ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        if(renameTabId && !ImGui::IsPopupOpen(loc::label("重命名标签页##rename-tab")))ImGui::OpenPopup(loc::label("重命名标签页##rename-tab"));
+        if(ImGui::BeginPopupModal(loc::label("重命名标签页##rename-tab"),nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::SetNextItemWidth(U(320));
+            bool apply=ImGui::InputText("##name",renameTabText,sizeof(renameTabText),ImGuiInputTextFlags_EnterReturnsTrue);
+            if(ImGui::Button(loc::label("确定")))apply=true;ImGui::SameLine();
+            const bool cancel=ImGui::Button(loc::label("取消")) || ImGui::IsKeyPressed(ImGuiKey_Escape);
+            if(apply && *renameTabText){for(auto &t:tabs)if(t.id==renameTabId)t.title=renameTabText;renameTabId=0;ImGui::CloseCurrentPopup();}
+            if(cancel){renameTabId=0;ImGui::CloseCurrentPopup();}
+            ImGui::EndPopup();
         }
     }
     void creationTop(float w) {
@@ -4755,7 +4859,7 @@ struct App {
         menu("窗口", "##create-window", [&] {
             for(int index=0;index<int(tabs.size());++index){ImGui::PushID(index);
                 if(ImGui::MenuItem(tabs[size_t(index)].title.c_str(),nullptr,index==activeTab))switchTab(index);ImGui::PopID();}
-            if(ImGui::MenuItem(loc::label("关闭当前标签"), "Ctrl+W"))closeTab(activeTab);
+            if(ImGui::MenuItem(loc::label("关闭当前标签"), "Ctrl+W"))requestTabClose(activeTab);
         });
         menu("帮助", "##create-help", [&] {
             if(ImGui::MenuItem(loc::label("用户手册"), "F1"))openUrl("https://github.com/WhiteCrosstheRiver/AtomX#readme");
@@ -7081,6 +7185,7 @@ struct App {
                     if(bond>=0 && std::find(creationBondSelection.begin(),creationBondSelection.end(),bond)==creationBondSelection.end())
                         selectCreationBond(bond,false);
                 }
+                creationContextPoint=io.MousePos;
                 ImGui::OpenPopup(loc::label("viewport-structure-menu"));
             }
             if (!creationMode && ImGui::IsMouseDragging(0) && viewportTool == 2) {
@@ -7532,6 +7637,8 @@ struct App {
                 ImGui::TextDisabled(loc::text("新标签页 · 增删改原子、建晶体、超胞"));
                 ImGui::Separator();
                 if (ImGui::MenuItem(loc::label("复位视角"))) fitCamera(i,false);
+                if(ImGui::MenuItem("XYZ...")){exportFormat=0;showDataExport=true;}
+                if(ImGui::MenuItem("POSCAR...")){exportFormat=1;showDataExport=true;}
                 if (ImGui::MenuItem(loc::label("导出结构..."))) showDataExport=true;
             } else {
                 ImGui::TextDisabled(loc::text("%zu 原子 · %zu 键已选中"),creationSelection.size(),creationBondSelection.size());
@@ -7552,6 +7659,10 @@ struct App {
                     for (size_t index=0;index<source.atoms.size();++index)
                         if (source.atoms[index].type==type && creationAtomVisible(int(index))) creationSelection.push_back(int(index));
                     creationPick=creationSelection.empty()?-1:creationSelection.back();
+                }
+                if(ImGui::MenuItem(loc::label("从此原子开始测距"),nullptr,false,creationPick>=0)) {
+                    const int atom=creationPick;chooseCreationTool(CreationTool::Distance);
+                    creationSelection={atom};geometryPending={atom};
                 }
                 if (ImGui::MenuItem(loc::label("选中连接片段"),nullptr,false,!creationSelection.empty() || !creationBondSelection.empty()))
                     selectCreationFragments();
@@ -7580,8 +7691,12 @@ struct App {
                 ImGui::TextDisabled(loc::text("Shift+右键旋转选中原子 · X/Y/Z 约束"));
                 ImGui::Separator();
                 if (ImGui::MenuItem(loc::label("在此添加原子"))) {
-                    chooseCreationTool(CreationTool::Sketch);
-                    status="在空白处点击以添加原子";
+                    const auto projection=creationProjection(result.data,cam,avail);
+                    const auto center=authoring::cartesian(source,.5,.5,.5);
+                    DirectX::XMFLOAT4 q;
+                    DirectX::XMStoreFloat4(&q,DirectX::XMVector4Transform(
+                        DirectX::XMVectorSet(center.x,center.y,center.z,1),projection.combined));
+                    if(q.w>0)addAtomAt(creationWorldAt(creationContextPoint,q.z/q.w,p,avail,projection.combined));
                 }
                 if (ImGui::MenuItem(loc::label("复位视角"))) fitCamera(i,false);
                 if (ImGui::MenuItem(loc::label("复制为新创作标签"))) duplicateCreationTab();
@@ -7679,7 +7794,7 @@ struct App {
         const float totalWidth = ImGui::CalcTextSize(totalLabel.c_str()).x + gap;
         // Exact width of the right-aligned transport/tool cluster.
         const float cluster =
-            5*square + 4*gap + separatorWidth + frameField + totalWidth + square + gap +
+            6*square + 5*gap + separatorWidth + frameField + totalWidth + square + gap +
             separatorWidth + 4*square + separatorWidth + 2*square + gap;
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(accent, loc::text("TRAJECTORY"));
@@ -7694,8 +7809,9 @@ struct App {
             ImGui::SameLine();
             ImGui::TextDisabled("%s", hintText);
         }
-        ImGui::SameLine();
-        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), clusterStart - ImGui::GetWindowPos().x));
+        if(windowRight-labelEnd-U(10)>=cluster) {
+            ImGui::SameLine();ImGui::SetCursorPosX(clusterStart-ImGui::GetWindowPos().x);
+        }
         ImGui::BeginDisabled(frames.size()<2 || indexing && busy);
         if (transport("##first",0xE892,0,"First frame (Home)")) seekFrame(0); ImGui::SameLine();
         if (transport("##previous",0xE76B,1,"Previous frame (Left)")) seekFrame(selected-1); ImGui::SameLine();
@@ -9542,7 +9658,6 @@ struct App {
     void right(float w, float h) {
         fixed("Properties", w - rightWidth(), topInset(), rightWidth(),
               h - topInset() - statusHeight());
-        referenceHelp("analysis");ImGui::SameLine();
         // Tighter than the global theme so checkboxes, combos and sliders hug
         // their labels. release() runs before End(): End() asserts
         // "Missing PopStyleVar()" (and blocks startup) if these are still pushed.
@@ -9579,6 +9694,9 @@ struct App {
         if (iconButton("panel.tab.system", 0xE713, "System",
                        "System", rightTab == 3))
             rightTab = 3;
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),ImGui::GetWindowWidth()-U(44)));
+        referenceHelp("analysis");
         ImGui::PopStyleVar();
         // P12 inspector header: category caption, mono badge chip, node name
         // and — for toggleable modifiers — the 30x16 toggle switch.
@@ -11842,8 +11960,11 @@ struct App {
         if(ImGui::IsKeyPressed(ImGuiKey_LeftAlt,false)||ImGui::IsKeyPressed(ImGuiKey_RightAlt,false))menuRequested=true;
         // Menu accelerators. Ctrl+O loads per OVITO; Ctrl+Z/Y stay on undo /
         // redo; Ctrl+P focuses the Quick command search.
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T))
-            newHomeTab();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T)) {
+            if(io.KeyShift)reopenTab();else newHomeTab();
+        }
+        if(io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_K))duplicateTab(activeTab);
+        if(ImGui::IsKeyPressed(ImGuiKey_F2))beginTabRename(activeTab);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Tab) && tabs.size()>1)
             switchTab((activeTab+(io.KeyShift?int(tabs.size())-1:1))%int(tabs.size()));
         if (io.KeyCtrl && !io.KeyAlt) {
@@ -11854,7 +11975,7 @@ struct App {
         }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O,false)) open();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) open();
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W)) closeTab(activeTab);
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_W)) requestTabClose(activeTab);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_E)) showDataExport = true;
         if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S))
             saveSessionState(true);
