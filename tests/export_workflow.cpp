@@ -2383,11 +2383,22 @@ int main(int argc,char **argv) {
                 const size_t count=app.tabs.size();const auto id=app.tabs[size_t(app.activeTab)].id;
                 click("tabs.new");settlePipeline();frame();frame();
                 requireExport(app.homeMode && app.tabs.size()==count+1,"v5 plus opens a blank browser tab");
+                for(size_t i=1;i<app.tabs.size();++i) {
+                    const auto &first=app.uiTestItems.at("tabs.tab.0");
+                    const auto &other=app.uiTestItems.at("tabs.tab."+std::to_string(i));
+                    requireExport((app.tabs[0].pinned || app.tabs[i].pinned || std::abs((first.max.x-first.min.x)-(other.max.x-other.min.x))<.01f) &&
+                        std::abs(other.min.y)<.01f,"Regular tabs share width and every tab is aligned to the title edge");
+                }
+
                 click("tabs.close."+std::to_string(app.activeTab));settlePipeline();frame();frame();
                 requireExport(app.tabs.size()==count,
                     "v5 inset close button receives the click and closes only its tab");
                 for(int i=0;i<int(app.tabs.size());++i)if(app.tabs[size_t(i)].id==id){app.switchTab(i);break;}
                 settlePipeline();frame();frame();
+                const auto sceneDraws=viewportSceneDraws;
+                interactiveMove=true;frame();interactiveMove=false;
+                requireExport(viewportSceneDraws==sceneDraws,"Moving the native window reuses existing GPU scenes");
+                frame();requireExport(viewportSceneDraws>sceneDraws,"Releasing the title restores full scene rendering");
             }
 
             // P11 timeline ruler: the pure 1/2/5-decade label-step helper and

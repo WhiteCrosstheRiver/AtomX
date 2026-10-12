@@ -7,6 +7,7 @@
 namespace desktop {
 inline NOTIFYICONDATAW tray{};
 inline bool inTray = false;
+inline float captionGapStart=0,captionGapEnd=0;
 inline UINT taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 inline constexpr UINT trayMessage = WM_APP + 17;
 inline std::filesystem::path settingsPath() {
@@ -129,7 +130,7 @@ inline LRESULT hitTest(HWND window, LPARAM lp) {
     // Browser tabs are real client controls. Only the static brand area can
     // initiate a native window drag; treating the entire strip as caption
     // swallows tab clicks before ImGui receives them.
-    return p.y < 40*scale && p.x < 135*scale ? HTCAPTION : HTCLIENT;
+    return p.y < 40*scale && (p.x < 135*scale || (p.x>=captionGapStart && p.x<captionGapEnd)) ? HTCAPTION : HTCLIENT;
 }
 inline ComPtr<ID3D11ShaderResourceView> loadLogo(ID3D11Device *device, HICON &icon) {
     auto resource = FindResourceW(nullptr, MAKEINTRESOURCEW(101), MAKEINTRESOURCEW(10));

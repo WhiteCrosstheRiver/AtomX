@@ -65,3 +65,28 @@ Verification: optimized Windows build and the application export/real ImGui
 interaction suite pass, including new pin/project and close/reopen history
 checks. Native inspection verified the tab context menu, rename dialog,
 inspector header and complete trajectory controls at 1560 x 1000.
+
+## Title edge, text and native move refinement (2026-10-12)
+
+Tabs start at the window's top edge. Regular tabs shrink between 215 and 130
+logical pixels; beyond that limit the strip uses left/right scroll buttons,
+mouse-wheel scrolling and the existing searchable tab list. Pinned tabs use
+42 logical pixels and show their mode icon. Long titles use a UTF-8-safe
+ellipsis and a full-name tooltip. Mozilla's tab overview/overflow workflow is
+credited in the interface source panel.
+
+Text uses physical-pixel font sizes, pixel-aligned title/caption placement,
+dedicated 11/16/30 logical-pixel fonts and Windows CJK fallback. Per-monitor
+DPI v2 and WM_DPICHANGED rebuild fonts and styles when the effective DPI changes.
+
+Native move/resize uses a 16 ms timer within the Windows modal loop. These
+frames repaint UI with completed viewport textures and nonblocking presentation;
+release restores complete scene rendering. No additional geometry or CPU renderer
+was introduced. The free title-strip area also supports native window dragging.
+
+Validation: optimized build and application interaction suite pass, with top-edge
+alignment and viewport scene reuse/resume assertions. The desktop check verifies
+timer-driven frames, native window controls and a synthetic 150% DPI transition.
+Physical multi-monitor movement has not been verified on this machine. Firefox's
+Windows inspection channel stopped because URL-policy enforcement is unsupported;
+its official Mozilla documentation supplied the overflow reference.

@@ -39,6 +39,7 @@
 #include <cctype>
 #include <numeric>
 #include <deque>
+#include <functional>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -51,7 +52,11 @@ using namespace atomx;
 namespace loc = localization;
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 static Renderer *renderer = nullptr;
-static bool resized = false;
+static bool resized = false, dpiChanged = false, interactiveMove = false;
+static float requestedDpiScale = 1.f;
+static constexpr UINT_PTR moveFrameTimer = 0x4158;
+static std::function<void()> interactiveFrame;
+static uint64_t interactiveFrameCount = 0, viewportSceneDraws = 0;
 static std::deque<std::filesystem::path> droppedFiles;
 // Viewport tool cursors. ImGui never draws the OS cursor itself; its win32
 // backend maps ImGui::GetMouseCursor() onto the stock shapes during
@@ -199,6 +204,19 @@ static LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     switch (msg) {
+    case WM_DPICHANGED: {
+        requestedDpiScale=std::max(1.f,float(HIWORD(wp))/96.f);dpiChanged=true;
+        const auto &r=*reinterpret_cast<const RECT *>(lp);
+        SetWindowPos(h,nullptr,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOZORDER|SWP_NOACTIVATE);
+        return 0;
+    }
+    case WM_ENTERSIZEMOVE:
+        interactiveMove=true;SetTimer(h,moveFrameTimer,16,nullptr);return 0;
+    case WM_EXITSIZEMOVE:
+        KillTimer(h,moveFrameTimer);interactiveMove=false;return 0;
+    case WM_TIMER:
+        if(wp==moveFrameTimer){if(interactiveMove && interactiveFrame)interactiveFrame();return 0;}
+        break;
     case WM_NCCALCSIZE:
         if (wp) return 0;
         break;
@@ -307,6 +325,8 @@ static int64_t timelineLabelStep(int64_t lastFrame, float trackWidthPx) {
     return int64_t(decade * 10.0);
 }
 static ImFont *headingFont = nullptr;
+static ImFont *smallFont = nullptr, *cardFont = nullptr, *heroFont = nullptr;
+static ImVec2 pixelPosition(ImVec2 p) { return {std::floor(p.x),std::floor(p.y)}; }
 static ImFont *iconFont = nullptr;
 static const char *iconFontName = "text fallback"; // Reported by the smoke run.
 static ImVec4 accent{.10f,.34f,.62f,1};
@@ -1039,7 +1059,7 @@ struct App {
     std::vector<StructureTab> closedTabs;
     std::vector<uint64_t> pendingTabCloses; bool confirmTabClose=false;
     ImVec2 creationContextPoint{};
-    uint64_t renameTabId=0; char renameTabText[256]{}, tabSearch[128]{};
+    uint64_t renameTabId=0; float tabScrollStep=0; char renameTabText[256]{}, tabSearch[128]{};
     uint64_t pendingTabId = 0;
     bool homeMode = false;
     int creationReturnTab = -1;
@@ -4099,7 +4119,7 @@ struct App {
         auto *dl = ImGui::GetWindowDrawList();
         const ImVec2 p = ImGui::GetCursorScreenPos();
         const float height=U(19);
-        dl->AddText(headingFont?headingFont:ImGui::GetFont(),U(11),{p.x,p.y+U(3)},ImGui::GetColorU32(ui_design::secondary()),text);
+        dl->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({p.x,p.y+U(3)}),ImGui::GetColorU32(ui_design::secondary()),text);
         if (rightText && rightText[0]) {
             const ImVec2 ts = ImGui::CalcTextSize(rightText);
             const float avail = ImGui::GetContentRegionAvail().x;
@@ -4572,11 +4592,11 @@ struct App {
         // Compact vertical group captions, matching the template's 16 px rail.
         if(loc::current==loc::Language::Chinese) {
             const size_t n=std::strlen(label);
-            if(n>=6) {draw->AddText(ImGui::GetFont(),U(10.5f),{p.x,p.y+U(3)},ImGui::GetColorU32(tone),label,label+3);
-                draw->AddText(ImGui::GetFont(),U(10.5f),{p.x,p.y+U(17)},ImGui::GetColorU32(tone),label+3,label+6);}
+            if(n>=6) {draw->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({p.x,p.y+U(2)}),ImGui::GetColorU32(tone),label,label+3);
+                draw->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({p.x,p.y+U(17)}),ImGui::GetColorU32(tone),label+3,label+6);}
         } else {
-            const size_t n=std::min(size_t(4),std::strlen(label));
-            for(size_t i=0;i<n;++i)draw->AddText(ImGui::GetFont(),U(8),{p.x+U(3),p.y+U(float(i)*8)},ImGui::GetColorU32(tone),label+i,label+i+1);
+            const size_t n=std::min(size_t(3),std::strlen(label));
+            for(size_t i=0;i<n;++i)draw->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({p.x+U(2),p.y+U(float(i)*11)}),ImGui::GetColorU32(tone),label+i,label+i+1);
         }
         ImGui::Dummy({U(16),U(32)});ImGui::SameLine(0,U(4));
     }
@@ -4621,12 +4641,29 @@ struct App {
             for(float yy:{9.f,15.f,21.f})d->AddLine({lo.x+U(7),lo.y+U(yy)},{lo.x+U(23),lo.y+U(yy)},ImGui::GetColorU32(ImGuiCol_Text),U(1.5f));}
         if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",loc::text("菜单 (Alt)"));
         ImGui::SameLine(0,U(8));const float tabStart=ImGui::GetCursorPosX();
-        const float regionW=std::max(U(70),w-tabStart-U(327));
+        const float outerW=std::max(U(70),w-tabStart-U(327));
+        const size_t pins=std::count_if(tabs.begin(),tabs.end(),[](const auto &t){return t.pinned;});
+        const size_t regular=tabs.size()-pins;
+        const float tabGap=std::max(1.f,std::floor(U(2))), pinnedW=std::floor(U(42));
+        const bool overflow=float(regular)*U(130)+float(pins)*pinnedW+float(tabs.size())*tabGap>outerW;
+        const float regionW=std::max(U(20),outerW-(overflow?U(52):0));
+        const float tabW=std::floor(std::clamp((regionW-float(pins)*pinnedW-float(tabs.size())*tabGap)/float(std::max(size_t(1),regular)),U(130),U(215)));
+        ImGui::SetCursorPos({tabStart,0});
+        if(overflow) {
+            if(ImGui::Button("<##tabs-left",{U(26),titleH}))tabScrollStep=-tabW;
+            recordUiTestItem("tabs.scroll-left");ImGui::SameLine(0,0);
+        }
+        const float childX=ImGui::GetCursorPosX();
         ImGui::BeginChild("##browser-tab-scroll",{regionW,titleH},ImGuiChildFlags_None,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoBackground);
-        ImGui::SetCursorPos({0,U(6)});
+        if(tabScrollStep){ImGui::SetScrollX(ImGui::GetScrollX()+tabScrollStep);tabScrollStep=0;}
+        ImGui::SetCursorPos({0,0});
         int closing=-1,duplicate=-1,moveFrom=-1,moveTo=-1,pinning=-1,groupClose=-1,createFrom=-1; bool closeRight=false,reopen=false,moveAfter=false;
-        const float tabW=std::clamp((regionW-U(4))/float(std::max(size_t(1),tabs.size())),U(130),U(215));
+        desktop::captionGapStart=childX+std::min(regionW,float(regular)*tabW+float(pins)*pinnedW+float(tabs.size())*tabGap);
+        desktop::captionGapEnd=overflow?desktop::captionGapStart:w-U(327);
+        float tabOffset=0;
         for(int index=0;index<int(tabs.size());++index) {
+            const float width=tabs[size_t(index)].pinned?pinnedW:tabW;
+            ImGui::SetCursorPos({tabOffset,0});tabOffset+=width+tabGap;
             ImGui::PushID(tabs[size_t(index)].id);
             const bool selected=index==activeTab;
             const bool home=selected?homeMode:tabs[size_t(index)].home;
@@ -4634,21 +4671,25 @@ struct App {
             const std::string name=home?loc::text("New Tab"):selected?tabTitle():tabs[size_t(index)].title;
             auto lo=ImGui::GetCursorScreenPos();
             ImGui::SetNextItemAllowOverlap(); // The close control sits inside the tab surface.
-            if(ImGui::InvisibleButton("##tab",{tabW,U(34)}))switchTab(index);
+            if(ImGui::InvisibleButton("##tab",{width,titleH}))switchTab(index);
             recordUiTestItem("tabs.tab."+std::to_string(index));
             const bool hover=ImGui::IsItemHovered();auto hi=ImGui::GetItemRectMax();auto *d=ImGui::GetWindowDrawList();
-            if(selected||hover)d->AddRectFilled(lo,hi,ImGui::GetColorU32(selected?ImGuiCol_WindowBg:ImGuiCol_TabHovered),U(8),ImDrawFlags_RoundCornersTop);
-            if(selected)d->AddRect(lo,hi,ImGui::GetColorU32(ImGuiCol_Border),U(8),ImDrawFlags_RoundCornersTop);
+            d->AddRectFilled(lo,hi,ImGui::GetColorU32(selected?ImGuiCol_WindowBg:hover?ImGuiCol_TabHovered:ImGuiCol_ChildBg),U(8),ImDrawFlags_RoundCornersTop);
+            d->AddRect(lo,hi,ImGui::GetColorU32(selected?ImGuiCol_SeparatorActive:ImGuiCol_Border),U(8),ImDrawFlags_RoundCornersTop);
             const auto tone=authored?ui_design::tool(0x52d38a,0x008d48):ui_design::tool(0xf0a431,0xb86e00);
-            drawCreationIcon(d,{lo.x+U(16),lo.y+U(17)},home?"home":authored?"draw":"eye",ImGui::GetColorU32(tone));
-            d->PushClipRect({lo.x+U(30),lo.y},{hi.x-U(29),hi.y},true);
-            d->AddText({lo.x+U(32),lo.y+(U(34)-ImGui::GetFontSize())*.5f},ImGui::GetColorU32(selected?ImGuiCol_Text:ImGuiCol_TextDisabled),name.c_str());
-            d->PopClipRect();
+            drawCreationIcon(d,{lo.x+U(16),lo.y+titleH*.5f},home?"home":authored?"draw":"eye",ImGui::GetColorU32(tone));
+            if(!tabs[size_t(index)].pinned) {
+                const float right=hi.x-U(29);
+                ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(selected?ImGuiCol_Text:ImGuiCol_TextDisabled));
+                ImGui::RenderTextEllipsis(d,pixelPosition({lo.x+U(32),lo.y+(titleH-ImGui::GetFontSize())*.5f}),
+                    {right,hi.y},right,right,name.c_str(),nullptr,nullptr);
+                ImGui::PopStyleColor();
+            }
             if(hover) {
                 ImGui::SetTooltip("%s\n%s · %zu atoms",name.c_str(),authored?"Creation":"View",selected?source.atoms.size():tabs[size_t(index)].source.atoms.size());
                 if(ImGui::IsMouseDoubleClicked(0))beginTabRename(index);
             }
-            if(tabs[size_t(index)].pinned)d->AddCircleFilled({lo.x+U(5),lo.y+U(17)},U(2),ImGui::GetColorU32(tone));
+            if(tabs[size_t(index)].pinned)d->AddCircleFilled({lo.x+U(5),lo.y+titleH*.5f},U(2),ImGui::GetColorU32(tone));
             if(hover && ImGui::IsMouseClicked(ImGuiMouseButton_Middle))closing=index;
             if(ImGui::BeginPopupContextItem("tab-actions")) {
                 ImGui::BeginDisabled(documentsBusy());
@@ -4679,17 +4720,24 @@ struct App {
                 }ImGui::EndDragDropTarget();
             }
             if(selected && displayedTab!=activeTab){ImGui::SetScrollHereX(.5f);displayedTab=activeTab;}
-            ImGui::SetCursorScreenPos({hi.x-U(26),lo.y+U(6)});
+            if(!tabs[size_t(index)].pinned) {
+            ImGui::SetCursorScreenPos({hi.x-U(26),lo.y+(titleH-U(22))*.5f});
             if(ImGui::InvisibleButton("##close",{U(22),U(22)}))closing=index;
             recordUiTestItem("tabs.close."+std::to_string(index));
-            auto c=ImVec2{hi.x-U(15),lo.y+U(17)};
+            auto c=ImVec2{hi.x-U(15),lo.y+titleH*.5f};
             if(ImGui::IsItemHovered())d->AddRectFilled({c.x-U(10),c.y-U(10)},{c.x+U(10),c.y+U(10)},ImGui::GetColorU32(ImGuiCol_ButtonHovered),U(6));
             d->AddLine({c.x-U(4),c.y-U(4)},{c.x+U(4),c.y+U(4)},ImGui::GetColorU32(ImGuiCol_TextDisabled),U(1.5f));
             d->AddLine({c.x+U(4),c.y-U(4)},{c.x-U(4),c.y+U(4)},ImGui::GetColorU32(ImGuiCol_TextDisabled),U(1.5f));
+            }
             ImGui::SetCursorScreenPos({hi.x,lo.y});ImGui::PopID();
         }
         if(ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel!=0)ImGui::SetScrollX(ImGui::GetScrollX()-ImGui::GetIO().MouseWheel*U(150));
         ImGui::EndChild();
+        if(overflow) {
+            ImGui::SameLine(0,0);
+            if(ImGui::Button(">##tabs-right",{U(26),titleH}))tabScrollStep=tabW;
+            recordUiTestItem("tabs.scroll-right");
+        }
         ImGui::SetCursorPos({w-U(321),U(5)});
         if(ImGui::Button((std::to_string(tabs.size())+" v##all-tabs").c_str(),{U(44),U(30)}))ImGui::OpenPopup("##all-tabs-popup");
         recordUiTestItem("tabs.switcher");
@@ -7158,9 +7206,14 @@ struct App {
         auto avail = ImGui::GetContentRegionAvail();
         const bool compactBondView = !creationMode && result.data.bondStyle.visible &&
             result.data.bondStyle.radius > 0 && gpu.bondsUploaded();
-        gpu.target(targets[i], int(avail.x), int(avail.y));
+        // Native move/size frames reuse the completed GPU scene. Window chrome
+        // can follow the pointer without redrawing millions of atoms/bonds.
+        if(!interactiveMove || !targets[i].srv) {
+            ++viewportSceneDraws;
+            gpu.target(targets[i], int(avail.x), int(avail.y));
             gpu.draw(targets[i], result.data, cam, radius, particleShape, renderMode, colorAxis, colorGradient, colorReverse?colorMax:colorMin, colorReverse?colorMin:colorMax, colorCoding, colorDiscrete, colorSelectedOnly, bg, particles, cell,
                 creationMode?.43f:compactBondView?.50f:1.f,creationMode && sameAtomCount()?&creationDisplay:nullptr);
+        }
         ImGui::Image((ImTextureID)(intptr_t)targets[i].srv.Get(), avail);
         if (creationMode) creationViewportSize=avail;
         const bool viewportHovered = ImGui::IsItemHovered();
@@ -8673,7 +8726,7 @@ struct App {
         fixed("Home workspace",0,topInset(),w,h-topInset()-statusHeight());
         const float width=std::min(U(780),w-U(48)),x=(w-width)*.5f;
         ImGui::SetCursorPos({x,U(65)});auto p=ImGui::GetCursorScreenPos();
-        ImGui::GetWindowDrawList()->AddText(headingFont?headingFont:ImGui::GetFont(),U(30),p,ImGui::GetColorU32(ImGuiCol_Text),loc::text("New Tab"));
+        ImGui::GetWindowDrawList()->AddText(heroFont?heroFont:ImGui::GetFont(),heroFont?heroFont->FontSize:U(30),pixelPosition(p),ImGui::GetColorU32(ImGuiCol_Text),loc::text("New Tab"));
         ImGui::Dummy({width,U(42)});ImGui::SetCursorPosX(x);ImGui::TextDisabled("%s",loc::text("打开一个结构查看，或者直接开始创作。"));ImGui::Dummy({0,U(22)});
         const bool stacked=width<U(640);const float cardW=stacked?width:(width-U(24))/3;
         auto card=[&](const char *id,const char *title,const char *subtitle,const char *icon,bool primary,auto &&action){
@@ -8685,8 +8738,8 @@ struct App {
             d->AddRectFilled(lo,hi,ImGui::GetColorU32(primary?green:ImGui::GetStyleColorVec4(ImGui::IsItemHovered()?ImGuiCol_HeaderHovered:ImGuiCol_WindowBg)),U(8));
             d->AddRect(lo,hi,ImGui::GetColorU32(primary?green:ImGui::GetStyleColorVec4(ImGuiCol_Border)),U(8));
             drawCreationIcon(d,{lo.x+U(28),lo.y+U(30)},icon,ImGui::GetColorU32(primary?ink:green));
-            d->AddText(headingFont?headingFont:ImGui::GetFont(),U(16),{lo.x+U(18),lo.y+U(66)},ImGui::GetColorU32(ink),loc::text(title));
-            d->AddText(ImGui::GetFont(),U(12),{lo.x+U(18),lo.y+U(102)},ImGui::GetColorU32(primary?ink:ui_design::secondary()),loc::text(subtitle));
+            d->AddText(cardFont?cardFont:ImGui::GetFont(),cardFont?cardFont->FontSize:U(16),pixelPosition({lo.x+U(18),lo.y+U(66)}),ImGui::GetColorU32(ink),loc::text(title));
+            d->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({lo.x+U(18),lo.y+U(102)}),ImGui::GetColorU32(primary?ink:ui_design::secondary()),loc::text(subtitle));
             if(stacked)ImGui::Dummy({0,U(12)});else ImGui::SameLine(0,U(12));
         };
         ImGui::SetCursorPosX(x);
@@ -11249,7 +11302,9 @@ struct App {
         auto &io = ImGui::GetIO();
         io.Fonts->Clear();
         const char *fonts[] = {"C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/consola.ttf"};
-        ImFont *base = io.Fonts->AddFontFromFileTTF(fonts[preferences.font], float(preferences.size)*uiScale);
+        ImFontConfig textConfig{};textConfig.OversampleH=3;textConfig.OversampleV=1;
+        textConfig.PixelSnapH=true;textConfig.RasterizerMultiply=1.10f;
+        ImFont *base = io.Fonts->AddFontFromFileTTF(fonts[preferences.font], std::round(float(preferences.size)*uiScale),&textConfig);
         if (!base) base = io.Fonts->AddFontDefault();
         // Merge the Windows Segoe MDL2 Assets icon set into the base font so a
         // single ImFont renders text and icons. Missing system font degrades to
@@ -11260,7 +11315,7 @@ struct App {
         for (const char *iconFile : {"C:/Windows/Fonts/segmdl2.ttf",
                                      "C:/Windows/Fonts/SegoeMDL2.ttf",
                                      "C:/Windows/Fonts/segfluent.ttf"}) {
-            ImFontConfig merge{};
+            ImFontConfig merge=textConfig;
             merge.MergeMode = true;
             merge.GlyphMinAdvanceX = iconSize;
             merge.GlyphOffset = {0, U(.5f)};
@@ -11305,22 +11360,31 @@ struct App {
         ImVector<ImWchar> chineseRanges;
         chineseBuilder.BuildRanges(&chineseRanges);
         {
-            ImFontConfig cjkMerge{};
+            ImFontConfig cjkMerge=textConfig;
             cjkMerge.MergeMode = true;
-            for (const char *cjkFile : {"C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/Deng.ttf",
-                                        "C:/Windows/Fonts/msyh.ttc"}) {
-                if (io.Fonts->AddFontFromFileTTF(cjkFile, float(preferences.size) * uiScale,
+            for (const char *cjkFile : {"C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/Deng.ttf",
+                                        "C:/Windows/Fonts/simhei.ttf"}) {
+                if (io.Fonts->AddFontFromFileTTF(cjkFile, std::round(float(preferences.size) * uiScale),
                                                  &cjkMerge, chineseRanges.Data))
                     break;
             }
         }
-        headingFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeuib.ttf", float(preferences.size)*uiScale);
-        {
-            ImFontConfig headingMerge{};
-            headingMerge.MergeMode = true;
-            io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/simhei.ttf",
-                float(preferences.size)*uiScale, &headingMerge, chineseRanges.Data);
-        }
+        auto sizedFont=[&](float size,bool bold,const ImWchar *ranges) {
+            auto config=textConfig;
+            ImFont *font=io.Fonts->AddFontFromFileTTF(bold?"C:/Windows/Fonts/segoeuib.ttf":fonts[preferences.font],std::round(U(size)),&config);
+            if(!font)return base;
+            config.MergeMode=true;
+            for(const char *file:{"C:/Windows/Fonts/msyh.ttc","C:/Windows/Fonts/simhei.ttf"})
+                if(io.Fonts->AddFontFromFileTTF(file,std::round(U(size)),&config,ranges))break;
+            return font;
+        };
+        headingFont=sizedFont(float(preferences.size),true,chineseRanges.Data);
+        smallFont=sizedFont(11,false,chineseRanges.Data);
+        // Larger home text only needs its own small set of glyphs.
+        ImFontGlyphRangesBuilder homeBuilder;homeBuilder.AddText("新标签页打开文件建晶体空白创作");
+        homeBuilder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+        ImVector<ImWchar> homeRanges;homeBuilder.BuildRanges(&homeRanges);
+        cardFont=sizedFont(16,true,homeRanges.Data);heroFont=sizedFont(30,true,homeRanges.Data);
         ImGui_ImplDX11_CreateDeviceObjects();
     }
     void startDataExport(const std::filesystem::path &destination) {
@@ -12210,7 +12274,8 @@ struct App {
 };
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     try {
-        SetProcessDPIAware();
+        if(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+            ImGui_ImplWin32_EnableDpiAwareness();
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         int argc;
         auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -12361,24 +12426,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             bool inspectorSmokeStarted = false;
             bool bondSmokeStarted = false;
             bool creationSmokeStarted = false;
-            while (!done) {
-                MSG msg;
-                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                    if (msg.message == WM_QUIT)
-                        done = true;
-                }
-                if (done)
-                    break;
-                if (IsIconic(window) || !IsWindowVisible(window)) {
-                    app.poll();
-                    Sleep(20);
-                    continue;
-                }
+            bool drawingFrame=false;
+            auto drawFrame=[&](bool liveMove) {
+                if(drawingFrame)return;
+                struct FrameGuard { bool &active;FrameGuard(bool &v):active(v){active=true;}~FrameGuard(){active=false;} } guard(drawingFrame);
                 if (resized) {
                     gpu.resize();
                     resized = false;
+                }
+                if(dpiChanged) {
+                    dpiChanged=false;uiScale=requestedDpiScale;theme(app.preferences.theme);app.refreshFont=true;
+                    if(g_magnifierCursor)DestroyCursor(g_magnifierCursor);
+                    g_magnifierCursor=createMagnifierCursor(uiScale);app.displayedTab=-1;
                 }
                 app.rebuildFont();
                 ImGui_ImplDX11_NewFrame();
@@ -12455,7 +12514,45 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                            << "\n";
                     done = true;
                 }
-                check(gpu.swap->Present(1, 0), "Present");
+                const HRESULT present=gpu.swap->Present(liveMove?0:1,liveMove?DXGI_PRESENT_DO_NOT_WAIT:0);
+                if(present!=DXGI_ERROR_WAS_STILL_DRAWING)check(present,"Present");
+                if(liveMove)++interactiveFrameCount;
+            };
+            interactiveFrame=[&]{try{drawFrame(true);}catch(const std::exception &e){app.error=e.what();}};
+            struct ClearInteractiveFrame { HWND window;~ClearInteractiveFrame(){interactiveFrame={};KillTimer(window,moveFrameTimer);interactiveMove=false;} } clearInteractive{window};
+            if(desktopTest) {
+                drawFrame(false);
+                const auto framesBefore=interactiveFrameCount,scenesBefore=viewportSceneDraws;
+                SendMessageW(window,WM_ENTERSIZEMOVE,0,0);
+                SendMessageW(window,WM_TIMER,moveFrameTimer,0);
+                SendMessageW(window,WM_EXITSIZEMOVE,0,0);
+                if(interactiveMove || interactiveFrameCount!=framesBefore+1 || viewportSceneDraws!=scenesBefore)
+                    throw std::runtime_error("Native move loop must refresh chrome using cached GPU scenes");
+                const float oldScale=uiScale;RECT r{};GetWindowRect(window,&r);
+                SendMessageW(window,WM_DPICHANGED,MAKELONG(144,144),reinterpret_cast<LPARAM>(&r));
+                drawFrame(false);
+                if(uiScale!=1.5f || !smallFont || smallFont->FontSize!=17.f)
+                    throw std::runtime_error("DPI transition must rebuild physical-size fonts");
+                const int oldDpi=int(std::round(oldScale*96));
+                SendMessageW(window,WM_DPICHANGED,MAKELONG(oldDpi,oldDpi),reinterpret_cast<LPARAM>(&r));drawFrame(false);
+                std::ofstream("build/desktop-test.txt",std::ios::app)<<"PASS: native move timer refresh, cached scene reuse and 150% DPI font transition\n";
+            }
+            while (!done) {
+                MSG msg;
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                    if (msg.message == WM_QUIT)
+                        done = true;
+                }
+                if (done)
+                    break;
+                if (IsIconic(window) || !IsWindowVisible(window)) {
+                    app.poll();
+                    Sleep(20);
+                    continue;
+                }
+                drawFrame(false);
             }
         }
         ImGui_ImplDX11_Shutdown();
