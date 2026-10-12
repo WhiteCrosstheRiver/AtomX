@@ -126,7 +126,10 @@ int main() {
             try { (void)document::read(nativePath,1); } catch (...) { rejected=true; }
             require(rejected,"native document refuses a sampled import that would lose topology and annotations");
             std::ifstream bytesIn(nativePath,std::ios::binary);
-            const std::string version13Bytes((std::istreambuf_iterator<char>(bytesIn)),{}); bytesIn.close();
+            std::string version13Bytes((std::istreambuf_iterator<char>(bytesIn)),{}); bytesIn.close();
+            // Native v15 appends cell appearance after the v13 measurement flags.
+            // Remove that block before deriving the historical fixtures below.
+            version13Bytes[8]=13;version13Bytes.erase(version13Bytes.size()-34,30);
             const size_t measurementBytes=8+view.display.monitors.size();
             auto bytes=version13Bytes;bytes[8]=12;bytes.erase(bytes.size()-4-measurementBytes,measurementBytes);
             auto rejectBytes=[&](std::string corrupted) {
@@ -138,7 +141,7 @@ int main() {
             rejectBytes(bytes.substr(0,bytes.size()-1));
             const size_t selectionBytes=8+view.bondSelection.size()*4;
             const size_t visibilityBytes=9; // No local rules in this legacy compatibility fixture.
-            auto version=bytes; version[8]=14; rejectBytes(version);
+            auto version=bytes; version[8]=127; rejectBytes(version);
             auto invalidFixed=version13Bytes;invalidFixed[invalidFixed.size()-5]=2;rejectBytes(invalidFixed);
             auto invalidFixedCount=version13Bytes;invalidFixedCount[invalidFixedCount.size()-4-measurementBytes]=2;rejectBytes(invalidFixedCount);
             const auto v12Path=dir/"v12.atomx";
@@ -195,6 +198,7 @@ int main() {
             bool invalidLabels=false;try {io::write(blPath,io::Format::AtomX,native,invalidOptions);}catch(...) {invalidLabels=true;}
             require(invalidLabels && document::read(blPath).view.display.bondLabels==bl,"invalid bond settings preserve existing destination");
             std::ifstream blIn(blPath,std::ios::binary);std::string blBytes((std::istreambuf_iterator<char>(blIn)),{});blIn.close();
+            blBytes.erase(blBytes.size()-34,30);blBytes.erase(blBytes.size()-4-measurementBytes,measurementBytes);blBytes[8]=12;
             auto badBondFlag=blBytes;badBondFlag[badBondFlag.size()-13-selectionBytes-visibilityBytes]=2;rejectBytes(badBondFlag);
             auto badBondBudget=blBytes;for(size_t i=blBytes.size()-12-selectionBytes-visibilityBytes;i<blBytes.size()-8-selectionBytes-visibilityBytes;++i)badBondBudget[i]=char(-1);rejectBytes(badBondBudget);
             auto hiddenOptions=nativeOptions;
@@ -208,6 +212,7 @@ int main() {
                     native.vectorProperties.at("Force").begin(),[](Vec3 a,Vec3 b){return a.x==b.x && a.y==b.y && a.z==b.z;}),
                 "v12 restores hidden periodic bond identity without changing topology or scientific properties");
             std::ifstream hiddenIn(hiddenPath,std::ios::binary);std::string hiddenBytes((std::istreambuf_iterator<char>(hiddenIn)),{});hiddenIn.close();
+            hiddenBytes.erase(hiddenBytes.size()-34,30);hiddenBytes.erase(hiddenBytes.size()-4-measurementBytes,measurementBytes);hiddenBytes[8]=12;
             auto badVisibilityFlag=hiddenBytes;badVisibilityFlag[badVisibilityFlag.size()-5]=2;rejectBytes(badVisibilityFlag);
             auto missingIdentity=hiddenBytes;uint32_t missingEndpoint=99;
             std::memcpy(missingIdentity.data()+missingIdentity.size()-37,&missingEndpoint,4);rejectBytes(missingIdentity);
@@ -286,6 +291,7 @@ int main() {
             require(compositeRead.view.display==composite && creation::labelText(compositeRead.data,0,compositeRead.view.display.labelAt(0)).find("Energy = -2.5")!=std::string::npos,
                 "v6 restores composite property names, order, prefix, precision and sparse selected overrides");
             std::ifstream compositeIn(compositePath,std::ios::binary); std::string compositeBytes((std::istreambuf_iterator<char>(compositeIn)),{});
+            compositeBytes.erase(compositeBytes.size()-34,30);
             compositeBytes.erase(compositeBytes.size()-4-measurementBytes,measurementBytes);
             compositeBytes.erase(compositeBytes.size()-4-visibilityBytes,visibilityBytes);compositeBytes.erase(compositeBytes.size()-4-selectionBytes,selectionBytes);
             compositeBytes.erase(compositeBytes.size()-8,4);compositeBytes.erase(compositeBytes.size()-4-bondLabelBytes,bondLabelBytes);compositeBytes.erase(compositeBytes.size()-5,1); compositeBytes[8]=6; compositeBytes.erase(compositeBytes.size()-4-colorBytes,colorBytes);
@@ -297,6 +303,7 @@ int main() {
             io::write(compositePath,io::Format::AtomX,native,compositeOptions);
             require(document::read(compositePath).view.display==composite,"v7 restores global color range and sparse custom overrides");
             std::ifstream colorIn(compositePath,std::ios::binary); std::string colorData((std::istreambuf_iterator<char>(colorIn)),{});
+            colorData.erase(colorData.size()-34,30);
             colorData.erase(colorData.size()-4-measurementBytes,measurementBytes);
             colorData.erase(colorData.size()-4-visibilityBytes,visibilityBytes);colorData.erase(colorData.size()-4-selectionBytes,selectionBytes);
             colorData.erase(colorData.size()-8,4);colorData.erase(colorData.size()-4-bondLabelBytes,bondLabelBytes);colorData.erase(colorData.size()-5,1);colorData[8]=7;auto badColor=colorData;badColor[badColor.size()-4-(44+color.property.size())]=char(255);rejectBytes(badColor);

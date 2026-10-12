@@ -8,6 +8,7 @@ void requireExport(bool ok, const char *message) {
     if (!ok)
         throw std::runtime_error(message);
 }
+#include "cell_appearance_tests.hpp"
 int main(int argc,char **argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     HWND window = CreateWindowExW(0, L"STATIC", L"Export validation", WS_OVERLAPPEDWINDOW, 0, 0,
@@ -30,6 +31,7 @@ int main(int argc,char **argv) {
         }
     } restorePreferences;
     try {
+        testCellAppearanceDocuments();
         Renderer testRenderer;
         testRenderer.init(window);
         ImGui::CreateContext();
@@ -309,6 +311,26 @@ int main(int argc,char **argv) {
             app.preferences.menuPinned=true;
             app.showModelingActions=true;
             frame();
+            // Exercise the real title toggle: changing the theme while Button
+            // colors are pushed used to restore dark surfaces in light mode.
+            {
+                const int original=app.preferences.theme;
+                app.preferences.theme=0;app.refreshTheme=true;frame();
+                for(int pass=0;pass<3;++pass) {
+                    click("title.theme");frame();
+                    const auto face=ImGui::GetStyleColorVec4(ImGuiCol_Button);
+                    const auto ink=ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                    requireExport(app.preferences.theme==1 && ui_design::light() && face.x>.95f && ink.x<.2f,
+                        "real light-theme toggle keeps white buttons with dark text after all style pops");
+                    ImGui::PushStyleColor(ImGuiCol_WindowBg,{0,0,0,1});
+                    requireExport(ui_design::light(),"temporary black viewport surfaces do not change theme identity");
+                    ImGui::PopStyleColor();
+                    click("title.theme");frame();
+                    requireExport(app.preferences.theme==0 && !ui_design::light() && ImGui::GetStyleColorVec4(ImGuiCol_Button).x<.3f,
+                        "returning to dark restores the complete neutral palette");
+                }
+                app.preferences.theme=original;app.refreshTheme=true;frame();
+            }
             // Live localization must not change widget identity or scientific data.
             {
                 const auto originalLanguage=loc::current;
@@ -440,6 +462,42 @@ int main(int argc,char **argv) {
                           "Creation Mode opens an editable copy in a separate workspace tab");
             settlePipeline();
             {
+                const auto before=app.captureTab();
+                app.chooseCreationTool(App::CreationTool::Select);frame();frame();
+                const auto viewport=app.uiTestItems.at("creation.viewport");
+                const ImVec2 size{viewport.max.x-viewport.min.x,viewport.max.y-viewport.min.y};
+                const auto projected=app.projectCell(viewport.min,size,app.cameras[3]);
+                ImVec2 point{};bool found=false;
+                for(int j=0;j<8 && !found;++j)for(int k=1;k<=4 && !found;k*=2)
+                    if(!(j&k) && projected.valid[j] && projected.valid[j|k]) {
+                        const auto a=projected.corners[j],b=projected.corners[j|k];
+                        point={(a.x+b.x)*.5f,(a.y+b.y)*.5f};
+                        found=point.x>viewport.min.x+10 && point.x<viewport.max.x-10 &&
+                            point.y>viewport.min.y+10 && point.y<viewport.max.y-10 && app.cellEdgeHit(projected,point);
+                    }
+                requireExport(found,"cell has a visible selectable projected edge");
+                guiIO.AddMousePosEvent(point.x,point.y);frame();
+                for(int i=0;i<2;++i){guiIO.AddMouseButtonEvent(0,true);frame();guiIO.AddMouseButtonEvent(0,false);frame();}
+                requireExport(app.cellSelected && app.creationSelection.empty(),"double click cell edge selects the cell instead of atoms");
+                guiIO.AddMouseButtonEvent(1,true);frame();guiIO.AddMouseButtonEvent(1,false);frame();frame();
+                requireExport(app.uiTestItems.contains("cell.width") && app.uiTestItems.contains("cell.parameters"),
+                    "selected-cell right click opens appearance and lattice parameter controls");
+                click("cell.width",.45f);frame();
+                requireExport(app.cellWidth>before.cellWidth && app.authorUndo.size()==before.authorUndo.size(),
+                    "cell width control changes appearance without a structure transaction");
+                const auto checkbox=app.uiTestItems.at("cell.dashed");
+                requireExport(checkbox.max.y-checkbox.min.y<=ImGui::GetFontSize()*1.4f,
+                    "checkbox square stays proportionate to the label height");
+                click("cell.dashed");frame();
+                const auto styled=app.captureTab();
+                requireExport(styled.cellDashed && App::projectView(styled).cellWidth==app.cellWidth,
+                    "cell appearance is captured by both tab and project persistence");
+                guiIO.AddKeyEvent(ImGuiKey_Escape,true);frame();guiIO.AddKeyEvent(ImGuiKey_Escape,false);frame();
+                app.restoreTab(before);settlePipeline();frame();
+                requireExport(!app.cellSelected && app.cellWidth==before.cellWidth && app.cellDashed==before.cellDashed,
+                    "tab restore returns its independent cell appearance and clears transient selection");
+            }
+            {
                 // New v5 layout: both side widths and the property height stay interactive.
                 app.creationPropertiesOpen=true;frame();frame();
                 auto dragPanel=[&](const char *key,float dx,float dy) {
@@ -453,7 +511,9 @@ int main(int argc,char **argv) {
                 const float left=app.pipelinePane,right=app.propertiesPane;
                 const int height=app.preferences.creationPropertiesHeight;
                 dragPanel("layout.Creation workspace edge-splitter",45,0);
-                requireExport(app.pipelinePane>left+20,"v5 creation workspace remains horizontally resizable");
+                requireExport(app.pipelinePane>left+20,("v5 creation workspace remains horizontally resizable: before="+std::to_string(left)+
+                    " after="+std::to_string(app.pipelinePane)+" popups="+std::to_string(ImGui::GetCurrentContext()->OpenPopupStack.size())+
+                    " hovered="+(ImGui::GetCurrentContext()->HoveredWindow?ImGui::GetCurrentContext()->HoveredWindow->Name:"none")).c_str());
                 dragPanel("layout.Creation properties edge-splitter",-45,0);
                 requireExport(app.propertiesPane>right+20,"v5 creation inspector remains horizontally resizable");
                 dragPanel("creation.properties-splitter",0,-45);
@@ -2383,6 +2443,17 @@ int main(int argc,char **argv) {
                 const size_t count=app.tabs.size();const auto id=app.tabs[size_t(app.activeTab)].id;
                 click("tabs.new");settlePipeline();frame();frame();
                 requireExport(app.homeMode && app.tabs.size()==count+1,"v5 plus opens a blank browser tab");
+                click("tabs.switcher");frame();
+                requireExport(app.uiTestItems.contains("tabs.result."+std::to_string(app.activeTab)),
+                    "icon tab-list button opens searchable rows including the active tab");
+                click("tabs.result."+std::to_string(app.activeTab));frame();
+                requireExport(!app.uiTestItems.contains("tabs.result."+std::to_string(app.activeTab)),
+                    "choosing a tab from the list closes the popup");
+                const int blankTab=app.activeTab;
+                click("tabs.switcher");frame();click("tabs.result.0");settlePipeline();frame();
+                requireExport(app.activeTab==0 && !app.uiTestItems.contains("tabs.result.0"),
+                    "tab overview switches to a different document and closes");
+                app.switchTab(blankTab);settlePipeline();frame();frame();
                 for(size_t i=1;i<app.tabs.size();++i) {
                     const auto &first=app.uiTestItems.at("tabs.tab.0");
                     const auto &other=app.uiTestItems.at("tabs.tab."+std::to_string(i));

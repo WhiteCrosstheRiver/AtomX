@@ -16,33 +16,37 @@ cl /nologo /O2 /MD /D SPG_STATIC_LIBRARY /I third_party\spglib\include /I third_
 if errorlevel 1 exit /b 1
 lib /nologo /OUT:build\spglib.lib build\spglib\*.obj
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /D SPG_STATIC_LIBRARY /I third_party\imgui src\main.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\backends\imgui_impl_win32.cpp third_party\imgui\backends\imgui_impl_dx11.cpp /Fo:build\ /Fe:build\AtomX.exe /link build\spglib.lib build\atomx.res /SUBSYSTEM:WINDOWS
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /D SPG_STATIC_LIBRARY /I third_party\imgui src\main.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\backends\imgui_impl_win32.cpp third_party\imgui\backends\imgui_impl_dx11.cpp /Fo:build\ /Fe:build\AtomX.exe /link build\spglib.lib build\atomx.res /SUBSYSTEM:WINDOWS
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /I third_party\imgui /I src tests\style_stack_test.cpp build\imgui.obj build\imgui_draw.obj build\imgui_tables.obj build\imgui_widgets.obj build\imgui_impl_dx11.obj build\imgui_impl_win32.obj /Fo:build\ /Fe:build\style_stack_test.exe
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /I third_party\imgui /I src tests\style_stack_test.cpp build\imgui.obj build\imgui_draw.obj build\imgui_tables.obj build\imgui_widgets.obj build\imgui_impl_dx11.obj build\imgui_impl_win32.obj /Fo:build\ /Fe:build\style_stack_test.exe
 if errorlevel 1 exit /b 1
 build\style_stack_test.exe
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /D SPG_STATIC_LIBRARY tests\core_tests.cpp /Fo:build\ /Fe:build\core_tests.exe /link build\spglib.lib
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /I third_party\imgui tests\native_font_tests.cpp build\imgui.obj build\imgui_draw.obj build\imgui_tables.obj build\imgui_widgets.obj /Fo:build\ /Fe:build\native_font_tests.exe
+if errorlevel 1 exit /b 1
+build\native_font_tests.exe
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /D SPG_STATIC_LIBRARY tests\core_tests.cpp /Fo:build\ /Fe:build\core_tests.exe /link build\spglib.lib
 if errorlevel 1 exit /b 1
 build\core_tests.exe
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /D SPG_STATIC_LIBRARY tests\symmetry_surface_tests.cpp /Fo:build\ /Fe:build\symmetry_surface_tests.exe /link build\spglib.lib
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /D SPG_STATIC_LIBRARY tests\symmetry_surface_tests.cpp /Fo:build\ /Fe:build\symmetry_surface_tests.exe /link build\spglib.lib
 if errorlevel 1 exit /b 1
 build\symmetry_surface_tests.exe
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\poscar_tests.cpp /Fo:build\ /Fe:build\poscar_tests.exe
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj tests\poscar_tests.cpp /Fo:build\ /Fe:build\poscar_tests.exe
 if errorlevel 1 exit /b 1
 build\poscar_tests.exe
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\structure_io_tests.cpp /Fo:build\ /Fe:build\structure_io_tests.exe
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj tests\structure_io_tests.cpp /Fo:build\ /Fe:build\structure_io_tests.exe
 if errorlevel 1 exit /b 1
 build\structure_io_tests.exe
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 tests\render_shapes.cpp /Fo:build\ /Fe:build\render_shapes.exe
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj tests\render_shapes.cpp /Fo:build\ /Fe:build\render_shapes.exe
 if errorlevel 1 exit /b 1
 build\render_shapes.exe
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /D SPG_STATIC_LIBRARY /I third_party\imgui tests\export_workflow.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\backends\imgui_impl_win32.cpp third_party\imgui\backends\imgui_impl_dx11.cpp /Fo:build\ /Fe:build\export_workflow.exe /link build\spglib.lib build\atomx.res
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /D SPG_STATIC_LIBRARY /I third_party\imgui tests\export_workflow.cpp third_party\imgui\imgui.cpp third_party\imgui\imgui_draw.cpp third_party\imgui\imgui_tables.cpp third_party\imgui\imgui_widgets.cpp third_party\imgui\backends\imgui_impl_win32.cpp third_party\imgui\backends\imgui_impl_dx11.cpp /Fo:build\ /Fe:build\export_workflow.exe /link build\spglib.lib build\atomx.res
 if errorlevel 1 exit /b 1
 build\export_workflow.exe
 if errorlevel 1 exit /b 1

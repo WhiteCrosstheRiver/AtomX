@@ -22,6 +22,7 @@
 #include "imgui.h"
 #include "imgui_guard.hpp"
 #include "imgui_internal.h" // GetCurrentWindow / ImGuiLayoutType for the title-strip menu row
+#include "native_font.hpp"
 #include "ui_design.hpp"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
@@ -373,10 +374,11 @@ static bool glyphAvailable(unsigned codepoint) {
     return iconFont && iconFont->FindGlyphNoFallback(ImWchar(codepoint)) != nullptr;
 }
 static void theme(int choice = 0) {
+    ui_design::lightTheme=choice==1;
     ImGui::GetStyle() = ImGuiStyle{};
     if (choice == 1) ImGui::StyleColorsLight(); else ImGui::StyleColorsDark();
     auto &s = ImGui::GetStyle();
-    s.WindowPadding = {14,10}; s.FramePadding = {10,6}; s.ItemSpacing = {8,6};
+    s.WindowPadding = {14,10}; s.FramePadding = {10,5}; s.ItemSpacing = {8,6};
     s.WindowRounding = 10; s.ChildRounding = 6; s.FrameRounding = 6; s.PopupRounding = 9;
     s.ScrollbarSize = 9; s.WindowBorderSize = 1; s.ChildBorderSize = 1;
     s.FrameBorderSize = 1; s.PopupBorderSize = 1; s.GrabRounding = 2;
@@ -679,7 +681,7 @@ struct App {
     desktop::Preferences preferences;
     ComPtr<ID3D11ShaderResourceView> logo;
     HICON icon = nullptr;
-    bool showSettings = false, refreshFont = false, selectAnalysis = false, selectPipeline = false;
+    bool showSettings = false, refreshFont = false, refreshTheme = false, selectAnalysis = false, selectPipeline = false;
     // Help menu dialogs (deferred-open pattern shared with showSettings).
     bool showAbout = false, showSystemInfo = false;
     // Quick command search (Ctrl+P): paletteRequested arms keyboard focus on
@@ -775,10 +777,11 @@ struct App {
     }
     bool focusParticleAppearance = false;
     int renderMode = 0;
-    float cellColor[4] = {0.82f,0.9f,1.f,0.88f};
-    float cellWidth = 1.25f, cellGlow = 0.35f;
-    bool cellDashed = false, cellLabels = false;
+    float cellColor[4] = {.70f,.79f,.88f,.90f};
+    float cellWidth = 1.5f, cellGlow = .12f;
+    bool cellDashed = false, cellLabels = true;
     int cellDimension = 1;
+    bool cellSelected = false, requestCellParameters = false;
     bool colorCoding = false, colorDiscrete = false, colorSelectedOnly = false, colorAutoRange = false,
          colorSymmetricRange = false, colorReverse = false;
     bool colorLegend = true;
@@ -910,6 +913,10 @@ struct App {
         float radius = .32f;
         int particleShape = 0, viewportTool = 0;
         bool cell = true, particles = true, quad = false;
+        std::array<float,4> cellColor{.70f,.79f,.88f,.90f};
+        float cellWidth=1.5f,cellGlow=.12f;
+        bool cellDashed=false,cellLabels=true;
+        int cellDimension=1;
         bool creationMode = false;
         bool creationSketch = false;
         bool sketchContinuous = true;
@@ -941,6 +948,8 @@ struct App {
     std::filesystem::path projectPath;
     static document::View projectView(const StructureTab &t) {
         document::View v;v.creation=t.creationMode;v.cell=t.cell;v.particles=t.particles;v.radius=t.radius;
+        v.cellColor=t.cellColor;v.cellWidth=t.cellWidth;v.cellGlow=t.cellGlow;
+        v.cellDashed=t.cellDashed;v.cellLabels=t.cellLabels;v.cellDimension=t.cellDimension;
         v.title=t.title;v.basedOn=t.basedOn;v.shape=t.particleShape;v.tool=int(t.creationTool);
         v.order=t.sketchOrder;v.ringSize=t.ringSize;v.fragmentKey=t.fragmentKey;v.fragmentConnector=t.fragmentConnector;
         v.element=t.element;v.continuous=t.sketchContinuous;v.autoHydrogens=t.autoHydrogens;
@@ -1004,6 +1013,8 @@ struct App {
             t.path=project::pathFromUtf8(r.text());t.documentPath=project::pathFromUtf8(r.text());t.readerName=r.text();
             auto content=project::readDocument(r,atomBudget);auto &v=content.view;t.source=std::move(content.data);
             t.title=v.title;t.basedOn=v.basedOn;t.creationMode=v.creation;t.cell=v.cell;t.particles=v.particles;t.radius=v.radius;
+            t.cellColor=v.cellColor;t.cellWidth=v.cellWidth;t.cellGlow=v.cellGlow;
+            t.cellDashed=v.cellDashed;t.cellLabels=v.cellLabels;t.cellDimension=v.cellDimension;
             t.particleShape=v.shape;t.creationTool=CreationTool(v.tool);t.creationSketch=t.creationTool==CreationTool::Sketch;
             t.sketchOrder=v.order;t.ringSize=v.ringSize;t.fragmentKey=v.fragmentKey;t.fragmentConnector=v.fragmentConnector;
             t.sketchContinuous=v.continuous;t.autoHydrogens=v.autoHydrogens;t.propertiesOpen=v.propertiesOpen;t.propertyPage=v.propertyPage;
@@ -1815,6 +1826,8 @@ struct App {
         tab.particleShape = particleShape;
         tab.viewportTool = viewportTool;
         tab.cell = cell;
+        std::copy(std::begin(cellColor),std::end(cellColor),tab.cellColor.begin());
+        tab.cellWidth=cellWidth;tab.cellGlow=cellGlow;tab.cellDashed=cellDashed;tab.cellLabels=cellLabels;tab.cellDimension=cellDimension;
         tab.particles = particles;
         tab.quad = quad;
         tab.creationMode = creationMode;
@@ -1858,6 +1871,9 @@ struct App {
         particleShape = tab.particleShape;
         viewportTool = tab.viewportTool;
         cell = tab.cell;
+        std::copy(tab.cellColor.begin(),tab.cellColor.end(),std::begin(cellColor));
+        cellWidth=tab.cellWidth;cellGlow=tab.cellGlow;cellDashed=tab.cellDashed;cellLabels=tab.cellLabels;cellDimension=tab.cellDimension;
+        cellSelected=false;requestCellParameters=false;
         particles = tab.particles;
         quad = tab.quad;
         creationMode = tab.creationMode;
@@ -2163,9 +2179,9 @@ struct App {
                 ImGui::TextWrapped(loc::text("逐个指定原子类型；不自动判断杂化。此计算包含所有原子对，不是完整 UFF。默认截断为 4 sigma（可编辑）。"));
             }
             bool geometric=ljOptions.geometric;
-            if(ImGui::Checkbox(loc::label("Geometric sigma / cutoff mixing"),&geometric)){ljOptions.geometric=geometric;changed=true;}
-            changed|=ImGui::Checkbox(loc::label("Energy shift to zero at cutoff"),&ljOptions.shift);
-            changed|=ImGui::Checkbox(loc::label("Use document periodic boundaries"),&ljOptions.periodic);
+            if(ui_design::checkbox(loc::label("Geometric sigma / cutoff mixing"),&geometric)){ljOptions.geometric=geometric;changed=true;}
+            changed|=ui_design::checkbox(loc::label("Energy shift to zero at cutoff"),&ljOptions.shift);
+            changed|=ui_design::checkbox(loc::label("Use document periodic boundaries"),&ljOptions.periodic);
             ImGui::TextDisabled(loc::text("Unchecked mixing: Lorentz-Berthelot (arithmetic sigma/cutoff, geometric epsilon)"));
             ImGui::BeginChild("lj-parameters",{0,U(155)},true);
             if(ImGui::BeginTable("parameters",5,ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_BordersInnerV)) {
@@ -2636,7 +2652,7 @@ struct App {
             recordUiTestItem("creation.property-name-"+name);
         }ImGui::EndCombo();}
         ImGui::TextWrapped("%s",atomPropertySummary.c_str());
-        ImGui::Checkbox(loc::label("将选中行设为缺失值"),&atomPropertyMissing);recordUiTestItem("creation.property-missing");
+        ui_design::checkbox(loc::label("将选中行设为缺失值"),&atomPropertyMissing);recordUiTestItem("creation.property-missing");
         ImGui::BeginDisabled(atomPropertyMissing);ImGui::SetNextItemWidth(U(260));
         ImGui::InputDouble(loc::label("新值"),&atomPropertyValue,0,0,"%.12g");recordUiTestItem("creation.property-value");ImGui::EndDisabled();
         ImGui::TextWrapped(loc::text("应用到打开时选中的原子；其他行保留。Charge 是部分电荷，不改变形式电荷，也不自动补氢。\n新建 Charge 列时，未赋值原子保持缺失。缺失值可保存在 .atomx 中；导出包含该列的 Extended XYZ 需先补齐数值。"));
@@ -2761,7 +2777,7 @@ struct App {
         if(!ImGui::BeginPopupModal(loc::label("原子化学设置##chemistry"),nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
         ImGui::Text(loc::text("打开时选中 %zu 个原子"),chemistrySelection.size());
         ImGui::TextWrapped("%s",chemistrySummary.c_str());
-        ImGui::Checkbox(loc::label("修改形式电荷"),&chemistrySetCharge);recordUiTestItem("creation.chemistry-charge-enable");
+        ui_design::checkbox(loc::label("修改形式电荷"),&chemistrySetCharge);recordUiTestItem("creation.chemistry-charge-enable");
         ImGui::BeginDisabled(!chemistrySetCharge);ImGui::SetNextItemWidth(U(150));
         ImGui::InputInt(loc::label("整数形式电荷"),&chemistryCharge,0,0);recordUiTestItem("creation.chemistry-charge");ImGui::EndDisabled();
         const char *preview=chemistryHybridChoice?chemistry::hybridNames[chemistryHybridChoice-1]:"保持原设置";
@@ -3222,13 +3238,13 @@ struct App {
             ImGui::TextDisabled(loc::text("重原子坐标不变；形式电荷与文件中的部分电荷分开处理"));
             ImGui::Separator();
             ImGui::BeginDisabled(documentsBusy());
-            bool changed=ImGui::Checkbox(loc::label("整个可见体系"),&hydrogenOptions.all);recordUiTestItem("creation.hydrogen-all");
+            bool changed=ui_design::checkbox(loc::label("整个可见体系"),&hydrogenOptions.all);recordUiTestItem("creation.hydrogen-all");
             if(!hydrogenOptions.all) ImGui::Text(loc::text("打开时的选择：%zu 原子；末端 H 对应其相连重原子"),hydrogenOptions.selection.size());
-            changed|=ImGui::Checkbox(loc::label("只补缺少的氢（保留已有氢的位置与数量）"),&hydrogenOptions.onlyAdd);recordUiTestItem("creation.hydrogen-only-add");
+            changed|=ui_design::checkbox(loc::label("只补缺少的氢（保留已有氢的位置与数量）"),&hydrogenOptions.onlyAdd);recordUiTestItem("creation.hydrogen-only-add");
             const char *hybrids[]={loc::text("沿用已有设置 / 自动"),loc::text("SP · 直线"),loc::text("SP2 · 三角平面"),loc::text("SP3 · 四面体"),loc::text("重置为自动判断")};
             ImGui::SetNextItemWidth(U(260));changed|=ImGui::Combo(loc::label("局部杂化"),&hydrogenOptions.hybridization,hybrids,5);
             recordUiTestItem("creation.hydrogen-hybrid");
-            changed|=ImGui::Checkbox(loc::label("指定形式电荷"),&hydrogenOptions.setCharge);recordUiTestItem("creation.hydrogen-charge-override");
+            changed|=ui_design::checkbox(loc::label("指定形式电荷"),&hydrogenOptions.setCharge);recordUiTestItem("creation.hydrogen-charge-override");
             if(hydrogenOptions.setCharge) {ImGui::SetNextItemWidth(U(150));changed|=ImGui::InputInt(loc::label("整数电荷"),&hydrogenOptions.charge);recordUiTestItem("creation.hydrogen-charge");}
             if(changed) {hydrogenPlan.reset();hydrogenMessage.clear();}
             ImGui::EndDisabled();
@@ -3733,6 +3749,8 @@ struct App {
     document::View captureDocumentView() const {
         document::View v;
         v.creation=creationMode; v.cell=cell; v.particles=particles;
+        std::copy(std::begin(cellColor),std::end(cellColor),v.cellColor.begin());
+        v.cellWidth=cellWidth;v.cellGlow=cellGlow;v.cellDashed=cellDashed;v.cellLabels=cellLabels;v.cellDimension=cellDimension;
         const auto &camera=cameras[creationMode?3:active];
         v.camera={camera.yaw,camera.pitch,camera.zoom,camera.panX,camera.panY};
         v.cameraRoll=camera.roll;
@@ -3762,6 +3780,9 @@ struct App {
         camera.roll=std::remainder(v.cameraRoll,DirectX::XM_2PI);
         camera.fitSelected=v.fitSelected; camera.fitLo=v.fitLo; camera.fitHi=v.fitHi;
         cell=v.cell; particles=v.particles; radius=v.radius; particleShape=v.shape;
+        std::copy(v.cellColor.begin(),v.cellColor.end(),std::begin(cellColor));
+        cellWidth=v.cellWidth;cellGlow=v.cellGlow;cellDashed=v.cellDashed;cellLabels=v.cellLabels;cellDimension=v.cellDimension;
+        cellSelected=false;requestCellParameters=false;
         syncAppearance(source.species);
         if (!v.styles.empty()) for (size_t i=0;i<v.styles.size();++i)
             gpu.styles[i]={v.styles[i].color,v.styles[i].visual,v.styles[i].axes};
@@ -3845,7 +3866,7 @@ struct App {
             panel=="Creation file properties" || panel=="Creation selection";
         ImGui::Begin(name, nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
                          ImGuiWindowFlags_NoSavedSettings | (actionBar?ImGuiWindowFlags_HorizontalScrollbar:0) | ((panel == "Title" ||
                          (creationMode && panel.starts_with("Creation") &&
                           !scrollableCreationPanel)) ?
@@ -4275,11 +4296,12 @@ struct App {
             if (kind == 2) desktop::hide(window);
             if (kind == 3) PostQuitMessage(0);
             if (kind == 4) showSettings = true;
-            if(kind==5){preferences.theme=preferences.theme==1?0:1;theme(preferences.theme);try{preferences.save();}catch(const std::exception &ex){error=ex.what();}}
+            if(kind==5){preferences.theme=preferences.theme==1?0:1;refreshTheme=true;try{preferences.save();}catch(const std::exception &ex){error=ex.what();}}
         }
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
         if (kind == 4) recordUiTestItem("title.settings");
+        if (kind == 5) recordUiTestItem("title.theme");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", loc::text(tip));
         auto p = ImGui::GetItemRectMin(); auto *d = ImGui::GetWindowDrawList();
         ImVec2 c{p.x+U(18),p.y+U(15)};
@@ -4674,8 +4696,12 @@ struct App {
             if(ImGui::InvisibleButton("##tab",{width,titleH}))switchTab(index);
             recordUiTestItem("tabs.tab."+std::to_string(index));
             const bool hover=ImGui::IsItemHovered();auto hi=ImGui::GetItemRectMax();auto *d=ImGui::GetWindowDrawList();
-            d->AddRectFilled(lo,hi,ImGui::GetColorU32(selected?ImGuiCol_WindowBg:hover?ImGuiCol_TabHovered:ImGuiCol_ChildBg),U(8),ImDrawFlags_RoundCornersTop);
-            d->AddRect(lo,hi,ImGui::GetColorU32(selected?ImGuiCol_SeparatorActive:ImGuiCol_Border),U(8),ImDrawFlags_RoundCornersTop);
+            if(selected || hover) {
+                d->AddRectFilled(lo,hi,ImGui::GetColorU32(selected?ImGuiCol_WindowBg:ImGuiCol_TabHovered),U(8),ImDrawFlags_RoundCornersTop);
+                if(selected)d->AddRect(lo,hi,ImGui::GetColorU32(ui_design::rgb(ui_design::light()?0x9daaba:0x566371)),U(8),ImDrawFlags_RoundCornersTop);
+            } else if(index+1!=activeTab) {
+                d->AddLine({hi.x,lo.y+U(11)},{hi.x,hi.y-U(11)},ImGui::GetColorU32(ImGuiCol_Border));
+            }
             const auto tone=authored?ui_design::tool(0x52d38a,0x008d48):ui_design::tool(0xf0a431,0xb86e00);
             drawCreationIcon(d,{lo.x+U(16),lo.y+titleH*.5f},home?"home":authored?"draw":"eye",ImGui::GetColorU32(tone));
             if(!tabs[size_t(index)].pinned) {
@@ -4739,18 +4765,46 @@ struct App {
             recordUiTestItem("tabs.scroll-right");
         }
         ImGui::SetCursorPos({w-U(321),U(5)});
-        if(ImGui::Button((std::to_string(tabs.size())+" v##all-tabs").c_str(),{U(44),U(30)}))ImGui::OpenPopup("##all-tabs-popup");
+        if(ImGui::InvisibleButton("##all-tabs",{U(36),U(30)},ImGuiButtonFlags_EnableNav))ImGui::OpenPopup("##all-tabs-popup");
         recordUiTestItem("tabs.switcher");
+        {auto lo=ImGui::GetItemRectMin();auto hi=ImGui::GetItemRectMax();auto *d=ImGui::GetWindowDrawList();
+            ImGui::RenderNavCursor(ImRect(lo,hi),ImGui::GetItemID());
+            if(ImGui::IsItemHovered() || ImGui::IsPopupOpen("##all-tabs-popup"))d->AddRectFilled(lo,hi,ImGui::GetColorU32(ImGuiCol_ButtonHovered),U(6));
+            const auto color=ImGui::GetColorU32(ImGuiCol_Text);
+            d->AddLine({lo.x+U(12),lo.y+U(12)},{lo.x+U(18),lo.y+U(18)},color,U(1.8f));
+            d->AddLine({lo.x+U(18),lo.y+U(18)},{lo.x+U(24),lo.y+U(12)},color,U(1.8f));
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("%s · %zu",loc::text("所有标签页"),tabs.size());}
         if(ImGui::BeginPopup("##all-tabs-popup")) {
-            ImGui::SetNextItemWidth(U(260));ImGui::InputTextWithHint("##tab-search",loc::text("搜索标签页"),tabSearch,sizeof(tabSearch));
+            ImGui::TextDisabled("%s  (%zu)",loc::text("所有标签页"),tabs.size());
+            if(ImGui::IsWindowAppearing())ImGui::SetKeyboardFocusHere();
+            ImGui::SetNextItemWidth(U(300));ImGui::InputTextWithHint("##tab-search",loc::text("搜索标签页"),tabSearch,sizeof(tabSearch));
             ImGui::Separator();
+            ImGui::BeginChild("##tab-results",{U(300),std::min(U(320),U(34)*float(tabs.size())+U(4))});
             for(int i=0;i<int(tabs.size());++i){
                 const std::string name=i==activeTab?tabTitle():tabs[size_t(i)].title;
                 if(*tabSearch && name.find(tabSearch)==std::string::npos)continue;
                 ImGui::PushID(i);
-                if(ImGui::Selectable(name.c_str(),i==activeTab))switchTab(i);ImGui::PopID();}
+                const auto lo=ImGui::GetCursorScreenPos();
+                if(ImGui::Selectable("##tab-result",i==activeTab,0,{0,U(30)})){switchTab(i);ImGui::CloseCurrentPopup();}
+                recordUiTestItem("tabs.result."+std::to_string(i));
+                const bool authored=i==activeTab?creationMode:tabs[size_t(i)].creationMode;
+                const bool home=i==activeTab?homeMode:tabs[size_t(i)].home;
+                auto *draw=ImGui::GetWindowDrawList();
+                drawCreationIcon(draw,{lo.x+U(13),lo.y+U(15)},home?"home":authored?"draw":"eye",
+                    ImGui::GetColorU32(authored?ui_design::tool(0x52d38a,0x008d48):ui_design::tool(0xf0a431,0xb86e00)));
+                ImGui::RenderTextEllipsis(draw,pixelPosition({lo.x+U(31),lo.y+(U(30)-ImGui::GetFontSize())*.5f}),
+                    {lo.x+U(278),lo.y+U(30)},lo.x+U(278),lo.x+U(278),name.c_str(),nullptr,nullptr);
+                if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",name.c_str());
+                ImGui::PopID();}
+            ImGui::EndChild();
             ImGui::EndPopup();}
-        ImGui::SameLine(0,U(3));if(ImGui::Button("+##new-tab",{U(30),U(30)}))newHomeTab();recordUiTestItem("tabs.new");
+        ImGui::SameLine(0,U(3));if(ImGui::InvisibleButton("##new-tab",{U(30),U(30)},ImGuiButtonFlags_EnableNav))newHomeTab();recordUiTestItem("tabs.new");
+        {auto lo=ImGui::GetItemRectMin();auto *d=ImGui::GetWindowDrawList();
+            ImGui::RenderNavCursor(ImRect(lo,ImGui::GetItemRectMax()),ImGui::GetItemID());
+            if(ImGui::IsItemHovered())d->AddRectFilled(lo,{lo.x+U(30),lo.y+U(30)},ImGui::GetColorU32(ImGuiCol_ButtonHovered),U(6));
+            const auto c=ImGui::GetColorU32(ImGuiCol_Text);d->AddLine({lo.x+U(9),lo.y+U(15)},{lo.x+U(21),lo.y+U(15)},c,U(1.5f));
+            d->AddLine({lo.x+U(15),lo.y+U(9)},{lo.x+U(15),lo.y+U(21)},c,U(1.5f));
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("%s (Ctrl+T)",loc::text("新建标签"));}
         ImGui::SetCursorPos({w-U(232),U(5)});
         control("##theme",5,"切换深色 / 浅色");ImGui::SameLine(0,0);
         control("##settings",4,"Settings");ImGui::SameLine(0,0);
@@ -5246,9 +5300,9 @@ struct App {
         if (ImGui::Button(loc::label("+ Import dataset"), {-1, U(32)}))
             open();
         heading("SCENE");
-        ImGui::Checkbox(loc::label("Particles"), &particles);
-        ImGui::Checkbox(loc::label("Simulation cell"), &cell);
-        ImGui::Checkbox(loc::label("Data inspector"), &showTable);
+        ui_design::checkbox(loc::label("Particles"), &particles);
+        ui_design::checkbox(loc::label("Simulation cell"), &cell);
+        ui_design::checkbox(loc::label("Data inspector"), &showTable);
         heading("PARTICLE TYPES");
         for (size_t i = 0; i < source.species.size(); ++i) {
             ImGui::BulletText("%s", source.species[i].c_str());
@@ -5621,7 +5675,7 @@ struct App {
             char number[64];if(measured)snprintf(number,sizeof(number)," · %.3f %s",*measured,m.count==2?"Å":"°");else snprintf(number,sizeof(number)," · 未定义");
             label+=number;label+=m.fixed?" · 固定":" · 自由";label+="##constraint-"+std::to_string(i);
             auto it=std::find(measurementConstraintRows.begin(),measurementConstraintRows.end(),int(i));bool selected=it!=measurementConstraintRows.end();
-            if(ImGui::Checkbox(label.c_str(),&selected)){if(selected)measurementConstraintRows.push_back(int(i));else measurementConstraintRows.erase(it);}
+            if(ui_design::checkbox(label.c_str(),&selected)){if(selected)measurementConstraintRows.push_back(int(i));else measurementConstraintRows.erase(it);}
             recordUiTestItem("creation.measurement-row-"+std::to_string(i));
         }ImGui::EndChild();
         const auto summary=geometry::fixedSummary(measurementConstraintSource,measurementConstraintRows);
@@ -5746,7 +5800,7 @@ struct App {
             }
             ImGui::EndChild();
             bool visible=creationDisplay.monitorsVisible;
-            if(ImGui::Checkbox(loc::label("显示测量标记"),&visible)) { auto next=creationDisplay; next.monitorsVisible=visible; editCreationDisplay(std::move(next),"显示测量标记"); }
+            if(ui_design::checkbox(loc::label("显示测量标记"),&visible)) { auto next=creationDisplay; next.monitorsVisible=visible; editCreationDisplay(std::move(next),"显示测量标记"); }
             if(ImGui::Button(loc::label("测量模拟约束..."),{-1,U(30)}))requestMeasurementConstraints();recordUiTestItem("creation.edit-measurement-constraints");
         }
         const int i=creationDisplay.activeMonitor;
@@ -5757,7 +5811,7 @@ struct App {
             ImGui::TextDisabled("%s",atoms.c_str());
             ImGui::SetNextItemWidth(U(125)); ImGui::InputDouble(m.count==2?loc::label("目标 Å"):loc::label("目标 °"),&geometryTarget,0,0,"%.4f");
             recordUiTestItem("creation.geometry-value");
-            ImGui::Checkbox(loc::label("反向移动另一侧"),&geometryInverted); recordUiTestItem("creation.geometry-invert");
+            ui_design::checkbox(loc::label("反向移动另一侧"),&geometryInverted); recordUiTestItem("creation.geometry-invert");
             ImGui::BeginDisabled(documentsBusy());
             if(ImGui::Button(loc::label("应用数值"))) applyGeometryValue(); recordUiTestItem("creation.geometry-apply");
             ImGui::SameLine(); if(ImGui::Button(loc::label("移除标记"))) removeGeometryMonitor(); recordUiTestItem("creation.geometry-remove");
@@ -5770,6 +5824,7 @@ struct App {
         ImGui::PopTextWrapPos();
     }
     void chooseCreationTool(CreationTool tool) {
+        cellSelected=false;
         creationSketchInsert=false;creationInsertHover=-1;
         geometryPending.clear(); geometryPanelMonitor=-1;
         geometryDragPlans[0].reset(); geometryDragPlans[1].reset();
@@ -5794,6 +5849,7 @@ struct App {
     }
     void selectCreationAtom(int index, bool shift, bool toggle = false) {
         if (index>=0 && !creationAtomVisible(index)) return;
+        cellSelected=false;
         if(!shift)creationBondSelection.clear();
         if (index < 0) { if (!shift) creationSelection.clear(); }
         else if (!shift) creationSelection = {index};
@@ -5815,6 +5871,7 @@ struct App {
     }
     void selectCreationBond(int row,bool shift,bool toggle=false) {
         if(!creationBondVisible(row))return;
+        cellSelected=false;
         if(!shift) {creationSelection.clear();creationPick=-1;creationBondSelection.clear();}
         auto found=std::find(creationBondSelection.begin(),creationBondSelection.end(),row);
         if(found==creationBondSelection.end())creationBondSelection.push_back(row);
@@ -6039,7 +6096,7 @@ struct App {
         if(ImGui::Begin(loc::label("显示样式##creation-styles"),&showCreationStyles)) {
             referenceHelp("elements");
             ImGui::BeginDisabled(documentsBusy());
-            ImGui::Checkbox(loc::label("整个体系"),&creationStyleAll); recordUiTestItem("creation.style-all");
+            ui_design::checkbox(loc::label("整个体系"),&creationStyleAll); recordUiTestItem("creation.style-all");
             ImGui::EndDisabled();
             if(!creationStyleAll) ImGui::Text(loc::text("选中 %zu 个原子"),creationSelection.size());
             if(ImGui::BeginTabBar("##appearance-pages")) {
@@ -6117,8 +6174,8 @@ struct App {
                     ImGui::SetNextItemWidth(U(210)); ImGui::InputDouble(loc::label("下限"),&cr.low,0,0,"%.6g");
                     ImGui::SetNextItemWidth(U(210)); ImGui::InputDouble(loc::label("上限"),&cr.high,0,0,"%.6g");
                     ImGui::Combo(loc::label("渐变"),&cr.gradient,loc::items("Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0Viridis\0Plasma\0"));
-                    ImGui::Checkbox(loc::label("反转颜色"),&cr.reverse); ImGui::SameLine(); ImGui::Checkbox(loc::label("12 段"),&cr.discrete);
-                    ImGui::Checkbox(loc::label("显示全体系图例"),&cr.legend);
+                    ui_design::checkbox(loc::label("反转颜色"),&cr.reverse); ImGui::SameLine(); ui_design::checkbox(loc::label("12 段"),&cr.discrete);
+                    ui_design::checkbox(loc::label("显示全体系图例"),&cr.legend);
                 } else ImGui::TextWrapped(loc::text("非负整数编号保持固定颜色；可选择运动分组或层编号，其他值为灰色。"));
                 ImGui::TextDisabled(loc::text("缺失值为灰色；颜色随数据更新，范围仅手动调整。"));
             }
@@ -7195,6 +7252,77 @@ struct App {
         }
         return contextRequested;
     }
+    struct CellScreenGeometry {
+        std::array<ImVec2,8> corners{};
+        std::array<bool,8> valid{};
+    };
+    CellScreenGeometry projectCell(ImVec2 p,ImVec2 size,const Camera &cam) {
+        using namespace DirectX;
+        CellScreenGeometry geometry;
+        const auto matrix=creationMode?creationProjection(result.data,cam,size).combined:
+            gpu.matrix(result.data,cam,size.x/std::max(size.y,1.f),true,radius);
+        const auto &data=result.data;
+        const bool lattice=std::any_of(data.cell.begin(),data.cell.end(),[](double x){return std::abs(x)>1e-12;});
+        for(int j=0;j<8;++j) {
+            Vec3 at;
+            if(lattice) {
+                const auto &c=data.cell;
+                at={float((j&1?c[0]:0)+(j&2?c[3]:0)+(j&4?c[6]:0))+data.origin.x,
+                    float((j&1?c[1]:0)+(j&2?c[4]:0)+(j&4?c[7]:0))+data.origin.y,
+                    float((j&1?c[2]:0)+(j&2?c[5]:0)+(j&4?c[8]:0))+data.origin.z};
+            }else at={j&1?data.hi.x:data.lo.x,j&2?data.hi.y:data.lo.y,j&4?data.hi.z:data.lo.z};
+            XMFLOAT4 q;XMStoreFloat4(&q,XMVector4Transform(XMVectorSet(at.x,at.y,at.z,1),matrix));
+            if(q.w<=0 || q.z<=0 || q.z>=q.w)continue;
+            geometry.corners[j]={p.x+(q.x/q.w+1)*size.x*.5f,p.y+(1-q.y/q.w)*size.y*.5f};
+            geometry.valid[j]=std::isfinite(geometry.corners[j].x) && std::isfinite(geometry.corners[j].y);
+        }
+        return geometry;
+    }
+    bool cellEdgeHit(const CellScreenGeometry &geometry,ImVec2 mouse) const {
+        const float tolerance=U(5)+U(cellWidth)*.5f;
+        for(int j=0;j<8;++j)for(int k=1;k<=4;k*=2) {
+            if((j&k) || !geometry.valid[j] || !geometry.valid[j|k] ||
+                (cellDimension!=1 && ((j&4) || ((j|k)&4))))continue;
+            const auto a=geometry.corners[j],b=geometry.corners[j|k];
+            const float dx=b.x-a.x,dy=b.y-a.y,lengthSquared=dx*dx+dy*dy;
+            if(lengthSquared<1)continue;
+            const float t=std::clamp(((mouse.x-a.x)*dx+(mouse.y-a.y)*dy)/lengthSquared,0.f,1.f);
+            if(std::hypot(mouse.x-a.x-t*dx,mouse.y-a.y-t*dy)<=tolerance)return true;
+        }
+        return false;
+    }
+    void cellAppearancePopup() {
+        ImGui::SetNextWindowSizeConstraints({U(280),0},{U(360),FLT_MAX});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{U(14),U(10)});
+        const bool open=ImGui::BeginPopup("cell-appearance-menu");
+        ImGui::PopStyleVar();
+        if(!open)return;
+        ImGui::TextUnformatted(loc::text("Simulation cell"));ImGui::SameLine();referenceHelp("modeling");
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(U(160));
+        ImGui::SliderFloat(loc::label("Line width"),&cellWidth,.5f,8.f,"%.1f px",ImGuiSliderFlags_AlwaysClamp);
+        recordUiTestItem("cell.width");
+        ImGui::SetNextItemWidth(U(180));
+        ImGui::ColorEdit4(loc::label("Cell line color"),cellColor,ImGuiColorEditFlags_AlphaBar|ImGuiColorEditFlags_NoInputs);
+        recordUiTestItem("cell.color");
+        ImGui::SetNextItemWidth(U(160));
+        ImGui::SliderFloat(loc::label("Glow"),&cellGlow,0.f,1.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+        recordUiTestItem("cell.glow");
+        ui_design::checkbox(loc::label("Dashed cell outline"),&cellDashed);recordUiTestItem("cell.dashed");
+        ui_design::checkbox(loc::label("Show cell labels"),&cellLabels);recordUiTestItem("cell.labels");
+        ImGui::Separator();
+        if(ImGui::MenuItem(loc::label("编辑晶胞参数..."),nullptr,false,creationMode && !documentsBusy())) {
+            requestCellParameters=true;creationPropertiesOpen=true;creationPropertyPage=0;
+        }
+        recordUiTestItem("cell.parameters");
+        if(ImGui::MenuItem(loc::label("Reset cell appearance"))) {
+            const document::View defaults;
+            std::copy(defaults.cellColor.begin(),defaults.cellColor.end(),std::begin(cellColor));
+            cellWidth=defaults.cellWidth;cellGlow=defaults.cellGlow;cellDashed=defaults.cellDashed;cellLabels=defaults.cellLabels;
+        }
+        if(ImGui::MenuItem(loc::label("取消选择")))cellSelected=false;
+        ImGui::EndPopup();
+    }
     void viewport(int i, float w, float h) {
         ImGui::PushID(i);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,creationMode ? ImVec2{0,0} : ImVec2{U(4),U(4)});
@@ -7218,7 +7346,23 @@ struct App {
         if (creationMode) creationViewportSize=avail;
         const bool viewportHovered = ImGui::IsItemHovered();
         if (creationMode) recordUiTestItem("creation.viewport","creation.viewport");
-        const bool creationContextRequested=creationMode && creationPointer(p,avail,cam,viewportHovered);
+        auto cellGeometry=cell?projectCell(p,avail,cam):CellScreenGeometry{};
+        const bool cellHit=cell && viewportHovered && cellEdgeHit(cellGeometry,ImGui::GetIO().MousePos);
+        const bool cellSelectTool=creationTool==CreationTool::Select || creationTool==CreationTool::Move;
+        const bool selectCell=creationMode && cellSelectTool && !documentsBusy() && !staleResult &&
+            cellHit && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
+            // At overlapping edges, atoms/bonds keep their fragment-selection
+            // gesture. The cell is picked from its unobstructed outline.
+            creationHit(p,avail,cam,ImGui::GetIO().MousePos)<0 &&
+            creationBondHit(p,avail,cam,ImGui::GetIO().MousePos,true)<0;
+        if(!cell || ImGui::IsKeyPressed(ImGuiKey_Escape))cellSelected=false;
+        if(selectCell) {
+            cellSelected=true;creationSelection.clear();creationBondSelection.clear();creationPick=creationHover=-1;
+            creationDrag=CreationDrag::None;creationDragAtoms.clear();geometryPending.clear();geometryPanelMonitor=-1;
+        }else if(viewportHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))cellSelected=false;
+        const bool creationContextRequested=creationMode && !selectCell && creationPointer(p,avail,cam,viewportHovered);
+        if(creationMode && cellHit && cellSelectTool && creationDrag==CreationDrag::None)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (ImGui::IsItemHovered()) {
             if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::GetIO().MouseWheel)
                 active = i;
@@ -7230,6 +7374,10 @@ struct App {
                 rightStart.x>=p.x && rightStart.x<=p.x+avail.x &&
                 rightStart.y>=p.y && rightStart.y<=p.y+avail.y;
             if (creationContextRequested || viewContextRequested) {
+                if(cellSelected && (cellHit || creationHover<0)) {
+                    ImGui::OpenPopup("cell-appearance-menu");
+                }else {
+                cellSelected=false;
                 if (creationMode && creationHover>=0 &&
                     std::find(creationSelection.begin(),creationSelection.end(),creationHover)==creationSelection.end())
                     selectCreationAtom(creationHover,false);
@@ -7240,6 +7388,7 @@ struct App {
                 }
                 creationContextPoint=io.MousePos;
                 ImGui::OpenPopup(loc::label("viewport-structure-menu"));
+                }
             }
             if (!creationMode && ImGui::IsMouseDragging(0) && viewportTool == 2) {
                 cam.yaw -= ImGui::GetIO().MouseDelta.x * .008f;
@@ -7260,51 +7409,47 @@ struct App {
         }
         auto *draw = ImGui::GetWindowDrawList();
         if (cell) {
-            using namespace DirectX;
-            auto m = creationMode ? creationProjection(result.data,cam,avail).combined
-                : gpu.matrix(result.data, cam, avail.x / std::max(avail.y, 1.f), true, radius);
-            ImVec2 corners[8];
-            bool valid[8];
-            bool lattice = source.cell[0] != 0 || source.cell[4] != 0 || source.cell[8] != 0;
-            for (int j = 0; j < 8; j++) {
-                float x, y, z;
-                if (lattice) {
-                    auto &c = result.data.cell;
-                    x = float((j & 1 ? c[0] : 0) + (j & 2 ? c[3] : 0) + (j & 4 ? c[6] : 0));
-                    y = float((j & 1 ? c[1] : 0) + (j & 2 ? c[4] : 0) + (j & 4 ? c[7] : 0));
-                    z = float((j & 1 ? c[2] : 0) + (j & 2 ? c[5] : 0) + (j & 4 ? c[8] : 0));
-                    x += result.data.origin.x;
-                    y += result.data.origin.y;
-                    z += result.data.origin.z;
-                } else {
-                    x = j & 1 ? result.data.hi.x : result.data.lo.x;
-                    y = j & 2 ? result.data.hi.y : result.data.lo.y;
-                    z = j & 4 ? result.data.hi.z : result.data.lo.z;
-                }
-                XMFLOAT4 q;
-                XMStoreFloat4(&q, XMVector4Transform(XMVectorSet(x, y, z, 1), m));
-                valid[j] = q.w > 0 && q.z > 0;
-                corners[j] = {p.x + (q.x / q.w + 1) * avail.x * .5f,
-                              p.y + (1 - q.y / q.w) * avail.y * .5f};
-            }
+            // Reproject after any camera input. Picking and drawing share the
+            // same twelve edges, including skew cells and two-dimensional views.
+            cellGeometry=projectCell(p,avail,cam);
+            const auto &corners=cellGeometry.corners;
+            const auto &valid=cellGeometry.valid;
+            const ImVec4 tint{cellColor[0],cellColor[1],cellColor[2],cellColor[3]};
+            const auto hi=ImGui::ColorConvertFloat4ToU32(tint);
+            const auto glow=ImGui::ColorConvertFloat4ToU32({tint.x,tint.y,tint.z,tint.w*cellGlow});
+            const float width=U(cellWidth)+(cellSelected?U(.5f):0.f);
             draw->PushClipRect(p, {p.x + avail.x, p.y + avail.y}, true);
             for (int j = 0; j < 8; j++)
                 for (int k = 1; k <= 4; k *= 2)
                     if (!(j & k) && valid[j] && valid[j | k] &&
                         (cellDimension == 1 || (!(j & 4) && !((j | k) & 4)))) {
-                        auto c = creationMode ? IM_COL32(90,95,102,55) :
-                            ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]*cellGlow});
-                        auto hi = creationMode ? IM_COL32(114,119,125,128) :
-                            ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],cellColor[3]});
-                        if (!creationMode) draw->AddLine(corners[j], corners[j | k], c, cellWidth+4.f);
-                        if (!cellDashed) draw->AddLine(corners[j], corners[j | k], hi, creationMode ? U(1) : cellWidth);
-                        else { auto a=corners[j], b=corners[j|k]; for(int q=0;q<8;q+=2){float t0=q/8.f,t1=(q+1)/8.f;draw->AddLine({a.x+(b.x-a.x)*t0,a.y+(b.y-a.y)*t0},{a.x+(b.x-a.x)*t1,a.y+(b.y-a.y)*t1},hi,cellWidth);} }
+                        const auto a=corners[j],b=corners[j|k];
+                        auto segment=[&](ImVec2 from,ImVec2 to) {
+                            if(cellSelected)draw->AddLine(from,to,IM_COL32(40,177,255,150),width+U(3));
+                            if(cellGlow>0)draw->AddLine(from,to,glow,width+U(3));
+                            draw->AddLine(from,to,hi,width);
+                        };
+                        if(!cellDashed)segment(a,b);
+                        else {
+                            const float length=std::hypot(b.x-a.x,b.y-a.y);
+                            const int count=int(std::clamp(std::ceil(length/U(12)),1.f,512.f));
+                            for(int dash=0;dash<count;++dash) {
+                                const float t0=float(dash)/count,t1=(float(dash)+.58f)/count;
+                                segment({a.x+(b.x-a.x)*t0,a.y+(b.y-a.y)*t0},{a.x+(b.x-a.x)*t1,a.y+(b.y-a.y)*t1});
+                            }
+                        }
                     }
-            if (creationMode) {
-                draw->AddText(corners[1], IM_COL32(232,75,70,255), "a");
-                draw->AddText(corners[2], IM_COL32(42,207,100,255), "b");
-                draw->AddText(corners[4], IM_COL32(32,170,237,255), "c");
-            } else if (cellLabels) { draw->AddText(corners[0], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "O"); draw->AddText(corners[1], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "A"); draw->AddText(corners[2], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "B"); draw->AddText(corners[4], ImGui::ColorConvertFloat4ToU32({cellColor[0],cellColor[1],cellColor[2],1}), "C"); }
+            if(cellLabels) {
+                if(valid[1])draw->AddText({std::round(corners[1].x)+U(4),std::round(corners[1].y)+U(3)},IM_COL32(244,103,96,255),"a");
+                if(valid[2])draw->AddText({std::round(corners[2].x)+U(4),std::round(corners[2].y)+U(3)},IM_COL32(65,225,127,255),"b");
+                if(cellDimension==1 && valid[4])draw->AddText({std::round(corners[4].x)+U(4),std::round(corners[4].y)+U(3)},IM_COL32(67,190,247,255),"c");
+            }
+            if(cellSelected) {
+                const ImVec2 a{p.x+U(14),p.y+U(14)},b{a.x+U(200),a.y+U(28)};
+                draw->AddRectFilled(a,b,IM_COL32(13,39,56,235),U(5));
+                draw->AddRect(a,b,IM_COL32(40,177,255,180),U(5));
+                draw->AddText({a.x+U(9),a.y+U(6)},IM_COL32(189,228,253,255),loc::text("Simulation cell"));
+            }
             draw->PopClipRect();
         }
         if (creationMode) {
@@ -7682,7 +7827,11 @@ struct App {
             }
             draw->PopClipRect();
         }
-        if (ImGui::BeginPopup(loc::label("viewport-structure-menu"))) {
+        cellAppearancePopup();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{U(14),U(10)});
+        const bool structureMenuOpen=ImGui::BeginPopup(loc::label("viewport-structure-menu"));
+        ImGui::PopStyleVar();
+        if (structureMenuOpen) {
             if (!creationMode) {
                 ImGui::TextDisabled(loc::text("%s · %zu 原子"),tabTitle().c_str(),result.data.atoms.size());
                 ImGui::Separator();
@@ -8764,7 +8913,7 @@ struct App {
             const bool valid=creationMode && activeTab>=0 && activeTab<int(tabs.size()) &&
                 tabs[size_t(activeTab)].id==creationBondLabelTabId && pipelineGeneration==creationBondLabelGeneration;
             ImGui::TextDisabled(loc::text("对象：显式键 · 数值跟随当前坐标和键级"));
-            ImGui::Checkbox(loc::label("整个体系"),&creationBondLabelAll);recordUiTestItem("creation.bond-label-all");
+            ui_design::checkbox(loc::label("整个体系"),&creationBondLabelAll);recordUiTestItem("creation.bond-label-all");
             ImGui::TextDisabled(creationBondLabelRows.empty()?loc::text("局部：两端原子都在打开窗口时的选择中"):loc::text("局部：打开窗口时直接选中的键"));
             ImGui::Text(loc::text("作用范围：%zu 条键"),creationBondLabelAll?source.bonds.size():creationBondLabelCount);
             ImGui::SeparatorText(loc::text("属性（按勾选顺序组合）"));
@@ -8772,7 +8921,7 @@ struct App {
             for(int i=0;i<5;++i) {
                 auto &fields=creationBondLabelRule.fields;const auto value=creation::BondField(i);
                 const auto it=std::find(fields.begin(),fields.end(),value);bool checked=it!=fields.end();
-                if(ImGui::Checkbox(captions[i],&checked)) {if(checked)fields.push_back(value);else fields.erase(it);}
+                if(ui_design::checkbox(captions[i],&checked)) {if(checked)fields.push_back(value);else fields.erase(it);}
                 recordUiTestItem("creation.bond-label-field-"+std::to_string(i));
             }
             ImGui::SetNextItemWidth(U(280));ImGui::InputText(loc::label("文字"),creationBondLabelText,sizeof(creationBondLabelText));
@@ -8780,9 +8929,9 @@ struct App {
             creationBondLabelRule.text=creationBondLabelText;
             ImGui::SetNextItemWidth(U(150));ImGui::SliderInt(loc::label("有效数字"),&creationBondLabelRule.precision,1,9);
             ImGui::SliderFloat(loc::label("字号"),&creationBondLabelDraft.fontSize,10,32,"%.0f");
-            ImGui::Checkbox(loc::label("粗体"),&creationBondLabelDraft.bold);
+            ui_design::checkbox(loc::label("粗体"),&creationBondLabelDraft.bold);
             ImGui::ColorEdit4(loc::label("颜色"),creationBondLabelDraft.color.data(),ImGuiColorEditFlags_NoInputs);
-            ImGui::Checkbox(loc::label("显示键标签"),&creationBondLabelDraft.visible);
+            ui_design::checkbox(loc::label("显示键标签"),&creationBondLabelDraft.visible);
             ImGui::SetNextItemWidth(U(150));ImGui::InputInt(loc::label("屏幕标签上限"),&creationBondLabelDraft.budget);
             ImGui::TextDisabled(loc::text("1–2000，默认 500；大体系抽样显示；隐藏键不标注"));
             if(!valid)ImGui::TextColored({1,.65f,.2f,1},loc::text("体系已改变，请关闭后重新打开"));
@@ -8822,7 +8971,7 @@ struct App {
             // The fields scroll independently; actions remain reachable at any window height.
             ImGui::BeginChild("##atom-label-body",{0,std::max(U(100),ImGui::GetContentRegionAvail().y-U(82))});
             ImGui::TextDisabled(loc::text("对象：原子 · 默认显示元素和编号"));
-            ImGui::Checkbox(loc::label("整个体系"),&creationLabelAll);
+            ui_design::checkbox(loc::label("整个体系"),&creationLabelAll);
             recordUiTestItem("creation.label-all");
             if (!creationLabelAll) ImGui::Text(loc::text("选中 %zu 个原子"),creationLabelSelection.size());
             ImGui::SetNextItemWidth(U(280));
@@ -8842,7 +8991,7 @@ struct App {
                     bool checked=it!=creationLabelFields.end();
                     ImGui::BeginDisabled(!checked && creationLabelFields.size()>=creation::labelFieldLimit);
                     ImGui::PushID(key.c_str());
-                    if(ImGui::Checkbox(caption.c_str(),&checked)) {
+                    if(ui_design::checkbox(caption.c_str(),&checked)) {
                         if(checked) creationLabelFields.push_back(std::move(value)); else creationLabelFields.erase(it);
                     } recordUiTestItem("creation.label-field-"+key); ImGui::PopID(); ImGui::EndDisabled();
                 };
@@ -8877,9 +9026,9 @@ struct App {
                 ImGui::TextUnformatted(previewText.c_str()); ImGui::EndChild();
             }
             ImGui::SliderFloat(loc::label("字号"),&creationLabelDraft.fontSize,10,32,"%.0f");
-            ImGui::Checkbox(loc::label("粗体"),&creationLabelDraft.bold);
+            ui_design::checkbox(loc::label("粗体"),&creationLabelDraft.bold);
             ImGui::ColorEdit4(loc::label("颜色"),creationLabelDraft.color.data(),ImGuiColorEditFlags_NoInputs);
-            ImGui::Checkbox(loc::label("显示标签"),&creationLabelDraft.labelsVisible);
+            ui_design::checkbox(loc::label("显示标签"),&creationLabelDraft.labelsVisible);
             ImGui::SetNextItemWidth(U(160));
             ImGui::InputInt(loc::label("屏幕标签上限"),&creationLabelDraft.labelBudget);
             ImGui::TextDisabled(loc::text("大体系自动抽样，优先显示选中原子的标签"));
@@ -8930,7 +9079,7 @@ struct App {
             }
             ImGui::TextDisabled(creationMovementMassCenter?loc::text("绕选中原子的质心旋转 · 不移动晶胞"):loc::text("绕选中原子的几何中心旋转 · 不移动晶胞"));
             ImGui::BeginDisabled(!creationMovementHasMass);
-            ImGui::Checkbox(loc::label("绕质心旋转（需 Mass 属性）"),&creationMovementMassCenter);
+            ui_design::checkbox(loc::label("绕质心旋转（需 Mass 属性）"),&creationMovementMassCenter);
             recordUiTestItem("creation.movement-mass-center"); ImGui::EndDisabled();
             if (ImGui::RadioButton(loc::label("屏幕轴"),creationMovementScreenAxes)) creationMovementScreenAxes=true;
             recordUiTestItem("creation.movement-screen-axes");
@@ -8995,7 +9144,7 @@ struct App {
             double a=0,b=0,c=0;
             const bool hasCell=validDocument && authoring::fractional(source,{},a,b,c);
             ImGui::BeginDisabled(!hasCell);
-            if (ImGui::Checkbox(loc::label("分数坐标"),&creationPositionFractional)) {
+            if (ui_design::checkbox(loc::label("分数坐标"),&creationPositionFractional)) {
                 const Vec3 draft{creationPositionDraft[0],creationPositionDraft[1],creationPositionDraft[2]};
                 Vec3 converted;
                 if (creationPositionFractional) {
@@ -9085,7 +9234,7 @@ struct App {
             if (remove>=0) crystalBasis.erase(crystalBasis.begin()+remove);
             if (ImGui::Button(loc::label("+ 添加原子")) && crystalBasis.size()<32)
                 crystalBasis.push_back(CrystalBasis{});
-            if (creationMode) ImGui::Checkbox(loc::label("替换当前创作结构（否则新标签页）"),&crystalReplaceCurrent);
+            if (creationMode) ui_design::checkbox(loc::label("替换当前创作结构（否则新标签页）"),&crystalReplaceCurrent);
             const bool valid=authoring::validCellParameters(crystalA,crystalB,crystalC,
                 crystalAlpha,crystalBeta,crystalGamma)&&!crystalBasis.empty()&&
                 (crystalPreset!=6 || (crystalSpaceGroup>=1&&crystalSpaceGroup<=230));
@@ -9185,8 +9334,8 @@ struct App {
         fixed("Creation snapshots",0,y,leftW,workH);
         ImGui::TextDisabled(loc::text("工作区"));
         ImGui::SameLine(leftW-U(68));
-        ImGui::PushStyleColor(ImGuiCol_Button,{.25f,.19f,.11f,1});
-        ImGui::PushStyleColor(ImGuiCol_Text,{1.f,.69f,.23f,1});
+        ImGui::PushStyleColor(ImGuiCol_Button,ui_design::rgb(ui_design::light()?0xfff1d8:0x40301c));
+        ImGui::PushStyleColor(ImGuiCol_Text,ui_design::rgb(ui_design::light()?0x925200:0xffb03b));
         if (ImGui::Button(loc::label("暂存"),{U(50),U(26)})) saveCreationSnapshot();
         ImGui::PopStyleColor(2);
         ImGui::Separator();
@@ -9278,7 +9427,8 @@ struct App {
                     creationSymmetry=symmetry::analyze(source);
                     creationSymmetryChecked=true;
                 }
-                if (ImGui::Button(loc::label("编辑晶胞参数..."),{-1,U(28)})) {
+                if (ImGui::Button(loc::label("编辑晶胞参数..."),{-1,U(28)}) || requestCellParameters) {
+                    requestCellParameters=false;
                     creationCellParameters={lattice.a>1e-5?lattice.a:10.0,
                         lattice.b>1e-5?lattice.b:10.0,lattice.c>1e-5?lattice.c:10.0,
                         lattice.alpha,lattice.beta,lattice.gamma};
@@ -9416,11 +9566,11 @@ struct App {
             for (int axis=0;axis<3;++axis) {
                 if (axis) ImGui::SameLine();
                 ImGui::PushID(axis+9);
-                ImGui::Checkbox(axis==0?loc::label("X"):axis==1?loc::label("Y"):loc::label("Z"),
+                ui_design::checkbox(axis==0?loc::label("X"):axis==1?loc::label("Y"):loc::label("Z"),
                     &creationCellPbc[size_t(axis)]);
                 ImGui::PopID();
             }
-            ImGui::Checkbox(loc::label("保持原子的分数坐标"),&creationCellPreserveFractional);
+            ui_design::checkbox(loc::label("保持原子的分数坐标"),&creationCellPreserveFractional);
             ImGui::TextDisabled(loc::text("关闭时保持笛卡尔坐标；开启时原子随晶胞变形。"));
             const auto &p=creationCellParameters;
             bool valid=authoring::validCellParameters(p[0],p[1],p[2],p[3],p[4],p[5]);
@@ -9461,7 +9611,7 @@ struct App {
 
         fixed("Creation selection", w - rightW, y, rightW, bodyH);
         geometryPanel();
-        ImGui::Checkbox(loc::label("自动更新氢"),&creationAutoHydrogens);recordUiTestItem("creation.auto-hydrogen");
+        ui_design::checkbox(loc::label("自动更新氢"),&creationAutoHydrogens);recordUiTestItem("creation.auto-hydrogen");
         if(ImGui::IsItemHovered())ImGui::SetTooltip(loc::text("提交绘制、换元素、改键级、接环或删除时调整相邻位点；开关本身不改体系。\n默认关闭；大体系可用 H+ 后台预览。"));
         if(!creationAutoHydrogenMessage.empty())ImGui::TextWrapped("%s",creationAutoHydrogenMessage.c_str());
         if (creationTool==CreationTool::Fragment) {
@@ -9514,9 +9664,9 @@ struct App {
             int order=creationSketchOrder-1;
             if (ImGui::Combo(loc::label("键级##sketch"),&order,loc::items("单键\0双键\0三键\0"))) creationSketchOrder=order+1;
             recordUiTestItem("creation.sketch-order");
-            ImGui::Checkbox(loc::label("连续成链"),&creationSketchContinuous);
+            ui_design::checkbox(loc::label("连续成链"),&creationSketchContinuous);
             recordUiTestItem("creation.sketch-continuous");
-            if(ImGui::Checkbox(loc::label("点击键中插入原子"),&creationSketchInsert)) {
+            if(ui_design::checkbox(loc::label("点击键中插入原子"),&creationSketchInsert)) {
                 creationSketchAnchor=creationSketchLastPlaced=-1;creationSketchPreviewValid=false;
                 creationInsertHover=-1;creationInsertMouse={-1,-1};
             }
@@ -9893,7 +10043,7 @@ struct App {
                     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
                     ImGui::TextUnformatted(loc::text("Line width"));
                     ImGui::PopStyleColor();
-                    if (scrubBar("##Cell line width", &cellWidth, .5f, 4.f, "%.1f", "px"))
+                    if (scrubBar("##Cell line width", &cellWidth, .5f, 8.f, "%.1f", "px"))
                         status = "Cell line width updated";
                     ImGui::Spacing();
                     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
@@ -9960,10 +10110,10 @@ struct App {
                         const double minimumWidth = 0;
                         ImGui::SetNextItemWidth(U(140));
                         changed |= ImGui::DragScalar("Slab width", ImGuiDataType_Double, &width,
-                                                     .02f, &minimumWidth, nullptr, "%.4g");                        changed |= ImGui::Checkbox(loc::label("Reverse orientation"), &reverse);
-                        changed |= ImGui::Checkbox(loc::label("Create selection (do not delete)"), &createSelection);
-                        changed |= ImGui::Checkbox(loc::label("Apply to selection only"), &applySelectionOnly);
-                        changed |= ImGui::Checkbox(loc::label("Visualize plane"), &visualize);
+                                                     .02f, &minimumWidth, nullptr, "%.4g");                        changed |= ui_design::checkbox(loc::label("Reverse orientation"), &reverse);
+                        changed |= ui_design::checkbox(loc::label("Create selection (do not delete)"), &createSelection);
+                        changed |= ui_design::checkbox(loc::label("Apply to selection only"), &applySelectionOnly);
+                        changed |= ui_design::checkbox(loc::label("Visualize plane"), &visualize);
                         if (ImGui::Button(loc::label("Center in simulation cell")))
                             centerPlane = true;
                         const auto &sliceAttributes = result.data.globalAttributes;
@@ -9977,14 +10127,14 @@ struct App {
                                                 sliceInput->second, sliceDeleted->second,
                                                 sliceRemaining->second);
                         heading("Operate on");
-                        changed |= ImGui::Checkbox(loc::label("Particles"), &operateOnParticles);
+                        changed |= ui_design::checkbox(loc::label("Particles"), &operateOnParticles);
                         ImGui::BeginDisabled();
                         bool absent = false;
                         for (const char *kind : {"Surfaces (not present)", "Voxel grids (not present)",
                                                  "Dislocations (not present)", "Lines (not present)",
                                                  "Vectors (not present)"}) {
                             ImGui::PushID(kind);
-                            ImGui::Checkbox(kind, &absent);
+                            ui_design::checkbox(kind, &absent);
                             ImGui::PopID();
                         }
                         ImGui::EndDisabled();
@@ -10081,11 +10231,11 @@ struct App {
                         for (int axis = 0; axis < 3; ++axis) {
                             if (axis) ImGui::SameLine();
                             ImGui::PushID(200 + axis);
-                            changed |= ImGui::Checkbox(axis == 0 ? loc::label("X") : axis == 1 ? loc::label("Y") : loc::label("Z"),
+                            changed |= ui_design::checkbox(axis == 0 ? loc::label("X") : axis == 1 ? loc::label("Y") : loc::label("Z"),
                                                        &pbc[axis]);
                             ImGui::PopID();
                         }
-                        changed |= ImGui::Checkbox(loc::label("Transform particle coordinates with cell"), &transform);
+                        changed |= ui_design::checkbox(loc::label("Transform particle coordinates with cell"), &transform);
                         ImGui::TextWrapped(loc::text("Off: particle positions stay fixed while the cell changes. On: preserve fractional coordinates in the edited cell."));
                         if (changed) {
                             checkpoint(); m.editedCell = editedCell; m.editedOrigin = origin;
@@ -10201,7 +10351,7 @@ struct App {
                                                           &matrix[axis * 4 + 3], 0, 0, "%.7g");
                             ImGui::PopID();
                         }
-                        changed |= ImGui::Checkbox(loc::label("In reduced cell coordinates"), &reducedCoords);
+                        changed |= ui_design::checkbox(loc::label("In reduced cell coordinates"), &reducedCoords);
                         if (reducedCoords)
                             ImGui::TextDisabled(loc::text("The translation is given in fractional cell coordinates and resolved through the simulation cell."));
                         const auto [inputCell, inputOrigin] =
@@ -10236,14 +10386,14 @@ struct App {
                                                         matrix[axis * 4 + 3]);
                         }
                         heading("Operate on");
-                        changed |= ImGui::Checkbox(loc::label("Transform only selected particles/vertices"),
+                        changed |= ui_design::checkbox(loc::label("Transform only selected particles/vertices"),
                                                    &onlySelected);
                         ImGui::BeginDisabled();
                         bool all = true;
-                        ImGui::Checkbox(loc::label("Simulation cell <all>"), &all);
-                        ImGui::Checkbox(loc::label("Particles <all>"), &all);
-                        ImGui::Checkbox(loc::label("Surfaces <not present>"), &all);
-                        ImGui::Checkbox(loc::label("Triangle meshes <not present>"), &all);
+                        ui_design::checkbox(loc::label("Simulation cell <all>"), &all);
+                        ui_design::checkbox(loc::label("Particles <all>"), &all);
+                        ui_design::checkbox(loc::label("Surfaces <not present>"), &all);
+                        ui_design::checkbox(loc::label("Triangle meshes <not present>"), &all);
                         ImGui::EndDisabled();
                         int vectorsOperate = transformVectors ? 0 : 1;
                         if (ImGui::Combo(loc::label("Vector properties"), &vectorsOperate, loc::items("<all>\0<none>\0")))
@@ -10261,15 +10411,15 @@ struct App {
                     }
                     if (m.op == Op::ClusterAnalysis) {
                         bool useBonds=m.clusterByBonds;
-                        if (ImGui::Checkbox(loc::label("Group by existing bonds"),&useBonds)) {
+                        if (ui_design::checkbox(loc::label("Group by existing bonds"),&useBonds)) {
                             checkpoint(); m.clusterByBonds=useBonds; update();
                         }
                         bool onlySelected=m.clusterOnlySelected;
-                        if (ImGui::Checkbox(loc::label("Use only selected particles"),&onlySelected)) {
+                        if (ui_design::checkbox(loc::label("Use only selected particles"),&onlySelected)) {
                             checkpoint(); m.clusterOnlySelected=onlySelected; update();
                         }
                         bool sortBySize=m.clusterSortBySize;
-                        if (ImGui::Checkbox(loc::label("Sort clusters by size"),&sortBySize)) {
+                        if (ui_design::checkbox(loc::label("Sort clusters by size"),&sortBySize)) {
                             checkpoint(); m.clusterSortBySize=sortBySize; update();
                         }
                         ImGui::TextDisabled(loc::text("When enabled, the largest component receives Cluster ID 1."));
@@ -10299,7 +10449,7 @@ struct App {
                     }
                     if (m.op==Op::RadialDistribution || m.op==Op::CoordinationAnalysis) {
                         bool onlySelected=m.neighborOnlySelected;
-                        if (ImGui::Checkbox(loc::label("Use only selected particles"),&onlySelected)) {
+                        if (ui_design::checkbox(loc::label("Use only selected particles"),&onlySelected)) {
                             checkpoint(); m.neighborOnlySelected=onlySelected; update();
                         }
                         ImGui::TextDisabled(loc::text("Unselected particles are excluded as both analysis centers and neighbors."));
@@ -10318,7 +10468,7 @@ struct App {
                         bool changed = ImGui::RadioButton(loc::label("Conventional CSP"), &mode, 0);
                         changed |= ImGui::RadioButton(loc::label("Minimum-weight matching CSP"), &mode, 1);
                         bool onlySelected = m.cspOnlySelected;
-                        changed |= ImGui::Checkbox(loc::label("Only selected particles"), &onlySelected);
+                        changed |= ui_design::checkbox(loc::label("Only selected particles"), &onlySelected);
                         if (changed) {
                             checkpoint();
                             m.cspMode = mode;
@@ -10391,7 +10541,7 @@ struct App {
                         changed |= ImGui::RadioButton(loc::label("To reference"), &mapping, 1);
                         changed |= ImGui::RadioButton(loc::label("To current"), &mapping, 2);
                         bool minimumImage = m.displacementMinimumImage;
-                        changed |= ImGui::Checkbox(loc::label("Use minimum image convention"), &minimumImage);
+                        changed |= ui_design::checkbox(loc::label("Use minimum image convention"), &minimumImage);
                         recordUiTestItem(std::string("pipeline.displacement-relative.") + m.id,
                                          "Relative to current frame");
                         recordUiTestItem(std::string("pipeline.displacement-mic.") + m.id,
@@ -10413,7 +10563,7 @@ struct App {
                         heading("Operate on");
                         ImGui::BeginDisabled();
                         bool operateParticles = true;
-                        ImGui::Checkbox(loc::label("Particles"), &operateParticles);
+                        ui_design::checkbox(loc::label("Particles"), &operateParticles);
                         ImGui::EndDisabled();
                         // Property to freeze: upstream scalar and vector
                         // particle properties. OVITO defaults to Particle
@@ -10461,7 +10611,7 @@ struct App {
                     }
                     if (m.op == Op::SelectOverlapping) {
                         bool useRadii = m.overlapUseRadii;
-                        if (ImGui::Checkbox(loc::label("Use per-particle radii"), &useRadii)) {
+                        if (ui_design::checkbox(loc::label("Use per-particle radii"), &useRadii)) {
                             checkpoint(); m.overlapUseRadii = useRadii; update();
                         }
                         if (m.overlapUseRadii) {
@@ -10512,7 +10662,7 @@ struct App {
                         recordUiTestItem(std::string("pipeline.scatter-x.")+m.id,"X property");
                         changed|=colorPropertyCombo("Y property",edited.scatterYProperty,true);
                         recordUiTestItem(std::string("pipeline.scatter-y.")+m.id,"Y property");
-                        if (ImGui::Checkbox(loc::label("Use only selected particles"),&edited.scatterSelectedOnly))
+                        if (ui_design::checkbox(loc::label("Use only selected particles"),&edited.scatterSelectedOnly))
                             changed=true;
                         recordUiTestItem(std::string("pipeline.scatter-selected.")+m.id,
                                          "Use only selected particles");
@@ -10532,7 +10682,7 @@ struct App {
                         if (m.op == Op::Histogram) {
                             int bins = edited.type;
                             if (ImGui::InputInt(loc::label("Bins"), &bins)) { edited.type = std::clamp(bins, 1, 4096); changed = true; }
-                            if (ImGui::Checkbox(loc::label("Use only selected elements"), &edited.histogramSelectedOnly))
+                            if (ui_design::checkbox(loc::label("Use only selected elements"), &edited.histogramSelectedOnly))
                                 changed = true;
                             int normalization = edited.histogramNormalization;
                             if (ImGui::Combo(loc::label("Normalization"), &normalization,
@@ -10540,7 +10690,7 @@ struct App {
                                 edited.histogramNormalization = normalization;
                                 changed = true;
                             }
-                            if (ImGui::Checkbox(loc::label("Select value range"), &edited.histogramSelectRange))
+                            if (ui_design::checkbox(loc::label("Select value range"), &edited.histogramSelectRange))
                                 changed = true;
                             if (edited.histogramSelectRange) {
                                 changed |= ImGui::InputDouble(loc::label("Range start"), &edited.histogramRangeStart,
@@ -10583,7 +10733,7 @@ struct App {
                                                        &counts[axis]);
                             ImGui::PopID();
                         }
-                        changed |= ImGui::Checkbox(loc::label("Adjust box size"), &adjustBox);
+                        changed |= ui_design::checkbox(loc::label("Adjust box size"), &adjustBox);
                         if (changed) {
                             checkpoint();
                             for (int axis = 0; axis < 3; ++axis)
@@ -10630,7 +10780,7 @@ struct App {
                                 ImGui::PushID(int(i));
                                 bool checked = std::find(types.begin(), types.end(), uint32_t(i)) !=
                                                types.end();
-                                if (ImGui::Checkbox(source.species[i].c_str(), &checked)) {
+                                if (ui_design::checkbox(source.species[i].c_str(), &checked)) {
                                     if (checked)
                                         types.push_back(uint32_t(i));
                                     else
@@ -10675,7 +10825,7 @@ struct App {
                         heading("Operate on");
                         ImGui::BeginDisabled();
                         bool operateParticles = true;
-                        ImGui::Checkbox(loc::label("Particles"), &operateParticles);
+                        ui_design::checkbox(loc::label("Particles"), &operateParticles);
                         ImGui::EndDisabled();
                         auto property = edited.property;
                         if (colorPropertyCombo("Property", property, true)) {
@@ -10750,11 +10900,11 @@ struct App {
                             }
                         }
                         bool automatic = edited.colorAutoRange;
-                        if (ImGui::Checkbox(loc::label("Automatic range"), &automatic)) { edited.colorAutoRange = automatic; changed = true; }
+                        if (ui_design::checkbox(loc::label("Automatic range"), &automatic)) { edited.colorAutoRange = automatic; changed = true; }
                         bool symmetric = edited.colorSymmetricRange;
-                        if (ImGui::Checkbox(loc::label("Symmetric range"), &symmetric)) { edited.colorSymmetricRange = symmetric; changed = true; }
+                        if (ui_design::checkbox(loc::label("Symmetric range"), &symmetric)) { edited.colorSymmetricRange = symmetric; changed = true; }
                         bool discrete = edited.colorDiscrete;
-                        if (ImGui::Checkbox(loc::label("Discretize"), &discrete)) { edited.colorDiscrete = discrete; changed = true; }
+                        if (ui_design::checkbox(loc::label("Discretize"), &discrete)) { edited.colorDiscrete = discrete; changed = true; }
                         double rangeLo = 0, rangeHi = 0;
                         const bool hasCurrentRange = propertyValueRange(result.data, edited.property, rangeLo, rangeHi);
                         ImGui::BeginDisabled(!hasCurrentRange);
@@ -10782,11 +10932,11 @@ struct App {
                             ImGui::SetTooltip(loc::text("Reverses the gradient mapping between the range endpoints."));
                         recordUiTestItem(std::string("pipeline.color-reverse.")+m.id, "Reverse range");
                         bool selectedOnly = edited.colorSelectedOnly;
-                        if (ImGui::Checkbox(loc::label("Color only selected elements"), &selectedOnly)) { edited.colorSelectedOnly = selectedOnly; changed = true; }
+                        if (ui_design::checkbox(loc::label("Color only selected elements"), &selectedOnly)) { edited.colorSelectedOnly = selectedOnly; changed = true; }
                         bool keepSelection = edited.colorKeepSelection;
-                        if (ImGui::Checkbox(loc::label("Keep selection"), &keepSelection)) { edited.colorKeepSelection = keepSelection; changed = true; }
+                        if (ui_design::checkbox(loc::label("Keep selection"), &keepSelection)) { edited.colorKeepSelection = keepSelection; changed = true; }
                         bool showLegend = edited.colorLegend;
-                        if (ImGui::Checkbox(loc::label("Show color legend"), &showLegend)) {
+                        if (ui_design::checkbox(loc::label("Show color legend"), &showLegend)) {
                             checkpoint(); m.colorLegend = showLegend; colorLegend = showLegend;
                         }
                         if (colorRangeRunning) {
@@ -10818,8 +10968,8 @@ struct App {
                             heading("Operate on");
                             ImGui::BeginDisabled();
                             bool operateParticles = true, operateBonds = true;
-                            ImGui::Checkbox(loc::label("Particles"), &operateParticles);
-                            ImGui::Checkbox(loc::label("Bonds"), &operateBonds);
+                            ui_design::checkbox(loc::label("Particles"), &operateParticles);
+                            ui_design::checkbox(loc::label("Bonds"), &operateBonds);
                             ImGui::EndDisabled();
                             ImGui::SeparatorText(loc::text("Creation mode"));
                             ImGui::BeginDisabled();
@@ -10841,7 +10991,7 @@ struct App {
                                 ImGui::TextWrapped(loc::text("Large structure: choose a small cutoff to create bonds. Atom rendering remains GPU accelerated."));
                             ImGui::SeparatorText(loc::text("Options"));
                             bool discard = m.discardExistingBonds;
-                            if (ImGui::Checkbox(loc::label("Discard existing bonds"), &discard)) {
+                            if (ui_design::checkbox(loc::label("Discard existing bonds"), &discard)) {
                                 checkpoint(); m.discardExistingBonds = discard; update();
                             }
                             ImGui::TextDisabled(loc::text("Checked: input bonds are removed before new cutoff bonds are created."));
@@ -10864,7 +11014,7 @@ struct App {
                             const size_t typeCount=result.data.species.size();
                             if (typeCount>0 && typeCount<=32) {
                                 bool usePairCutoffs=m.bondTypeCutoffsEnabled;
-                                if (ImGui::Checkbox(loc::label("Use type-pair cutoffs"),&usePairCutoffs)) {
+                                if (ui_design::checkbox(loc::label("Use type-pair cutoffs"),&usePairCutoffs)) {
                                     checkpoint();
                                     m.bondTypeCutoffsEnabled=usePairCutoffs;
                                     if (usePairCutoffs)
@@ -10915,7 +11065,7 @@ struct App {
                             float width = m.bondWidth;
                             float bondRadius = m.bondRadius;
                             auto color = m.bondColor;
-                            bool changed = ImGui::Checkbox(loc::label("Show bonds"), &visible);
+                            bool changed = ui_design::checkbox(loc::label("Show bonds"), &visible);
                             if (result.data.bonds.size() > atomx::interactiveBondBudget)
                                 ImGui::TextWrapped(loc::text("Bond display paused: this dataset exceeds the interactive bond budget."));
                             else if (result.data.bonds.size() > atomx::cylinderBondBudget && cylinders)
@@ -10931,8 +11081,8 @@ struct App {
                                                             .001f, 100.f, "%.4g units");
                             else
                                 changed |= ImGui::SliderFloat(loc::label("Line width"), &width, .5f, 12.f, "%.1f px");
-                            changed |= ImGui::Checkbox(loc::label("Color by particle type"), &colorByType);
-                            changed |= ImGui::Checkbox(loc::label("Show periodic boundary bonds"), &showPeriodicImages);
+                            changed |= ui_design::checkbox(loc::label("Color by particle type"), &colorByType);
+                            changed |= ui_design::checkbox(loc::label("Show periodic boundary bonds"), &showPeriodicImages);
                             if (!colorByType)
                                 changed |= ImGui::ColorEdit3(loc::label("Bond color"), color.data());
                             if (changed) {
@@ -11028,18 +11178,18 @@ struct App {
                     ImGui::PopID();
                 }
                 heading("Scene visibility");
-                ImGui::Checkbox("##particles-visible", &particles);
+                ui_design::checkbox("##particles-visible", &particles);
                 ImGui::SameLine();
                 if (ImGui::Button(loc::label("Particles"))) focusParticleAppearance = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip(loc::text("Edit particle shape, radius and type colors"));
                 ImGui::SameLine();
-                ImGui::Checkbox(loc::label("Simulation cell"), &cell);
+                ui_design::checkbox(loc::label("Simulation cell"), &cell);
                 if (cell) {
                     ImGui::Combo(loc::label("Cell dimensionality"), &cellDimension, loc::items("2D\0" "3D\0"));
                     ImGui::ColorEdit4(loc::label("Cell line color"), cellColor, ImGuiColorEditFlags_AlphaBar);
-                    if (scrubBar("##Cell line width scene", &cellWidth, .5f, 4.f, "%.1f", "px")) {}
+                    if (scrubBar("##Cell line width scene", &cellWidth, .5f, 8.f, "%.1f", "px")) {}
                     ImGui::SliderFloat(loc::label("Glow"), &cellGlow, 0.f, 1.f, "%.2f");
-                    ImGui::Checkbox(loc::label("Dashed secondary edges"), &cellDashed); ImGui::Checkbox(loc::label("Show cell labels"), &cellLabels);
+                    ui_design::checkbox(loc::label("Dashed secondary edges"), &cellDashed); ui_design::checkbox(loc::label("Show cell labels"), &cellLabels);
                     ImGui::TextDisabled(loc::text("PBC: %s %s %s"), source.pbc[0]?"X":"-", source.pbc[1]?"Y":"-", source.pbc[2]?"Z":"-");
                 }
                 heading("Particle appearance");
@@ -11063,14 +11213,14 @@ struct App {
                     ImGui::PushID(result.data.species[appearanceType].c_str());
                     auto &style = gpu.styles[appearanceType];
                     bool visible = style.visual[2] > .5f;
-                    if (ImGui::Checkbox(loc::label("Show this type"), &visible))
+                    if (ui_design::checkbox(loc::label("Show this type"), &visible))
                         style.visual[2] = visible ? 1.f : 0.f;
                     ImGui::ColorEdit3(loc::label("Type color"), style.color.data());
                     if (ImGui::IsItemDeactivatedAfterEdit() && result.data.bondStyle.colorByType &&
                         !result.data.bonds.empty())
                         uploadCreationDisplay(result.data, result.selected, result.colorSelected);
                     bool inheritRadius = style.visual[0] == 0;
-                    if (ImGui::Checkbox(loc::label("Use default radius"), &inheritRadius))
+                    if (ui_design::checkbox(loc::label("Use default radius"), &inheritRadius))
                         setDefaultRadius(result.data.species[appearanceType], style, inheritRadius);
                     if (!inheritRadius)
                         ImGui::SliderFloat(loc::label("Type radius"), &style.visual[0], .02f, 5.f, "%.3f");
@@ -11301,10 +11451,11 @@ struct App {
         ImGui_ImplDX11_InvalidateDeviceObjects();
         auto &io = ImGui::GetIO();
         io.Fonts->Clear();
+        io.Fonts->FontBuilderIO = native_font::builder();
         const char *fonts[] = {"C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/consola.ttf"};
         ImFontConfig textConfig{};textConfig.OversampleH=3;textConfig.OversampleV=1;
         textConfig.PixelSnapH=true;textConfig.RasterizerMultiply=1.10f;
-        ImFont *base = io.Fonts->AddFontFromFileTTF(fonts[preferences.font], std::round(float(preferences.size)*uiScale),&textConfig);
+        ImFont *base = native_font::add(io.Fonts,fonts[preferences.font], std::round(float(preferences.size)*uiScale),&textConfig);
         if (!base) base = io.Fonts->AddFontDefault();
         // Merge the Windows Segoe MDL2 Assets icon set into the base font so a
         // single ImFont renders text and icons. Missing system font degrades to
@@ -11319,7 +11470,7 @@ struct App {
             merge.MergeMode = true;
             merge.GlyphMinAdvanceX = iconSize;
             merge.GlyphOffset = {0, U(.5f)};
-            if (io.Fonts->AddFontFromFileTTF(iconFile, iconSize, &merge, iconGlyphRanges)) {
+            if (native_font::add(io.Fonts,iconFile, std::round(iconSize), &merge, iconGlyphRanges)) {
                 iconFont = base;
                 iconFontName = "Segoe MDL2 Assets";
                 break;
@@ -11364,18 +11515,18 @@ struct App {
             cjkMerge.MergeMode = true;
             for (const char *cjkFile : {"C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/Deng.ttf",
                                         "C:/Windows/Fonts/simhei.ttf"}) {
-                if (io.Fonts->AddFontFromFileTTF(cjkFile, std::round(float(preferences.size) * uiScale),
+                if (native_font::add(io.Fonts,cjkFile, std::round(float(preferences.size) * uiScale),
                                                  &cjkMerge, chineseRanges.Data))
                     break;
             }
         }
         auto sizedFont=[&](float size,bool bold,const ImWchar *ranges) {
             auto config=textConfig;
-            ImFont *font=io.Fonts->AddFontFromFileTTF(bold?"C:/Windows/Fonts/segoeuib.ttf":fonts[preferences.font],std::round(U(size)),&config);
+            ImFont *font=native_font::add(io.Fonts,bold?"C:/Windows/Fonts/segoeuib.ttf":fonts[preferences.font],std::round(U(size)),&config);
             if(!font)return base;
             config.MergeMode=true;
-            for(const char *file:{"C:/Windows/Fonts/msyh.ttc","C:/Windows/Fonts/simhei.ttf"})
-                if(io.Fonts->AddFontFromFileTTF(file,std::round(U(size)),&config,ranges))break;
+            for(const char *file:{bold?"C:/Windows/Fonts/msyhbd.ttc":"C:/Windows/Fonts/msyh.ttc","C:/Windows/Fonts/simhei.ttf"})
+                if(native_font::add(io.Fonts,file,std::round(U(size)),&config,ranges))break;
             return font;
         };
         headingFont=sizedFont(float(preferences.size),true,chineseRanges.Data);
@@ -11537,14 +11688,14 @@ struct App {
         auto fmt = io::formats[exportFormat].id;
         ImGui::SeparatorText(loc::text("Frame sequence"));
         ImGui::BeginDisabled(frames.size() < 2);
-        ImGui::Checkbox(loc::label("Export frame range"), &exportRange);
+        ui_design::checkbox(loc::label("Export frame range"), &exportRange);
         ImGui::EndDisabled();
         if (exportRange && frames.size() > 1) {
             ImGui::InputInt(loc::label("First frame"), &exportFirst);
             ImGui::InputInt(loc::label("Last frame"), &exportLast);
             ImGui::InputInt(loc::label("Every Nth frame"), &exportStep);
             if (io::info(fmt).trajectory)
-                ImGui::Checkbox(loc::label("Separate file per frame"), &exportSequence);
+                ui_design::checkbox(loc::label("Separate file per frame"), &exportSequence);
             else
                 ImGui::TextDisabled(loc::text("This format exports one file per frame."));
             ImGui::TextDisabled(fmt == io::Format::POSCAR ? loc::text("Default POSCAR sequence: frame_000000/POSCAR") : loc::text("Sequence naming: name_000000.ext"));
@@ -11565,9 +11716,9 @@ struct App {
         if (fmt == io::Format::XSF)
             ImGui::TextWrapped(loc::text("XSF: lattice vectors and positions in Angstroms, with X / XY / XYZ periodicity. Cell origin is subtracted from positions. Bonds, arbitrary properties, grids and animations are not stored."));
         if (fmt == io::Format::POSCAR) {
-            ImGui::Checkbox(loc::label("Fractional coordinates (Direct)"), &exportOptions.fractionalPOSCAR);
+            ui_design::checkbox(loc::label("Fractional coordinates (Direct)"), &exportOptions.fractionalPOSCAR);
             if (result.data.vectorProperties.count("MoveMask") || result.data.scalarProperties.count(constraints::cartesianProperty))
-                ImGui::Checkbox(loc::label("Preserve selective dynamics"), &exportOptions.constraints);
+                ui_design::checkbox(loc::label("Preserve selective dynamics"), &exportOptions.constraints);
             if(constraints::anyCartesian(result.data))ImGui::TextWrapped(loc::text("Cartesian fixed positions cannot be preserved by POSCAR. Save .atomx or explicitly disable constraint preservation."));
             ImGui::TextWrapped(loc::text("Particle positions are grouped by type. POSCAR does not preserve "
                                "arbitrary properties or non-periodic flags."));
@@ -11582,12 +11733,12 @@ struct App {
             ImGui::TextWrapped(loc::text("id, type, element, x, y, z; sequential IDs per frame. Restricted "
                                "triclinic cells and periodic flags are preserved."));
         if (fmt == io::Format::XYZ) {
-            ImGui::Checkbox(loc::label("Extended XYZ (cell / PBC / properties)"), &exportOptions.extendedXYZ);
+            ui_design::checkbox(loc::label("Extended XYZ (cell / PBC / properties)"), &exportOptions.extendedXYZ);
             if (exportOptions.extendedXYZ) {
                 ImGui::TextDisabled(loc::text("Species and XYZ coordinates are required."));
                 auto property = [&](const std::string &name, std::vector<std::string> &selected) {
                     bool on = std::find(selected.begin(), selected.end(), name) != selected.end();
-                    if (ImGui::Checkbox(name.c_str(), &on)) {
+                    if (ui_design::checkbox(name.c_str(), &on)) {
                         if (on)
                             selected.push_back(name);
                         else
@@ -11611,7 +11762,7 @@ struct App {
         }
         if (source.sampled()) {
             ImGui::Separator();
-            ImGui::Checkbox(loc::label("Export sampled preview only"), &exportPreview);
+            ui_design::checkbox(loc::label("Export sampled preview only"), &exportPreview);
             ImGui::TextWrapped(loc::text("The loaded data is sampled. Increase the import budget and reload "
                                "to export full data."));
         }
@@ -11717,7 +11868,7 @@ struct App {
                 ImGui::TextWrapped(loc::text("GPU adapter: %s"),utf8(gpu.adapterName).c_str());
                 ImGui::TextDisabled("%s",loc::text("设置窗口不会重新生成原子或化学键。"));
             }
-            if(changed||fontChanged){theme(preferences.theme);refreshFont|=fontChanged;try{preferences.save();}catch(const std::exception &ex){error=ex.what();}}
+            if(changed||fontChanged){refreshTheme=true;refreshFont|=fontChanged;try{preferences.save();}catch(const std::exception &ex){error=ex.what();}}
             ImGui::EndChild();ImGui::Separator();ImGui::Dummy({0,U(5)});
             if(ImGui::Button(loc::label("Done"),{U(110),U(32)}))ImGui::CloseCurrentPopup();recordUiTestItem("settings.done");
             ImGui::EndPopup();
@@ -11997,6 +12148,10 @@ struct App {
         ImGui::End();
     }
     void ui() {
+        // Apply a complete theme only with an empty style stack. Applying it
+        // inside the title button used to restore the previous Button colors
+        // on PopStyleColor, leaving black text on a dark light-theme button.
+        if(refreshTheme){theme(preferences.theme);refreshTheme=false;}
         loc::current=preferences.language;
         poll();
         if (pendingTabId && !documentsBusy()) {
@@ -12509,6 +12664,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                            << "\ngpu_bytes=" << gpu.gpuBytes << "\nframes=" << ticks
                            << "\nfps=" << io.Framerate
                            << "\nicon_font=" << iconFontName
+                           << "\nfont_rasterizer=" << (native_font::lastBuildNative?"Windows hinted grayscale":"STB fallback")
                            << "\ncursor_zoom="
                            << (g_magnifierCursor ? "procedural-magnifier" : "sizeall-fallback")
                            << "\n";
