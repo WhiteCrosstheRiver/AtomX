@@ -22,6 +22,7 @@
 #include "imgui.h"
 #include "imgui_guard.hpp"
 #include "imgui_internal.h" // GetCurrentWindow / ImGuiLayoutType for the title-strip menu row
+#include "ui_design.hpp"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
 #include <commdlg.h>
@@ -355,11 +356,11 @@ static void theme(int choice = 0) {
     ImGui::GetStyle() = ImGuiStyle{};
     if (choice == 1) ImGui::StyleColorsLight(); else ImGui::StyleColorsDark();
     auto &s = ImGui::GetStyle();
-    s.WindowPadding = {10,8}; s.FramePadding = {6,3}; s.ItemSpacing = {6,4};
-    s.WindowRounding = 0; s.ChildRounding = 3; s.FrameRounding = 3; s.PopupRounding = 5;
-    s.ScrollbarSize = 13; s.WindowBorderSize = 0; s.ChildBorderSize = 1;
+    s.WindowPadding = {14,10}; s.FramePadding = {10,6}; s.ItemSpacing = {8,6};
+    s.WindowRounding = 10; s.ChildRounding = 6; s.FrameRounding = 6; s.PopupRounding = 9;
+    s.ScrollbarSize = 9; s.WindowBorderSize = 1; s.ChildBorderSize = 1;
     s.FrameBorderSize = 1; s.PopupBorderSize = 1; s.GrabRounding = 2;
-    s.DisabledAlpha = .72f;
+    s.DisabledAlpha = .5f;
     auto *c = s.Colors;
     if (choice == 0) {
         // P12 "View mode dark": the AtomX redesign reference palette.
@@ -399,8 +400,6 @@ static void theme(int choice = 0) {
         c[ImGuiCol_PlotHistogram] = accent;
         c[ImGuiCol_PlotLines] = accent;
         c[ImGuiCol_NavCursor] = accent;
-        s.ScaleAllSizes(uiScale);
-        return;
     }
     if (choice == 1) {
         accent = {.08f,.32f,.61f,1};
@@ -438,23 +437,38 @@ static void theme(int choice = 0) {
         c[ImGuiCol_Header] = {.25f,.34f,.45f,1};
         c[ImGuiCol_TabSelected] = {.28f,.35f,.44f,1};
     }
+    // Exact neutral surface and contrast tokens from the v5 template.
+    if(choice<=1) {
+        auto set=[&](ImGuiCol id,unsigned dark,unsigned light){c[id]=ui_design::rgb(choice==1?light:dark);};
+        accent=ui_design::rgb(choice==1?0xb86e00:0xf0a431);
+        set(ImGuiCol_Text,0xeef0f2,0x16191d);set(ImGuiCol_TextDisabled,0x9aa2ab,0x56606b);
+        set(ImGuiCol_WindowBg,0x1a1d21,0xfbfbfc);set(ImGuiCol_ChildBg,0x1a1d21,0xfbfbfc);
+        set(ImGuiCol_PopupBg,0x22262b,0xffffff);set(ImGuiCol_Border,0x31363d,0xd3d8de);
+        set(ImGuiCol_FrameBg,0x0f1114,0xe8ebee);set(ImGuiCol_FrameBgHovered,0x1d2024,0xe2e6ea);
+        set(ImGuiCol_FrameBgActive,0x2a2f35,0xd3d8de);
+        set(ImGuiCol_Button,0x2b3037,0xffffff);set(ImGuiCol_ButtonHovered,0x373e47,0xeef0f3);
+        set(ImGuiCol_ButtonActive,0x40464e,0xe2e6ea);set(ImGuiCol_Header,0x262a30,0xe2e6ea);
+        set(ImGuiCol_HeaderHovered,0x2a2f35,0xe2e6ea);set(ImGuiCol_HeaderActive,0x31363d,0xd3d8de);
+        set(ImGuiCol_Tab,0x1a1d21,0xfbfbfc);set(ImGuiCol_TabHovered,0x1f2327,0xeef0f3);
+        set(ImGuiCol_TabSelected,0x2b3037,0xffffff);set(ImGuiCol_TableHeaderBg,0x1d2024,0xeef0f3);
+        set(ImGuiCol_ScrollbarBg,0x1a1d21,0xfbfbfc);set(ImGuiCol_ScrollbarGrab,0x40464e,0xbcc3cb);
+    }
     c[ImGuiCol_CheckMark] = accent; c[ImGuiCol_SliderGrab] = accent;
     c[ImGuiCol_PlotHistogram] = accent; c[ImGuiCol_PlotLines] = accent;
     c[ImGuiCol_Separator] = c[ImGuiCol_Border];
     s.ScaleAllSizes(uiScale);
 }
 static void heading(const char *title) {
-    title=loc::text(title);
-    ImGui::Spacing();
-    auto p = ImGui::GetCursorScreenPos();
-    float width = ImGui::GetContentRegionAvail().x, height = ImGui::GetFontSize()+U(12);
-    auto *d = ImGui::GetWindowDrawList();
-    d->AddRectFilled(p,{p.x+width,p.y+height},ImGui::GetColorU32(ImGuiCol_Tab),U(3));
-    if (headingFont) ImGui::PushFont(headingFont);
-    d->AddText({p.x+U(8),p.y+U(6)},ImGui::GetColorU32(ImGuiCol_Text),title);
-    if (headingFont) ImGui::PopFont();
-    ImGui::Dummy({width,height});
+    title=loc::text(title);ImGui::Dummy({0,U(8)});
+    auto p=ImGui::GetCursorScreenPos();auto *draw=ImGui::GetWindowDrawList();
+    const float width=ImGui::GetContentRegionAvail().x,height=ImGui::GetFontSize()+U(12);
+    if(headingFont)ImGui::PushFont(headingFont);
+    draw->AddText({p.x,p.y+U(2)},ImGui::GetColorU32(ImGuiCol_Text),title);
+    if(headingFont)ImGui::PopFont();
+    draw->AddLine({p.x,p.y+height-U(2)},{p.x+width,p.y+height-U(2)},ImGui::GetColorU32(ImGuiCol_Border));
+    ImGui::Dummy({width,height});ImGui::Dummy({0,U(3)});
 }
+
 struct Loaded {
     Dataset data;
     std::vector<Frame> frames;
@@ -2026,8 +2040,8 @@ struct App {
                    !(sourceGroup=="modeling" && (std::string_view(entry.group)=="elements" || std::string_view(entry.group)=="symmetry")))continue;
                 ImGui::PushID(index++);ImGui::TextWrapped("%s",entry.title);
                 ImGui::TextWrapped("%s",entry.detail);
-                if(ImGui::Button(loc::label("Open official source")))openUrl(entry.url);
-                ImGui::SameLine();if(ImGui::SmallButton(loc::label("Copy citation")))
+                if(entry.url[0]){if(ImGui::Button(loc::label("Open official source")))openUrl(entry.url);ImGui::SameLine();}
+                if(ImGui::SmallButton(loc::label("Copy citation")))
                     ImGui::SetClipboardText((std::string(entry.title)+"\n"+entry.detail+"\n"+entry.url).c_str());
                 ImGui::Separator();ImGui::PopID();
             }
@@ -3751,6 +3765,8 @@ struct App {
         status = "Rendered " + utf8(p.filename().wstring());
     }
     void fixed(const char *name, float x, float y, float w, float h) {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,0);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,0);
         ImGui::SetNextWindowPos({x, y});
         ImGui::SetNextWindowSize({std::max(w, 1.f), std::max(h, 1.f)});
         const std::string_view panel=name;
@@ -3764,6 +3780,7 @@ struct App {
                          (creationMode && panel.starts_with("Creation") &&
                           !scrollableCreationPanel)) ?
                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0));
+        ImGui::PopStyleVar(2);
     }
     void recordUiTestItem(const std::string &name,const char *explicitLabel=nullptr) {
         if (!captureUiTestItems) return;
@@ -4031,12 +4048,12 @@ struct App {
         text=loc::text(text);rightText=loc::text(rightText);
         auto *dl = ImGui::GetWindowDrawList();
         const ImVec2 p = ImGui::GetCursorScreenPos();
-        const float height = ImGui::GetTextLineHeight();
-        dl->AddText(p, ImGui::GetColorU32(ImGuiCol_TextDisabled), text);
+        const float height=U(19);
+        dl->AddText(headingFont?headingFont:ImGui::GetFont(),U(11),{p.x,p.y+U(3)},ImGui::GetColorU32(ui_design::secondary()),text);
         if (rightText && rightText[0]) {
             const ImVec2 ts = ImGui::CalcTextSize(rightText);
             const float avail = ImGui::GetContentRegionAvail().x;
-            dl->AddText({p.x + ImGui::CalcTextSize(text).x + U(8) + std::max(0.f, avail - ts.x), p.y},
+            dl->AddText({p.x+std::max(0.f,avail-ts.x), p.y},
                         ImGui::GetColorU32(ImGuiCol_TextDisabled), rightText);
         }
         ImGui::Dummy({ImGui::GetContentRegionAvail().x, height});
@@ -4182,19 +4199,20 @@ struct App {
     void control(const char *id, int kind, const char *tip) {
         ImGui::PushStyleColor(ImGuiCol_Button, {0,0,0,0});
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
-        if (ImGui::Button(id, {U(42),U(30)})) {
+        if (ImGui::Button(id, {U(36),U(30)})) {
             if (kind == 0) ShowWindow(window, SW_MINIMIZE);
             if (kind == 1) ShowWindow(window, IsZoomed(window) ? SW_RESTORE : SW_MAXIMIZE);
             if (kind == 2) desktop::hide(window);
             if (kind == 3) PostQuitMessage(0);
             if (kind == 4) showSettings = true;
+            if(kind==5){preferences.theme=preferences.theme==1?0:1;theme(preferences.theme);try{preferences.save();}catch(const std::exception &ex){error=ex.what();}}
         }
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
         if (kind == 4) recordUiTestItem("title.settings");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", loc::text(tip));
         auto p = ImGui::GetItemRectMin(); auto *d = ImGui::GetWindowDrawList();
-        ImVec2 c{p.x+U(21),p.y+U(15)};
+        ImVec2 c{p.x+U(18),p.y+U(15)};
         auto color = ImGui::GetColorU32(kind == 3 ? ImVec4{.94f,.40f,.40f,1} : ImGui::GetStyleColorVec4(ImGuiCol_Text));
         if (kind == 0) d->AddLine({c.x-6,c.y+3},{c.x+6,c.y+3},color,1.5f);
         if (kind == 1) {
@@ -4209,6 +4227,7 @@ struct App {
             d->PathArcTo(c,7,-.9f,4.04f,24); d->PathStroke(color,0,1.7f);
             d->AddLine({c.x,c.y-9},{c.x,c.y},color,1.7f);
         }
+        if(kind==5){d->AddCircle(c,U(6),color,24,U(1.5f));for(int i=0;i<8;++i){float a=float(i)*.785398f;d->AddLine({c.x+std::cos(a)*U(8),c.y+std::sin(a)*U(8)},{c.x+std::cos(a)*U(10),c.y+std::sin(a)*U(10)},color,U(1.4f));}}
         if (kind == 4) {
             // Small vector gear; follows display scale without another font or texture.
             for(int tooth=0;tooth<8;++tooth) {
@@ -4226,11 +4245,16 @@ struct App {
     float leftWidth() const { return workspaceWidth() + pipelineWidth(); }
     float rightWidth() const { return U(propertiesPane); }
     float statusHeight() const { return U(24); }     // P12 bottom status strip
-    float titleBarHeight() const { return U(42); }
+    float designCreationToolbarH=112, designViewerToolbarH=60;
+    int settingsPage=0;
+    bool menuRequested=false;
+    float titleBarHeight() const { return U(40); }
+    float menuHeight() const { return preferences.menuPinned?U(38):0.f; }
+    float primaryToolbarHeight() const { return U(creationMode?designCreationToolbarH:designViewerToolbarH); }
     float toolBarHeight() const { return U(34); }
     float modelingActionsHeight() const { return U(ImGui::GetIO().DisplaySize.x<U(1150)?50.f:36.f); }
-    float topInset() const { return titleBarHeight() + (homeMode ? 0.f :
-        (creationMode ? U(94) : titleBarHeight() + toolBarHeight()) + (showModelingActions ? modelingActionsHeight() : 0.f)); }
+    float topInset() const { return titleBarHeight() + (homeMode?menuHeight():menuHeight()+primaryToolbarHeight()+
+        (showModelingActions?modelingActionsHeight():0.f)); }
     void toggleModelingActions() {
         showModelingActions=!showModelingActions;
         preferences.modelingActions=showModelingActions;layoutDirty=true;
@@ -4281,7 +4305,7 @@ struct App {
     }
     void modelingActions(float w) {
         if(homeMode || !showModelingActions)return;
-        const float y=titleBarHeight()+(creationMode?U(94):titleBarHeight()+toolBarHeight());
+        const float y=titleBarHeight()+menuHeight()+primaryToolbarHeight();
         fixed("Modeling actions",0,y,w,modelingActionsHeight());
         ImGui::SetCursorPosY(U(4));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,{U(3),U(3)});
@@ -4386,6 +4410,11 @@ struct App {
         }
         button("actions.lj",0,"LJ","LJ single-point energy / forces",idle && !homeMode && !ljBusy,[&]{requestLJ();});
         button("actions.hide",0xE70E,"Hide","收起操作栏；视图菜单可重新打开",true,[&]{toggleModelingActions();});
+        ImGui::SetNextItemWidth(U(220));
+        if(paletteRequested){paletteRequested=false;paletteActive=true;ImGui::SetKeyboardFocusHere();}
+        ImGui::InputTextWithHint("##command-search",loc::text("Quick command search (Ctrl+P)"),commandSearch,sizeof(commandSearch));
+        recordUiTestItem("palette.search");paletteAnchor=ImGui::GetItemRectMin();
+        if(ImGui::IsItemActive() && commandSearch[0])paletteActive=true;
         ImGui::PopStyleVar();ImGui::End();
     }
     void drawCreationIcon(ImDrawList *draw, ImVec2 center, std::string_view name, ImU32 color) {
@@ -4399,11 +4428,18 @@ struct App {
         auto rect=[&](float x,float y,float a,float b) {
             draw->AddRect(point(x,y),point(a,b),color,U(1),0,U(1.8f));
         };
-        if (name=="undo"||name=="redo") {
+        if(name=="eye") {draw->PathEllipticalArcTo(point(12,12),{U(9),U(5)},0,0,6.283185f,24);draw->PathStroke(color,ImDrawFlags_Closed,U(1.7f));circle(12,12,2.5f);
+        } else if(name=="open") {line(3,7,9,7);line(9,7,11,9);line(11,9,21,9);line(21,9,21,20);line(21,20,3,20);line(3,20,3,7);
+        } else if(name=="export") {line(12,3,12,15);line(12,15,7,10);line(12,15,17,10);line(4,17,4,21);line(4,21,20,21);line(20,21,20,17);
+        } else if(name=="quad") {rect(3,3,21,21);line(12,3,12,21);line(3,12,21,12);
+        } else if(name=="single") {rect(3,3,21,21);
+        } else if (name=="undo"||name=="redo") {
             const bool flip=name=="redo";
-            const float a=flip?19:5,b=flip?5:19;
-            line(a,11,flip?14:10,6); line(a,11,flip?14:10,16);
-            line(a,11,b,11); circle(flip?11:13,15,5);
+            auto arrowPoint=[&](float x,float y){return point(flip?24-x:x,y);};
+            draw->PathLineTo(arrowPoint(5,10));draw->PathBezierCubicCurveTo(arrowPoint(9,5),arrowPoint(20,7),arrowPoint(19,15));
+            draw->PathBezierCubicCurveTo(arrowPoint(18,20),arrowPoint(12,21),arrowPoint(9,18));draw->PathStroke(color,0,U(1.8f));
+            draw->AddLine(arrowPoint(5,10),arrowPoint(5,4),color,U(1.8f));
+            draw->AddLine(arrowPoint(5,10),arrowPoint(11,10),color,U(1.8f));
         } else if (name=="select") {
             ImVec2 pts[]={point(5,3),point(19,11),point(12,13),point(9,20)};
             draw->AddPolyline(pts,4,color,ImDrawFlags_Closed,U(1.8f));
@@ -4476,102 +4512,162 @@ struct App {
             line(3,15,3,21);line(3,21,9,21);line(21,15,21,21);line(21,21,15,21);
         }
     }
+    void designGroupBegin(const char *caption,ImVec4 tone,float estimate) {
+        if(ImGui::GetCursorPosX()+U(estimate)>ImGui::GetWindowWidth()-U(10) && ImGui::GetCursorPosX()>U(14))
+            ImGui::NewLine();
+        ImGui::BeginGroup();
+        auto *draw=ImGui::GetWindowDrawList();draw->ChannelsSplit(2);draw->ChannelsSetCurrent(1);
+        auto p=ImGui::GetCursorScreenPos();
+        const char *label=loc::text(caption);
+        // Compact vertical group captions, matching the template's 16 px rail.
+        if(loc::current==loc::Language::Chinese) {
+            const size_t n=std::strlen(label);
+            if(n>=6) {draw->AddText(ImGui::GetFont(),U(10.5f),{p.x,p.y+U(3)},ImGui::GetColorU32(tone),label,label+3);
+                draw->AddText(ImGui::GetFont(),U(10.5f),{p.x,p.y+U(17)},ImGui::GetColorU32(tone),label+3,label+6);}
+        } else {
+            const size_t n=std::min(size_t(4),std::strlen(label));
+            for(size_t i=0;i<n;++i)draw->AddText(ImGui::GetFont(),U(8),{p.x+U(3),p.y+U(float(i)*8)},ImGui::GetColorU32(tone),label+i,label+i+1);
+        }
+        ImGui::Dummy({U(16),U(32)});ImGui::SameLine(0,U(4));
+    }
+    void designGroupEnd() {
+        ImGui::Dummy({U(1),U(32)});ImGui::EndGroup();
+        auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();auto *draw=ImGui::GetWindowDrawList();
+        draw->ChannelsSetCurrent(0);
+        draw->AddRectFilled({lo.x-U(4),lo.y-U(5)},{hi.x+U(5),hi.y+U(5)},ImGui::GetColorU32(ui_design::sunk()),U(9));
+        draw->AddRect({lo.x-U(4),lo.y-U(5)},{hi.x+U(5),hi.y+U(5)},ImGui::GetColorU32(ImGuiCol_Border),U(9));
+        draw->ChannelsMerge();ImGui::SameLine(0,U(16));
+    }
+    bool designButton(const char *id,const char *icon,const char *caption,const char *tip,
+                      ImVec4 tone,bool selected=false,const char *record=nullptr) {
+        ImGui::PushID(id);const char *label=caption?loc::text(caption):nullptr;
+        const float width=label?std::max(U(32),ImGui::CalcTextSize(label).x+U(43)):U(32);
+        const bool pressed=ImGui::InvisibleButton("##button",{width,U(32)});
+        if(record)recordUiTestItem(record);
+        const bool hovered=ImGui::IsItemHovered();auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
+        auto *draw=ImGui::GetWindowDrawList();ui_design::button(draw,lo,hi,tone,selected,hovered,uiScale);
+        auto ink=selected?ui_design::rgb(ui_design::light()?0xffffff:0x0e1013):tone;
+        drawCreationIcon(draw,{lo.x+U(16),(lo.y+hi.y)*.5f},icon,ImGui::GetColorU32(ink));
+        if(label)draw->AddText({lo.x+U(31),(lo.y+hi.y-ImGui::GetFontSize())*.5f},ImGui::GetColorU32(ink),label);
+        if(hovered)ImGui::SetTooltip("%s",loc::text(tip));
+        ImGui::PopID();ImGui::SameLine(0,U(4));return pressed;
+    }
     void browserTabStrip(float w) {
-        const float titleH = titleBarHeight();
-        fixed("Creation tabs", 0, 0, w, titleH);
-        ImGui::SetCursorPosY(U(3));
-        if (logo.Get()) ImGui::Image((ImTextureID)(intptr_t)logo.Get(), {U(30), U(30)});
-        ImGui::SameLine();
-        ImGui::AlignTextToFramePadding();
-        ImGui::Text(loc::text("AtomX  %s"), atomxVersion);
-        ImGui::SameLine(0, U(16));
-        const float tabStart=ImGui::GetCursorPosX();
-        const float tabWidth=std::max(U(100),w-tabStart-U(317));
-        ImGui::BeginChild("##browser-tab-scroll",{tabWidth,titleH-U(2)},ImGuiChildFlags_None,
-            ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoBackground);
-        ImGui::SetCursorPosY(U(3));
-        int closing = -1,duplicate=-1;
-        for (int index = 0; index < int(tabs.size()); ++index) {
-            ImGui::PushID(index);
-            const bool selected = index == activeTab;
-            const bool isHome=selected?homeMode:tabs[size_t(index)].home;
-            if (selected) ImGui::PushStyleColor(ImGuiCol_Button, {0.102f, 0.114f, 0.125f, 1.f});
-            const std::string name = selected ? tabTitle() : tabs[size_t(index)].title;
-            const std::string label = name;
-            if (ImGui::Button(isHome?loc::label("New Tab"):label.c_str(), {U(212), U(32)})) switchTab(index);
-            recordUiTestItem("tabs.tab."+std::to_string(index),label.c_str());
+        const float titleH=titleBarHeight();
+        ImGui::PushStyleColor(ImGuiCol_WindowBg,ui_design::chrome());
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{U(12),0});
+        fixed("Creation tabs",0,0,w,titleH);ImGui::PopStyleVar();ImGui::PopStyleColor();
+        ImGui::SetCursorPos({U(12),U(9)});
+        if(logo.Get())ImGui::Image((ImTextureID)(intptr_t)logo.Get(),{U(22),U(22)});
+        ImGui::SameLine(0,U(9));ImGui::SetCursorPosY(U(12));
+        if(headingFont)ImGui::PushFont(headingFont);ImGui::TextUnformatted("AtomX");if(headingFont)ImGui::PopFont();
+        ImGui::SameLine(0,U(9));ImGui::TextDisabled("%s",atomxVersion);
+        ImGui::SameLine(0,U(14));ImGui::SetCursorPosY(U(5));
+        ImGui::PushStyleColor(ImGuiCol_Button,{0,0,0,0});
+        if(ImGui::InvisibleButton("##main-menu",{U(30),U(30)}))menuRequested=true;
+        recordUiTestItem("title.menu");
+        {auto lo=ImGui::GetItemRectMin();auto *d=ImGui::GetWindowDrawList();
+            if(ImGui::IsItemHovered())d->AddRectFilled(lo,{lo.x+U(30),lo.y+U(30)},ImGui::GetColorU32(ImGuiCol_ButtonHovered),U(7));
+            for(float yy:{9.f,15.f,21.f})d->AddLine({lo.x+U(7),lo.y+U(yy)},{lo.x+U(23),lo.y+U(yy)},ImGui::GetColorU32(ImGuiCol_Text),U(1.5f));}
+        if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",loc::text("菜单 (Alt)"));
+        ImGui::SameLine(0,U(8));const float tabStart=ImGui::GetCursorPosX();
+        const float regionW=std::max(U(70),w-tabStart-U(327));
+        ImGui::BeginChild("##browser-tab-scroll",{regionW,titleH},ImGuiChildFlags_None,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoBackground);
+        ImGui::SetCursorPos({0,U(6)});
+        int closing=-1,duplicate=-1,moveFrom=-1,moveTo=-1;
+        const float tabW=std::clamp((regionW-U(4))/float(std::max(size_t(1),tabs.size())),U(130),U(215));
+        for(int index=0;index<int(tabs.size());++index) {
+            ImGui::PushID(tabs[size_t(index)].id);
+            const bool selected=index==activeTab;
+            const bool home=selected?homeMode:tabs[size_t(index)].home;
+            const bool authored=selected?creationMode:tabs[size_t(index)].creationMode;
+            const std::string name=home?loc::text("New Tab"):selected?tabTitle():tabs[size_t(index)].title;
+            auto lo=ImGui::GetCursorScreenPos();
+            ImGui::SetNextItemAllowOverlap(); // The close control sits inside the tab surface.
+            if(ImGui::InvisibleButton("##tab",{tabW,U(34)}))switchTab(index);
+            recordUiTestItem("tabs.tab."+std::to_string(index));
+            const bool hover=ImGui::IsItemHovered();auto hi=ImGui::GetItemRectMax();auto *d=ImGui::GetWindowDrawList();
+            if(selected||hover)d->AddRectFilled(lo,hi,ImGui::GetColorU32(selected?ImGuiCol_WindowBg:ImGuiCol_TabHovered),U(8),ImDrawFlags_RoundCornersTop);
+            if(selected)d->AddRect(lo,hi,ImGui::GetColorU32(ImGuiCol_Border),U(8),ImDrawFlags_RoundCornersTop);
+            const auto tone=authored?ui_design::tool(0x52d38a,0x008d48):ui_design::tool(0xf0a431,0xb86e00);
+            drawCreationIcon(d,{lo.x+U(16),lo.y+U(17)},home?"home":authored?"draw":"eye",ImGui::GetColorU32(tone));
+            d->PushClipRect({lo.x+U(30),lo.y},{hi.x-U(29),hi.y},true);
+            d->AddText({lo.x+U(32),lo.y+(U(34)-ImGui::GetFontSize())*.5f},ImGui::GetColorU32(selected?ImGuiCol_Text:ImGuiCol_TextDisabled),name.c_str());
+            d->PopClipRect();
+            if(hover)ImGui::SetTooltip("%s",name.c_str());
+            if(hover && ImGui::IsMouseClicked(ImGuiMouseButton_Middle))closing=index;
             if(ImGui::BeginPopupContextItem("tab-actions")) {
-                const bool authored=index==activeTab?creationMode:tabs[size_t(index)].creationMode;
-                if(ImGui::MenuItem(loc::label("复制为新创作标签"),nullptr,false,authored && !documentsBusy()))duplicate=index;
+                if(ImGui::MenuItem(loc::label("复制为新创作标签"),nullptr,false,authored&&!documentsBusy()))duplicate=index;
                 recordUiTestItem("tabs.duplicate."+std::to_string(index));
+                if(ImGui::MenuItem(loc::label("关闭当前标签"),"Ctrl+W"))closing=index;
                 ImGui::EndPopup();
             }
-            if (selected && displayedTab != activeTab) {
-                ImGui::SetScrollHereX(.5f);
-                displayedTab=activeTab;
-            }
-            const bool isCreation=selected?creationMode:tabs[size_t(index)].creationMode;
-            if (!isHome) {
-                const auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
-                ImGui::GetWindowDrawList()->AddCircleFilled({lo.x+U(12),(lo.y+hi.y)*.5f},U(4),
-                    isCreation?IM_COL32(70,225,134,255):IM_COL32(245,173,53,255));
-            }
-            if (selected) ImGui::PopStyleColor();
-            ImGui::SameLine(0, U(2));
-            if (ImGui::SmallButton(loc::label("x"))) closing = index;
-            ImGui::SameLine(0, U(5));
-            ImGui::PopID();
+            if(ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                ImGui::SetDragDropPayload("ATOMX_TAB",&index,sizeof(index));ImGui::TextUnformatted(name.c_str());ImGui::EndDragDropSource();}
+            if(ImGui::BeginDragDropTarget()) {if(auto payload=ImGui::AcceptDragDropPayload("ATOMX_TAB")){moveFrom=*static_cast<const int*>(payload->Data);moveTo=index;}ImGui::EndDragDropTarget();}
+            if(selected && displayedTab!=activeTab){ImGui::SetScrollHereX(.5f);displayedTab=activeTab;}
+            ImGui::SetCursorScreenPos({hi.x-U(26),lo.y+U(6)});
+            if(ImGui::InvisibleButton("##close",{U(22),U(22)}))closing=index;
+            recordUiTestItem("tabs.close."+std::to_string(index));
+            auto c=ImVec2{hi.x-U(15),lo.y+U(17)};
+            if(ImGui::IsItemHovered())d->AddRectFilled({c.x-U(10),c.y-U(10)},{c.x+U(10),c.y+U(10)},ImGui::GetColorU32(ImGuiCol_ButtonHovered),U(6));
+            d->AddLine({c.x-U(4),c.y-U(4)},{c.x+U(4),c.y+U(4)},ImGui::GetColorU32(ImGuiCol_TextDisabled),U(1.5f));
+            d->AddLine({c.x+U(4),c.y-U(4)},{c.x-U(4),c.y+U(4)},ImGui::GetColorU32(ImGuiCol_TextDisabled),U(1.5f));
+            ImGui::SetCursorScreenPos({hi.x,lo.y});ImGui::PopID();
         }
-        if (ImGui::SmallButton(loc::label("+"))) newHomeTab();
-        if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel!=0)
-            ImGui::SetScrollX(ImGui::GetScrollX()-ImGui::GetIO().MouseWheel*U(170));
+        if(ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel!=0)ImGui::SetScrollX(ImGui::GetScrollX()-ImGui::GetIO().MouseWheel*U(150));
         ImGui::EndChild();
-        ImGui::SetCursorPos({w-U(304),U(5)});
-        if (ImGui::InvisibleButton("##all-tabs",{U(36),U(30)})) ImGui::OpenPopup("##all-tabs-popup");
-        {
-            const auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
-            auto *draw=ImGui::GetWindowDrawList();
-            draw->AddRectFilled(lo,hi,ImGui::IsItemHovered()?IM_COL32(43,48,55,255):IM_COL32(28,32,37,255),U(5));
-            const ImVec2 center{(lo.x+hi.x)*.5f,(lo.y+hi.y)*.5f};
-            draw->AddLine({center.x-U(5),center.y-U(2)}, {center.x,center.y+U(3)},IM_COL32(190,199,211,255),U(1.7f));
-            draw->AddLine({center.x,center.y+U(3)}, {center.x+U(5),center.y-U(2)},IM_COL32(190,199,211,255),U(1.7f));
+        ImGui::SetCursorPos({w-U(321),U(5)});
+        if(ImGui::Button((std::to_string(tabs.size())+" v##all-tabs").c_str(),{U(44),U(30)}))ImGui::OpenPopup("##all-tabs-popup");
+        recordUiTestItem("tabs.switcher");
+        if(ImGui::BeginPopup("##all-tabs-popup")) {
+            for(int i=0;i<int(tabs.size());++i){ImGui::PushID(i);
+                const std::string name=i==activeTab?tabTitle():tabs[size_t(i)].title;
+                if(ImGui::Selectable(name.c_str(),i==activeTab))switchTab(i);ImGui::PopID();}
+            ImGui::EndPopup();}
+        ImGui::SameLine(0,U(3));if(ImGui::Button("+##new-tab",{U(30),U(30)}))newHomeTab();recordUiTestItem("tabs.new");
+        ImGui::SetCursorPos({w-U(232),U(5)});
+        control("##theme",5,"切换深色 / 浅色");ImGui::SameLine(0,0);
+        control("##settings",4,"Settings");ImGui::SameLine(0,0);
+        control("##minimize",0,"Minimize to taskbar");ImGui::SameLine(0,0);
+        control("##maximize",1,"Maximize / restore");ImGui::SameLine(0,0);
+        control("##tray",2,"Close to system tray");ImGui::SameLine(0,0);
+        control("##exit",3,"Exit AtomX");ImGui::PopStyleColor();ImGui::End();
+        if(closing>=0)closeTab(closing);
+        else if(duplicate>=0)duplicateCreationTab(duplicate);
+        else if(moveFrom>=0 && moveTo>=0 && moveFrom!=moveTo && !documentsBusy()) {
+            tabs[size_t(activeTab)]=captureTab();const auto id=tabs[size_t(activeTab)].id;
+            auto tab=std::move(tabs[size_t(moveFrom)]);tabs.erase(tabs.begin()+moveFrom);tabs.insert(tabs.begin()+moveTo,std::move(tab));
+            for(int i=0;i<int(tabs.size());++i)if(tabs[size_t(i)].id==id)activeTab=i;
+            displayedTab=-1;
         }
-        recordUiTestItem("tabs.switcher","All tabs");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(loc::text("所有标签页 · Ctrl+Tab 切换"));
-        if (ImGui::BeginPopup("##all-tabs-popup")) {
-            for (int index=0;index<int(tabs.size());++index) {
-                const auto &entry=tabs[size_t(index)];
-                const std::string name=index==activeTab?tabTitle():entry.title;
-                const bool home=index==activeTab?homeMode:entry.home;
-                if (ImGui::Selectable(home?loc::label("New Tab"):name.c_str(),index==activeTab)) switchTab(index);
-            }
-            ImGui::EndPopup();
-        }
-        ImGui::SetCursorPos({w-U(262),U(5)});
-        control("##settings", 4, "Settings"); ImGui::SameLine();
-        control("##minimize", 0, "Minimize to taskbar"); ImGui::SameLine();
-        control("##maximize", 1, "Maximize / restore"); ImGui::SameLine();
-        control("##tray", 2, "Close to system tray"); ImGui::SameLine();
-        control("##exit", 3, "Exit AtomX");
-        ImGui::End();
-        if (closing >= 0) closeTab(closing);
-        if (duplicate >= 0) duplicateCreationTab(duplicate);
     }
     void creationTop(float w) {
         const float titleH = titleBarHeight();
         browserTabStrip(w);
 
-        fixed("Creation menu", 0, titleH, w, U(38));
+        const bool pinned=preferences.menuPinned;bool menuVisible=pinned;
+        if(menuRequested){ImGui::OpenPopup("##creation-main-menu");menuRequested=false;}
+        if(pinned) {fixed("Creation menu",0,titleH,w,menuHeight());ImGui::SetCursorPos({U(10),U(4)});}
+        else {ImGui::SetNextWindowPos({U(170),titleH},ImGuiCond_Appearing);menuVisible=ImGui::BeginPopup("##creation-main-menu");}
+        if(menuVisible) {
+        if(!pinned) {
+            if(ImGui::MenuItem(loc::label("固定菜单栏"))){preferences.menuPinned=true;layoutDirty=true;}recordUiTestItem("menu.pin");
+            ImGui::Separator();
+        }
         ImGui::PushStyleColor(ImGuiCol_Button, {0.22f, 0.86f, 0.48f, 1.f});
         ImGui::PushStyleColor(ImGuiCol_Text, {0.05f, 0.07f, 0.06f, 1.f});
         if (ImGui::Button(loc::label("创作模式"))) leaveCreationTab();
         recordUiTestItem("creation.return-view", "Creation mode badge");
         ImGui::PopStyleColor(2);
-        ImGui::SameLine(0, U(10));
+        if(pinned)ImGui::SameLine(0,U(10));
         auto menu = [&](const char *caption, const char *id, auto &&items) {
-            if (ImGui::Button(loc::label(caption))) ImGui::OpenPopup(id);
-            if (ImGui::BeginPopup(id)) { items(); ImGui::EndPopup(); }
-            ImGui::SameLine(0, U(3));
+            if(pinned) {
+                ImGui::PushStyleColor(ImGuiCol_Button,{0,0,0,0});ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
+                if(ImGui::Button(loc::label(caption)))ImGui::OpenPopup(id);
+                ImGui::PopStyleVar();ImGui::PopStyleColor();
+                if(ImGui::BeginPopup(id)){items();ImGui::EndPopup();}ImGui::SameLine(0,U(3));
+            } else if(ImGui::BeginMenu(loc::label(caption))){items();ImGui::EndMenu();}
         };
         menu("文件", "##create-file", [&] {
             if (ImGui::MenuItem(loc::label("新建标签"), "Ctrl+T")) newHomeTab();
@@ -4596,6 +4692,7 @@ struct App {
             if (ImGui::MenuItem(loc::label("删除选中"), "Del")) deletePickedAtom();
         });
         menu("视图", "##create-view", [&] {
+            if(ImGui::MenuItem(loc::label("固定菜单栏"),nullptr,preferences.menuPinned)){preferences.menuPinned=!preferences.menuPinned;layoutDirty=true;}recordUiTestItem("menu.toggle-pin");
             if (ImGui::MenuItem(loc::label("晶胞边框"), nullptr, cell)) cell = !cell;
             if (ImGui::MenuItem(loc::label("化学键"), nullptr, result.data.bondStyle.visible)) {
                 source.bondStyle.visible = !source.bondStyle.visible; update();
@@ -4665,85 +4762,74 @@ struct App {
             if(ImGui::MenuItem(loc::label("系统信息")))showSystemInfo=true;
             if(ImGui::MenuItem(loc::label("关于 AtomX")))showAbout=true;
         });
+        if(pinned) {
         const std::string base = std::string(loc::current==loc::Language::Chinese?"基于 ":"Based on ") + creationBasedOn;
         const float textWidth = ImGui::CalcTextSize(base.c_str()).x;
         if (ImGui::GetCursorPosX() + textWidth < w - U(14)) {
             ImGui::SetCursorPosX(w - textWidth - U(14));
             ImGui::TextDisabled("%s", base.c_str());
         }
-        ImGui::End();
-
-        fixed("Creation tool strip", 0, titleH + U(38), w, U(56));
-        ImGui::SetCursorPosY(U(7));
+        }
+        if(pinned)ImGui::End();else ImGui::EndPopup();
+        }
+        fixed("Creation tool strip",0,titleH+menuHeight(),w,primaryToolbarHeight());
+        ImGui::SetCursorPos({U(14),U(13)});
         auto icon = [&](const char *id, unsigned codepoint, const char *fallback, const char *tip,
                         ImVec4 tone, bool selected, auto &&action) {
             (void)codepoint; (void)fallback;
             ImGui::PushID(id);
-            const bool pressed = ImGui::InvisibleButton("##icon", {U(35), U(35)});
+            const bool pressed = ImGui::InvisibleButton("##icon", {U(32), U(32)});
             recordUiTestItem(std::string("creation.tool-")+id);
             const bool hovered = ImGui::IsItemHovered();
             const ImVec2 lo = ImGui::GetItemRectMin(), hi = ImGui::GetItemRectMax();
-            const ImVec4 bg = selected ? tone : ImVec4{tone.x * (hovered ? .30f : .14f),
-                tone.y * (hovered ? .30f : .14f), tone.z * (hovered ? .30f : .14f), 1.f};
-            auto *draw = ImGui::GetWindowDrawList();
-            draw->AddRectFilled(lo, hi, ImGui::GetColorU32(bg), U(10));
-            draw->AddRect(lo, hi, ImGui::GetColorU32(ImVec4{tone.x*.48f,tone.y*.48f,tone.z*.48f,1}), U(10), 0, U(1));
-            if (selected) draw->AddRect({lo.x-U(2),lo.y-U(2)}, {hi.x+U(2),hi.y+U(2)},
-                ImGui::GetColorU32(tone), U(12), 0, U(1.5f));
-            drawCreationIcon(draw, {(lo.x+hi.x)*.5f,(lo.y+hi.y)*.5f}, id,
-                selected ? IM_COL32(12,18,21,255) : ImGui::GetColorU32(tone));
+            auto *draw=ImGui::GetWindowDrawList();
+            ui_design::button(draw,lo,hi,tone,selected,hovered,uiScale);
+            drawCreationIcon(draw,{(lo.x+hi.x)*.5f,(lo.y+hi.y)*.5f},id,
+                selected?ImGui::GetColorU32(ui_design::rgb(ui_design::light()?0xffffff:0x0e1013)):ImGui::GetColorU32(tone));
             if (pressed) action();
             if (hovered) ImGui::SetTooltip("%s", loc::text(tip));
             ImGui::PopID();
             ImGui::SameLine(0, U(4));
         };
-        auto divider = [&] { toolbarSeparator(U(35)); };
-        const ImVec4 gray{.62f,.67f,.73f,1}, cyan{.11f,.65f,.95f,1}, green{.20f,.86f,.49f,1},
-            orange{.95f,.57f,.18f,1}, red{.95f,.25f,.30f,1}, gold{.95f,.67f,.14f,1},
-            violet{.72f,.53f,1.f,1}, blue{.58f,.68f,1.f,1};
+        auto divider=[&]{designGroupEnd();};
+        const auto gray=ImGui::GetStyleColorVec4(ImGuiCol_Text),cyan=ui_design::tool(0x63cde4,0x00859b),
+            green=ui_design::tool(0x52d38a,0x008d48),orange=ui_design::tool(0xf4ad66,0xb76a13),
+            red=ui_design::tool(0xf17a71,0xc63f3a),gold=ui_design::tool(0xedd36b,0x9e6d0c),
+            violet=ui_design::tool(0xb496ee,0x8054bf),blue=ui_design::tool(0xb5b6ef,0x7561b1);
+        designGroupBegin("编辑",gray,104);
         icon("undo",0xE7A7,"<","Undo",gray,false,[&]{history(false);});
         icon("redo",0xE7A6,">","Redo",gray,false,[&]{history(true);}); divider();
+        designGroupBegin("视角",cyan,210);
         icon("select",0xE7C9,"S","Select atoms",cyan,creationTool==CreationTool::Select,[&]{chooseCreationTool(CreationTool::Select);});
         icon("rotate",0xE7AD,"R","Rotate view (X/Y/Z constrain axis; right drag near edge rolls screen)",cyan,creationTool==CreationTool::Rotate,[&]{chooseCreationTool(CreationTool::Rotate);});
         icon("pan",0xE72A,"P","Pan view",green,creationTool==CreationTool::Pan,[&]{chooseCreationTool(CreationTool::Pan);});
         icon("zoom",0,"Z","拖动持续缩放",blue,creationTool==CreationTool::Zoom,[&]{chooseCreationTool(CreationTool::Zoom);});
         icon("move",0xE8AB,"M","Move selected atoms",orange,creationTool==CreationTool::Move,[&]{chooseCreationTool(CreationTool::Move);});
+        divider();designGroupBegin("绘制",green,142);
         icon("draw",0xE70F,"+","Draw atoms",green,creationTool==CreationTool::Sketch,[&]{chooseCreationTool(CreationTool::Sketch);});
         icon("ring",0,"6","绘制碳环 (4 / 5 / 6) · Alt 芳香环",green,creationTool==CreationTool::Ring,[&]{chooseCreationTool(CreationTool::Ring);});
         icon("fragment",0,"CH","片段浏览器 · 常用与自定义片段",green,creationTool==CreationTool::Fragment,[&]{
             requestFragmentLibrary(); chooseCreationTool(CreationTool::Fragment); showFragmentBrowser=true;
         }); divider();
+        designGroupBegin("修改",red,180);
         icon("delete",0xE74D,"X","Delete selected atom",red,false,[&]{deletePickedAtom();});
         icon("hydrogen",0xE8FA,"H+","调整氢原子 / Adjust Hydrogen",violet,false,[&]{addHydrogensCommand();});
         icon("auto-hydrogen",0,"H","自动更新氢 · 绘制 / 换元素 / 改键级 / 接环",violet,creationAutoHydrogens,[&]{creationAutoHydrogens=!creationAutoHydrogens;});
         icon("clean",0xE734,"*","Clean geometry",violet,false,[&]{cleanGeometryCommand();}); divider();
+        designGroupBegin("测量",gold,140);
         icon("distance",0xE8A0,"D","测量 / 修改距离",gold,creationTool==CreationTool::Distance,[&]{chooseCreationTool(CreationTool::Distance);});
         icon("angle",0xE8B1,"A","测量 / 修改角度",gold,creationTool==CreationTool::Angle,[&]{chooseCreationTool(CreationTool::Angle);});
         icon("torsion",0,"T","测量 / 修改扭转角",gold,creationTool==CreationTool::Torsion,[&]{chooseCreationTool(CreationTool::Torsion);}); divider();
+        designGroupBegin("显示",blue,216);
         icon("ball",0xE80F,"B","Ball and stick",blue,radius<.6f,[&]{setDisplayStyle(0);});
         icon("stick",0xE8A4,"I","Stick",blue,false,[&]{setDisplayStyle(2);});
-        icon("fill",0xE8B7,"O","Space filling",blue,radius>=.6f,[&]{setDisplayStyle(1);}); divider();
+        icon("fill",0xE8B7,"O","Space filling",blue,radius>=.6f,[&]{setDisplayStyle(1);});
         icon("cell",0xE8A7,"C","Show cell",cyan,cell,[&]{cell=!cell;});
         icon("bond",0xE8D7,"-","Show bonds",cyan,source.bondStyle.visible,[&]{source.bondStyle.visible=!source.bondStyle.visible;update();}); divider();
+        designGroupBegin("构建",violet,ImGui::CalcTextSize(loc::text("建晶体")).x/uiScale+ImGui::CalcTextSize(loc::text("超胞")).x/uiScale+ImGui::CalcTextSize(loc::text("切面·真空")).x/uiScale+210.f);
         auto buildButton=[&](const char *id,const char *caption,float width,bool primary,auto &&action) {
-            caption=loc::text(caption);width=std::max(width,ImGui::CalcTextSize(caption).x/uiScale+42.f);
-            ImGui::PushID(id);
-            const bool pressed=ImGui::InvisibleButton("##build",{U(width),U(35)});
-            const bool hovered=ImGui::IsItemHovered();
-            const auto lo=ImGui::GetItemRectMin(),hi=ImGui::GetItemRectMax();
-            auto *draw=ImGui::GetWindowDrawList();
-            const ImU32 fill=primary
-                ? IM_COL32(155,110,244,255)
-                : hovered?IM_COL32(55,35,87,255):IM_COL32(35,23,55,255);
-            const ImU32 foreground=primary?IM_COL32(23,14,34,255):IM_COL32(189,145,255,255);
-            draw->AddRectFilled(lo,hi,fill,U(9));
-            draw->AddRect(lo,hi,primary?IM_COL32(171,134,255,255):IM_COL32(79,49,120,255),U(9));
-            drawCreationIcon(draw,{lo.x+U(16),(lo.y+hi.y)*.5f},id,foreground);
-            const auto textSize=ImGui::CalcTextSize(caption);
-            draw->AddText({lo.x+U(32),(lo.y+hi.y-textSize.y)*.5f},foreground,caption);
-            if (pressed) action();
-            ImGui::PopID();
-            ImGui::SameLine(0,U(4));
+            (void)width;
+            if(designButton(id,id,caption,caption,violet,primary))action();
         };
         buildButton("crystal","建晶体",90,true,[&]{openCrystalDialog=true;});
         buildButton("supercell","超胞",76,false,[&]{openSupercellDialog=true;});
@@ -4752,18 +4838,25 @@ struct App {
         if(ImGui::Button(loc::label("LJ"),{U(44),U(35)}))requestLJ();recordUiTestItem("creation.lj-open");
         if(ImGui::IsItemHovered())ImGui::SetTooltip(loc::text("LJ single-point energy / forces"));
         ImGui::EndDisabled();ImGui::SameLine(0,U(4));
-        divider();
+        divider();designGroupBegin("视窗",gray,140);
+        if(designButton("return-view","eye",nullptr,"返回视图",green,false,"creation.return-view"))leaveCreationTab();
         icon("home",0xE80F,"H","Reset camera",gray,false,[&]{resetView();});
         icon("fit",0xE8AA,"F","Fit structure",gray,false,[&]{fitCamera(3,false);});
+        designGroupEnd();
+        designCreationToolbarH=std::max(60.f,(ImGui::GetItemRectMax().y-ImGui::GetWindowPos().y)/uiScale+12.f);
+        ImGui::SetWindowSize({w,U(designCreationToolbarH)});
         ImGui::End();
     }
     void top(float w) {
         if (creationMode) { creationTop(w); return; }
-        if (homeMode) { browserTabStrip(w); return; }
-        const float titleH = titleBarHeight(), barH = toolBarHeight();
+        const float titleH=titleBarHeight();
         browserTabStrip(w);
-        fixed("Title", 0, titleH, w, titleH);
-        ImGui::SetCursorPos({U(12),U(10)});
+        if(menuRequested){ImGui::OpenPopup("##viewer-main-menu");menuRequested=false;}
+        const bool pinned=preferences.menuPinned;bool menuVisible=pinned;
+        if(pinned){fixed("Title",0,titleH,w,menuHeight());ImGui::SetCursorPos({U(12),U(6)});}
+        else {ImGui::SetNextWindowPos({U(170),titleH},ImGuiCond_Appearing);menuVisible=ImGui::BeginPopup("##viewer-main-menu");}
+        if(menuVisible) {
+        if(!pinned){if(ImGui::MenuItem(loc::label("固定菜单栏"))){preferences.menuPinned=true;layoutDirty=true;}recordUiTestItem("menu.pin");ImGui::Separator();}
         // OVITO parity: File / Edit / Help drop-downs live in the title strip
         // next to the logo. Plain BeginMenu calls give the standard behavior
         // (click to open, hover to switch while open, click-away/Esc to
@@ -4793,7 +4886,7 @@ struct App {
         // BeginMenuBar does for its own row.
         auto *titleWindow = ImGui::GetCurrentWindow();
         const ImGuiLayoutType savedLayout = titleWindow->DC.LayoutType;
-        titleWindow->DC.LayoutType = ImGuiLayoutType_Horizontal;
+        titleWindow->DC.LayoutType=pinned?ImGuiLayoutType_Horizontal:ImGuiLayoutType_Vertical;
             if (smokeMenuFile) ImGui::OpenPopup(loc::label("File"));
             const bool fileOpen = ImGui::BeginMenu(loc::label("File"));
             recordUiTestItem("menu.file", "File");
@@ -4853,22 +4946,10 @@ struct App {
                     showSettings = true;
                 ImGui::EndMenu();
             }
-            const bool helpOpen = ImGui::BeginMenu(loc::label("Help"));
-            recordUiTestItem("menu.help", "Help");
-            if (helpOpen) {
-                if (enabledItem("User Manual", "menu.help.user-manual", "F1"))
-                    openUrl("https://github.com/WhiteCrosstheRiver/AtomX#readme");
-                disabledItem("Scripting Reference", "menu.help.scripting", nullptr, "Deferred");
-                if (enabledItem("Request a Feature", "menu.help.request-feature"))
-                    openUrl("https://github.com/WhiteCrosstheRiver/AtomX/issues/new");
-                if (enabledItem("System Information...", "menu.help.system-info"))
-                    showSystemInfo = true;
-                if (enabledItem("About AtomX", "menu.help.about")) showAbout = true;
-                ImGui::EndMenu();
-            }
             const bool viewOpen = ImGui::BeginMenu(loc::label("View"));
             recordUiTestItem("menu.view", "View");
             if (viewOpen) {
+                if(ImGui::MenuItem(loc::label("固定菜单栏"),nullptr,preferences.menuPinned)){preferences.menuPinned=!preferences.menuPinned;layoutDirty=true;}recordUiTestItem("menu.toggle-pin");
                 if(ImGui::MenuItem(loc::label("Modeling Actions"),nullptr,showModelingActions))toggleModelingActions();
                 if (enabledItem("Reset Camera", "menu.view.reset-camera")) resetView();
                 if (enabledItem("Fit Structure in View", "menu.view.fit")) {
@@ -4950,272 +5031,55 @@ struct App {
                 }
                 ImGui::EndMenu();
             }
+            const bool helpOpen = ImGui::BeginMenu(loc::label("Help"));
+            recordUiTestItem("menu.help", "Help");
+            if (helpOpen) {
+                if (enabledItem("User Manual", "menu.help.user-manual", "F1"))
+                    openUrl("https://github.com/WhiteCrosstheRiver/AtomX#readme");
+                disabledItem("Scripting Reference", "menu.help.scripting", nullptr, "Deferred");
+                if (enabledItem("Request a Feature", "menu.help.request-feature"))
+                    openUrl("https://github.com/WhiteCrosstheRiver/AtomX/issues/new");
+                if (enabledItem("System Information...", "menu.help.system-info"))
+                    showSystemInfo = true;
+                if (enabledItem("About AtomX", "menu.help.about")) showAbout = true;
+                ImGui::EndMenu();
+            }
             titleWindow->DC.LayoutType = savedLayout;
         }
-        // P12: centered "file — fileInfo" caption between the menus and the
-        // window controls (file in secondary text, the rest faint).
-        {
-            auto *dl = ImGui::GetWindowDrawList();
-            const std::string fileName = creationMode ? tabTitle() : path.empty()
-                ? std::string("Untitled structure")
-                : utf8(path.filename().wstring());
-            const std::string info = readerName + " · " + std::to_string(std::max<size_t>(frames.size(), 1)) +
-                (frames.size() > 1 ? " frames" : " frame");
-            const ImVec2 dash = ImGui::CalcTextSize("  —  ");
-            const ImVec2 fs = ImGui::CalcTextSize(fileName.c_str());
-            const float total = fs.x + dash.x + ImGui::CalcTextSize(info.c_str()).x;
-            float x = (w - total) * .5f;
-            const float y = titleH + U(13);
-            dl->AddText({x, y}, IM_COL32(174, 180, 187, 255), fileName.c_str());
-            x += fs.x;
-            dl->AddText({x, y}, ImGui::GetColorU32(ImGuiCol_TextDisabled, .62f), "  -  ");
-            x += dash.x;
-            dl->AddText({x, y}, ImGui::GetColorU32(ImGuiCol_TextDisabled, .62f), info.c_str());
+        if(pinned)ImGui::End();else ImGui::EndPopup();
         }
-        // P12: amber "View mode" marker chip at the right edge, in front of
-        // the min/max/close cluster.
-        {
-            auto *dl = ImGui::GetWindowDrawList();
-            const float chipX = w - U(215) - U(96);
-            const float cy = titleH + U(20);
-            dl->AddRectFilled({chipX, cy - U(3)}, {chipX + U(6), cy + U(3)},
-                              ImGui::GetColorU32(ImGuiCol_NavCursor), U(1));
-            dl->AddText({chipX + U(12), titleH + U(13)}, ImGui::GetColorU32(ImGuiCol_TextDisabled),
-                        "View mode");
-        }
-        // OVITO parity: the "Pipelines: <source>" selector lives in the
-        // window's top strip, right-aligned before the min/max/close cluster
-        // (which occupies the right ~U(215) of the row).
-        const std::string sourceLabel = creationMode ? tabTitle() : path.empty()
-            ? readerName
-            : utf8(path.filename().wstring()) + "  [" + readerName + "]";
-        {
-            const float comboWidth = U(280);
-            ImGui::AlignTextToFramePadding();
-            const float labelWidth = ImGui::CalcTextSize("Pipelines:").x;
-            const float rowRight = w - U(215);
-            const float blockWidth = labelWidth + U(8) + comboWidth;
-            ImGui::SetCursorPosY(U(9));
-            ImGui::SetCursorPosX(std::max(U(220), rowRight - blockWidth));
-            ImGui::TextUnformatted(loc::text("Pipelines:"));
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(comboWidth);
-            if (ImGui::BeginCombo("##pipeline-source", sourceLabel.c_str())) {
-                ImGui::Selectable(sourceLabel.c_str(), true);
-                ImGui::EndCombo();
-            }
-            recordUiTestItem("pipeline.source-selector");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(loc::text("Data source feeding the pipeline"));
-        }
-        ImGui::End();
-        if (creationMode) {
-            fixed("Creation mode header", 0, titleH, w, U(38));
-            ImGui::PushStyleColor(ImGuiCol_Button, {0.494f, 0.871f, 0.494f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
-            if (ImGui::Button(loc::label("创作模式"))) leaveCreationTab();
-            ImGui::PopStyleColor(2);
-            ImGui::SameLine();
-            if (ImGui::Button(loc::label("返回视图"))) leaveCreationTab();
-            recordUiTestItem("creation.return-view", "Return to view");
-            ImGui::SameLine();
-            if (ImGui::Button(loc::label("File"))) ImGui::OpenPopup(loc::label("creation-file"));
-            if (ImGui::BeginPopup(loc::label("creation-file"))) {
-                if (ImGui::MenuItem(loc::label("Export structure..."))) showDataExport = true;
-                ImGui::EndPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(loc::label("Edit"))) ImGui::OpenPopup(loc::label("creation-edit"));
-            if (ImGui::BeginPopup(loc::label("creation-edit"))) {
-                if (ImGui::MenuItem(loc::label("Undo"), "Ctrl+Z")) history(false);
-                if (ImGui::MenuItem(loc::label("Redo"), "Ctrl+Y")) history(true);
-                ImGui::EndPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(loc::label("Build"))) ImGui::OpenPopup(loc::label("creation-build"));
-            if (ImGui::BeginPopup(loc::label("creation-build"))) {
-                if (ImGui::MenuItem(loc::label("Orthogonal cell..."))) openNewCell = true;
-                if (ImGui::MenuItem(loc::label("Triclinic cell..."))) openTriclinicCell = true;
-                if (ImGui::MenuItem(loc::label("Supercell 2 x 2 x 2")))
-                    adoptStructure(authoring::replicate(source, 2, 2, 2), "Built supercell");
-                ImGui::EndPopup();
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled(loc::text("Based on %s"), creationBasedOn.c_str());
-            ImGui::End();
-            fixed("Creation mode tools", 0, titleH + U(38), w, U(56));
-            auto tool = [&](const char *label, const char *tip, auto &&fn) {
-                if (ImGui::Button(label, {0, U(34)})) fn();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", loc::text(tip));
-                ImGui::SameLine(0, U(5));
-            };
-            tool("Select", "Pick an atom in the viewport", [&] { creationSketch = false; });
-            if (creationSketch) {
-                ImGui::PushStyleColor(ImGuiCol_Button, {0.18f, 0.55f, 0.31f, 1.f});
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.23f, 0.65f, 0.37f, 1.f});
-            }
-            tool("Draw atom", "Click empty space to place the chosen element", [&] {
-                creationSketch = true;
-            });
-            if (creationSketch) ImGui::PopStyleColor(2);
-            tool("Add atom", "Add the chosen element at the center of the cell", [&] {
-                addAtomAt(authoring::cartesian(source, .5, .5, .5));
-            });
-            tool("Delete", "Delete the selected atom", [&] { deletePickedAtom(); });
-            ImGui::SetNextItemWidth(U(48));
-            ImGui::InputText("##creation-element-toolbar", creationElement, sizeof(creationElement));
-            ImGui::SameLine();
-            tool("Replace", "Replace the selected atom with this element", [&] { replacePickedElement(); });
-            tool("Hydrogens", "Adjust hydrogens", [&] { addHydrogensCommand(); });
-            tool("Clean", "Clean geometry", [&] { cleanGeometryCommand(); });
-            tool("Ball + stick", "Ball and stick display", [&] { setDisplayStyle(0); });
-            tool("Space fill", "Space filling display", [&] { setDisplayStyle(1); });
-            tool("Fit", "Fit the structure", [&] { fitCamera(3, false); });
-            ImGui::End();
-            return;
-        }
-        // Compact OVITO-style toolbar: grouped icon-only flat buttons with
-        // subtle separators; every action, tooltip and recorded UI-test name
-        // of the former text toolbar is preserved.
-        fixed("Top", 0, titleH * 2, w, barH);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(6), U(4)});
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {U(2), U(4)});
-        ImGui::SetCursorPosY(U(3));
-        if (iconButton("toolbar.open", 0xE8E5, "Open",
-                       "Open a structure file (Ctrl+O)"))
-            open();
-        ImGui::SameLine();
-        if (iconButton("toolbar.import", 0xE8B5, "Import",
-                       "Import data from a structure file"))
-            open();
-        toolbarSeparator(barH);
-        if (iconButton("toolbar.undo", 0xE7A7, "Undo",
-                       "Undo the last pipeline edit (Ctrl+Z)"))
-            history(false);
-        ImGui::SameLine();
-        if (iconButton("toolbar.redo", 0xE7A6, "Redo",
-                       "Redo an undone pipeline edit (Ctrl+Y)"))
-            history(true);
-        toolbarSeparator(barH);
-        if (iconButton("toolbar.select", 0xE799, "Select", "Selection tool"))
-            active = active;
-        ImGui::SameLine();
-        if (iconButton("toolbar.orbit", 0xE7B8, "Orbit",
-                       "Orbit the active viewport"))
-            cameras[active].mode = 7;
-        ImGui::SameLine();
-        if (iconButton("toolbar.rotate", 0xE72C, "Rotate",
-                       "Rotate the view"))
-            cameras[active].yaw += .35f;
-        toolbarSeparator(barH);
-        // P12 tool pill group: Orbit / Pan / Zoom pills over the existing
-        // viewportTool state (design: Orbit/Pan/Select pill container).
-        {
-            struct Pill { const char *name; const char *label; int tool; };
-            const Pill pills[] = {
-                {"toolbar.pill.orbit", "Orbit", 2},
-                {"toolbar.pill.pan", "Pan", 1},
-                {"toolbar.pill.zoom", "Zoom", 0},
-            };
-            const float pillH = U(24);
-            for (const auto &pill : pills) {
-                const bool selected = viewportTool == pill.tool;
-                if (selected) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, {0.941f, 0.643f, 0.192f, 1.f});
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.957f, 0.694f, 0.263f, 1.f});
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.957f, 0.694f, 0.263f, 1.f});
-                    ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
-                }
-                if (ImGui::Button(pill.label, {0, pillH}))
-                    viewportTool = pill.tool;
-                if (selected) ImGui::PopStyleColor(4);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip(loc::text("%s tool — drag in the active viewport"),
-                                                              pill.label);
-                recordUiTestItem(pill.name, pill.label);
-                ImGui::SameLine();
-            }
-        }
-        toolbarSeparator(barH);
-        if (iconButton("toolbar.snapshot", 0xE722, "Snapshot",
-                       "Save a snapshot image"))
-            exportImage();
-        ImGui::SameLine();
-        if (iconButton("toolbar.views", quad ? 0xE8A7 : 0xE8A9,
-                       quad ? "Single view" : "Four views",
-                       quad ? "Maximize active viewport" : "Show four viewports"))
-            quad = !quad;
-        ImGui::SameLine();
-        if (iconButton("toolbar.fit", 0xE8AA, "Fit all",
-                       "Fit all viewports to the data")) {
-            for (int i=0;i<4;++i) fitCamera(i,false);
-        }
-        toolbarSeparator(barH);
-        if (iconButton("toolbar.modifiers", 0xE81E, "Modifiers",
-                       "Show the modifier catalog"))
-            showCatalog = true;
-        ImGui::SameLine();
-        if (iconButton("toolbar.render", 0xE7F4, "Render",
-                       "Render the active viewport to an image"))
-            exportImage();
-        toolbarSeparator(barH);
-        if (iconButton("toolbar.settings", 0xE713, "Settings",
-                       "Open the settings dialog"))
-            showSettings = true;
-        ImGui::SameLine();
-        if (iconButton("toolbar.workspace", 0xE91B, "Workspace",
-                       "Toggle the workspace side panel"))
-            showWorkspace = !showWorkspace;
-        ImGui::SameLine();
-        // P12 primary buttons: green 创作模式 (Creation Mode) and amber Render.
-        {
-            ImGui::PushStyleColor(ImGuiCol_Button, {0.494f, 0.871f, 0.494f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.573f, 0.906f, 0.573f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.573f, 0.906f, 0.573f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
-            if (ImGui::Button(creationMode ? loc::label("退出创作模式") : loc::label("创作模式"), {0, U(28)}))
-                creationMode ? leaveCreationTab() : openCreationTab();
-            ImGui::PopStyleColor(4);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(loc::text("Open this structure in Creation Mode (atom editing)"));
-            recordUiTestItem("toolbar.creation-mode", creationMode ? "退出创作模式" : "创作模式");
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Button, {0.941f, 0.643f, 0.192f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.957f, 0.694f, 0.263f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.957f, 0.694f, 0.263f, 1.f});
-            ImGui::PushStyleColor(ImGuiCol_Text, {0.086f, 0.094f, 0.106f, 1.f});
-            if (ImGui::Button(loc::label("Render"), {0, U(28)}))
-                exportImage();
-            ImGui::PopStyleColor(4);
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip(loc::text("Render the active viewport to a PNG image"));
-            recordUiTestItem("toolbar.render-primary", "Render");
-        }
-        // Quick command search (Ctrl+P) pinned to the right edge of the row;
-        // the matching entry list renders in a floating window drawn after
-        // every other window so nothing can cover it.
-        {
-            const float searchWidth = U(260);
-            const float avail = ImGui::GetContentRegionAvail().x;
-            if (avail > searchWidth) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - searchWidth);
-            ImGui::SetCursorPosY(U(3));
-            if (paletteRequested) {
-                paletteRequested = false;
-                paletteActive = true;
-                ImGui::SetKeyboardFocusHere();
-            }
-            ImGui::InputTextWithHint(
-                "##command-search", loc::text("Quick command search (Ctrl+P)"), commandSearch,
-                sizeof(commandSearch));
-            recordUiTestItem("palette.search");
-            // Anchor always tracks the field so the dropdown appears beneath
-            // it even while focus is still being acquired.
-            paletteAnchor = ImGui::GetItemRectMin();
-            // Typing directly in the field also opens the dropdown; the
-            // empty field after an executed command keeps it closed.
-            if (ImGui::IsItemActive() && commandSearch[0]) paletteActive = true;
-        }
-        ImGui::PopStyleVar(2);
-        ImGui::End();
+        if(!homeMode)viewerToolbar(w);
+    }
+    void viewerToolbar(float w) {
+        fixed("Top",0,titleBarHeight()+menuHeight(),w,primaryToolbarHeight());
+        ImGui::SetCursorPos({U(14),U(13)});
+        auto neutral=ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        auto cyan=ui_design::tool(0x63cde4,0x00859b),blue=ui_design::tool(0x62baff,0x006bd6);
+        auto green=ui_design::tool(0x52d38a,0x008d48);
+        designGroupBegin("文件",neutral,108);
+        if(designButton("open","open",nullptr,"Open a structure file (Ctrl+O)",neutral,false,"toolbar.open"))open();
+        if(designButton("export","export",nullptr,"Export File...",neutral,false,"toolbar.import"))showDataExport=true;
+        designGroupEnd();designGroupBegin("编辑",neutral,106);
+        if(designButton("undo","undo",nullptr,"Undo",neutral,false,"toolbar.undo"))history(false);
+        if(designButton("redo","redo",nullptr,"Redo",neutral,false,"toolbar.redo"))history(true);
+        designGroupEnd();designGroupBegin("视角",cyan,395);
+        if(designButton("orbit","rotate","Orbit","Orbit the active viewport",cyan,viewportTool==2,"toolbar.pill.orbit"))viewportTool=2;
+        if(designButton("pan","pan","Pan","Pan view",cyan,viewportTool==1,"toolbar.pill.pan"))viewportTool=1;
+        if(designButton("zoom","zoom","Zoom","Zoom",blue,viewportTool==0,"toolbar.pill.zoom"))viewportTool=0;
+        if(designButton("fit","fit","Fit","Fit all viewports to the data",neutral,false,"toolbar.fit"))for(int i=0;i<4;++i)fitCamera(i,false);
+        designGroupEnd();designGroupBegin("布局",blue,108);
+        if(designButton("single","single",nullptr,"Maximize active viewport",blue,!quad,"toolbar.single"))quad=false;
+        if(designButton("quad","quad",nullptr,"Show four viewports",blue,quad,"toolbar.views"))quad=true;
+        designGroupEnd();designGroupBegin("工具",neutral,110);
+        if(iconButton("toolbar.modifiers",0xE81E,"M","Show the modifier catalog",false,U(32)))showCatalog=true;ImGui::SameLine(0,U(4));
+        if(iconButton("toolbar.workspace",0xE91B,"W","Toggle the workspace side panel",false,U(32)))showWorkspace=!showWorkspace;ImGui::SameLine(0,U(4));
+        designGroupEnd();
+        if(ImGui::GetCursorPosX()+U(255)>w-U(10))ImGui::NewLine();
+        if(designButton("creation","draw","创作模式","Open this structure in Creation Mode (atom editing)",green,true,"toolbar.creation-mode"))openCreationTab();
+        if(designButton("render","export","Render","Render the active viewport to a PNG image",accent,true,"toolbar.render-primary"))exportImage();
+        ImGui::Dummy({U(1),U(32)});
+        designViewerToolbarH=std::max(60.f,(ImGui::GetItemRectMax().y-ImGui::GetWindowPos().y)/uiScale+12.f);
+        ImGui::SetWindowSize({w,U(designViewerToolbarH)});ImGui::End();
     }
     void left(float h) {
         fixed("Workspace", 0, topInset(), workspaceWidth(), h - topInset() - statusHeight());
@@ -8689,21 +8553,37 @@ struct App {
         verticalSplitter("Properties edge", w - rightWidth(), h, propertiesPane, 200.f,
             std::max(200.f, (w - leftWidth() - minCenter) / uiScale), -1.f, 316.f);
     }
-    void homeWorkspace(float w, float h) {
-        fixed("Home workspace", 0, topInset(), w, h - topInset() - statusHeight());
-        const float cardW = U(250);
-        ImGui::SetCursorPos({std::max(U(24),w*.5f-cardW*1.55f),U(105)});
-        if (headingFont) ImGui::PushFont(headingFont);
-        ImGui::TextUnformatted(loc::text("开始使用 AtomX"));
-        if (headingFont) ImGui::PopFont();
-        ImGui::SetCursorPosX(std::max(U(24),w*.5f-cardW*1.55f));
-        ImGui::TextDisabled(loc::text("打开结构，或从空白结构开始创作"));
-        ImGui::SetCursorPosX(std::max(U(24),w*.5f-cardW*1.55f));
-        if (ImGui::Button(loc::label("打开结构文件"), {cardW,U(100)})) open();
-        ImGui::SameLine(0,U(16));
-        if (ImGui::Button(loc::label("新建空白结构"), {cardW,U(100)})) newBlankCreation();
-        ImGui::SameLine(0,U(16));
-        if (ImGui::Button(loc::label("从晶体开始"), {cardW,U(100)})) openCrystalDialog = true;
+    void homeWorkspace(float w,float h) {
+        fixed("Home workspace",0,topInset(),w,h-topInset()-statusHeight());
+        const float width=std::min(U(780),w-U(48)),x=(w-width)*.5f;
+        ImGui::SetCursorPos({x,U(65)});auto p=ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddText(headingFont?headingFont:ImGui::GetFont(),U(30),p,ImGui::GetColorU32(ImGuiCol_Text),loc::text("New Tab"));
+        ImGui::Dummy({width,U(42)});ImGui::SetCursorPosX(x);ImGui::TextDisabled("%s",loc::text("打开一个结构查看，或者直接开始创作。"));ImGui::Dummy({0,U(22)});
+        const bool stacked=width<U(640);const float cardW=stacked?width:(width-U(24))/3;
+        auto card=[&](const char *id,const char *title,const char *subtitle,const char *icon,bool primary,auto &&action){
+            if(stacked)ImGui::SetCursorPosX(x);
+            auto lo=ImGui::GetCursorScreenPos();if(ImGui::InvisibleButton(id,{cardW,U(148)}))action();
+            auto hi=ImGui::GetItemRectMax();auto *d=ImGui::GetWindowDrawList();
+            const auto green=ui_design::tool(0x52d38a,0x008d48);
+            const auto ink=primary?ui_design::rgb(ui_design::light()?0xffffff:0x121417):ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            d->AddRectFilled(lo,hi,ImGui::GetColorU32(primary?green:ImGui::GetStyleColorVec4(ImGui::IsItemHovered()?ImGuiCol_HeaderHovered:ImGuiCol_WindowBg)),U(8));
+            d->AddRect(lo,hi,ImGui::GetColorU32(primary?green:ImGui::GetStyleColorVec4(ImGuiCol_Border)),U(8));
+            drawCreationIcon(d,{lo.x+U(28),lo.y+U(30)},icon,ImGui::GetColorU32(primary?ink:green));
+            d->AddText(headingFont?headingFont:ImGui::GetFont(),U(16),{lo.x+U(18),lo.y+U(66)},ImGui::GetColorU32(ink),loc::text(title));
+            d->AddText(ImGui::GetFont(),U(12),{lo.x+U(18),lo.y+U(102)},ImGui::GetColorU32(primary?ink:ui_design::secondary()),loc::text(subtitle));
+            if(stacked)ImGui::Dummy({0,U(12)});else ImGui::SameLine(0,U(12));
+        };
+        ImGui::SetCursorPosX(x);
+        card("##home-open","打开结构文件","XYZ · CIF · POSCAR · PDB","open",false,[&]{open();});
+        card("##home-crystal","从空间群建晶体","空间群 → 晶格 → 不对称单元","crystal",true,[&]{openCrystalDialog=true;});
+        card("##home-blank","空白创作","绘制原子、键与分子片段","draw",false,[&]{newBlankCreation();});
+        ImGui::NewLine();ImGui::Dummy({0,U(20)});ImGui::SetCursorPosX(x);
+        const auto recent=ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddText(recent,ImGui::GetColorU32(ImGuiCol_TextDisabled),loc::text("Recent Files"));
+        ImGui::GetWindowDrawList()->AddLine({recent.x,recent.y+U(25)},{recent.x+width,recent.y+U(25)},ImGui::GetColorU32(ImGuiCol_Border));
+        ImGui::Dummy({width,U(38)});
+        for(const auto &file:preferences.recentFiles){ImGui::SetCursorPosX(x);const auto name=utf8(std::filesystem::path(file).filename().wstring());
+            if(ImGui::Selectable(name.c_str(),false,0,{width,U(32)}))openFileTab(file);}
         ImGui::End();
     }
     void creationDialogs() {
@@ -8765,9 +8645,13 @@ struct App {
         ImGui::SetNextWindowPos(labelViewport->GetWorkCenter(),ImGuiCond_Always,{0.5f,0.5f});
         ImGui::SetNextWindowSizeConstraints({0,0},
             {std::max(U(200),labelViewport->WorkSize.x-U(24)),std::max(U(200),labelViewport->WorkSize.y-U(24))});
-        if (ImGui::BeginPopupModal(loc::label("原子标签"),nullptr,ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::SetNextWindowSize({std::min(U(520),labelViewport->WorkSize.x-U(24)),
+            std::min(U(760),labelViewport->WorkSize.y-U(24))},ImGuiCond_Always);
+        if (ImGui::BeginPopupModal(loc::label("原子标签"),nullptr,ImGuiWindowFlags_NoResize)) {
             const bool valid=creationMode && activeTab>=0 && activeTab<int(tabs.size()) &&
                 tabs[size_t(activeTab)].id==creationLabelTabId;
+            // The fields scroll independently; actions remain reachable at any window height.
+            ImGui::BeginChild("##atom-label-body",{0,std::max(U(100),ImGui::GetContentRegionAvail().y-U(82))});
             ImGui::TextDisabled(loc::text("对象：原子 · 默认显示元素和编号"));
             ImGui::Checkbox(loc::label("整个体系"),&creationLabelAll);
             recordUiTestItem("creation.label-all");
@@ -8833,6 +8717,8 @@ struct App {
             ImGui::TextDisabled(loc::text("隐藏原子不显示标签；上限 1-2000，默认 500"));
             const bool validText=(creationLabelKind!=int(creation::LabelKind::Custom) || creationLabelText[0]) && creation::validLabel(rule);
             const bool validBudget=creationLabelDraft.labelBudget>0 && creationLabelDraft.labelBudget<=2000;
+            ImGui::EndChild();
+            ImGui::Separator();
             ImGui::BeginDisabled(!valid || documentsBusy() || (!creationLabelAll && creationLabelSelection.empty()));
             ImGui::BeginDisabled(!validText || !validBudget);
             if (ImGui::Button(loc::label("应用"),{U(110),U(30)})) {
@@ -9109,7 +8995,8 @@ struct App {
         }
     }
     void creationWorkspace(float w, float h) {
-        const float leftW = U(240), rightW = U(275);
+        const float leftW=U(std::min(pipelinePane,std::max(180.f,w/uiScale*.28f)));
+        const float rightW=U(std::min(propertiesPane,std::max(200.f,w/uiScale*.30f)));
         const float y = topInset(), bodyH = h - y - statusHeight();
         std::vector<size_t> counts(source.species.size());
         for (const auto &atom : source.atoms)
@@ -9124,7 +9011,7 @@ struct App {
         }
         const float footerH=U(32);
         const float propertyH=creationPropertiesOpen
-            ? std::max(0.f,std::min(std::max(bodyH*.43f,U(220)),bodyH-U(170))) : 0.f;
+            ?std::max(0.f,std::min(U(float(preferences.creationPropertiesHeight)),bodyH-U(170))):0.f;
         const float workH=std::max(U(80),bodyH-propertyH-footerH);
         fixed("Creation snapshots",0,y,leftW,workH);
         ImGui::TextDisabled(loc::text("工作区"));
@@ -9638,6 +9525,19 @@ struct App {
             if (ImGui::Button(loc::label("重做"), {U(80), U(30)})) history(true);
         }
         ImGui::End();
+        verticalSplitter("Creation workspace edge",leftW,h,pipelinePane,180.f,std::max(180.f,(w-rightW-U(320))/uiScale),1.f,264.f);
+        verticalSplitter("Creation properties edge",w-rightW,h,propertiesPane,200.f,std::max(200.f,(w-leftW-U(320))/uiScale),-1.f,288.f);
+        if(creationPropertiesOpen) {
+            ImGui::SetNextWindowPos({0,y+workH-U(4)});ImGui::SetNextWindowSize({leftW,U(8)});
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{0,0});ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize,{1,1});
+            ImGui::Begin("Creation property divider",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoBackground|ImGuiWindowFlags_NoSavedSettings);
+            ImGui::InvisibleButton("##resize",{leftW,U(8)});recordUiTestItem("creation.properties-splitter");
+            const bool hot=ImGui::IsItemHovered()||ImGui::IsItemActive();
+            if(hot)ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            if(ImGui::IsItemActive() && ImGui::IsMouseDragging(0,0)) {preferences.creationPropertiesHeight=std::clamp(preferences.creationPropertiesHeight-int(std::lround(ImGui::GetIO().MouseDelta.y/uiScale)),120,std::max(120,int((bodyH-U(170))/uiScale)));layoutDirty=true;}
+            ImGui::GetWindowDrawList()->AddLine({0,y+workH},{leftW,y+workH},ImGui::GetColorU32(hot?accent:ImGui::GetStyleColorVec4(ImGuiCol_Border)),U(hot?2.f:1.f));
+            ImGui::End();ImGui::PopStyleVar(2);
+        }
     }
     void right(float w, float h) {
         fixed("Properties", w - rightWidth(), topInset(), rightWidth(),
@@ -11574,55 +11474,70 @@ struct App {
         ImGui::EndPopup();
     }
     void settings() {
-        if (showSettings) { ImGui::OpenPopup(loc::label("Settings")); showSettings = false; }
+        if(showSettings){ImGui::OpenPopup(loc::label("Settings"));showSettings=false;}
         const auto display=ImGui::GetIO().DisplaySize;
-        ImGui::SetNextWindowSize({std::min(U(620),display.x-U(24)),std::min(U(620),display.y-U(32))},ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize({std::min(U(760),display.x-U(24)),std::min(U(640),display.y-U(32))},ImGuiCond_Appearing);
         ImGui::SetNextWindowPos({display.x*.5f,display.y*.5f},ImGuiCond_Appearing,{.5f,.5f});
         bool open=true;
-        if (ImGui::BeginPopupModal(loc::label("Settings"), &open, ImGuiWindowFlags_NoSavedSettings)) {
+        if(ImGui::BeginPopupModal(loc::label("Settings"),&open,ImGuiWindowFlags_NoSavedSettings)) {
             recordUiTestItem("settings.dialog");
-            ImGui::BeginChild("##settings-options",{0,-U(46)});
-            heading("GENERAL");
-            int language=int(preferences.language);
-            ImGui::SetNextItemWidth(U(290));
-            const char *languages[]={"简体中文","English"};
-            const bool choosingLanguage=ImGui::BeginCombo(loc::label("Language"),languages[language]);
-            recordUiTestItem("settings.language");
-            if(choosingLanguage) {
-                for(int choice=0;choice<2;++choice) {
-                    if(ImGui::Selectable(languages[choice],choice==language))setLanguage(loc::Language(choice));
-                    recordUiTestItem("settings.language."+std::to_string(choice));
-                }
-                ImGui::EndCombo();
+            ImGui::TextDisabled("%s",loc::text("修改立即生效并自动保存"));ImGui::Dummy({0,U(10)});ImGui::Separator();
+            const float contentH=ImGui::GetContentRegionAvail().y-U(52);
+            ImGui::BeginChild("##settings-nav",{U(142),contentH});
+            const char *pages[]={"外观","界面","3D 视窗"};
+            for(int page=0;page<3;++page){if(ImGui::Selectable(loc::label(pages[page]),settingsPage==page,0,{0,U(34)}))settingsPage=page;recordUiTestItem("settings.page."+std::to_string(page));}
+            ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(),contentH-U(34)));referenceHelp("interface");
+            ImGui::EndChild();ImGui::SameLine(0,U(18));
+            ImGui::BeginChild("##settings-options",{0,contentH});
+            auto intro=[&](const char *caption,const char *hint) {
+                ImGui::Dummy({0,U(8)});if(headingFont)ImGui::PushFont(headingFont);
+                ImGui::TextUnformatted(loc::text(caption));if(headingFont)ImGui::PopFont();
+                ImGui::PushStyleColor(ImGuiCol_Text,ui_design::secondary());ImGui::TextWrapped("%s",loc::text(hint));ImGui::PopStyleColor();ImGui::Dummy({0,U(5)});
+            };
+            auto rule=[&]{ImGui::Dummy({0,U(10)});ImGui::Separator();ImGui::Dummy({0,U(8)});};
+            bool changed=false,fontChanged=false;
+            if(settingsPage==0) {
+                intro("Language","Language changes apply immediately and are saved for the next launch.");
+                const char *languages[]={"简体中文","English"};ImGui::SetNextItemWidth(-1);
+                const bool choosing=ImGui::BeginCombo("##language",languages[int(preferences.language)]);recordUiTestItem("settings.language");
+                if(choosing){for(int i=0;i<2;++i){if(ImGui::Selectable(languages[i],int(preferences.language)==i))setLanguage(loc::Language(i));recordUiTestItem("settings.language."+std::to_string(i));}ImGui::EndCombo();}
+                rule();intro("外观主题","只影响界面，不影响 3D 视窗背景。");
+                int selected=segmented("##theme-segments",preferences.theme,{"深色","浅色","Midnight"},ImGui::GetContentRegionAvail().x);
+                if(selected!=preferences.theme){preferences.theme=selected;changed=true;}
+                rule();intro("界面字号","调整文字与控件的留白密度，数值与视口操作保持独立。");
+                const int sizes[]={13,14,16,18};int sizeIndex=0;
+                for(int i=0;i<4;++i)if(preferences.size>=sizes[i])sizeIndex=i;
+                int choice=segmented("##size-segments",sizeIndex,{"紧凑","标准","大","特大"},ImGui::GetContentRegionAvail().x);
+                if(choice!=sizeIndex){preferences.size=sizes[choice];fontChanged=true;}
+                rule();intro("界面字体","沿用本机字体，避免启动时下载资源。");
+                selected=segmented("##font-segments",preferences.font,{"Segoe UI","Arial","Consolas"},ImGui::GetContentRegionAvail().x);
+                if(selected!=preferences.font){preferences.font=selected;fontChanged=true;}
+            } else if(settingsPage==1) {
+                intro("菜单栏","收起时从标签栏左侧 ≡ 打开；也可在菜单里一键固定。");
+                int pin=segmented("##menu-segments",preferences.menuPinned?1:0,{"收起到 ≡","固定显示"},ImGui::GetContentRegionAvail().x);
+                recordUiTestItem("settings.menu-pinned");
+                if(bool(pin)!=preferences.menuPinned){preferences.menuPinned=pin!=0;changed=true;}
+                rule();intro("建模操作栏","常用文档、编辑、视角与科学计算入口。");
+                int actions=segmented("##actions-segments",showModelingActions?0:1,{"显示","隐藏"},ImGui::GetContentRegionAvail().x);
+                if((actions==0)!=showModelingActions){showModelingActions=actions==0;preferences.modelingActions=showModelingActions;changed=true;}
+                rule();intro("面板布局","拖动面板边缘调整宽度；创作属性面板也支持上下调整。");
+                if(ImGui::Button(loc::label("Reset layout"),{-1,U(32)})){workspacePane=220;pipelinePane=264;propertiesPane=288;inspectorPane=180;timelinePane=94;preferences.creationPropertiesHeight=300;layoutDirty=true;}
+                rule();intro("WINDOW CONTROLS","Double-click the tray logo to restore. Right-click for Restore / Exit.");
+                ImGui::BulletText("%s",loc::text("Minimize: collect in the taskbar"));
+                ImGui::BulletText("%s",loc::text("X: keep running in the system tray"));
+                ImGui::BulletText("%s",loc::text("Power: exit the application completely"));
+            } else {
+                intro("3D 视窗背景","只修改当前标签的视窗，其他标签保持自己的显示设置。");
+                int old=bg[0]>.9f?2:bg[0]>.01f?1:0;
+                int choice=segmented("##viewport-bg",old,{"黑","深灰","白"},ImGui::GetContentRegionAvail().x);
+                if(choice!=old){bg[0]=bg[1]=bg[2]=choice==2?1.f:choice==1?.11f:0.f;}
+                rule();intro("GPU viewport rendering","Direct3D 11 renders the structure. Scientific calculations run in a cancellable background worker.");
+                ImGui::TextWrapped(loc::text("GPU adapter: %s"),utf8(gpu.adapterName).c_str());
+                ImGui::TextDisabled("%s",loc::text("设置窗口不会重新生成原子或化学键。"));
             }
-            ImGui::TextWrapped(loc::text("Language changes apply immediately and are saved for the next launch."));
-            ImGui::Spacing();
-            heading("APPEARANCE");
-            ImGui::SetNextItemWidth(U(290));
-            bool changed = ImGui::Combo(loc::label("Theme"), &preferences.theme,
-                                        loc::items("View mode dark\0Classic light\0Midnight\0"));
-            ImGui::SetNextItemWidth(U(290));
-            bool fontChanged = ImGui::Combo(loc::label("Font"), &preferences.font, loc::items("Segoe UI\0Arial\0Consolas\0"));
-            ImGui::SetNextItemWidth(U(290));
-            fontChanged |= ImGui::SliderInt(loc::label("Font size"), &preferences.size, 14,20,"%d px");
-            if (changed || fontChanged) {
-                theme(preferences.theme);
-                refreshFont |= fontChanged;
-                try { preferences.save(); } catch(const std::exception &ex) { error=ex.what(); }
-            }
-            ImGui::TextWrapped(loc::text("Appearance is applied immediately and saved for the next launch."));
-            heading("WINDOW CONTROLS");
-            ImGui::BulletText(loc::text("Minimize: collect in the taskbar"));
-            ImGui::BulletText(loc::text("X: keep running in the system tray"));
-            ImGui::BulletText(loc::text("Power: exit the application completely"));
-            ImGui::TextWrapped(loc::text("Double-click the tray logo to restore. Right-click for Restore / Exit."));
-            ImGui::EndChild();
-            if (ImGui::Button(loc::label("Done"),{U(100),U(30)})) ImGui::CloseCurrentPopup();
-            recordUiTestItem("settings.done");
-            ImGui::SameLine();
-            if(ImGui::Button(loc::label("Reset layout"),{U(150),U(30)})) {
-                workspacePane=220;pipelinePane=268;propertiesPane=316;inspectorPane=180;timelinePane=94;layoutDirty=true;
-            }
+            if(changed||fontChanged){theme(preferences.theme);refreshFont|=fontChanged;try{preferences.save();}catch(const std::exception &ex){error=ex.what();}}
+            ImGui::EndChild();ImGui::Separator();ImGui::Dummy({0,U(5)});
+            if(ImGui::Button(loc::label("Done"),{U(110),U(32)}))ImGui::CloseCurrentPopup();recordUiTestItem("settings.done");
             ImGui::EndPopup();
         }
     }
@@ -11811,10 +11726,13 @@ struct App {
     // of the frame so later windows cannot cover it; keeps the search field
     // focused so typing continues to filter while the dropdown is open.
     void commandPalette() {
+        const bool floatingSearch=!showModelingActions||homeMode;
+        bool focusSearch=false;
+        if(paletteRequested && (!showModelingActions||homeMode)) {
+            paletteRequested=false;paletteActive=true;paletteAnchor={ImGui::GetIO().DisplaySize.x*.5f-U(215),titleBarHeight()+U(20)};
+            focusSearch=true;
+        }
         if (!paletteActive) return;
-        const auto matches = paletteMatches();
-        if (paletteIndex >= int(matches.size())) paletteIndex = int(matches.size()) - 1;
-        if (paletteIndex < 0) paletteIndex = 0;
         ImGui::SetNextWindowPos({paletteAnchor.x, paletteAnchor.y + U(30)});
         ImGui::SetNextWindowSize({U(430), 0});
         if (!ImGui::Begin("##command-palette", nullptr,
@@ -11825,6 +11743,15 @@ struct App {
             ImGui::End();
             return;
         }
+        if(floatingSearch) {
+            ImGui::SetNextItemWidth(-1);
+            if(focusSearch)ImGui::SetKeyboardFocusHere();
+            ImGui::InputTextWithHint("##floating-command-search",loc::text("Quick command search (Ctrl+P)"),commandSearch,sizeof(commandSearch));
+            recordUiTestItem("palette.search");
+        }
+        const auto matches=paletteMatches();
+        if(paletteIndex>=int(matches.size()))paletteIndex=int(matches.size())-1;
+        if(paletteIndex<0)paletteIndex=0;
         if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && paletteIndex > 0) --paletteIndex;
         if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && paletteIndex + 1 < int(matches.size()))
             ++paletteIndex;
@@ -11912,6 +11839,7 @@ struct App {
         // Modal inputs own their keyboard shortcuts. Never delete/move atoms,
         // switch documents, or create an undo step behind a modal editor.
         if (!ImGui::GetTopMostPopupModal()) {
+        if(ImGui::IsKeyPressed(ImGuiKey_LeftAlt,false)||ImGui::IsKeyPressed(ImGuiKey_RightAlt,false))menuRequested=true;
         // Menu accelerators. Ctrl+O loads per OVITO; Ctrl+Z/Y stay on undo /
         // redo; Ctrl+P focuses the Quick command search.
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_T))
@@ -12278,7 +12206,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                               "Browser tabs must receive pointer clicks");
                 std::ofstream("build/desktop-test.txt") << "PASS: minimize, maximize, close-to-tray, restore, title drag hit test\n";
             }
-            if (!input.empty()) {if(lowerExtension(input)==".atomx-project")app.loadProject(input);else app.load(input);}
+            if (!input.empty()) {
+                if(lowerExtension(input)==".atomx-project") {
+                    if(app.pipelineJob.valid())app.pipelineJob.wait();
+                    app.poll();
+                    app.loadProject(input);
+                } else app.load(input);
+            }
             else {
                 app.source={};
                 app.result={};

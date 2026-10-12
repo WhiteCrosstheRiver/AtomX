@@ -19,10 +19,12 @@ inline std::filesystem::path settingsPath() {
 }
 struct Preferences {
     localization::Language language = localization::Language::Chinese;
-    int theme = 0, font = 0, size = 18;
+    int theme = 0, font = 0, size = 14;
+    bool menuPinned = false;
+    int creationPropertiesHeight = 300;
     int workspacePane = 220, pipelinePane = 268, propertiesPane = 316;
     int inspectorPane = 180, timelinePane = 94;
-    bool modelingActions = true;
+    bool modelingActions = false;
     // Most recently opened files, persisted across launches and shown by the
     // File > Recent Files submenu. Newest entry first, at most 8 kept.
     static constexpr int maxRecentFiles = 8;
@@ -38,13 +40,19 @@ struct Preferences {
         exportDirectory = exportFolder;
         theme = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Theme", 0, p.c_str())), 0, 2);
         font = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Font", 0, p.c_str())), 0, 2);
-        size = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Size", 18, p.c_str())), 14, 20);
+        size = std::clamp(int(GetPrivateProfileIntW(L"Appearance", L"Size", 14, p.c_str())), 13, 20);
+        // The v5 reference establishes a smaller standard text scale. Migrate
+        // once; subsequent user size choices are preserved across launches.
+        if(GetPrivateProfileIntW(L"Appearance",L"DesignRevision",0,p.c_str())<5)size=14;
+        menuPinned=GetPrivateProfileIntW(L"Layout",L"MenuPinned",0,p.c_str())!=0;
+        creationPropertiesHeight=std::clamp(int(GetPrivateProfileIntW(L"Layout",L"CreationPropertiesHeight",300,p.c_str())),120,900);
         workspacePane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"WorkspaceWidth", 220, p.c_str())), 150, 480);
         pipelinePane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"PipelineWidth", 268, p.c_str())), 180, 520);
         propertiesPane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"PropertiesWidth", 316, p.c_str())), 200, 560);
         inspectorPane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"InspectorHeight", 180, p.c_str())), 90, 900);
         timelinePane = std::clamp(int(GetPrivateProfileIntW(L"Layout", L"TimelineHeight", 94, p.c_str())), 56, 300);
-        modelingActions = GetPrivateProfileIntW(L"Layout", L"ModelingActions", 1, p.c_str()) != 0;
+        modelingActions = GetPrivateProfileIntW(L"Layout", L"ModelingActions", 0, p.c_str()) != 0;
+        if(GetPrivateProfileIntW(L"Appearance",L"DesignRevision",0,p.c_str())<5)modelingActions=false;
         recentFiles.clear();
         for (int i = 0; i < maxRecentFiles; ++i) {
             wchar_t buffer[32768]{};
@@ -59,14 +67,15 @@ struct Preferences {
             throw std::runtime_error("Unable to save language settings");
         if (!WritePrivateProfileStringW(L"Export", L"Directory", exportDirectory.c_str(), p.c_str()))
             throw std::runtime_error("Unable to save export directory");
-        for (auto entry : {std::pair{L"Theme", theme}, {L"Font", font}, {L"Size", size}})
+        for (auto entry : {std::pair{L"Theme", theme}, {L"Font", font}, {L"Size", size}, {L"DesignRevision",5}})
             if (!WritePrivateProfileStringW(L"Appearance", entry.first,
                                             std::to_wstring(entry.second).c_str(), p.c_str()))
                 throw std::runtime_error("Unable to save appearance settings");
         for (auto entry : {std::pair{L"WorkspaceWidth",workspacePane},
                            {L"PipelineWidth",pipelinePane}, {L"PropertiesWidth",propertiesPane},
                            {L"InspectorHeight",inspectorPane}, {L"TimelineHeight",timelinePane},
-                           {L"ModelingActions",int(modelingActions)}})
+                           {L"ModelingActions",int(modelingActions)}, {L"MenuPinned",int(menuPinned)},
+                           {L"CreationPropertiesHeight",creationPropertiesHeight}})
             if (!WritePrivateProfileStringW(L"Layout",entry.first,
                                             std::to_wstring(entry.second).c_str(),p.c_str()))
                 throw std::runtime_error("Unable to save panel layout");
@@ -120,7 +129,7 @@ inline LRESULT hitTest(HWND window, LPARAM lp) {
     // Browser tabs are real client controls. Only the static brand area can
     // initiate a native window drag; treating the entire strip as caption
     // swallows tab clicks before ImGui receives them.
-    return p.y < 42*scale && p.x < 160*scale ? HTCAPTION : HTCLIENT;
+    return p.y < 40*scale && p.x < 135*scale ? HTCAPTION : HTCLIENT;
 }
 inline ComPtr<ID3D11ShaderResourceView> loadLogo(ID3D11Device *device, HICON &icon) {
     auto resource = FindResourceW(nullptr, MAKEINTRESOURCEW(101), MAKEINTRESOURCEW(10));

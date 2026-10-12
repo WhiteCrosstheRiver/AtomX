@@ -3,6 +3,7 @@
 namespace atomx::references {
 struct Entry {const char *group,*title,*detail,*url;};
 inline constexpr Entry entries[]={
+    {"interface","User supplied AtomX workspace design · v5","AtomX molecular structure editor (1).zip / AtomX 1.0 v5.dc.html, supplied October 2026. Reference for neutral button surfaces, colored tool icons, browser tabs, grouped toolbars, compact typography and settings layout. Native Dear ImGui implementation; no numerical methods taken from the template.",""},
     {"lj","OpenKIM Universal LJ · Elliott & Akerson","MO_959249795837_003 (2018 revision of 2015 model); DOI 10.25950/962b4967. Parameters: Angstrom/eV, 4 sigma cutoff, energy shift, Lorentz-Berthelot. Fitted to dimers only. CDDL-1.0; original package and license: third_party/openkim-lj.","https://openkim.org/id/LJ_ElliottAkerson_2015_Universal__MO_959249795837_003"},
     {"lj","LJ equations, mixing and cutoff conventions","LAMMPS official documentation is the equation/convention reference. AtomX implements its own evaluator; LAMMPS is not linked or required.","https://docs.lammps.org/pair_lj.html"},
     {"lj","Lorentz-Berthelot / geometric mixing","LAMMPS pair_modify: arithmetic sigma and geometric epsilon; geometric sigma/epsilon alternative. Energy shifting does not shift forces.","https://docs.lammps.org/pair_modify.html"},

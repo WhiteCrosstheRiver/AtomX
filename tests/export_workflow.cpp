@@ -16,6 +16,19 @@ int main(int argc,char **argv) {
                ("atomx-export-" +
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directory(dir);
+    // UI persistence checks must restore the user's application preferences.
+    struct RestorePreferences {
+        std::filesystem::path file=desktop::settingsPath();
+        std::optional<std::string> bytes;
+        RestorePreferences() {
+            if(std::filesystem::exists(file)) {std::ifstream in(file,std::ios::binary);
+                bytes=std::string(std::istreambuf_iterator<char>(in),{});}
+        }
+        ~RestorePreferences() {
+            try {if(bytes){std::ofstream out(file,std::ios::binary|std::ios::trunc);out.write(bytes->data(),std::streamsize(bytes->size()));}
+                else std::filesystem::remove(file);}catch(...){}
+        }
+    } restorePreferences;
     try {
         Renderer testRenderer;
         testRenderer.init(window);
@@ -292,6 +305,8 @@ int main(int argc,char **argv) {
                         " popups="+std::to_string(ImGui::GetCurrentContext()->OpenPopupStack.size()));
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
+            app.preferences.menuPinned=true;
+            app.showModelingActions=true;
             frame();
             // Live localization must not change widget identity or scientific data.
             {
@@ -423,6 +438,34 @@ int main(int argc,char **argv) {
                               app.uiTestItems.contains("creation.return-view"),
                           "Creation Mode opens an editable copy in a separate workspace tab");
             settlePipeline();
+            {
+                // New v5 layout: both side widths and the property height stay interactive.
+                app.creationPropertiesOpen=true;frame();frame();
+                auto dragPanel=[&](const char *key,float dx,float dy) {
+                    const auto item=app.uiTestItems.at(key);
+                    const ImVec2 at{(item.min.x+item.max.x)*.5f,(item.min.y+item.max.y)*.5f};
+                    guiIO.AddMousePosEvent(at.x,at.y);frame();
+                    guiIO.AddMouseButtonEvent(0,true);frame();
+                    guiIO.AddMousePosEvent(at.x+dx,at.y+dy);frame();
+                    app.layoutDirty=false;guiIO.AddMouseButtonEvent(0,false);frame();
+                };
+                const float left=app.pipelinePane,right=app.propertiesPane;
+                const int height=app.preferences.creationPropertiesHeight;
+                dragPanel("layout.Creation workspace edge-splitter",45,0);
+                requireExport(app.pipelinePane>left+20,"v5 creation workspace remains horizontally resizable");
+                dragPanel("layout.Creation properties edge-splitter",-45,0);
+                requireExport(app.propertiesPane>right+20,"v5 creation inspector remains horizontally resizable");
+                dragPanel("creation.properties-splitter",0,-45);
+                requireExport(app.preferences.creationPropertiesHeight>height+20,"v5 property tray remains vertically resizable");
+                app.pipelinePane=left;app.propertiesPane=right;app.preferences.creationPropertiesHeight=height;
+                guiIO.DisplaySize={900,720};frame();frame();
+                for(const char *key:{"creation.return-view","creation.lj-open"}) {
+                    const auto item=app.uiTestItems.at(key);
+                    requireExport(item.min.x>=0 && item.max.x<=900 && item.min.y>=0 && item.max.y<app.topInset(),
+                        "v5 creation toolbar wraps critical controls inside a narrow window");
+                }
+                guiIO.DisplaySize={1560,1000};frame();frame();
+            }
             {
                 // Creation duplicates own live data/display/history and have no
                 // parent save destination; named immutable snapshots remain safe.
@@ -2304,6 +2347,35 @@ int main(int argc,char **argv) {
                           "executing the palette entry adds a real Slice modifier");
             requireExport(app.commandSearch[0] == 0 && !app.paletteActive,
                           "executing a palette command clears and closes the palette");
+
+            // The collapsed reference menu exposes the same commands, including Home.
+            app.preferences.menuPinned=false;frame();frame();click("title.menu");frame();
+            requireExport(app.uiTestItems.contains("menu.file") && app.uiTestItems.contains("menu.pin"),
+                "v5 hamburger opens the real application menus");
+            click("menu.pin");frame();frame();
+            requireExport(app.preferences.menuPinned && app.uiTestItems.contains("menu.file"),
+                "v5 menu can be pinned without losing command access");
+            guiIO.AddKeyEvent(ImGuiKey_Escape,true);frame();guiIO.AddKeyEvent(ImGuiKey_Escape,false);frame();
+            const bool oldActions=app.showModelingActions;
+            app.showModelingActions=false;app.paletteRequested=true;frame();frame();
+            requireExport(app.uiTestItems.contains("palette.search"),"hidden toolbar still provides a floating command search");
+            guiIO.AddInputCharactersUTF8("slice");frame();
+            requireExport(app.uiTestItems.contains("palette.item.Modification: Slice"),"floating search filters the actual command list");
+            app.closePalette();app.showModelingActions=oldActions;frame();
+            app.homeMode=true;app.preferences.menuPinned=false;frame();frame();click("title.menu");frame();
+            requireExport(app.uiTestItems.contains("menu.file"),"Home hamburger retains file command access");
+            guiIO.AddKeyEvent(ImGuiKey_Escape,true);frame();guiIO.AddKeyEvent(ImGuiKey_Escape,false);frame();
+            app.homeMode=false;app.preferences.menuPinned=true;frame();frame();
+            {
+                const size_t count=app.tabs.size();const auto id=app.tabs[size_t(app.activeTab)].id;
+                click("tabs.new");settlePipeline();frame();frame();
+                requireExport(app.homeMode && app.tabs.size()==count+1,"v5 plus opens a blank browser tab");
+                click("tabs.close."+std::to_string(app.activeTab));settlePipeline();frame();frame();
+                requireExport(app.tabs.size()==count,
+                    "v5 inset close button receives the click and closes only its tab");
+                for(int i=0;i<int(app.tabs.size());++i)if(app.tabs[size_t(i)].id==id){app.switchTab(i);break;}
+                settlePipeline();frame();frame();
+            }
 
             // P11 timeline ruler: the pure 1/2/5-decade label-step helper and
             // seek-by-click on the redesigned track. The frame number spinner
