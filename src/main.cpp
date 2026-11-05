@@ -373,6 +373,38 @@ static int glyphUtf8(unsigned codepoint, char out[8]) {
 static bool glyphAvailable(unsigned codepoint) {
     return iconFont && iconFont->FindGlyphNoFallback(ImWchar(codepoint)) != nullptr;
 }
+// Neutral surfaces from the v5 template, one row per ImGui slot. Dark and light
+// are the reference tokens; Midnight is the optional cooler theme. Slots derived
+// from the accent are set in theme() so no ImGui default blue survives anywhere.
+struct ThemeColor {
+    ImGuiCol slot;
+    unsigned dark, light, midnight;
+};
+static constexpr ThemeColor themeColors[] = {
+    {ImGuiCol_Text, 0xeef0f2, 0x16191d, 0xf2f5fa},
+    {ImGuiCol_TextDisabled, 0x9aa2ab, 0x56606b, 0xb3bdcc},
+    {ImGuiCol_WindowBg, 0x1a1d21, 0xfbfbfc, 0x12141a},
+    {ImGuiCol_ChildBg, 0x1a1d21, 0xfbfbfc, 0x1a1f26},
+    {ImGuiCol_PopupBg, 0x22262b, 0xffffff, 0x292e38},
+    {ImGuiCol_Border, 0x31363d, 0xd3d8de, 0x465263},
+    {ImGuiCol_FrameBg, 0x0f1114, 0xe8ebee, 0x171c24},
+    {ImGuiCol_FrameBgHovered, 0x1d2024, 0xe2e6ea, 0x1f2631},
+    {ImGuiCol_FrameBgActive, 0x2a2f35, 0xd3d8de, 0x2a3342},
+    {ImGuiCol_Button, 0x2b3037, 0xffffff, 0x3b4554},
+    {ImGuiCol_ButtonHovered, 0x373e47, 0xeef0f3, 0x4a5668},
+    {ImGuiCol_ButtonActive, 0x40464e, 0xe2e6ea, 0x566478},
+    {ImGuiCol_Header, 0x262a30, 0xe2e6ea, 0x405773},
+    {ImGuiCol_HeaderHovered, 0x2a2f35, 0xdce1e6, 0x4a6585},
+    {ImGuiCol_HeaderActive, 0x31363d, 0xd3d8de, 0x557395},
+    {ImGuiCol_Tab, 0x1a1d21, 0xfbfbfc, 0x1a1f26},
+    {ImGuiCol_TabHovered, 0x1f2327, 0xeef0f3, 0x2a3342},
+    {ImGuiCol_TabSelected, 0x2b3037, 0xffffff, 0x475970},
+    {ImGuiCol_TitleBgActive, 0x1a1d21, 0xeef0f3, 0x1a1f26},
+    {ImGuiCol_TableHeaderBg, 0x1d2024, 0xeef0f3, 0x1f2631},
+    {ImGuiCol_ScrollbarBg, 0x1a1d21, 0xfbfbfc, 0x12141a},
+    {ImGuiCol_ScrollbarGrab, 0x40464e, 0xbcc3cb, 0x465263},
+    {ImGuiCol_ScrollbarGrabHovered, 0x565d66, 0x9daaba, 0x566478},
+};
 static void theme(int choice = 0) {
     ui_design::lightTheme=choice==1;
     ImGui::GetStyle() = ImGuiStyle{};
@@ -384,100 +416,32 @@ static void theme(int choice = 0) {
     s.FrameBorderSize = 1; s.PopupBorderSize = 1; s.GrabRounding = 2;
     s.DisabledAlpha = .5f;
     auto *c = s.Colors;
-    if (choice == 0) {
-        // P12 "View mode dark": the AtomX redesign reference palette.
-        // Window #16181b, panels #1a1d20, borders #22262a, hairlines
-        // #2c3137, control wells #111316, popups #1d2024 / border #33383e,
-        // text #e6e8eb / #aeb4bb / #9aa1a9 / #6b727a, accent amber #f0a431.
-        accent = {.941f,.643f,.192f,1}; // #f0a431
-        c[ImGuiCol_Text] = {.902f,.910f,.922f,1};        // #e6e8eb
-        c[ImGuiCol_TextDisabled] = {.420f,.447f,.478f,1}; // #6b727a
-        c[ImGuiCol_TextSelectedBg] = {.941f,.643f,.192f,.30f};
-        c[ImGuiCol_WindowBg] = {.102f,.114f,.125f,1};    // #1a1d20
-        c[ImGuiCol_ChildBg] = {.102f,.114f,.125f,1};     // #1a1d20
-        c[ImGuiCol_PopupBg] = {.114f,.125f,.141f,1};     // #1d2024
-        c[ImGuiCol_Border] = {.133f,.149f,.165f,1};      // #22262a
-        c[ImGuiCol_Separator] = {.133f,.149f,.165f,1};   // #22262a
-        c[ImGuiCol_FrameBg] = {.067f,.075f,.086f,1};     // #111316
-        c[ImGuiCol_FrameBgHovered] = {.086f,.094f,.106f,1};
-        c[ImGuiCol_FrameBgActive] = {.114f,.125f,.141f,1};
-        c[ImGuiCol_Button] = {.125f,.137f,.157f,1};      // #202328
-        c[ImGuiCol_ButtonHovered] = {.149f,.165f,.184f,1}; // #262a2f
-        c[ImGuiCol_ButtonActive] = {.173f,.192f,.216f,1}; // #2c3137
-        c[ImGuiCol_Header] = {.137f,.153f,.173f,1};      // #23272c
-        c[ImGuiCol_HeaderHovered] = {.153f,.169f,.188f,1}; // #272b30
-        c[ImGuiCol_HeaderActive] = {.173f,.192f,.216f,1};
-        c[ImGuiCol_Tab] = {.125f,.137f,.157f,1};
-        c[ImGuiCol_TabHovered] = {.149f,.165f,.184f,1};
-        c[ImGuiCol_TabSelected] = {.149f,.163f,.188f,1}; // #262a30
-        c[ImGuiCol_TitleBgActive] = {.102f,.114f,.125f,1};
-        c[ImGuiCol_TableHeaderBg] = {.125f,.137f,.157f,1};
-        c[ImGuiCol_TableRowBgAlt] = {1,1,1,.025f};
-        c[ImGuiCol_ScrollbarBg] = {.102f,.114f,.125f,1};
-        c[ImGuiCol_ScrollbarGrab] = {.180f,.200f,.220f,1};
-        c[ImGuiCol_ScrollbarGrabHovered] = {.220f,.239f,.259f,1};
-        c[ImGuiCol_ScrollbarGrabActive] = {.941f,.643f,.192f,1};
-        c[ImGuiCol_SliderGrab] = accent;
-        c[ImGuiCol_CheckMark] = accent;
-        c[ImGuiCol_PlotHistogram] = accent;
-        c[ImGuiCol_PlotLines] = accent;
-        c[ImGuiCol_NavCursor] = accent;
-    }
-    if (choice == 1) {
-        accent = {.08f,.32f,.61f,1};
-        c[ImGuiCol_Text] = {.08f,.10f,.13f,1};
-        c[ImGuiCol_TextDisabled] = {.35f,.38f,.42f,1};
-        c[ImGuiCol_WindowBg] = {.935f,.945f,.955f,1};
-        c[ImGuiCol_ChildBg] = {1,1,1,1};
-        c[ImGuiCol_PopupBg] = {.95f,.96f,.97f,1};
-        c[ImGuiCol_Border] = {.64f,.68f,.73f,1};
-        c[ImGuiCol_FrameBg] = {1,1,1,1};
-        c[ImGuiCol_FrameBgHovered] = {.91f,.95f,1,1};
-        c[ImGuiCol_FrameBgActive] = {.84f,.91f,.99f,1};
-        c[ImGuiCol_Button] = {.97f,.98f,.99f,1};
-        c[ImGuiCol_ButtonHovered] = {.85f,.92f,1,1};
-        c[ImGuiCol_ButtonActive] = {.73f,.85f,.98f,1};
-        c[ImGuiCol_Header] = {.84f,.90f,.97f,1};
-        c[ImGuiCol_HeaderHovered] = {.80f,.88f,.98f,1};
-        c[ImGuiCol_HeaderActive] = {.73f,.84f,.96f,1};
-        c[ImGuiCol_Tab] = {.87f,.89f,.92f,1};
-        c[ImGuiCol_TabHovered] = {.79f,.87f,.97f,1};
-        c[ImGuiCol_TabSelected] = {1,1,1,1};
-        c[ImGuiCol_TitleBgActive] = {.86f,.90f,.95f,1};
-        c[ImGuiCol_TableHeaderBg] = {.86f,.89f,.93f,1};
-        c[ImGuiCol_TableRowBgAlt] = {.10f,.25f,.45f,.045f};
-    } else {
-        accent = {.48f,.74f,1,1};
-        c[ImGuiCol_Text] = {.95f,.96f,.98f,1};
-        c[ImGuiCol_TextDisabled] = {.70f,.74f,.80f,1};
-        c[ImGuiCol_WindowBg] = choice == 2 ? ImVec4{.07f,.08f,.10f,1} : ImVec4{.14f,.16f,.19f,1};
-        c[ImGuiCol_ChildBg] = {.10f,.12f,.15f,1};
-        c[ImGuiCol_PopupBg] = {.16f,.18f,.22f,1};
-        c[ImGuiCol_Border] = {.39f,.44f,.51f,1};
-        c[ImGuiCol_FrameBg] = {.09f,.11f,.14f,1};
-        c[ImGuiCol_Button] = {.23f,.27f,.33f,1};
-        c[ImGuiCol_Header] = {.25f,.34f,.45f,1};
-        c[ImGuiCol_TabSelected] = {.28f,.35f,.44f,1};
-    }
-    // Exact neutral surface and contrast tokens from the v5 template.
-    if(choice<=1) {
-        auto set=[&](ImGuiCol id,unsigned dark,unsigned light){c[id]=ui_design::rgb(choice==1?light:dark);};
-        accent=ui_design::rgb(choice==1?0xb86e00:0xf0a431);
-        set(ImGuiCol_Text,0xeef0f2,0x16191d);set(ImGuiCol_TextDisabled,0x9aa2ab,0x56606b);
-        set(ImGuiCol_WindowBg,0x1a1d21,0xfbfbfc);set(ImGuiCol_ChildBg,0x1a1d21,0xfbfbfc);
-        set(ImGuiCol_PopupBg,0x22262b,0xffffff);set(ImGuiCol_Border,0x31363d,0xd3d8de);
-        set(ImGuiCol_FrameBg,0x0f1114,0xe8ebee);set(ImGuiCol_FrameBgHovered,0x1d2024,0xe2e6ea);
-        set(ImGuiCol_FrameBgActive,0x2a2f35,0xd3d8de);
-        set(ImGuiCol_Button,0x2b3037,0xffffff);set(ImGuiCol_ButtonHovered,0x373e47,0xeef0f3);
-        set(ImGuiCol_ButtonActive,0x40464e,0xe2e6ea);set(ImGuiCol_Header,0x262a30,0xe2e6ea);
-        set(ImGuiCol_HeaderHovered,0x2a2f35,0xe2e6ea);set(ImGuiCol_HeaderActive,0x31363d,0xd3d8de);
-        set(ImGuiCol_Tab,0x1a1d21,0xfbfbfc);set(ImGuiCol_TabHovered,0x1f2327,0xeef0f3);
-        set(ImGuiCol_TabSelected,0x2b3037,0xffffff);set(ImGuiCol_TableHeaderBg,0x1d2024,0xeef0f3);
-        set(ImGuiCol_ScrollbarBg,0x1a1d21,0xfbfbfc);set(ImGuiCol_ScrollbarGrab,0x40464e,0xbcc3cb);
-    }
-    c[ImGuiCol_CheckMark] = accent; c[ImGuiCol_SliderGrab] = accent;
-    c[ImGuiCol_PlotHistogram] = accent; c[ImGuiCol_PlotLines] = accent;
+    for (const auto &entry : themeColors)
+        c[entry.slot] = ui_design::rgb(choice==0?entry.dark:choice==1?entry.light:entry.midnight);
+    c[ImGuiCol_TableRowBgAlt] = choice==1 ? ImVec4{.10f,.25f,.45f,.045f} : ImVec4{1,1,1,.025f};
+    accent = ui_design::rgb(choice==0?0xf0a431:choice==1?0xb86e00:0x7abdff);
+    ui_design::accentColor = accent;
+    auto accentAlpha = [](float alpha) { ImVec4 tone = accent; tone.w = alpha; return tone; };
+    // A slightly stronger accent for pressed or hovered accent-colored items.
+    const ImVec4 accentStrong = ui_design::mix(accent, choice==1?ImVec4{0,0,0,1}:ImVec4{1,1,1,1}, .18f);
+    for (ImGuiCol slot : {ImGuiCol_CheckMark, ImGuiCol_SliderGrab, ImGuiCol_PlotHistogram,
+                          ImGuiCol_PlotLines, ImGuiCol_NavCursor, ImGuiCol_ScrollbarGrabActive,
+                          ImGuiCol_TextLink, ImGuiCol_DragDropTarget, ImGuiCol_TabSelectedOverline,
+                          ImGuiCol_ResizeGripActive, ImGuiCol_SeparatorActive})
+        c[slot] = accent;
+    for (ImGuiCol slot : {ImGuiCol_SliderGrabActive, ImGuiCol_PlotHistogramHovered, ImGuiCol_PlotLinesHovered})
+        c[slot] = accentStrong;
+    c[ImGuiCol_TextSelectedBg] = accentAlpha(.30f);
+    c[ImGuiCol_SeparatorHovered] = accentAlpha(.60f);
+    c[ImGuiCol_ResizeGrip] = accentAlpha(.15f);
+    c[ImGuiCol_ResizeGripHovered] = accentAlpha(.60f);
     c[ImGuiCol_Separator] = c[ImGuiCol_Border];
+    c[ImGuiCol_TableBorderStrong] = c[ImGuiCol_Border];
+    c[ImGuiCol_TableBorderLight] = c[ImGuiCol_Border];
+    c[ImGuiCol_TabDimmed] = c[ImGuiCol_Tab];
+    c[ImGuiCol_TabDimmedSelected] = c[ImGuiCol_TabSelected];
+    c[ImGuiCol_TabDimmedSelectedOverline] = {0,0,0,0};
+    c[ImGuiCol_ModalWindowDimBg] = {0,0,0,.45f};
     s.ScaleAllSizes(uiScale);
 }
 static void heading(const char *title) {
@@ -4178,11 +4142,11 @@ struct App {
                     ImGui::GetColorU32(hovered ? ImGuiCol_TextDisabled : ImGuiCol_Border), U(3));
         const double t = mx > mn ? std::clamp((*value - mn) / (mx - mn), 0.0, 1.0) : 0.0;
         if (t > 0)
-            dl->AddRectFilled(p, {p.x + float(t * w), p.y + h}, IM_COL32(240, 164, 49, 36), U(3),
+            dl->AddRectFilled(p, {p.x + float(t * w), p.y + h}, ui_design::tint(.14f), U(3),
                               ImDrawFlags_RoundCornersLeft);
         if (t > 0 && t < 1)
             dl->AddLine({p.x + float(t * w), p.y}, {p.x + float(t * w), p.y + h},
-                        IM_COL32(240, 164, 49, 204));
+                        ui_design::tint(.8f));
         char text[64];
         snprintf(text, sizeof(text), format, *value);
         if (unit && unit[0])
@@ -4264,7 +4228,7 @@ struct App {
         if (ImGui::IsItemClicked(0)) *value = !*value;
         auto *dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(p, {p.x + w, p.y + h},
-                          ImGui::GetColorU32(*value ? ImGuiCol_NavCursor : ImGuiCol_Tab), U(8));
+                          ImGui::GetColorU32(*value ? ImGuiCol_NavCursor : ImGuiCol_ScrollbarGrab), U(8));
         const float knob = h - U(4);
         dl->AddCircleFilled({p.x + (*value ? w - U(2) - knob * .5f : U(2) + knob * .5f),
                              p.y + h * .5f},
@@ -4280,7 +4244,7 @@ struct App {
         auto *dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(p, {p.x + w, p.y + h}, 0, U(2));
         dl->AddRect(p, {p.x + w, p.y + h},
-                    ImGui::GetColorU32(selected ? ImGuiCol_NavCursor : ImGuiCol_Tab, selected ? 1.f : 1.f),
+                    ImGui::GetColorU32(selected ? ImGuiCol_NavCursor : ImGuiCol_Border),
                     U(2));
         const ImVec2 ts = ImGui::CalcTextSize(text);
         dl->AddText({p.x + (w - ts.x) * .5f, p.y + (h - ts.y) * .5f},
@@ -4686,7 +4650,7 @@ struct App {
         for(int index=0;index<int(tabs.size());++index) {
             const float width=tabs[size_t(index)].pinned?pinnedW:tabW;
             ImGui::SetCursorPos({tabOffset,0});tabOffset+=width+tabGap;
-            ImGui::PushID(tabs[size_t(index)].id);
+            ImGui::PushID(int(tabs[size_t(index)].id));
             const bool selected=index==activeTab;
             const bool home=selected?homeMode:tabs[size_t(index)].home;
             const bool authored=selected?creationMode:tabs[size_t(index)].creationMode;
@@ -5382,12 +5346,12 @@ struct App {
         else if (hovered)
             dl->AddRectFilled(p, {p.x + w, p.y + rowH}, ImGui::GetColorU32(ImGuiCol_HeaderHovered));
         if (selected && isModifier)
-            dl->AddRectFilled(p, {p.x + U(2), p.y + rowH}, IM_COL32(240, 164, 49, 255));
+            dl->AddRectFilled(p, {p.x + U(2), p.y + rowH}, ui_design::tint());
         float x = p.x + U(14);
         if (index == -1) {
             // Data source row: green 6px dot instead of a checkbox.
             const ImVec2 c{x, p.y + (rowH - U(6)) * .5f};
-            dl->AddRectFilled(c, {c.x + U(6), c.y + U(6)}, IM_COL32(87, 171, 90, 255), U(1));
+            dl->AddRectFilled(c, {c.x + U(6), c.y + U(6)}, ImGui::GetColorU32(ui_design::success()), U(1));
         } else {
         // Checkbox (14px, amber when on)
         {
@@ -5399,7 +5363,7 @@ struct App {
                 dl->AddLine({cx0 + U(2.2f), cy0 + U(2.4f)}, {cx0 + U(7.4f), c.y + U(3.6f)}, IM_COL32(22, 24, 27, 255), U(1.6f));
             } else {
                 dl->AddRectFilled(c, {c.x + U(14), c.y + U(14)}, ImGui::GetColorU32(ImGuiCol_FrameBg), U(2));
-                dl->AddRect(c, {c.x + U(14), c.y + U(14)}, ImGui::GetColorU32(ImGuiCol_Tab), U(2));
+                dl->AddRect(c, {c.x + U(14), c.y + U(14)}, ImGui::GetColorU32(ImGuiCol_Border), U(2));
             }
             const ImVec2 cursor = ImGui::GetCursorScreenPos();
             ImGui::SetCursorScreenPos(c);
@@ -5466,7 +5430,7 @@ struct App {
             dl->AddLine({hp.x, hp.y + headerH}, {hp.x + w, hp.y + headerH},
                         ImGui::GetColorU32(ImGuiCol_Border));
             ImGui::SetCursorPos({ImGui::GetCursorPosX() + U(14), ImGui::GetCursorPosY() + U(11)});
-            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+            ImGui::PushStyleColor(ImGuiCol_Text, ui_design::secondary());
             ImGui::TextUnformatted(loc::text("PIPELINE"));
             ImGui::PopStyleColor();
             const bool isMod = modifierGraph.selected < mods.size();
@@ -7528,10 +7492,15 @@ struct App {
             const bool activeVp = i == active;
             const ImVec2 lp{p.x + U(10), p.y + U(8)};
             const ImVec2 nameSize = ImGui::CalcTextSize(viewNames[mode]);
-            draw->AddText(lp, activeVp ? IM_COL32(240, 164, 49, 255) : IM_COL32(174, 180, 187, 235),
+            draw->AddText(lp, activeVp ? ui_design::tint() : IM_COL32(174, 180, 187, 235),
                           viewNames[mode]);
-            draw->AddText({lp.x + nameSize.x + U(8), lp.y + U(1)}, IM_COL32(93, 100, 108, 255),
-                          mode < 6 ? "ortho" : "fov 35°");
+            // Modes 0-5 are orthographic axis views, 6 is the free ORTHO view and
+            // 7 the only perspective view, so the name alone already says ORTHO.
+            char projection[16] = "ortho";
+            if (mode == 7)
+                snprintf(projection, sizeof(projection), "fov %.0f\xC2\xB0", perspectiveFovY * 180.f / DirectX::XM_PI);
+            draw->AddText({lp.x + nameSize.x + U(8), lp.y + U(1)}, IM_COL32(142, 149, 158, 255),
+                          mode == 6 ? "" : projection);
             const float btn = U(22);
             auto vpBtn = [&](const char *id, ImVec2 min, const char *tip) {
                 ImGui::SetCursorScreenPos(min);
@@ -7907,7 +7876,7 @@ struct App {
             ImGui::EndPopup();
         }
         if (i == active && !creationMode) {
-            draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, IM_COL32(240, 164, 49, 191));
+            draw->AddRect(p, {p.x + avail.x, p.y + avail.y}, ui_design::tint(.75f));
             // Fading status overlay at the viewport's bottom-left (replaces the
             // removed status bar); hides after ~4 s or on the next message.
             if (!overlayStatus.empty()) {
@@ -8120,26 +8089,26 @@ struct App {
         d->AddRect({left,trackTop},{right,trackBottom},ImGui::GetColorU32(ImGuiCol_Border),U(1));
         const float knobX = xFor(selected);
         if (knobX > left+1.f)
-            d->AddRectFilled({left,trackTop},{knobX,trackBottom},IM_COL32(240,164,49,56),U(1),
+            d->AddRectFilled({left,trackTop},{knobX,trackBottom},ui_design::tint(.22f),U(1),
                              ImDrawFlags_RoundCornersLeft);
         for (int64_t frame=0;frame<=last;frame+=minor) {
             const float x=xFor(int(frame));
             const bool isMajor = frame%major==0;
-            const ImU32 tickColor = frame <= selected ? IM_COL32(138,106,58,255)
-                                                      : IM_COL32(61,67,74,255);
+            const ImU32 tickColor = frame <= selected ? ui_design::tint(.6f)
+                                                      : ImGui::GetColorU32(ImGuiCol_ScrollbarGrab);
             d->AddLine({x,trackBottom},{x,trackBottom+U(isMajor?8.f:4.f)},tickColor,U(1));
             if (isMajor) {
                 const auto label=std::to_string(frame); // 0-based, matching the spinner's "/ total".
                 const auto size=ImGui::CalcTextSize(label.c_str());
                 d->AddText({std::clamp(x-size.x*.5f,p.x+2.f,p.x+width-size.x-2.f),
-                            p.y+U(4)},IM_COL32(107,114,122,255),label.c_str());
+                            p.y+U(4)},ImGui::GetColorU32(ui_design::faint()),label.c_str());
             }
         }
-        d->AddLine({knobX,p.y+U(12)},{knobX,p.y+rulerHeight-U(2)},IM_COL32(240,164,49,255),U(1));
+        d->AddLine({knobX,p.y+U(12)},{knobX,p.y+rulerHeight-U(2)},ui_design::tint(),U(1));
         {
             const float cy = p.y + U(14.5f), r = U(4.5f);
             d->AddQuadFilled({knobX, cy - r}, {knobX + r, cy}, {knobX, cy + r}, {knobX - r, cy},
-                             IM_COL32(240, 164, 49, 255));
+                             ui_design::tint());
         }
         const bool scrubbing = ImGui::IsItemActive() && ImGui::IsMouseDown(0);
         if (scrubbing && last>0)
@@ -8148,7 +8117,9 @@ struct App {
         // ruler or scrubbing; it is hidden the rest of the time.
         if ((hovered || scrubbing) && last>0) {
             const int frame=int(std::lround(std::clamp((ImGui::GetIO().MousePos.x-left)/trackWidth,0.f,1.f)*last));
-            const std::string name = path.filename().string();
+            // Not path.string(): that uses the system code page and throws for a
+            // file name it cannot represent, such as Chinese on Western Windows.
+            const std::string name = utf8(path.filename().wstring());
             ImGui::SetTooltip(loc::text("%s (Frame %d)"),
                               name.empty() ? "Trajectory" : name.c_str(), frame);
         }
@@ -8856,7 +8827,7 @@ struct App {
         ImGui::GetWindowDrawList()->AddRectFilled({x-U(3), midY-U(24)},
             {x+U(3), midY+U(24)}, ImGui::GetColorU32(active || hovered ? ImGuiCol_ButtonHovered : ImGuiCol_Button), U(3));
         for (int i=-1;i<=1;++i)
-            ImGui::GetWindowDrawList()->AddCircleFilled({x,midY+U(9*i)},U(1.4f),
+            ImGui::GetWindowDrawList()->AddCircleFilled({x,midY+U(9.f*i)},U(1.4f),
                 active || hovered ? ImGui::GetColorU32(accent) : ImGui::GetColorU32(ImGuiCol_TextDisabled));
         ImGui::End();
         ImGui::PopStyleVar(2);
@@ -9958,7 +9929,7 @@ struct App {
                 if (panelSelection == -1) {
                     ImGui::Spacing();
                     auto gridLabel = [](const char *label) {
-                        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                        ImGui::PushStyleColor(ImGuiCol_Text, ui_design::secondary());
                         ImGui::TextUnformatted(label);
                         ImGui::PopStyleColor();
                     };
@@ -10017,13 +9988,13 @@ struct App {
                     }
                 } else if (panelSelection == -2) {
                     ImGui::Spacing();
-                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ui_design::secondary());
                     ImGui::TextUnformatted(loc::text("Radius scale"));
                     ImGui::PopStyleColor();
                     if (scrubBar("##Radius scale", &radius, .02f, 2.f, "%.2f", "x"))
                         status = "Particle radius scale updated";
                     ImGui::Spacing();
-                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ui_design::secondary());
                     ImGui::TextUnformatted(loc::text("Shape"));
                     ImGui::PopStyleColor();
                     const int shape = segmented("##Particle shape",
@@ -10040,13 +10011,13 @@ struct App {
                     ImGui::PopStyleColor();
                 } else {
                     ImGui::Spacing();
-                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ui_design::secondary());
                     ImGui::TextUnformatted(loc::text("Line width"));
                     ImGui::PopStyleColor();
                     if (scrubBar("##Cell line width", &cellWidth, .5f, 8.f, "%.1f", "px"))
                         status = "Cell line width updated";
                     ImGui::Spacing();
-                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(154, 161, 169, 255));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ui_design::secondary());
                     ImGui::TextUnformatted(loc::text("Line color"));
                     ImGui::PopStyleColor();
                     ImGui::ColorEdit3("##Cell line color", cellColor);
@@ -11912,7 +11883,7 @@ struct App {
                 // P12: muted entries carry the mono PLANNED badge.
                 const ImVec2 r = ImGui::GetItemRectMax();
                 ImGui::GetWindowDrawList()->AddText({r.x - ImGui::CalcTextSize("PLANNED").x - U(8), r.y - ImGui::GetTextLineHeight() - U(1)},
-                                                    IM_COL32(107, 114, 122, 255), "PLANNED");
+                                                    ImGui::GetColorU32(ui_design::faint()), "PLANNED");
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip(loc::text("Not implemented. This entry does not execute an algorithm."));
             };
@@ -12132,8 +12103,8 @@ struct App {
             return;
         }
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(12), U(4)});
-        ImGui::PushStyleColor(ImGuiCol_Text, playing ? IM_COL32(240, 164, 49, 255)
-                                                     : IM_COL32(87, 171, 90, 255));
+        ImGui::PushStyleColor(ImGuiCol_Text, playing ? ui_design::accentColor
+                                                     : ui_design::success());
         ImGui::TextUnformatted(loc::text(status.c_str()));
         ImGui::PopStyleColor();
         ImGui::SameLine(U(420));

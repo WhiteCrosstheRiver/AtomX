@@ -103,8 +103,16 @@ inline std::array<double, 9> cellFromParameters(double a, double b, double c, do
     if (a <= 0 || b <= 0 || c <= 0 || alpha <= 0 || alpha >= 180 || beta <= 0 || beta >= 180 ||
         gamma <= 0 || gamma >= 180)
         throw std::runtime_error("Invalid cell parameters");
-    double ca = std::cos(alpha * rad), cb = std::cos(beta * rad), cg = std::cos(gamma * rad),
-           sg = std::sin(gamma * rad);
+    // Exact values for the angles crystallographic files use most, so cubic,
+    // tetragonal and hexagonal cells get exact zeros instead of ~1e-16 noise
+    // that otherwise leaks into the cell panel and every exported file.
+    auto cosDeg = [&](double d) {
+        return d == 90 ? 0. : d == 60 ? .5 : d == 120 ? -.5 : std::cos(d * rad);
+    };
+    auto sinDeg = [&](double d) {
+        return d == 90 ? 1. : (d == 60 || d == 120) ? 0.86602540378443864676 : std::sin(d * rad);
+    };
+    double ca = cosDeg(alpha), cb = cosDeg(beta), cg = cosDeg(gamma), sg = sinDeg(gamma);
     double cy = (ca - cb * cg) / sg, zz = 1 - cb * cb - cy * cy;
     if (zz <= 0)
         throw std::runtime_error("Degenerate cell angles");
@@ -236,6 +244,56 @@ inline std::vector<Frame> index(const std::filesystem::path &path,
         *progress = 1;
     return frames;
 }
+// Reorders atoms (and every per-atom property) by ascending key. LAMMPS dumps are
+// unsorted unless "dump_modify sort id" is used, so without this the same index
+// refers to different atoms in different frames.
+inline void sortAtomsBy(Dataset &d, const std::vector<double> &key) {
+    if (key.size() != d.atoms.size() || std::is_sorted(key.begin(), key.end()))
+        return;
+    std::vector<size_t> order(d.atoms.size());
+    for (size_t i = 0; i < order.size(); ++i)
+        order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return key[a] < key[b]; });
+    auto permute = [&](auto &values) {
+        if (values.size() != order.size())
+            return;
+        std::remove_reference_t<decltype(values)> sorted;
+        sorted.reserve(values.size());
+        for (size_t i : order)
+            sorted.push_back(values[i]);
+        values = std::move(sorted);
+    };
+    permute(d.atoms);
+    for (auto &[name, values] : d.scalarProperties)
+        permute(values);
+    for (auto &[name, values] : d.vectorProperties)
+        permute(values);
+}
+// Dumps without an element column name species Type_<n>. Lay them out as
+// Type_1..Type_max so species index k is LAMMPS type k+1 in every frame: colors
+// stay stable over a trajectory and exporting never renumbers types.
+inline void orderNumericTypes(Dataset &d) {
+    uint64_t maxType = 0;
+    std::vector<uint64_t> typeNumber(d.species.size());
+    for (size_t k = 0; k < d.species.size(); ++k) {
+        const auto &name = d.species[k];
+        if (name.rfind("Type_", 0) != 0 || name.size() == 5 ||
+            name.find_first_not_of("0123456789", 5) != std::string::npos || name.size() > 10)
+            return;
+        typeNumber[k] = std::stoull(name.substr(5));
+        if (typeNumber[k] == 0)
+            return;
+        maxType = std::max(maxType, typeNumber[k]);
+    }
+    if (maxType > 4096)
+        return;
+    std::vector<std::string> ordered;
+    for (uint64_t k = 1; k <= maxType; ++k)
+        ordered.push_back("Type_" + std::to_string(k));
+    for (auto &a : d.atoms)
+        a.type = uint32_t(typeNumber[a.type] - 1);
+    d.species = std::move(ordered);
+}
 inline Dataset readDump(const std::filesystem::path &path, const Frame &frame, uint64_t budget,
                         std::atomic<float> *progress, std::atomic<bool> *cancel) {
     if (!budget)
@@ -265,7 +323,7 @@ inline Dataset readDump(const std::filesystem::path &path, const Frame &frame, u
     }
     if (x < 0 || y < 0 || z < 0)
         throw std::runtime_error("Dump needs x/y/z, xu/yu/zu or xs/ys/zs");
-    int t = column("type"), element = column("element");
+    int t = column("type"), element = column("element"), idColumn = column("id");
     for (uint64_t i = 0; i < h.n; ++i) {
         auto row = tokens(line(f));
         if (row.size() != h.columns.size())
@@ -278,7 +336,15 @@ inline Dataset readDump(const std::filesystem::path &path, const Frame &frame, u
         // Build a stable type list even when a row is not resident in the preview.
         std::string name = element >= 0 ? row[element] : t >= 0 ? "Type_" + row[t] : "X";
         species(d, name);
-        if (i % d.stride)
+        // Sample by atom ID when available so the same atoms stay resident in every
+        // frame even though parallel LAMMPS runs write rows in a different order.
+        uint64_t sampleKey = i;
+        if (idColumn >= 0 && d.stride > 1) {
+            double id = number(row[size_t(idColumn)]);
+            if (id >= 1 && id <= 9007199254740991. && std::floor(id) == id)
+                sampleKey = uint64_t(id) - 1;
+        }
+        if (sampleKey % d.stride)
             continue;
         double a = number(row[x]), b = number(row[y]), c = number(row[z]);
         if (scaled)
@@ -296,6 +362,10 @@ inline Dataset readDump(const std::filesystem::path &path, const Frame &frame, u
                 d.scalarProperties[h.columns[k]].push_back(value);
             }
     }
+    if (t >= 0 && element < 0)
+        orderNumericTypes(d);
+    if (auto ids = d.scalarProperties.find("id"); ids != d.scalarProperties.end())
+        sortAtomsBy(d, ids->second);
     d.bounds();
     if (progress)
         *progress = 1;
@@ -423,6 +493,29 @@ inline Dataset readPDB(const std::filesystem::path &path, std::atomic<bool> *can
     d.bounds();
     return d;
 }
+// Element name for a LAMMPS type from its Masses line: an element written in the
+// trailing comment ("1 63.546 # Cu") wins, otherwise the mass identifies the element
+// when exactly one element lies within 0.05 u. Returns "" when undetermined.
+inline std::string lammpsTypeElement(double mass, const std::string &comment) {
+    auto words = tokens(comment);
+    if (!words.empty())
+        if (auto e = elements::find(words[0]); e && words[0].size() <= 2)
+            return e->symbol;
+    // Reduced-unit (LJ) systems commonly use mass 1.0; only call it hydrogen when the
+    // mass is written as a real hydrogen mass.
+    if (!std::isfinite(mass) || mass <= 0 || (mass < 2 && std::abs(mass - 1.008) > 0.002))
+        return "";
+    const elements::Element *match = nullptr;
+    for (const auto &e : elements::table) {
+        double m = elements::atomicMass(e);
+        if (m > 0 && std::abs(m - mass) < 0.05) {
+            if (match)
+                return "";
+            match = &e;
+        }
+    }
+    return match ? match->symbol : "";
+}
 inline Dataset readAtomicData(const std::filesystem::path &path, std::atomic<bool> *cancel) {
     std::ifstream f(path);
     if (!f)
@@ -430,46 +523,103 @@ inline Dataset readAtomicData(const std::filesystem::path &path, std::atomic<boo
     Dataset d;
     d.comment = line(f);
     std::string s;
-    uint64_t expected = 0;
-    bool inAtoms = false;
+    uint64_t expected = 0, typeCount = 0;
+    enum class Section { Header, Masses, Atoms, Other } section = Section::Header;
+    // Column layout of the Atoms section: index of type, x, and optional charge/molecule.
+    int typeColumn = 1, xColumn = 2, chargeColumn = -1, moleculeColumn = -1;
+    size_t width = 5;
+    std::map<uint64_t, std::string> typeNames;
     bool bounds[3]{};
+    auto ensureTypes = [&] {
+        // Species index k always means LAMMPS type k+1, so saving never renumbers types.
+        if (!d.species.empty())
+            return;
+        for (uint64_t k = 1; k <= typeCount; ++k) {
+            auto it = typeNames.find(k);
+            std::string name = it != typeNames.end() ? it->second : "Type_" + std::to_string(k);
+            // Two types mapping to the same element must stay distinct types.
+            if (std::find(d.species.begin(), d.species.end(), name) != d.species.end())
+                name = "Type_" + std::to_string(k);
+            d.species.push_back(name);
+        }
+    };
     while (std::getline(f, s)) {
         checkpoint(cancel);
         s = trim(s);
         if (s.empty())
             continue;
-        if (s.rfind("Atoms", 0) == 0) {
+        if (std::isalpha(static_cast<unsigned char>(s[0]))) {
             auto hash = s.find('#');
-            if (hash != std::string::npos && trim(s.substr(hash + 1)) != "atomic")
-                throw std::runtime_error(
-                    "LAMMPS data reader currently supports Atoms # atomic only");
-            inAtoms = true;
+            auto title = trim(s.substr(0, hash));
+            if (title == "Atoms") {
+                auto style = hash == std::string::npos ? std::string() : trim(s.substr(hash + 1));
+                if (style.empty() || style == "atomic") {
+                } else if (style == "charge") {
+                    chargeColumn = 2, xColumn = 3, width = 6;
+                } else if (style == "bond" || style == "angle" || style == "molecular") {
+                    moleculeColumn = 1, typeColumn = 2, xColumn = 3, width = 6;
+                } else if (style == "full") {
+                    moleculeColumn = 1, typeColumn = 2, chargeColumn = 3, xColumn = 4, width = 7;
+                } else
+                    throw std::runtime_error("Unsupported LAMMPS atom style '" + style +
+                                             "'; supported: atomic, charge, bond, angle, molecular, full");
+                ensureTypes();
+                section = Section::Atoms;
+            } else
+                section = title == "Masses" ? Section::Masses : Section::Other;
             continue;
         }
-        auto hash = s.find('#');
-        if (hash != std::string::npos)
+        std::string comment;
+        if (auto hash = s.find('#'); hash != std::string::npos) {
+            comment = s.substr(hash + 1);
             s = s.substr(0, hash);
+        }
         auto v = tokens(s);
         if (v.empty())
             continue;
-        if (inAtoms) {
-            if (std::isalpha(static_cast<unsigned char>(v[0][0]))) {
-                inAtoms = false;
-                continue;
-            }
-            if (v.size() != 5 && v.size() != 8)
-                throw std::runtime_error("Atomic LAMMPS row must have id type x y z [ix iy iz]");
-            auto id = count(v[0]), type = count(v[1]);
+        if (section == Section::Masses) {
+            if (v.size() != 2)
+                throw std::runtime_error("LAMMPS Masses row must be: type mass");
+            auto name = lammpsTypeElement(number(v[1]), comment);
+            if (!name.empty())
+                typeNames[count(v[0])] = name;
+            continue;
+        }
+        if (section == Section::Other)
+            continue;
+        if (section == Section::Atoms) {
+            if (v.size() != width && v.size() != width + 3)
+                throw std::runtime_error("LAMMPS Atoms row has " + std::to_string(v.size()) +
+                                         " columns; expected " + std::to_string(width) + " or " +
+                                         std::to_string(width + 3) + " for this atom style");
+            auto id = count(v[0]), type = count(v[size_t(typeColumn)]);
             if (!type || id > 9007199254740991ULL)
                 throw std::runtime_error("Invalid LAMMPS id/type");
-            atom(d, number(v[2]), number(v[3]), number(v[4]), "Type_" + v[1]);
+            if (type > typeCount)
+                throw std::runtime_error("LAMMPS atom type " + v[size_t(typeColumn)] +
+                                         " exceeds declared atom types");
+            Atom a{float(number(v[size_t(xColumn)])), float(number(v[size_t(xColumn) + 1])),
+                   float(number(v[size_t(xColumn) + 2])), uint32_t(type - 1)};
+            if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z))
+                throw std::runtime_error("Coordinates exceed float range");
+            d.atoms.push_back(a);
             d.scalarProperties["id"].push_back(double(id));
+            if (chargeColumn >= 0)
+                d.scalarProperties["Charge"].push_back(number(v[size_t(chargeColumn)]));
+            if (moleculeColumn >= 0)
+                d.scalarProperties["Molecule Identifier"].push_back(
+                    double(count(v[size_t(moleculeColumn)])));
             continue;
         }
         if (v.size() == 2 && v[1] == "atoms") {
             expected = count(v[0]);
             if (expected > 20000000)
                 throw std::runtime_error("LAMMPS data reader limit: 20 million atoms");
+        }
+        if (v.size() == 3 && v[1] == "atom" && v[2] == "types") {
+            typeCount = count(v[0]);
+            if (typeCount == 0 || typeCount > 65535)
+                throw std::runtime_error("Invalid LAMMPS atom type count");
         }
         if (v.size() == 4) {
             for (int k = 0; k < 3; ++k) {
@@ -495,6 +645,8 @@ inline Dataset readAtomicData(const std::filesystem::path &path, std::atomic<boo
             d.cell[7] = number(v[2]);
         }
     }
+    if (!typeCount)
+        throw std::runtime_error("LAMMPS data header is missing 'N atom types'");
     if (d.atoms.size() != expected || !bounds[0] || !bounds[1] || !bounds[2])
         throw std::runtime_error("LAMMPS atom count or cell bounds missing/mismatched");
     // LAMMPS data has no boundary flags; do not invent periodicity.
@@ -511,8 +663,23 @@ inline Dataset readCifP1(const std::filesystem::path &path, std::atomic<bool> *c
     std::string s;
     while (std::getline(f, s)) {
         checkpoint(cancel);
-        if (!s.empty() && s.front() == ';')
-            throw std::runtime_error("CIF multiline fields are not supported by this reader");
+        if (!s.empty() && s.front() == ';') {
+            // Semicolon text field (titles, author lists, ...): one value spanning
+            // lines until a line that starts with ';'.
+            std::string text = s.substr(1), next;
+            bool closed = false;
+            while (std::getline(f, next)) {
+                if (!next.empty() && next.front() == ';') {
+                    closed = true;
+                    break;
+                }
+                text += '\n' + next;
+            }
+            if (!closed)
+                throw std::runtime_error("Unterminated CIF text field");
+            all.push_back(trim(text));
+            continue;
+        }
         size_t i = 0;
         while (i < s.size()) {
             if (std::isspace(static_cast<unsigned char>(s[i]))) {
@@ -595,6 +762,12 @@ inline Dataset readCifP1(const std::filesystem::path &path, std::atomic<bool> *c
             v = v.substr(0, p);
         return number(v);
     };
+    for (const char *name : {"_cell_length_a", "_cell_length_b", "_cell_length_c"})
+        if (!fields.count(name))
+            throw std::runtime_error(std::string("CIF is missing ") + name +
+                                     "; AtomX needs the unit cell to place fractional coordinates");
+    if (headers.empty())
+        throw std::runtime_error("CIF has no _atom_site loop with fractional coordinates");
     Dataset d;
     d.cell = cellFromParameters(
         numeric(fields.at("_cell_length_a")), numeric(fields.at("_cell_length_b")),
@@ -618,6 +791,14 @@ inline Dataset readCifP1(const std::filesystem::path &path, std::atomic<bool> *c
         auto symbol = rows[i + (t >= 0 ? t : label)];
         if (t < 0)
             symbol = symbol.substr(0, symbol.find_first_of("0123456789_"));
+        else if (symbol.find_first_of("+-") != std::string::npos) {
+            // pymatgen / Materials Project and ICSD write oxidation states into the
+            // type symbol ("Fe3+", "O2-"). Keep the element so exports stay valid
+            // for VASP/ASE; the charge is not part of the structure.
+            auto element = symbol.substr(0, symbol.find_first_of("0123456789+-"));
+            if (elements::find(element))
+                symbol = element;
+        }
         double a = numeric(rows[i + x]), b = numeric(rows[i + y]), c = numeric(rows[i + z]);
         atom(d, a * d.cell[0] + b * d.cell[3] + c * d.cell[6],
              a * d.cell[1] + b * d.cell[4] + c * d.cell[7],
@@ -852,8 +1033,21 @@ inline void writeFrame(std::ostream &f, Format fmt, const Dataset &d, const Expo
               << d.origin.x << ' ' << d.origin.x + d.cell[0] << " xlo xhi\n"
               << d.origin.y << ' ' << d.origin.y + d.cell[4] << " ylo yhi\n"
               << d.origin.z << ' ' << d.origin.z + d.cell[8] << " zlo zhi\n"
-              << d.cell[3] << ' ' << d.cell[6] << ' ' << d.cell[7]
-              << " xy xz yz\n\nAtoms # atomic\n\n";
+              << d.cell[3] << ' ' << d.cell[6] << ' ' << d.cell[7] << " xy xz yz\n\n";
+            // LAMMPS needs a mass for every type; write the section only when each
+            // species is a known element. The comment lets readers restore names.
+            bool allElements = !d.species.empty();
+            for (const auto &name : d.species)
+                allElements = allElements && elements::find(name) && elements::atomicMass(*elements::find(name)) > 0;
+            if (allElements) {
+                f << "Masses\n\n";
+                for (size_t k = 0; k < d.species.size(); ++k) {
+                    const auto *e = elements::find(d.species[k]);
+                    f << k + 1 << ' ' << elements::atomicMass(*e) << " # " << e->symbol << '\n';
+                }
+                f << '\n';
+            }
+            f << "Atoms # atomic\n\n";
             for (size_t i = 0; i < d.atoms.size(); ++i) {
                 auto a = d.atoms[i];
                 f << i + 1 << ' ' << a.type + 1 << ' ' << a.x << ' ' << a.y << ' ' << a.z << '\n';

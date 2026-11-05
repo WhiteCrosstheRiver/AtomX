@@ -19,6 +19,8 @@ inline void check(HRESULT hr, const char *message) {
         throw std::runtime_error(std::string(message) + " (HRESULT " +
                                  std::to_string(uint32_t(hr)) + ")");
 }
+// Vertical field of view of the perspective camera, in radians (about 37 degrees).
+inline constexpr float perspectiveFovY = .65f;
 struct Camera {
     float yaw = .65f, pitch = .48f, zoom = 1.0f, panX = 0, panY = 0, roll = 0;
     int mode = 7;
@@ -776,7 +778,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         const auto screenRotation = XMMatrixRotationZ(cam.roll);
         auto baseView = XMMatrixLookAtRH(center + dir * dist, center, up) * screenRotation;
         if (cam.mode == 7) {
-            const float tanHalfY = std::tan(.65f * .5f);
+            const float tanHalfY = std::tan(perspectiveFovY * .5f);
             const float tanHalfX = tanHalfY * aspect;
             const float minDepth = std::max({particleExtent * 2.5f, span * .01f, .5f});
             float fittedDistance = 0;
@@ -803,7 +805,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         auto v = baseView * XMMatrixTranslation(cam.panX * span, cam.panY * span, 0);
         XMMATRIX p;
         if (cam.mode == 7) {
-            p = XMMatrixPerspectiveFovRH(.65f, aspect, span * .001f, span * 1000);
+            p = XMMatrixPerspectiveFovRH(perspectiveFovY, aspect, span * .001f, span * 1000);
         } else {
             // Fit the actual projected cell bounds. A single world-space max
             // dimension wastes most of a wide viewport for long nanowires.

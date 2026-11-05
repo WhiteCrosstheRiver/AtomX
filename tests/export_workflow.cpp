@@ -322,6 +322,11 @@ int main(int argc,char **argv) {
                     const auto ink=ImGui::GetStyleColorVec4(ImGuiCol_Text);
                     requireExport(app.preferences.theme==1 && ui_design::light() && face.x>.95f && ink.x<.2f,
                         "real light-theme toggle keeps white buttons with dark text after all style pops");
+                    const auto navCursor=ImGui::GetStyleColorVec4(ImGuiCol_NavCursor);
+                    const auto overline=ImGui::GetStyleColorVec4(ImGuiCol_TabSelectedOverline);
+                    requireExport(navCursor.x==ui_design::accentColor.x && navCursor.z==ui_design::accentColor.z &&
+                                  overline.x==ui_design::accentColor.x && overline.z==ui_design::accentColor.z,
+                        "light theme accent slots do not keep ImGui default blue");
                     ImGui::PushStyleColor(ImGuiCol_WindowBg,{0,0,0,1});
                     requireExport(ui_design::light(),"temporary black viewport surfaces do not change theme identity");
                     ImGui::PopStyleColor();

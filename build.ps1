@@ -42,6 +42,10 @@ cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj tests\structure_io_tests.
 if errorlevel 1 exit /b 1
 build\structure_io_tests.exe
 if errorlevel 1 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj tests\real_world_io_tests.cpp /Fo:build\ /Fe:build\real_world_io_tests.exe
+if errorlevel 1 exit /b 1
+build\real_world_io_tests.exe
+if errorlevel 1 exit /b 1
 cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj tests\render_shapes.cpp /Fo:build\ /Fe:build\render_shapes.exe
 if errorlevel 1 exit /b 1
 build\render_shapes.exe

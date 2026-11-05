@@ -66,6 +66,21 @@ interaction suite pass, including new pin/project and close/reopen history
 checks. Native inspection verified the tab context menu, rename dialog,
 inspector header and complete trajectory controls at 1560 x 1000.
 
+## Theme consistency pass (2026-11-05)
+
+`theme()` is now one table per ImGui slot plus accent-derived slots, replacing
+three overlapping palette blocks. Accent items such as the navigation cursor,
+selected tab overline, slider press and resize grips no longer fall back to
+ImGui's default blue. Chrome reads `ui_design::tint`, `secondary`, `faint` and
+`success` instead of literal dark-theme colors, so the timeline, pipeline and
+inspector labels follow the light and Midnight themes. Viewport overlays keep
+their fixed colors because they sit on the black scene surface.
+
+Off toggles, unchecked pipeline boxes and unselected badges now have a visible
+track or border. Viewport captions show the real perspective field of view
+(`perspectiveFovY`, about 37 degrees) and no longer label the ORTHO view as
+perspective.
+
 ## Title edge, text and native move refinement (2026-10-12)
 
 Tabs start at the window's top edge. Regular tabs shrink between 215 and 130

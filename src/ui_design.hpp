@@ -14,6 +14,15 @@ inline ImVec4 chrome(){return rgb(light()?0xe4e7eb:0x0b0d0f);}
 inline ImVec4 sunk(){return rgb(light()?0xe8ebee:0x0f1114);}
 inline ImVec4 buttonBorder(){return rgb(light()?0xbcc3cb:0x4a515a);}
 inline ImVec4 secondary(){return rgb(light()?0x56606b:0x9aa2ab);}
+// Small annotations such as ruler numbers; still readable on both surfaces.
+inline ImVec4 faint(){return rgb(light()?0x6b7480:0x7d858e);}
+// Set by the application theme; chrome must use this instead of a literal color.
+inline ImVec4 accentColor=rgb(0xf0a431);
+inline ImU32 tint(float alpha=1.f){auto tone=accentColor;tone.w=alpha;return ImGui::GetColorU32(tone);}
+inline ImVec4 mix(ImVec4 a,ImVec4 b,float t){
+    return {a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,a.z+(b.z-a.z)*t,a.w+(b.w-a.w)*t};
+}
+inline ImVec4 success(){return rgb(light()?0x008d48:0x57ab5a);}
 inline ImVec4 tool(unsigned dark,unsigned pale){return rgb(light()?pale:dark);}
 inline bool checkbox(const char *label,bool *value) {
     const auto &style=ImGui::GetStyle();
@@ -24,8 +33,9 @@ inline bool checkbox(const char *label,bool *value) {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,3.f*scale);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing,{7.f*scale,style.ItemInnerSpacing.y});
     ImGui::PushStyleColor(ImGuiCol_Border,buttonBorder());
-    ImGui::PushStyleColor(ImGuiCol_FrameBg,*value?rgb(light()?0xe4edf9:0x25374a):rgb(light()?0xffffff:0x11151a));
-    ImGui::PushStyleColor(ImGuiCol_CheckMark,rgb(light()?0x215a9b:0x86c5ff));
+    const ImVec4 well=rgb(light()?0xffffff:0x11151a);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,*value?mix(well,accentColor,.16f):well);
+    ImGui::PushStyleColor(ImGuiCol_CheckMark,accentColor);
     const bool changed=ImGui::Checkbox(label,value);
     ImGui::PopStyleColor(3);ImGui::PopStyleVar(3);
     return changed;

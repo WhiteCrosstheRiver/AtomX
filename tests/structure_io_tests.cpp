@@ -1,5 +1,6 @@
 #include "../src/structure_io.hpp"
 #include <chrono>
+#include <cstring>
 #include <iostream>
 using namespace atomx;
 void require(bool b, const char *s) {

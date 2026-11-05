@@ -525,8 +525,11 @@ inline Dataset readXYZ(const std::filesystem::path &path, const Frame &fr,
     return d;
 }
 inline std::string lowerExtension(const std::filesystem::path &p) {
-    auto s = p.extension().string();
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    // Format extensions are ASCII. Reading the wide form keeps a file with any other
+    // extension from throwing in the system code page conversion of path::string().
+    std::string s;
+    for (wchar_t c : p.extension().wstring())
+        s.push_back(c < 128 ? char(std::tolower(int(c))) : '?');
     return s;
 }
 inline bool isPOSCAR(const std::filesystem::path &path) {
@@ -534,8 +537,19 @@ inline bool isPOSCAR(const std::filesystem::path &path) {
     std::transform(name.begin(), name.end(), name.begin(),
                    [](wchar_t c) { return wchar_t(std::towlower(c)); });
     auto ext = lowerExtension(path);
-    return name == L"poscar" || name == L"contcar" || ext == ".poscar" || ext == ".contcar" ||
-           ext == ".vasp";
+    if (name == L"poscar" || name == L"contcar" || ext == ".poscar" || ext == ".contcar" ||
+        ext == ".vasp")
+        return true;
+    // VASP users routinely keep variants such as POSCAR_relaxed, CONTCAR-3 or POSCAR.Si.
+    // Accept those unless the extension clearly names another structure format.
+    if (name.rfind(L"poscar", 0) != 0 && name.rfind(L"contcar", 0) != 0)
+        return false;
+    for (const char *other : {".xyz", ".extxyz", ".cif", ".data", ".lmp", ".dump", ".lammpstrj",
+                              ".pdb", ".ent", ".gro", ".mol", ".sdf", ".sd", ".xsf", ".atomx",
+                              ".gz", ".zst", ".png", ".csv", ".txt"})
+        if (ext == other)
+            return false;
+    return true;
 }
 inline Dataset readPOSCAR(const std::filesystem::path &path) {
     std::ifstream f(path);
@@ -552,17 +566,29 @@ inline Dataset readPOSCAR(const std::filesystem::path &path) {
     double scale;
     std::istringstream scaling(line());
     std::string extra;
-    if (!(scaling >> scale) || !std::isfinite(scale) || scale <= 0 || (scaling >> extra))
+    if (!(scaling >> scale) || !std::isfinite(scale) || scale == 0 || (scaling >> extra))
         throw std::runtime_error(
-            "POSCAR requires one positive scale (volume/three-axis scaling unsupported)");
+            "POSCAR requires one scale factor (three-axis scaling unsupported)");
+    std::array<double, 9> raw{};
     for (int row = 0; row < 3; ++row) {
         std::istringstream values(line());
-        for (int col = 0; col < 3; ++col) {
-            double v;
-            if (!(values >> v) || !std::isfinite(v * scale))
+        for (int col = 0; col < 3; ++col)
+            if (!(values >> raw[size_t(row * 3 + col)]) || !std::isfinite(raw[size_t(row * 3 + col)]))
                 throw std::runtime_error("Invalid POSCAR lattice");
-            d.cell[row * 3 + col] = v * scale;
-        }
+    }
+    if (scale < 0) {
+        // VASP convention: a negative scale is the target cell volume in A^3.
+        double volume = std::abs(raw[0] * (raw[4] * raw[8] - raw[5] * raw[7]) -
+                                 raw[1] * (raw[3] * raw[8] - raw[5] * raw[6]) +
+                                 raw[2] * (raw[3] * raw[7] - raw[4] * raw[6]));
+        if (!std::isfinite(volume) || volume < 1e-12)
+            throw std::runtime_error("POSCAR volume scaling needs a non-degenerate lattice");
+        scale = std::cbrt(-scale / volume);
+    }
+    for (size_t k = 0; k < 9; ++k) {
+        d.cell[k] = raw[k] * scale;
+        if (!std::isfinite(d.cell[k]))
+            throw std::runtime_error("Invalid POSCAR lattice");
     }
     auto header = line();
     std::istringstream symbols(header);

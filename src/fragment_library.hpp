@@ -268,7 +268,8 @@ inline Template load(const std::filesystem::path &path) {
     if (std::filesystem::file_size(path)>1024*1024) throw std::runtime_error("片段文件超过 1 MiB");
     auto content=document::read(path,atomLimit);
     if (content.view.selection.size()!=1) throw std::runtime_error("片段文件缺少唯一连接点");
-    Template t{"user/"+path.stem().string(),content.view.title,content.view.basedOn,
+    const auto stem=path.stem().u8string(); // path::string() throws outside the system code page
+    Template t{"user/"+std::string(reinterpret_cast<const char*>(stem.data()),stem.size()),content.view.title,content.view.basedOn,
         std::move(content.data),content.view.selection[0]}; validate(t); return t;
 }
 } // namespace atomx::fragments
