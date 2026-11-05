@@ -315,6 +315,10 @@ int main(int argc,char **argv) {
             // colors are pushed used to restore dark surfaces in light mode.
             {
                 const int original=app.preferences.theme;
+                // The large fonts are built from these strings' translations. This harness
+                // has no DX11 font backend, so glyphs themselves are checked in the real app.
+                for(const char *text:homeFontStrings)
+                    requireExport(loc::catalog().count(text)==1,"home titles are in the translation catalog");
                 app.preferences.theme=0;app.refreshTheme=true;frame();
                 for(int pass=0;pass<3;++pass) {
                     click("title.theme");frame();

@@ -8,28 +8,52 @@
 // UI-only localization. Scientific keys, expressions, user labels, filenames and
 // serialized documents retain their original spelling. No network/dependencies.
 namespace localization {
-enum class Language { Chinese, English };
+// Values index every per-language array. Append new languages at the end.
+enum class Language { Chinese, English, French, German, Spanish, Portuguese, Russian, Japanese };
+inline constexpr int languageCount = 8;
+// Languages after Chinese and English come from localization_packs.inc.
+inline constexpr int packLanguageCount = languageCount - 2;
+struct LanguageInfo { const wchar_t *code; const char *name; };
+inline constexpr LanguageInfo languages[languageCount] = {
+    {L"zh-CN", "简体中文"}, {L"en", "English"},   {L"fr", "Français"}, {L"de", "Deutsch"},
+    {L"es", "Español"},     {L"pt", "Português"}, {L"ru", "Русский"},  {L"ja", "日本語"},
+};
 inline Language current = Language::Chinese;
-inline const wchar_t *code(Language value) { return value==Language::English ? L"en" : L"zh-CN"; }
+inline const wchar_t *code(Language value) { return languages[int(value)].code; }
 inline Language fromCode(const wchar_t *value) {
-    return std::wcscmp(value,L"en")==0 ? Language::English : Language::Chinese;
+    for(int lang=0;lang<languageCount;++lang)
+        if(std::wcscmp(value,languages[lang].code)==0) return Language(lang);
+    return Language::Chinese;
 }
 struct Entry { const char *source; const char *chinese; const char *english; };
 inline constexpr Entry entries[] = {
 #include "localization_strings.inc"
 };
-struct Translation { std::string text[2], label[2]; };
+// French, German, Spanish, Portuguese, Russian, Japanese, in enum order. A source
+// missing here shows its English text, so a pack can grow one row at a time.
+struct PackEntry { const char *source; const char *text[packLanguageCount]; };
+inline constexpr PackEntry packEntries[] = {
+#include "localization_packs.inc"
+};
+struct Translation { std::string text[languageCount], label[languageCount]; };
 inline const auto &catalog() {
     static const auto values=[] {
         std::unordered_map<std::string_view,Translation> map;
         for(const auto &entry:entries) {
             Translation value;
-            value.text[0]=entry.chinese; value.text[1]=entry.english;
-            // ### fixes ImGui IDs across live changes, including open popups.
-            value.label[0]=value.text[0]+"###"+entry.source;
-            value.label[1]=value.text[1]+"###"+entry.source;
+            value.text[0]=entry.chinese;
+            for(int lang=1;lang<languageCount;++lang) value.text[lang]=entry.english;
             map.emplace(entry.source,std::move(value));
         }
+        for(const auto &entry:packEntries) {
+            const auto found=map.find(entry.source);
+            if(found==map.end()) continue; // localization_tests rejects unknown sources.
+            for(int pack=0;pack<packLanguageCount;++pack) found->second.text[pack+2]=entry.text[pack];
+        }
+        for(auto &[source,value]:map)
+            // ### fixes ImGui IDs across live changes, including open popups.
+            for(int lang=0;lang<languageCount;++lang)
+                value.label[lang]=value.text[lang]+"###"+std::string(source);
         return map;
     }();
     return values;
@@ -53,18 +77,18 @@ inline const char *label(const char *source) {
     auto found=variants.find(source);
     if(found==variants.end()) {
         Translation value;
-        for(int lang=0;lang<2;++lang) value.label[lang]=base->second.text[lang]+"###"+source;
+        for(int lang=0;lang<languageCount;++lang) value.label[lang]=base->second.text[lang]+"###"+source;
         found=variants.emplace(source,std::move(value)).first;
     }
     return found->second.label[int(current)].c_str();
 }
 template<size_t N> const char *items(const char (&source)[N]) {
-    // Literal addresses are stable; cache both languages including NUL separators.
+    // Literal addresses are stable; cache every language including NUL separators.
     static std::unordered_map<const char *,Translation> cache;
     auto found=cache.find(source);
     if(found==cache.end()) {
         Translation value;
-        for(int lang=0;lang<2;++lang) {
+        for(int lang=0;lang<languageCount;++lang) {
             const auto previous=current;current=Language(lang);
             for(size_t at=0;at<N;) {
                 value.text[lang]+=text(source+at);value.text[lang]+='\0';

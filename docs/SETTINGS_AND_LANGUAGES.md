@@ -4,7 +4,9 @@ The title bar gear, beside the window controls, opens Settings from Home,
 Viewer and Creation tabs. Edit > Application Settings and the existing toolbar
 entry open the same dialog.
 
-- Languages: Simplified Chinese (`zh-CN`, default) and English (`en`).
+- Languages: Simplified Chinese (`zh-CN`, default), English (`en`), French (`fr`),
+  German (`de`), Spanish (`es`), Portuguese (`pt`), Russian (`ru`), Japanese (`ja`).
+  The last six are partial packs: text not yet translated shows in English.
 - Language, theme, font and size apply immediately. No restart or network is needed.
 - Preferences are saved in `%LOCALAPPDATA%/AtomX/settings.ini`; missing or
   unknown language codes fall back to Simplified Chinese.
@@ -15,6 +17,10 @@ entry open the same dialog.
 ## Adding interface text
 
 `src/localization_strings.inc` holds source spelling, Chinese and English.
+`src/localization_packs.inc` adds the other languages, one row per source;
+`localization_tests` rejects unknown sources, gaps and changed placeholders.
+To add a language, extend `Language`, `languages` and each pack row. Right-to-left
+scripts are not supported because Dear ImGui does not shape them.
 Use `localization::text` for captions/tooltips and `localization::label` for
 ImGui controls/window titles. Labels keep a language-independent `###` ID.
 `localization::items` preserves NUL-separated combo lists. Keep printf argument

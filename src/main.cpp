@@ -327,6 +327,11 @@ static int64_t timelineLabelStep(int64_t lastFrame, float trackWidthPx) {
 }
 static ImFont *headingFont = nullptr;
 static ImFont *smallFont = nullptr, *cardFont = nullptr, *heroFont = nullptr;
+// The large home fonts hold only the glyphs of these strings, so anything drawn
+// with cardFont or heroFont must come from here. The font build reads the same list.
+static const char *const homeOpenTitle="打开结构文件", *const homeCrystalTitle="从空间群建晶体",
+                         *const homeBlankTitle="空白创作", *const homeHeroTitle="New Tab";
+static const char *const homeFontStrings[]={homeOpenTitle,homeCrystalTitle,homeBlankTitle,homeHeroTitle};
 static ImVec2 pixelPosition(ImVec2 p) { return {std::floor(p.x),std::floor(p.y)}; }
 static ImFont *iconFont = nullptr;
 static const char *iconFontName = "text fallback"; // Reported by the smoke run.
@@ -4581,8 +4586,13 @@ struct App {
             if(n>=6) {draw->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({p.x,p.y+U(2)}),ImGui::GetColorU32(tone),label,label+3);
                 draw->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({p.x,p.y+U(17)}),ImGui::GetColorU32(tone),label+3,label+6);}
         } else {
-            const size_t n=std::min(size_t(3),std::strlen(label));
-            for(size_t i=0;i<n;++i)draw->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({p.x+U(2),p.y+U(float(i)*11)}),ImGui::GetColorU32(tone),label+i,label+i+1);
+            // Step by UTF-8 character: accented and non-Latin captions are multi-byte.
+            const char *cursor=label;
+            for(int i=0;i<3 && *cursor;++i) {
+                unsigned codepoint=0;const int bytes=ImTextCharFromUtf8(&codepoint,cursor,nullptr);
+                draw->AddText(smallFont?smallFont:ImGui::GetFont(),smallFont?smallFont->FontSize:U(11),pixelPosition({p.x+U(2),p.y+U(float(i)*11)}),ImGui::GetColorU32(tone),cursor,cursor+bytes);
+                cursor+=bytes;
+            }
         }
         ImGui::Dummy({U(16),U(32)});ImGui::SameLine(0,U(4));
     }
@@ -8846,7 +8856,7 @@ struct App {
         fixed("Home workspace",0,topInset(),w,h-topInset()-statusHeight());
         const float width=std::min(U(780),w-U(48)),x=(w-width)*.5f;
         ImGui::SetCursorPos({x,U(65)});auto p=ImGui::GetCursorScreenPos();
-        ImGui::GetWindowDrawList()->AddText(heroFont?heroFont:ImGui::GetFont(),heroFont?heroFont->FontSize:U(30),pixelPosition(p),ImGui::GetColorU32(ImGuiCol_Text),loc::text("New Tab"));
+        ImGui::GetWindowDrawList()->AddText(heroFont?heroFont:ImGui::GetFont(),heroFont?heroFont->FontSize:U(30),pixelPosition(p),ImGui::GetColorU32(ImGuiCol_Text),loc::text(homeHeroTitle));
         ImGui::Dummy({width,U(42)});ImGui::SetCursorPosX(x);ImGui::TextDisabled("%s",loc::text("打开一个结构查看，或者直接开始创作。"));ImGui::Dummy({0,U(22)});
         const bool stacked=width<U(640);const float cardW=stacked?width:(width-U(24))/3;
         auto card=[&](const char *id,const char *title,const char *subtitle,const char *icon,bool primary,auto &&action){
@@ -8863,9 +8873,9 @@ struct App {
             if(stacked)ImGui::Dummy({0,U(12)});else ImGui::SameLine(0,U(12));
         };
         ImGui::SetCursorPosX(x);
-        card("##home-open","打开结构文件","XYZ · CIF · POSCAR · PDB","open",false,[&]{open();});
-        card("##home-crystal","从空间群建晶体","空间群 → 晶格 → 不对称单元","crystal",true,[&]{openCrystalDialog=true;});
-        card("##home-blank","空白创作","绘制原子、键与分子片段","draw",false,[&]{newBlankCreation();});
+        card("##home-open",homeOpenTitle,"XYZ · CIF · POSCAR · PDB","open",false,[&]{open();});
+        card("##home-crystal",homeCrystalTitle,"空间群 → 晶格 → 不对称单元","crystal",true,[&]{openCrystalDialog=true;});
+        card("##home-blank",homeBlankTitle,"绘制原子、键与分子片段","draw",false,[&]{newBlankCreation();});
         ImGui::NewLine();ImGui::Dummy({0,U(20)});ImGui::SetCursorPosX(x);
         const auto recent=ImGui::GetCursorScreenPos();
         ImGui::GetWindowDrawList()->AddText(recent,ImGui::GetColorU32(ImGuiCol_TextDisabled),loc::text("Recent Files"));
@@ -9795,7 +9805,7 @@ struct App {
         ImGui::GetWindowDrawList()->AddRectFilled({row.x,row.y+U(2)},
             {row.x+U(3),row.y+U(23)},IM_COL32(32,163,241,255));
         ImGui::Indent(U(13));
-        const std::string origin = std::string(loc::current==loc::Language::English?"From ":"从 ") +
+        const std::string origin = std::string(loc::current==loc::Language::Chinese?"从 ":"From ") +
             (creationBasedOn.empty() ? std::string(loc::text("新结构")) : creationBasedOn);
         if (ImGui::Selectable(origin.c_str(),authorUndo.empty(),0,{rightW-U(75),U(27)}))
             jumpCreationHistory(0);
@@ -11452,6 +11462,9 @@ struct App {
         ImFontGlyphRangesBuilder chineseBuilder;
         chineseBuilder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
         for(const auto &entry:loc::entries) {chineseBuilder.AddText(entry.chinese);chineseBuilder.AddText(entry.english);}
+        // Cyrillic and kana come from the merged CJK font, so request the pack glyphs too.
+        for(const auto &entry:loc::packEntries)for(const char *text:entry.text)chineseBuilder.AddText(text);
+        for(const auto &language:loc::languages)chineseBuilder.AddText(language.name);
         chineseBuilder.AddText("测量模拟约束选择已有可同时修改多种类型全选清空测量选择已选未选择当前值随坐标更新约束随测量保存在中标准结构导出不保留测量移除测量或删除其端点会同时移除该约束体系或测量已改变请重新打开测量类型无效测量选择已改变测量约束选项无效");
         chineseBuilder.AddText("原子模拟约束整原子固定当前晶格方向保持各原子当前值解除固定笛卡尔同时部分轴及其旋转后的方向约束尚未支持分数分量固定全部解除全部晶格方向需要有效的三维周期晶胞这些是属性手工移动与旋转仍可使用不执行模拟求解保持当前值可保留多选中的不同约束保存两类保存晶格方向整原子笛卡尔固定需保存在中导出时须显式取消约束保留没有变化标志必须为零或一属性类型不正确层构建会重设晶格基矢请先解除来源的晶格方向约束片段库不保留来源晶格方向");
         chineseBuilder.AddText("创作模式文件编辑视图修改构建工具基于结构氯化钠岩盐组成点击选中同元素晶格体积空间群布拉维格子面心立方原子数密度历史回到该步从新撤销重做旋转缩放右键更多操作拖动空白处框选删除晶体超胞切面真空中键滚轮单位转换原胞对称操作识别失败三维周期晶面重排沿法向添加关闭边界编号须标准设置参数相容基元无效");
@@ -11503,7 +11516,12 @@ struct App {
         headingFont=sizedFont(float(preferences.size),true,chineseRanges.Data);
         smallFont=sizedFont(11,false,chineseRanges.Data);
         // Larger home text only needs its own small set of glyphs.
-        ImFontGlyphRangesBuilder homeBuilder;homeBuilder.AddText("新标签页打开文件建晶体空白创作");
+        ImFontGlyphRangesBuilder homeBuilder;
+        for(const char *text:homeFontStrings) {
+            homeBuilder.AddText(text);
+            if(const auto found=loc::catalog().find(text);found!=loc::catalog().end())
+                for(const auto &translated:found->second.text)homeBuilder.AddText(translated.c_str());
+        }
         homeBuilder.AddRanges(io.Fonts->GetGlyphRangesDefault());
         ImVector<ImWchar> homeRanges;homeBuilder.BuildRanges(&homeRanges);
         cardFont=sizedFont(16,true,homeRanges.Data);heroFont=sizedFont(30,true,homeRanges.Data);
@@ -11802,9 +11820,9 @@ struct App {
             bool changed=false,fontChanged=false;
             if(settingsPage==0) {
                 intro("Language","Language changes apply immediately and are saved for the next launch.");
-                const char *languages[]={"简体中文","English"};ImGui::SetNextItemWidth(-1);
-                const bool choosing=ImGui::BeginCombo("##language",languages[int(preferences.language)]);recordUiTestItem("settings.language");
-                if(choosing){for(int i=0;i<2;++i){if(ImGui::Selectable(languages[i],int(preferences.language)==i))setLanguage(loc::Language(i));recordUiTestItem("settings.language."+std::to_string(i));}ImGui::EndCombo();}
+                ImGui::SetNextItemWidth(-1);
+                const bool choosing=ImGui::BeginCombo("##language",loc::languages[int(preferences.language)].name);recordUiTestItem("settings.language");
+                if(choosing){for(int i=0;i<loc::languageCount;++i){if(ImGui::Selectable(loc::languages[i].name,int(preferences.language)==i))setLanguage(loc::Language(i));recordUiTestItem("settings.language."+std::to_string(i));}ImGui::EndCombo();}
                 rule();intro("外观主题","只影响界面，不影响 3D 视窗背景。");
                 int selected=segmented("##theme-segments",preferences.theme,{"深色","浅色","Midnight"},ImGui::GetContentRegionAvail().x);
                 if(selected!=preferences.theme){preferences.theme=selected;changed=true;}
