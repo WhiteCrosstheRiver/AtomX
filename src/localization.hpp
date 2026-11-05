@@ -2,6 +2,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
 
@@ -62,6 +63,16 @@ inline const char *text(const char *source) {
     if(!source || !*source || source[0]=='#') return source;
     const auto &map=catalog();const auto it=map.find(source);
     return it==map.end()?source:it->second.text[int(current)].c_str();
+}
+// Message built at runtime: `source` is a printf row of the table, so its
+// translation is free to move the surrounding words but keeps the arguments.
+template<class... Args> std::string format(const char *source,Args... args) {
+    const char *pattern=text(source);
+    const int size=std::snprintf(nullptr,0,pattern,args...);
+    if(size<=0) return pattern;
+    std::string out(size_t(size),'\0');
+    std::snprintf(out.data(),out.size()+1,pattern,args...);
+    return out;
 }
 inline const char *label(const char *source) {
     if(!source || !*source || source[0]=='#') return source;

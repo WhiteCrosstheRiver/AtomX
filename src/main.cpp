@@ -230,8 +230,8 @@ static LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (lp == WM_LBUTTONDBLCLK) desktop::restore(h);
         if (lp == WM_RBUTTONUP) {
             auto menu = CreatePopupMenu();
-            AppendMenuW(menu, MF_STRING, 1, loc::current==loc::Language::Chinese?L"恢复 AtomX":L"Restore AtomX");
-            AppendMenuW(menu, MF_STRING, 2, loc::current==loc::Language::Chinese?L"退出 AtomX":L"Exit AtomX");
+            auto addItem=[&](UINT_PTR id,const char *source){wchar_t item[128]{};MultiByteToWideChar(CP_UTF8,0,loc::text(source),-1,item,127);AppendMenuW(menu,MF_STRING,id,item);};
+            addItem(1,"恢复 AtomX");addItem(2,"退出 AtomX");
             POINT p; GetCursorPos(&p); SetForegroundWindow(h);
             int action = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, h, nullptr);
             DestroyMenu(menu);
@@ -307,6 +307,10 @@ static std::string number(uint64_t n) {
 }
 static float uiScale = 1;
 static float U(float value) { return value * uiScale; }
+// Fixed button widths suit Chinese captions; translations may need more room.
+static float buttonWidth(const char *label,float minimum) {
+    return std::max(minimum,ImGui::CalcTextSize(label,nullptr,true).x+ImGui::GetStyle().FramePadding.x*2);
+}
 // P11: pure 1/2/5-decade label-step selection for the timeline ruler. Picks
 // the smallest step in the {1,2,5}*10^n series that keeps the major-label
 // count at 12 or fewer and, when the track is wide enough, a minimum pixel
@@ -1759,7 +1763,7 @@ struct App {
     }
     bool structureEditIsLatest = false;
     std::string tabTitle() const {
-        if (homeMode) return "新标签页";
+        if (homeMode) return loc::text("新标签页");
         if (activeTab >= 0 && activeTab < int(tabs.size()) && !tabs[size_t(activeTab)].title.empty() && tabs[size_t(activeTab)].title!="Structure")
             return tabs[size_t(activeTab)].title;
         if (!path.empty()) return utf8(path.filename().wstring());
@@ -1927,8 +1931,8 @@ struct App {
     void newBlankCreation() {
         if(documentsBusy())return;
         auto empty=authoring::orthogonalCell(10,10,10,"C");empty.atoms.clear();empty.sourceCount=0;empty.bounds();
-        newStructureTab(std::move(empty),"未命名 · 创作");creationMode=true;
-        chooseCreationTool(CreationTool::Sketch);saveCreationSnapshot("空白结构");
+        newStructureTab(std::move(empty),loc::text("未命名 · 创作"));creationMode=true;
+        chooseCreationTool(CreationTool::Sketch);saveCreationSnapshot(loc::text("空白结构"));
     }
     void newHomeTab() {
         if (documentsBusy()) { status = "Wait for the current operation before opening a tab"; return; }
@@ -1936,7 +1940,7 @@ struct App {
         StructureTab tab;
         tab.id = nextTabId++;
         tab.home = true;
-        tab.title = "新标签页";
+        tab.title = loc::text("新标签页");
         tabs.push_back(std::move(tab));
         activeTab = int(tabs.size()) - 1;
         restoreTab(tabs[size_t(activeTab)]);
@@ -1947,7 +1951,7 @@ struct App {
             status="工作区最多暂存 24 个结果；请删除不需要的快照";
             return;
         }
-        if (name.empty()) name="快照 " + std::to_string(creationSnapshots.size()+1);
+        if (name.empty()) name=loc::format("快照 %zu",creationSnapshots.size()+1);
         SYSTEMTIME now{};
         GetLocalTime(&now);
         char time[16];
@@ -1960,7 +1964,7 @@ struct App {
         if (index<0||index>=int(creationSnapshots.size()) || !creationSnapshots[size_t(index)].data)
             return;
         const auto snapshot=creationSnapshots[size_t(index)];
-        adoptStructure(*snapshot.data,"已载入工作区快照："+snapshot.name);
+        adoptStructure(*snapshot.data,loc::format("已载入工作区快照：%s",snapshot.name.c_str()));
         creationDisplay=snapshot.display;
         creationDisplay.normalize(source.atoms.size()); creationDisplay.normalizeBonds(source);
         queueCreationLabelFont();
@@ -2177,7 +2181,7 @@ struct App {
             bool valid=currentLJ && !documentsBusy() && !ljOptions.types.empty();
             for(const auto &p:ljOptions.types)valid&=std::isfinite(p.sigma)&&p.sigma>0&&std::isfinite(p.epsilon)&&p.epsilon>=0&&std::isfinite(p.cutoff)&&p.cutoff>0;
             ImGui::BeginDisabled(!valid);
-            if(ImGui::Button(loc::label("计算能量与力"),{U(150),0}))startLJ();recordUiTestItem("lj.calculate");
+            if(ImGui::Button(loc::label("计算能量与力"),{buttonWidth(loc::label("计算能量与力"),U(150)),0}))startLJ();recordUiTestItem("lj.calculate");
             ImGui::EndDisabled();ImGui::EndDisabled();
             if(ljBusy){ImGui::SameLine();if(ImGui::Button(loc::label("Cancel")))ljCancel=true;
                 ImGui::ProgressBar(ljProgress.load(),{-1,U(12)});}
@@ -2189,7 +2193,7 @@ struct App {
                 if(ImGui::Button(loc::label("写入体系属性（可撤销）")))applyLJ();recordUiTestItem("lj.apply");ImGui::EndDisabled();
                 ImGui::TextDisabled(loc::text("LJ energy (eV), LJ force (eV/A); view/edit/export via the data inspector."));
             }
-            ImGui::TextWrapped("%s",ljMessage.c_str());
+            ImGui::TextWrapped("%s",loc::text(ljMessage.c_str()));
         }ImGui::End();
         if(!showLJ && ljBusy)ljCancel=true;
     }
@@ -2244,7 +2248,7 @@ struct App {
         editable.bondStyle.colorByType = true;
         editable.bondStyle.showPeriodicImages = false;
         const std::string basedOn = path.empty() ? tabTitle() : utf8(path.filename().wstring());
-        const std::string title = tabTitle() + " · 创作";
+        const std::string title = loc::format("%s · 创作",tabTitle().c_str());
         newStructureTab(std::move(editable), title);
         if (activeTab == origin) return;
         creationReturnTab = origin;
@@ -2259,7 +2263,7 @@ struct App {
         creationTool = CreationTool::Select;
         creationSelection.clear(); creationBondSelection.clear();
         creationSnapshots.clear();
-        saveCreationSnapshot("原始 · " + basedOn);
+        saveCreationSnapshot(loc::format("原始 · %s",basedOn.c_str()));
         status = "Creation Mode: " + title;
     }
     void duplicateCreationTab(int index=-1) {
@@ -2270,7 +2274,7 @@ struct App {
         auto copy=tabs[size_t(index)];
         const auto originalId=copy.id;
         copy.id=nextTabId++;copy.sourceTabId=originalId;
-        copy.title+=" · 副本";
+        copy.title=loc::format("%s · 副本",copy.title.c_str());
         // A copy must never save over its parent's document or source file.
         copy.documentPath.clear();copy.path.clear();copy.frames.clear();copy.current=0;
         copy.readerName="Copied creation document";
@@ -2442,14 +2446,14 @@ struct App {
                 remap(affected);remap(creationSelection);
                 for(int *index:{&creationPick,&creationMeasure,&creationAngle,&creationDihedral})
                     *index=hydrogens::remapIndex(*index,plan.removed);
-                creationAutoHydrogenMessage="自动氢：新增 "+std::to_string(plan.added.size())+" / 删除 "+std::to_string(plan.removed.size());
+                creationAutoHydrogenMessage=loc::format("自动氢：新增 %zu / 删除 %zu",size_t(plan.added.size()),size_t(plan.removed.size()));
             }
             const size_t skipped=plan.unsupported+plan.ambiguous+plan.invalid+plan.periodic+plan.hidden;
             if(skipped) {
                 if(!creationAutoHydrogenMessage.empty())creationAutoHydrogenMessage+=" · ";
-                creationAutoHydrogenMessage+="跳过 "+std::to_string(skipped)+" 个不可自动调整的位点";
+                creationAutoHydrogenMessage+=loc::format("跳过 %zu 个不可自动调整的位点",skipped);
             }
-        } catch(const std::exception &e) { creationAutoHydrogenMessage=std::string("自动氢未执行：")+e.what(); }
+        } catch(const std::exception &e) { creationAutoHydrogenMessage=loc::format("自动氢未执行：%s",loc::text(e.what())); }
     }
     static UINT structureClipboardFormat() {
         static const UINT format=RegisterClipboardFormatW(L"AtomX.Structure.v1");return format;
@@ -2479,18 +2483,18 @@ struct App {
             CloseClipboard();if(!accepted){GlobalFree(memory);throw std::runtime_error("Cannot publish structure clipboard");}
             if(cut) {
                 const auto count=source.atoms.size();
-                editStructure("剪切 "+std::to_string(copied.rows.size())+" 个原子",[&](Dataset &d){
+                editStructure(loc::format("剪切 %zu 个原子",size_t(copied.rows.size())),[&](Dataset &d){
                     creationDisplay.eraseAtoms(count,copied.rows);authoring::eraseAtoms(d,copied.rows);
                     creationSelection.clear();creationPick=creationMeasure=creationAngle=creationDihedral=-1;
                 });
-            } else status="已复制 "+std::to_string(copied.rows.size())+" 个原子（保留坐标与内部键）";
+            } else status=loc::format("已复制 %zu 个原子（保留坐标与内部键）",size_t(copied.rows.size()));
         }catch(const std::exception &e){status=e.what();}
     }
     void pasteCreationContent(const document::Content &content) {
         if(!creationMode || documentsBusy() || creationDrag!=CreationDrag::None)return;
         if(!mods.empty())throw std::runtime_error("Clear creation modifiers before pasting");
         auto prepared=clipboard::prepare(source,creationDisplay,content);
-        editStructure("粘贴 "+std::to_string(prepared.rows.size())+" 个原子",[&](Dataset &d){
+        editStructure(loc::format("粘贴 %zu 个原子",size_t(prepared.rows.size())),[&](Dataset &d){
             d=std::move(prepared.data);creationDisplay=std::move(prepared.display);
             creationSelection=std::move(prepared.rows);creationPick=creationSelection.back();
             creationMeasure=creationAngle=creationDihedral=-1;
@@ -2547,7 +2551,7 @@ struct App {
         const auto selectedBonds=creationBondSelection;
         std::sort(selected.begin(),selected.end());
         selected.erase(std::unique(selected.begin(),selected.end()),selected.end());
-        editStructure("删除 " + std::to_string(selected.size()) + " 个原子", [&](Dataset &data) {
+        editStructure(loc::format("删除 %zu 个原子",size_t(selected.size())), [&](Dataset &data) {
             std::vector<int> affected;
             if(creationAutoHydrogens && data.atoms.size()<=100000 && data.bonds.size()<=interactiveBondBudget) {
                 std::vector<uint8_t> removed(data.atoms.size());for(int i:selected)removed[size_t(i)]=1;
@@ -2573,8 +2577,8 @@ struct App {
         const auto s=properties::summarize(source,atomPropertyName,atomPropertySelection);
         atomPropertyValue=s.common.value_or(0);atomPropertyMissing=false;atomPropertyMessage.clear();
         std::ostringstream value;value<<std::setprecision(12)<<atomPropertyValue;
-        atomPropertySummary=s.common?"当前值："+value.str():"当前值：混合 / 缺失";
-        atomPropertySummary+=" · 有值 "+std::to_string(s.present)+" · 缺失 "+std::to_string(s.missing);
+        atomPropertySummary=s.common?loc::format("当前值：%s",value.str().c_str()):std::string(loc::text("当前值：混合 / 缺失"));
+        atomPropertySummary+=loc::format(" · 有值 %s · 缺失 %s",std::to_string(s.present).c_str(),std::to_string(s.missing).c_str());
     }
     void requestAtomProperties() {
         if(!creationMode || documentsBusy() || !sameAtomCount() || creationSelection.empty())return;
@@ -2601,7 +2605,7 @@ struct App {
                 atomPropertyMissing?std::nullopt:std::optional<double>(atomPropertyValue));
             if(!edit.changed){status="属性没有变化";return true;}
             const auto bonds=creationBondSelection;
-            editStructure("修改 "+edit.name+" · "+std::to_string(edit.selection.size())+" 个原子",
+            editStructure(loc::format("修改 %s · %zu 个原子",edit.name.c_str(),size_t(edit.selection.size())),
                 [&](Dataset &data){properties::apply(data,edit);});
             creationSelection=edit.selection;creationPick=creationSelection.back();creationBondSelection=bonds;return true;
         }catch(const std::exception &e){atomPropertyMessage=e.what();return false;}
@@ -2620,7 +2624,7 @@ struct App {
             if(ImGui::Selectable(name.c_str(),name==atomPropertyName)){atomPropertyName=name;refreshAtomProperty();}
             recordUiTestItem("creation.property-name-"+name);
         }ImGui::EndCombo();}
-        ImGui::TextWrapped("%s",atomPropertySummary.c_str());
+        ImGui::TextWrapped("%s",loc::text(atomPropertySummary.c_str()));
         ui_design::checkbox(loc::label("将选中行设为缺失值"),&atomPropertyMissing);recordUiTestItem("creation.property-missing");
         ImGui::BeginDisabled(atomPropertyMissing);ImGui::SetNextItemWidth(U(260));
         ImGui::InputDouble(loc::label("新值"),&atomPropertyValue,0,0,"%.12g");recordUiTestItem("creation.property-value");ImGui::EndDisabled();
@@ -2628,7 +2632,7 @@ struct App {
         if(atomPropertyName=="Mass")ImGui::TextWrapped(loc::text("Mass 使用 amu，必须大于零；这里只修改文件中已有的质量列。"));
         ImGui::EndDisabled();
         if(!valid)ImGui::TextWrapped(loc::text("体系已改变，请关闭后重新选择原子。"));
-        if(!atomPropertyMessage.empty())ImGui::TextWrapped("%s",atomPropertyMessage.c_str());
+        if(!atomPropertyMessage.empty())ImGui::TextWrapped("%s",loc::text(atomPropertyMessage.c_str()));
         ImGui::BeginDisabled(!valid);
         if(ImGui::Button(loc::label("应用"),{U(110),U(30)}) && applyAtomProperties())ImGui::CloseCurrentPopup();
         recordUiTestItem("creation.property-apply");ImGui::EndDisabled();ImGui::SameLine();
@@ -2654,7 +2658,7 @@ struct App {
             const auto edit=constraints::prepare(source,constraintSelection,constraintDraft);
             if(!edit.changed){status="约束没有变化";return true;}
             const auto bonds=creationBondSelection;
-            editStructure("修改原子模拟约束 · "+std::to_string(edit.rows.size())+" 个原子",
+            editStructure(loc::format("修改原子模拟约束 · %zu 个原子",size_t(edit.rows.size())),
                 [&](Dataset &d){constraints::apply(d,edit);});
             creationSelection=edit.rows;creationPick=creationSelection.back();creationBondSelection=bonds;return true;
         }catch(const std::exception &e){constraintMessage=e.what();return false;}
@@ -2667,15 +2671,15 @@ struct App {
         if(!ImGui::BeginPopupModal(loc::label("原子模拟约束##atom-constraints"),nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+U(480));
         ImGui::Text(loc::text("打开时选中 %zu 个原子"),constraintSelection.size());
-        auto state=[](int s){return s<0?"混合":s?"固定":"自由";};
+        auto state=[](int s){return loc::text(s<0?"混合":s?"固定":"自由");};
         ImGui::Text(loc::text("当前整原子固定：%s"),state(constraintSummary.cartesian));
         ImGui::Text(loc::text("当前晶格方向：a %s · b %s · c %s"),state(constraintSummary.fractional[0]),
             state(constraintSummary.fractional[1]),state(constraintSummary.fractional[2]));
         const bool valid=validAtomConstraints();ImGui::BeginDisabled(!valid);
         auto choice=[&](const char *label,int &value,const char *key) {
             ImGui::SetNextItemWidth(U(155));
-            const char *labels[]{"保持当前值","解除固定","固定"};
-            const bool open=ImGui::BeginCombo(label,labels[std::clamp(value,0,2)]);recordUiTestItem(key);
+            const char *labels[]{loc::text("保持当前值"),loc::text("解除固定"),loc::text("固定")};
+            const bool open=ImGui::BeginCombo(loc::label(label),labels[std::clamp(value,0,2)]);recordUiTestItem(key);
             if(open) {
                 for(int i=0;i<3;++i) {if(ImGui::Selectable(labels[i],value==i))value=i;recordUiTestItem(std::string(key)+"-"+std::to_string(i));}
                 ImGui::EndCombo();
@@ -2698,7 +2702,7 @@ struct App {
         ImGui::TextWrapped(loc::text(".atomx 保存两类约束。POSCAR 保存晶格方向 T/F；整原子笛卡尔固定需保存在 .atomx 中，导出 POSCAR 时须显式取消约束保留。"));
         ImGui::EndDisabled();
         if(!valid)ImGui::TextWrapped(loc::text("体系已改变，请关闭后重新选择原子。"));
-        if(!constraintMessage.empty())ImGui::TextWrapped("%s",constraintMessage.c_str());
+        if(!constraintMessage.empty())ImGui::TextWrapped("%s",loc::text(constraintMessage.c_str()));
         ImGui::BeginDisabled(!valid);
         if(ImGui::Button(loc::label("应用"),{U(110),U(30)}) && applyAtomConstraints())ImGui::CloseCurrentPopup();
         recordUiTestItem("creation.constraint-apply");ImGui::EndDisabled();ImGui::SameLine();
@@ -2716,9 +2720,9 @@ struct App {
             bool sameQ=true,sameH=true;
             for(int i:chemistrySelection) {sameQ&=chemistry::charge(source,size_t(i))==q;sameH&=chemistry::hybrid(source,size_t(i))==h;}
             if(std::isfinite(q) && q==std::floor(q) && q>=INT_MIN && q<=INT_MAX)chemistryCharge=int(q);
-            const auto qText=sameQ && std::isfinite(q)?std::to_string(q):std::string("混合 / 缺失");
-            const auto hText=sameH && std::isfinite(h) && h>=0 && h<=7 && h==std::floor(h)?chemistry::hybridNames[int(h)]:"混合 / 缺失";
-            chemistrySummary="当前形式电荷："+qText+" · 杂化："+hText;
+            const auto qText=sameQ && std::isfinite(q)?std::to_string(q):std::string(loc::text("混合 / 缺失"));
+            const auto hText=sameH && std::isfinite(h) && h>=0 && h<=7 && h==std::floor(h)?loc::text(chemistry::hybridNames[int(h)]):loc::text("混合 / 缺失");
+            chemistrySummary=loc::format("当前形式电荷：%s · 杂化：%s",qText.c_str(),hText);
             openCreationChemistry=true;
         }catch(const std::exception &e){status=e.what();}
     }
@@ -2731,7 +2735,7 @@ struct App {
                 chemistryHybridChoice?std::optional<int>(chemistryHybridChoice-1):std::nullopt);
             if(!edit.changed){status="化学设置没有变化";return true;}
             auto selected=edit.selection;
-            editStructure("修改原子化学设置 · "+std::to_string(selected.size())+" 个原子",[&](Dataset &data) {
+            editStructure(loc::format("修改原子化学设置 · %zu 个原子",size_t(selected.size())),[&](Dataset &data) {
                 chemistry::apply(data,edit);updateAutomaticHydrogens(data,selected);
             });
             creationSelection=std::move(selected);creationPick=creationSelection.empty()?-1:creationSelection.back();
@@ -2745,21 +2749,21 @@ struct App {
         ImGui::SetNextWindowSizeConstraints({U(360),0},{std::max(U(360),vp->WorkSize.x-U(24)),vp->WorkSize.y-U(24)});
         if(!ImGui::BeginPopupModal(loc::label("原子化学设置##chemistry"),nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
         ImGui::Text(loc::text("打开时选中 %zu 个原子"),chemistrySelection.size());
-        ImGui::TextWrapped("%s",chemistrySummary.c_str());
+        ImGui::TextWrapped("%s",loc::text(chemistrySummary.c_str()));
         ui_design::checkbox(loc::label("修改形式电荷"),&chemistrySetCharge);recordUiTestItem("creation.chemistry-charge-enable");
         ImGui::BeginDisabled(!chemistrySetCharge);ImGui::SetNextItemWidth(U(150));
         ImGui::InputInt(loc::label("整数形式电荷"),&chemistryCharge,0,0);recordUiTestItem("creation.chemistry-charge");ImGui::EndDisabled();
-        const char *preview=chemistryHybridChoice?chemistry::hybridNames[chemistryHybridChoice-1]:"保持原设置";
+        const char *preview=chemistryHybridChoice?loc::text(chemistry::hybridNames[chemistryHybridChoice-1]):loc::text("保持原设置");
         ImGui::SetNextItemWidth(U(230));
         const bool hybridOpen=ImGui::BeginCombo(loc::label("杂化"),preview,ImGuiComboFlags_HeightLarge);recordUiTestItem("creation.chemistry-hybrid");
         if(hybridOpen) {
             for(int choice=0;choice<=8;++choice) {
-                if(ImGui::Selectable(choice?chemistry::hybridNames[choice-1]:loc::label("保持原设置"),chemistryHybridChoice==choice))chemistryHybridChoice=choice;
+                if(ImGui::Selectable(choice?loc::text(chemistry::hybridNames[choice-1]):loc::label("保持原设置"),chemistryHybridChoice==choice))chemistryHybridChoice=choice;
                 recordUiTestItem("creation.chemistry-hybrid-"+std::to_string(choice));
             }ImGui::EndCombo();
         }
         ImGui::TextWrapped(loc::text("形式电荷用于化学价态判断；文件中的部分电荷 Charge 保留原值。\n自动杂化由已有键判断；高配位设置只记录属性，当前不自动补氢。\n应用后按本标签的自动氢开关调整；重原子固定。大体系可用 H+ 后台预览。"));
-        if(!chemistryMessage.empty())ImGui::TextWrapped("%s",chemistryMessage.c_str());
+        if(!chemistryMessage.empty())ImGui::TextWrapped("%s",loc::text(chemistryMessage.c_str()));
         const bool valid=creationMode && activeTab>=0 && activeTab<int(tabs.size()) && tabs[size_t(activeTab)].id==chemistryTabId &&
             pipelineGeneration==chemistryGeneration;
         if(!valid)ImGui::TextWrapped(loc::text("体系已改变，请关闭后重新选择原子。"));
@@ -2777,7 +2781,7 @@ struct App {
             return;
         }
         std::string symbol = creationElement[0] ? creationElement : "C";
-        editStructure("替换 " + std::to_string(selected.size()) + " 个原子 → " + symbol, [&](Dataset &data) {
+        editStructure(loc::format("替换 %zu 个原子 → %s",size_t(selected.size()),std::string(symbol).c_str()), [&](Dataset &data) {
             const auto type=authoring::speciesIndex(data,symbol);
             for (int index:selected)
                 if (index>=0&&size_t(index)<data.atoms.size()) data.atoms[size_t(index)].type=type;
@@ -2811,7 +2815,7 @@ struct App {
                 status="无法连键：重合坐标或键数已达上限"; return false;
             }
         }
-        editStructure(order?"设置键级 "+std::to_string(order):"断开键",[&](Dataset &data) {
+        editStructure(order?loc::format("设置键级 %d",int(order)):std::string(loc::text("断开键")),[&](Dataset &data) {
             authoring::setDirectBond(data,first,last,order);
             if (order) data.bondStyle.visible=true;
             std::vector<int> affected{first,last};updateAutomaticHydrogens(data,affected);
@@ -2826,7 +2830,7 @@ struct App {
             if(!creationAtomVisible(int(b.a)) || !creationAtomVisible(int(b.b)))throw std::invalid_argument("键端点不可见");
             const auto edit=insertion::prepare(source,size_t(bond),creationElement[0]?creationElement:"C",creationSketchOrder);
             int added=-1;
-            editStructure("键中插入 "+edit.element,[&](Dataset &data) {
+            editStructure(loc::format("键中插入 %s",std::string(edit.element).c_str()),[&](Dataset &data) {
                 added=insertion::apply(data,edit);data.bondStyle.visible=true;
                 std::vector<int> affected{int(edit.original.a),int(edit.original.b),added};
                 updateAutomaticHydrogens(data,affected);added=affected.back();
@@ -2862,7 +2866,7 @@ struct App {
         }
         int added=-1;
         try {hydrogens::validateRows(source);} catch(const std::exception &e){status=e.what();return;}
-        editStructure(anchor>=0?"绘制 "+symbol+" 并连键":"绘制 "+symbol,[&](Dataset &data) {
+        editStructure(loc::format(anchor>=0?"绘制 %s 并连键":"绘制 %s",std::string(symbol).c_str()),[&](Dataset &data) {
             const uint32_t type=authoring::speciesIndex(data,symbol);
             added=int(data.atoms.size());
             data.atoms.push_back({at.x,at.y,at.z,type});
@@ -2888,7 +2892,7 @@ struct App {
             const auto edit=authoring::prepareRing(source,ring,creationDisplay.hidden);
             std::vector<int> selected=edit.selection;
             if (!edit.changed()) { status="环已存在"; return; }
-            editStructure(std::string(ring.aromatic?"绘制芳香环 · ":"绘制碳环 · ")+std::to_string(ring.size),[&](Dataset &data) {
+            editStructure(loc::format(ring.aromatic?"绘制芳香环 · %d":"绘制碳环 · %d",int(ring.size)),[&](Dataset &data) {
                 authoring::applyRing(data,edit); data.bondStyle.visible=true;
                 updateAutomaticHydrogens(data,selected);
             });
@@ -2917,7 +2921,7 @@ struct App {
                     try { result.entries.push_back(fragments::load(file.path())); }
                     catch (const std::exception &) { ++invalid; }
                 }
-                if (invalid) result.message="已跳过 "+std::to_string(invalid)+" 个无效片段文件";
+                if (invalid) result.message=loc::format("已跳过 %zu 个无效片段文件",size_t(invalid));
                 std::sort(result.entries.begin(),result.entries.end(),[](const auto &a,const auto &b){return a.name<b.name;});
             } catch (const std::exception &e) { result.message=e.what(); }
             return result;
@@ -2945,10 +2949,10 @@ struct App {
                             categories[fragmentLibrary[index].category].push_back(index);
                     for (const auto &[category,indexes]:categories) {
                         ImGui::SetNextItemOpen(true,ImGuiCond_Once);
-                        if (ImGui::TreeNode(category.c_str())) {
+                        if (ImGui::TreeNode(category.c_str(),"%s",loc::text(category.c_str()))) {
                             for (auto index:indexes) {
                                 const auto &t=fragmentLibrary[index]; ImGui::PushID(t.key.c_str());
-                                if (ImGui::Selectable(t.name.c_str(),t.key==creationFragmentKey)) selectFragment(t);
+                                if (ImGui::Selectable(loc::text(t.name.c_str()),t.key==creationFragmentKey)) selectFragment(t);
                                 recordUiTestItem("creation.fragment-entry-"+t.key);
                                 ImGui::PopID();
                             }
@@ -3035,7 +3039,7 @@ struct App {
                 if (ImGui::Button(loc::label("关闭"))) showFragmentBrowser=false;
                 recordUiTestItem("creation.fragment-close");
                 if (fragmentLibraryJob.valid()) ImGui::TextDisabled(loc::text("正在读取本机片段库..."));
-                if (!fragmentLibraryMessage.empty()) ImGui::TextWrapped("%s",fragmentLibraryMessage.c_str());
+                if (!fragmentLibraryMessage.empty()) ImGui::TextWrapped("%s",loc::text(fragmentLibraryMessage.c_str()));
                 ImGui::TextDisabled(loc::text("主视口：空白处放置 · 末端原子接枝 · 按住拖动调整朝向"));
             }
             ImGui::End();
@@ -3046,7 +3050,7 @@ struct App {
             if (fragmentDefineDraft) {
                 ImGui::Text(loc::text("%zu 原子 · 连接点 #%d"),fragmentDefineDraft->data.atoms.size(),fragmentDefineDraft->connector+1);
                 ImGui::InputText(loc::label("名称"),fragmentName,sizeof(fragmentName)); recordUiTestItem("creation.fragment-name");
-                ImGui::InputText(loc::label("库"),fragmentCategory,sizeof(fragmentCategory)); recordUiTestItem("creation.fragment-category");
+                if(std::strcmp(fragmentCategory,"我的片段")==0)snprintf(fragmentCategory,sizeof(fragmentCategory),"%s",loc::text("我的片段"));ImGui::InputText(loc::label("库"),fragmentCategory,sizeof(fragmentCategory)); recordUiTestItem("creation.fragment-category");
                 ImGui::BeginDisabled(fragmentSaveJob.valid() || !fragmentName[0] || !fragmentCategory[0]);
                 if (ImGui::Button(loc::label("保存到片段库"))) {
                     requestFragmentLibrary();
@@ -3062,7 +3066,7 @@ struct App {
                 }
                 recordUiTestItem("creation.fragment-save"); ImGui::EndDisabled(); ImGui::SameLine();
                 if (ImGui::Button(loc::label("取消"))) ImGui::CloseCurrentPopup(); recordUiTestItem("creation.fragment-cancel");
-                if (!fragmentLibraryMessage.empty()) ImGui::TextWrapped("%s",fragmentLibraryMessage.c_str());
+                if (!fragmentLibraryMessage.empty()) ImGui::TextWrapped("%s",loc::text(fragmentLibraryMessage.c_str()));
             }
             ImGui::EndPopup();
         }
@@ -3102,7 +3106,7 @@ struct App {
         try {
             fragments::preflight(source,*t,placement,creationDisplay.hidden);
             std::vector<int> added;
-            editStructure("放置片段 · "+t->name,[&](Dataset &data) {
+            editStructure(loc::format("放置片段 · %s",t->name.c_str()),[&](Dataset &data) {
                 if (placement.removed>=0) creationDisplay.eraseAtoms(data.atoms.size(),{placement.removed});
                 added=fragments::apply(data,*t,placement); data.bondStyle.visible=true;
             });
@@ -3115,7 +3119,7 @@ struct App {
             fragmentLibraryMessage="请在主视口选中一个末端原子作为连接点"; return;
         }
         try {
-            fragmentDefineDraft=fragments::define(source,creationSelection[0],"我的片段","我的片段");
+            fragmentDefineDraft=fragments::define(source,creationSelection[0],loc::text("我的片段"),loc::text("我的片段"));
             snprintf(fragmentName,sizeof(fragmentName),"%s",fragmentDefineDraft->name.c_str());
             openFragmentDefine=true;
         } catch (const std::exception &e) { fragmentLibraryMessage=e.what(); }
@@ -3184,13 +3188,13 @@ struct App {
         try {
             hydrogens::preflight(source,*hydrogenPlan,hydrogenVisibility());
             auto plan=std::move(*hydrogenPlan);
-            const auto message="调整氢 · +"+number(plan.added.size())+" / −"+number(plan.removed.size())+" / 移动 "+number(plan.moved.size());
+            const auto message=loc::format("调整氢 · +%s / −%s / 移动 %s",number(plan.added.size()).c_str(),number(plan.removed.size()).c_str(),number(plan.moved.size()).c_str());
             editStructure(message,[&](Dataset &data) {
                 creationDisplay.eraseAtoms(data.atoms.size(),plan.removed);
                 creationSelection=hydrogens::apply(data,plan);
                 creationPick=creationSelection.empty()?-1:creationSelection.back();
             });
-            hydrogenMessage=message+" · 已记录一步历史";
+            hydrogenMessage=loc::format("%s · 已记录一步历史",message.c_str());
         } catch(const std::exception &e) {hydrogenPlan.reset();hydrogenMessage=e.what();}
     }
     void hydrogenDialog() {
@@ -3229,12 +3233,12 @@ struct App {
                 ImGui::TextWrapped(loc::text("跳过：不支持 %zu · 价态不明确 %zu · 坐标/拓扑无效 %zu · 跨周期 %zu · 隐藏 %zu"),p.unsupported,p.ambiguous,p.invalid,p.periodic,p.hidden);
                 if(!p.changes())ImGui::TextUnformatted(loc::text("没有需要应用的更改"));
             }
-            if(!hydrogenMessage.empty())ImGui::TextWrapped("%s",hydrogenMessage.c_str());
+            if(!hydrogenMessage.empty())ImGui::TextWrapped("%s",loc::text(hydrogenMessage.c_str()));
             ImGui::EndChild();ImGui::Separator();
             ImGui::BeginDisabled(documentsBusy() || !sameAtomCount() || !mods.empty() ||
                 (!hydrogenOptions.all && hydrogenOptions.selection.empty()) ||
                 (hydrogenOptions.setCharge && (hydrogenOptions.charge < -4 || hydrogenOptions.charge > 4)));
-            if(ImGui::Button(loc::label("计算调整预览"),{U(155),U(32)}))previewHydrogens();recordUiTestItem("creation.hydrogen-preview");
+            if(ImGui::Button(loc::label("计算调整预览"),{buttonWidth(loc::label("计算调整预览"),U(155)),U(32)}))previewHydrogens();recordUiTestItem("creation.hydrogen-preview");
             ImGui::SameLine();ImGui::BeginDisabled(!hydrogenPlan || !hydrogenPlan->changes());
             if(ImGui::Button(loc::label("应用"),{U(100),U(32)}))applyHydrogens();recordUiTestItem("creation.hydrogen-apply");
             ImGui::EndDisabled();ImGui::EndDisabled();ImGui::SameLine();
@@ -3291,7 +3295,7 @@ struct App {
                 creationSelection.clear(); creationBondSelection.clear();
                 syncAppearance(source.species);
                 if (previous.data) update(); else refreshCreationDisplay(visibilityChanged);
-                status = "撤销："+previous.action;
+                status = loc::format("撤销：%s",loc::text(previous.action.c_str()));
                 return;
             }
             if (forward && !authorRedo.empty()) {
@@ -3308,7 +3312,7 @@ struct App {
                 creationSelection.clear(); creationBondSelection.clear();
                 syncAppearance(source.species);
                 if (next.data) update(); else refreshCreationDisplay(visibilityChanged);
-                status = "重做："+next.action;
+                status = loc::format("重做：%s",loc::text(next.action.c_str()));
                 return;
             }
         }
@@ -3471,9 +3475,9 @@ struct App {
                 if (!creationMode || tabs[size_t(activeTab)].id!=layerBuilderTabId)
                     throw std::runtime_error("创作标签已改变，叠层结果未替换当前体系");
                 const size_t count=built.data.atoms.size(),cut=built.cutBonds;
-                adoptStructure(std::move(built.data),"构建叠层 · "+std::to_string(layerCount)+" 层");
+                adoptStructure(std::move(built.data),loc::format("构建叠层 · %zu 层",size_t(layerCount)));
                 fitCamera(3,false);
-                layerBuilderMessage="已构建 "+number(count)+" 原子 · 切断 "+number(cut)+" 条法向边界键 · 已记录一步历史";
+                layerBuilderMessage=loc::format("已构建 %s 原子 · 切断 %s 条法向边界键 · 已记录一步历史",number(count).c_str(),number(cut).c_str());
                 layerBuildCompleted=true;
                 refreshFont=true;
             } catch (const std::exception &e) { layerBuilderMessage=e.what(); }
@@ -3483,8 +3487,8 @@ struct App {
             try {
                 auto assignment=motionGroupJob.get();
                 const size_t count=assignment.labels.size(),skipped=assignment.skipped;
-                if (count) editStructure("自动创建 "+std::to_string(count)+" 个运动分组",[&](Dataset &data){motion::apply(data,std::move(assignment));});
-                motionGroupMessage="已创建 "+std::to_string(count)+" 组 · 跳过周期网络中的 "+std::to_string(skipped)+" 个原子";
+                if (count) editStructure(loc::format("自动创建 %s 个运动分组",std::to_string(count).c_str()),[&](Dataset &data){motion::apply(data,std::move(assignment));});
+                motionGroupMessage=loc::format("已创建 %s 组 · 跳过周期网络中的 %s 个原子",std::to_string(count).c_str(),std::to_string(skipped).c_str());
                 refreshFont=true;
             } catch (const std::exception &e) { motionGroupMessage=e.what(); }
         }
@@ -3504,7 +3508,7 @@ struct App {
             try {
                 fragmentLibrary.push_back(fragmentSaveJob.get());
                 if (creationMode && tabs[size_t(activeTab)].id==fragmentSaveTabId) selectFragment(fragmentLibrary.back());
-                fragmentLibraryMessage="片段已保存 · "+fragmentLibrary.back().name;
+                fragmentLibraryMessage=loc::format("片段已保存 · %s",fragmentLibrary.back().name.c_str());
                 refreshFont=true;
                 showFragmentBrowser=creationMode; fragmentSaveComplete=true;
             } catch (const std::exception &e) { fragmentLibraryMessage=e.what(); }
@@ -3776,7 +3780,7 @@ struct App {
         if (!v.title.empty()) tab.title=v.title;
         authorUndo.clear(); authorRedo.clear(); creationSnapshots.clear();
         creationSnapshotSelected=-1; creationSymmetry.reset(); creationSymmetryChecked=false;
-        if (creationMode) saveCreationSnapshot("打开 · "+utf8(path.filename().wstring()));
+        if (creationMode) saveCreationSnapshot(loc::format("打开 · %s",utf8(path.filename().wstring()).c_str()));
         queueCreationLabelFont();
     }
     // Each tab remembers its native save destination without changing the
@@ -4354,7 +4358,7 @@ struct App {
                 std::string label=std::to_string(i+1)+"  ";
                 if(authorHistoryActive()) {
                     const auto &stack=forward?authorRedo:authorUndo;
-                    label+=stack[stack.size()-1-i].action;
+                    label+=loc::text(stack[stack.size()-1-i].action.c_str());
                 } else label+="Pipeline edit";
                 if(ImGui::Selectable(label.c_str()))chosen=int(i+1);
                 recordUiTestItem(std::string(key)+"."+std::to_string(i));
@@ -4439,7 +4443,7 @@ struct App {
             });
             popup("actions.rings","环 v",editing,[&] {
                 for(int size=4;size<=6;++size) {
-                    const auto label=std::to_string(size)+" 元碳环";
+                    const auto label=loc::format("%d 元碳环",int(size));
                     if(ImGui::MenuItem(label.c_str())){creationRingSize=size;chooseCreationTool(CreationTool::Ring);}
                     recordUiTestItem("actions.ring."+std::to_string(size));
                 }
@@ -4466,7 +4470,7 @@ struct App {
             button("actions.symmetry",0xE8D4,"Sym","查找对称性 · 三维周期 / 最多 512 原子",editing && symmetry::prepared(source),[&]{
                 creationSymmetry=symmetry::analyze(source);creationSymmetryChecked=true;
                 creationPropertiesOpen=true;creationPropertyPage=0;
-                status=creationSymmetry?"空间群 "+creationSymmetry->symbol+" ("+std::to_string(creationSymmetry->number)+")":"对称性识别失败";
+                status=creationSymmetry?loc::format("空间群 %s (%d)",creationSymmetry->symbol.c_str(),int(creationSymmetry->number)):std::string(loc::text("对称性识别失败"));
             });
         }
         button("actions.lj",0,"LJ","LJ single-point energy / forces",idle && !homeMode && !ljBusy,[&]{requestLJ();});
@@ -4908,7 +4912,7 @@ struct App {
             if (ImGui::MenuItem(loc::label("定义片段..."))) defineFragment();
             if (ImGui::BeginMenu(loc::label("绘制碳环"))) {
                 for (int size=4;size<=6;++size) {
-                    const auto caption=std::to_string(size)+" 元环";
+                    const auto caption=loc::format("%d 元环",int(size));
                     if (ImGui::MenuItem(caption.c_str(),nullptr,creationTool==CreationTool::Ring && creationRingSize==size)) {
                         creationRingSize=size; chooseCreationTool(CreationTool::Ring);
                     }
@@ -4943,7 +4947,7 @@ struct App {
             if(ImGui::MenuItem(loc::label("关于 AtomX")))showAbout=true;
         });
         if(pinned) {
-        const std::string base = std::string(loc::current==loc::Language::Chinese?"基于 ":"Based on ") + creationBasedOn;
+        const std::string base = loc::format("基于 %s",creationBasedOn.c_str());
         const float textWidth = ImGui::CalcTextSize(base.c_str()).x;
         if (ImGui::GetCursorPosX() + textWidth < w - U(14)) {
             ImGui::SetCursorPosX(w - textWidth - U(14));
@@ -5588,7 +5592,7 @@ struct App {
         if(found!=next.monitors.end()) { activateGeometry(int(found-next.monitors.begin())); return; }
         if(next.monitors.size()>=geometry::monitorLimit) { status="测量标记最多 256 个"; geometryPending.clear(); return; }
         next.monitors.push_back(m); next.activeMonitor=int(next.monitors.size())-1; next.monitorsVisible=true;
-        editCreationDisplay(std::move(next),std::string("创建测量 · ")+geometryName(m.count));
+        editCreationDisplay(std::move(next),loc::format("创建测量 · %s",geometryName(m.count)));
     }
     void removeGeometryMonitor() {
         const int i=creationDisplay.activeMonitor;
@@ -5604,7 +5608,7 @@ struct App {
             const auto plan=geometry::prepare(source,creationDisplay.monitors[size_t(i)],geometryInverted);
             (void)geometry::positions(plan,geometryTarget);
             if(std::abs(geometry::delta(plan,geometryTarget))<1e-7) return;
-            editStructure(std::string("修改")+geometryName(plan.monitor.count),[&](Dataset &data){geometry::apply(data,plan,geometryTarget);});
+            editStructure(loc::format("修改%s",geometryName(plan.monitor.count)),[&](Dataset &data){geometry::apply(data,plan,geometryTarget);});
             geometryPanelMonitor=-1;
         } catch(const std::exception &e) { status=e.what(); }
     }
@@ -5646,8 +5650,8 @@ struct App {
             const auto &m=measurementConstraintSource[i];const auto measured=geometry::value(source,m);
             std::string label=std::string(geometryName(m.count))+" "+std::to_string(i+1)+" · ";
             for(size_t j=0;j<m.count;++j)label+="#"+std::to_string(m.atoms[j])+(j+1<m.count?" → ":"");
-            char number[64];if(measured)snprintf(number,sizeof(number)," · %.3f %s",*measured,m.count==2?"Å":"°");else snprintf(number,sizeof(number)," · 未定义");
-            label+=number;label+=m.fixed?" · 固定":" · 自由";label+="##constraint-"+std::to_string(i);
+            char number[64];if(measured)snprintf(number,sizeof(number)," · %.3f %s",*measured,m.count==2?"Å":"°");else snprintf(number,sizeof(number),"%s",loc::text(" · 未定义"));
+            label+=number;label+=loc::text(m.fixed?" · 固定":" · 自由");label+="##constraint-"+std::to_string(i);
             auto it=std::find(measurementConstraintRows.begin(),measurementConstraintRows.end(),int(i));bool selected=it!=measurementConstraintRows.end();
             if(ui_design::checkbox(label.c_str(),&selected)){if(selected)measurementConstraintRows.push_back(int(i));else measurementConstraintRows.erase(it);}
             recordUiTestItem("creation.measurement-row-"+std::to_string(i));
@@ -5656,8 +5660,8 @@ struct App {
         ImGui::Text(loc::text("已选 %zu 个测量"),measurementConstraintRows.size());
         for(int k=0;k<3;++k) {
             ImGui::PushID(k);ImGui::BeginDisabled(summary[size_t(k)]==-2);
-            ImGui::Text(loc::text("%s：%s"),geometryName(uint8_t(k+2)),summary[size_t(k)]==-2?"未选择":summary[size_t(k)]==-1?"混合":summary[size_t(k)]?"固定":"自由");
-            ImGui::SameLine();ImGui::SetNextItemWidth(U(155));const char *labels[]{"保持当前值","解除固定","固定"};
+            ImGui::Text(loc::text("%s：%s"),geometryName(uint8_t(k+2)),loc::text(summary[size_t(k)]==-2?"未选择":summary[size_t(k)]==-1?"混合":summary[size_t(k)]?"固定":"自由"));
+            ImGui::SameLine();ImGui::SetNextItemWidth(U(155));const char *labels[]{loc::text("保持当前值"),loc::text("解除固定"),loc::text("固定")};
             const bool open=ImGui::BeginCombo("##choice",labels[measurementConstraintChoices[size_t(k)]]);
             recordUiTestItem("creation.measurement-choice-"+std::to_string(k));
             if(open){for(int c=0;c<3;++c){if(ImGui::Selectable(labels[c],measurementConstraintChoices[size_t(k)]==c))measurementConstraintChoices[size_t(k)]=c;
@@ -5668,7 +5672,7 @@ struct App {
         ImGui::TextWrapped(loc::text("约束随测量保存在 .atomx 中；标准结构导出不保留测量。移除测量或删除其端点会同时移除该约束。"));
         ImGui::EndDisabled();
         if(!valid)ImGui::TextWrapped(loc::text("体系或测量已改变，请重新打开。"));
-        else if(!measurementConstraintMessage.empty())ImGui::TextWrapped("%s",measurementConstraintMessage.c_str());
+        else if(!measurementConstraintMessage.empty())ImGui::TextWrapped("%s",loc::text(measurementConstraintMessage.c_str()));
         ImGui::BeginDisabled(!valid || measurementConstraintRows.empty());
         if(ImGui::Button(loc::label("应用"),{U(110),U(30)}) && applyMeasurementConstraints())ImGui::CloseCurrentPopup();recordUiTestItem("creation.measurement-apply");
         ImGui::EndDisabled();ImGui::SameLine();
@@ -5694,7 +5698,7 @@ struct App {
             for(size_t j=0;j<m.count;++j) visible=visible && creationAtomVisible(m.atoms[j]) && project(geometry::at(result.data,m.atoms[j]),pts[j]);
             if(!visible) continue;
             const auto measured=geometry::value(result.data,m);
-            char caption[80]; if(measured) snprintf(caption,sizeof(caption),m.count==2?"%.3f Å%s":"%.2f°%s",*measured,m.fixed?" · 固定":""); else snprintf(caption,sizeof(caption),"未定义%s",m.fixed?" · 固定":"");
+            const char *fixedTag=m.fixed?loc::text(" · 固定"):"";char caption[120]; if(measured) snprintf(caption,sizeof(caption),m.count==2?"%.3f Å%s":"%.2f°%s",*measured,fixedTag); else snprintf(caption,sizeof(caption),"%s%s",loc::text("未定义"),fixedTag);
             ImVec2 anchor=m.count==2?ImVec2{(pts[0].x+pts[1].x)*.5f,(pts[0].y+pts[1].y)*.5f}:
                 m.count==3?pts[1]:ImVec2{(pts[1].x+pts[2].x)*.5f,(pts[1].y+pts[2].y)*.5f};
             anchor.x+=U(8); anchor.y+=U(m.count==4?8.f:-24.f);
@@ -5767,8 +5771,8 @@ struct App {
             ImGui::BeginChild("##monitors",{0,U(std::min(130.f,float(creationDisplay.monitors.size())*29+6))},ImGuiChildFlags_Borders);
             for(size_t i=0;i<creationDisplay.monitors.size();++i) {
                 const auto &m=creationDisplay.monitors[i]; const auto measured=geometry::value(result.data,m);
-                char label[160]; if(measured) snprintf(label,sizeof(label),"%s %zu  %.3f %s%s##%zu",geometryName(m.count),i+1,*measured,m.count==2?"Å":"°",m.fixed?" · 固定":"",i);
-                else snprintf(label,sizeof(label),"%s %zu  未定义%s##%zu",geometryName(m.count),i+1,m.fixed?" · 固定":"",i);
+                char label[160]; if(measured) snprintf(label,sizeof(label),"%s %zu  %.3f %s%s##%zu",geometryName(m.count),i+1,*measured,m.count==2?"Å":"°",m.fixed?loc::text(" · 固定"):"",i);
+                else snprintf(label,sizeof(label),"%s %zu  %s%s##%zu",geometryName(m.count),i+1,loc::text("未定义"),m.fixed?loc::text(" · 固定"):"",i);
                 if(ImGui::Selectable(label,creationDisplay.activeMonitor==int(i))) activateGeometry(int(i));
                 recordUiTestItem("creation.monitor-"+std::to_string(i));
             }
@@ -5861,7 +5865,7 @@ struct App {
             changed|=source.bonds[size_t(row)].order!=order;
         }
         if(!changed)return false;
-        editStructure((order?"修改选中键级 · ":"断开选中键 · ")+std::to_string(rows.size()),[&](Dataset &d) {
+        editStructure(loc::format(order?"修改选中键级 · %zu":"断开选中键 · %zu",size_t(rows.size())),[&](Dataset &d) {
             auto affected=creation::editBonds(d,rows,order);
             updateAutomaticHydrogens(d,affected);
         });
@@ -5877,7 +5881,7 @@ struct App {
         creationSelection.erase(std::remove_if(creationSelection.begin(),creationSelection.end(),
             [&](int atom){return !creationAtomVisible(atom);}),creationSelection.end());
         creationPick=creationSelection.empty()?-1:index;
-        status="选中连接片段 · "+std::to_string(creationSelection.size())+" 个原子";
+        status=loc::format("选中连接片段 · %zu 个原子",size_t(creationSelection.size()));
     }
     std::vector<int> creationTransformSelection() const {
         try {
@@ -5893,7 +5897,7 @@ struct App {
             [&](int i){return !creationAtomVisible(i);}),creationSelection.end());
         creationBondSelection.clear();
         creationPick=creationSelection.empty()?-1:creationSelection.back();
-        status="选中连接片段 · "+std::to_string(creationSelection.size())+" 个原子";
+        status=loc::format("选中连接片段 · %zu 个原子",size_t(creationSelection.size()));
     }
     void invertCreationSelection() {
         std::vector<uint8_t> atoms(source.atoms.size(),0);
@@ -6099,7 +6103,7 @@ struct App {
                 next.ballRadius=creationStyleDraft.ballRadius; next.stickRadius=creationStyleDraft.stickRadius;
                 next.cpkScale=creationStyleDraft.cpkScale; next.lineWidth=creationStyleDraft.lineWidth;
                 next.setPreset(source.atoms.size(),creationSelection,uint8_t(creationStylePreset),creationStyleAll);
-                editCreationDisplay(std::move(next),std::string("显示样式 · ")+names[creationStylePreset]);
+                editCreationDisplay(std::move(next),loc::format("显示样式 · %s",names[creationStylePreset]));
             }
             recordUiTestItem("creation.style-apply"); ImGui::EndDisabled(); ImGui::SameLine();
             if(ImGui::Button(loc::label("关闭"),{U(110),U(30)})) showCreationStyles=false;
@@ -6153,9 +6157,9 @@ struct App {
                 } else ImGui::TextWrapped(loc::text("非负整数编号保持固定颜色；可选择运动分组或层编号，其他值为灰色。"));
                 ImGui::TextDisabled(loc::text("缺失值为灰色；颜色随数据更新，范围仅手动调整。"));
             }
-            if(!creationColorMessage.empty()) ImGui::TextWrapped("%s",creationColorMessage.c_str());
+            if(!creationColorMessage.empty()) ImGui::TextWrapped("%s",loc::text(creationColorMessage.c_str()));
             ImGui::BeginDisabled(!creation::validColor(cr) || (!creationStyleAll && creationSelection.empty()));
-            if(ImGui::Button(loc::label("应用着色"),{U(110),U(30)})) {
+            if(ImGui::Button(loc::label("应用着色"),{buttonWidth(loc::label("应用着色"),U(110)),U(30)})) {
                 auto next=creationDisplay; next.setColor(source.atoms.size(),creationSelection,cr,creationStyleAll);
                 editCreationDisplay(std::move(next),"编辑原子着色");
             } recordUiTestItem("creation.color-apply"); ImGui::EndDisabled(); ImGui::EndDisabled();
@@ -6180,7 +6184,7 @@ struct App {
         ImGui::SetNextWindowSizeConstraints({U(530),U(410)},{U(900),U(800)});
         if (ImGui::Begin(loc::label("运动分组##motion-groups"),&showMotionGroups)) {
             ImGui::TextDisabled(loc::text("保留原子与显式键 · 分组不自动限制手工编辑"));
-            ImGui::SetNextItemWidth(-1); ImGui::InputText("##group-name",motionGroupName,sizeof(motionGroupName));
+            if(std::strcmp(motionGroupName,"我的分组")==0)snprintf(motionGroupName,sizeof(motionGroupName),"%s",loc::text("我的分组"));ImGui::SetNextItemWidth(-1); ImGui::InputText("##group-name",motionGroupName,sizeof(motionGroupName));
             recordUiTestItem("creation.group-name");
             auto attempt=[&](auto action) { try { action(); } catch (const std::exception &e) { motionGroupMessage=e.what(); } };
             ImGui::BeginDisabled(documentsBusy());
@@ -6188,8 +6192,8 @@ struct App {
             if (ImGui::Button(loc::label("从选择创建"))) attempt([&] {
                 const int key=motion::prepare(source,creationSelection,motionGroupName);
                 const auto selected=creationSelection; const std::string name=motionGroupName;
-                editStructure("创建运动分组 · "+name,[&](Dataset &data){motion::create(data,selected,name,key);});
-                motionGroupSelected=key; motionGroupMessage="已创建分组 · "+name;
+                editStructure(loc::format("创建运动分组 · %s",name.c_str()),[&](Dataset &data){motion::create(data,selected,name,key);});
+                motionGroupSelected=key; motionGroupMessage=loc::format("已创建分组 · %s",name.c_str());
             }); recordUiTestItem("creation.group-create"); ImGui::EndDisabled(); ImGui::SameLine();
             if (ImGui::Button(loc::label("按独立片段自动分组"))) attempt([&] {
                 if (source.sampled() || !motion::catalog(source).empty())
@@ -6203,7 +6207,7 @@ struct App {
                 ImGuiListClipper clipper; clipper.Begin(int(motionGroupCache.size()));
                 while (clipper.Step()) for (int index=clipper.DisplayStart;index<clipper.DisplayEnd;++index) {
                     const auto &group=motionGroupCache[size_t(index)]; ImGui::PushID(group.id);
-                    const std::string label=group.name+" · "+std::to_string(group.count)+" 原子";
+                    const std::string label=loc::format("%s · %s 原子",group.name.c_str(),std::to_string(group.count).c_str());
                     if (ImGui::Selectable(label.c_str(),motionGroupSelected==group.id)) {
                         motionGroupSelected=group.id; snprintf(motionGroupName,sizeof(motionGroupName),"%s",group.name.c_str());
                     } recordUiTestItem("creation.group-row-"+std::to_string(group.id)); ImGui::PopID();
@@ -6237,7 +6241,7 @@ struct App {
                 }); motionGroupSelected=0;
             } recordUiTestItem("creation.group-clear"); ImGui::EndDisabled(); ImGui::SameLine();
             if (ImGui::Button(loc::label("关闭"))) showMotionGroups=false; recordUiTestItem("creation.group-close");
-            if (!motionGroupMessage.empty()) ImGui::TextWrapped("%s",motionGroupMessage.c_str());
+            if (!motionGroupMessage.empty()) ImGui::TextWrapped("%s",loc::text(motionGroupMessage.c_str()));
         }
         ImGui::End();
     }
@@ -6323,7 +6327,7 @@ struct App {
                 for (int i=0;i<layerCount;++i) {
                     ImGui::PushID(i); ImGui::Separator();
                     ImGui::Text(loc::text("层 %d"),i+1);
-                    std::string title="选择来源标签";
+                    std::string title=loc::text("选择来源标签");
                     for (const auto &tab:tabs) if (tab.id==layerSourceIds[i]) title=tab.title;
                     ImGui::SetNextItemWidth(-1);
                     if (ImGui::BeginCombo("##source",title.c_str())) {
@@ -6381,7 +6385,7 @@ struct App {
                 if (ImGui::RadioButton(loc::label("a、b、γ 取各层平均"),layerOptions.matching<0)) layerOptions.matching=-1;
                 recordUiTestItem("creation.layers-average");
                 for (int i=0;i<layerCount;++i) {
-                    const auto label="采用层 "+std::to_string(i+1)+" 的 a、b、γ";
+                    const auto label=loc::format("采用层 %s 的 a、b、γ",std::to_string(i+1).c_str());
                     if (ImGui::RadioButton(label.c_str(),layerOptions.matching==i)) layerOptions.matching=i;
                     recordUiTestItem("creation.layers-match-"+std::to_string(i));
                 }
@@ -6396,7 +6400,7 @@ struct App {
             if (ImGui::BeginTabItem(loc::label("选项"))) {
                 ImGui::BeginChild("##layer-options-scroll",{0,U(290)});
                 for (int i=0;i<layerCount;++i) {
-                    const auto label="采用层 "+std::to_string(i+1)+" 的空间朝向";
+                    const auto label=loc::format("采用层 %s 的空间朝向",std::to_string(i+1).c_str());
                     if (ImGui::RadioButton(label.c_str(),layerOptions.orientation==i)) layerOptions.orientation=i;
                     recordUiTestItem("creation.layers-orient-"+std::to_string(i));
                 }
@@ -6421,7 +6425,7 @@ struct App {
         recordUiTestItem("creation.layers-build"); ImGui::EndDisabled(); ImGui::SameLine();
         if (ImGui::Button(loc::label("关闭"),{U(110),U(32)})) ImGui::CloseCurrentPopup();
         recordUiTestItem("creation.layers-close"); ImGui::EndDisabled();
-        if (!layerBuilderMessage.empty()) ImGui::TextWrapped("%s",layerBuilderMessage.c_str());
+        if (!layerBuilderMessage.empty()) ImGui::TextWrapped("%s",loc::text(layerBuilderMessage.c_str()));
         ImGui::EndPopup();
     }
     void requestCreationMovement() {
@@ -6478,7 +6482,7 @@ struct App {
                 rotate?vector:Vec3{},rotate?double(creationMovementAngle)*direction:0,
                 creationMovementMassCenter?motion::massCenter(source,creationMovementSelection):std::nullopt);
             if (positions.empty()) { creationMovementMessage="坐标未改变"; return; }
-            const std::string message=(rotate?"精准旋转 ":"精准移动 ")+std::to_string(positions.size())+" 个原子";
+            const std::string message=loc::format(rotate?"精准旋转 %zu 个原子":"精准移动 %zu 个原子",size_t(positions.size()));
             editStructure(message,[&](Dataset &data) {
                 for (const auto &[index,at]:positions) {
                     auto &atom=data.atoms[size_t(index)]; atom.x=at.x; atom.y=at.y; atom.z=at.z;
@@ -6488,7 +6492,7 @@ struct App {
             // retain identity. Other source edits invalidate the dialog.
             creationMovementGeneration=pipelineGeneration;
             creationBondSelection=creationMovementBonds;
-            creationMovementMessage=message+" · 已记录一步历史";
+            creationMovementMessage=loc::format("%s · 已记录一步历史",message.c_str());
         } catch (const std::exception &e) { creationMovementMessage=e.what(); }
     }
     struct CreationProjection {
@@ -7114,7 +7118,7 @@ struct App {
             if(creationDrag==CreationDrag::Geometry && creationDragMoved) {
                 const auto &plan=geometryDragPlans[geometryDragInverted?1:0];
                 if(plan && std::abs(geometry::delta(*plan,geometryDragTarget))>1e-7)
-                    editStructure(std::string("拖动修改")+geometryName(plan->monitor.count),[&](Dataset &data){geometry::apply(data,*plan,geometryDragTarget);});
+                    editStructure(loc::format("拖动修改%s",geometryName(plan->monitor.count)),[&](Dataset &data){geometry::apply(data,*plan,geometryDragTarget);});
                 geometryPanelMonitor=-1;
             } else if (creationDrag==CreationDrag::Box && creationDragMoved) {
                 const auto matrix=creationProjection(result.data,cam,size).combined;
@@ -7160,7 +7164,7 @@ struct App {
             } else if (creationDrag==CreationDrag::Move && creationDragMoved && !creationDragAtoms.empty()) {
                 const auto edits=creationDragAtoms;
                 const auto delta=creationMoveDelta;
-                editStructure("移动 " + std::to_string(edits.size()) + " 个原子",[&](Dataset &data) {
+                editStructure(loc::format("移动 %zu 个原子",size_t(edits.size())),[&](Dataset &data) {
                     for (const auto &[index,original]:edits) {
                         auto &atom=data.atoms[size_t(index)];
                         atom.x=original.x+delta.x; atom.y=original.y+delta.y; atom.z=original.z+delta.z;
@@ -7173,7 +7177,7 @@ struct App {
                     const auto &a=result.data.atoms[size_t(index)];
                     positions.push_back({index,{a.x,a.y,a.z}});
                 }
-                editStructure("旋转 "+std::to_string(positions.size())+" 个原子",[&](Dataset &data) {
+                editStructure(loc::format("旋转 %zu 个原子",size_t(positions.size())),[&](Dataset &data) {
                     for (const auto &[index,at]:positions) {
                         auto &a=data.atoms[size_t(index)]; a.x=at.x; a.y=at.y; a.z=at.z;
                     }
@@ -7630,7 +7634,7 @@ struct App {
                 ImVec2 marker;
                 if (screen(fragments::at(source,creationFusionSeed->connector),marker)) {
                     draw->AddRect({marker.x-U(9),marker.y-U(9)},{marker.x+U(9),marker.y+U(9)},IM_COL32(255,80,80,255),0,0,U(2));
-                    draw->AddText({marker.x+U(14),marker.y-U(12)},IM_COL32(255,110,110,255),"移动片段连接点");
+                    draw->AddText({marker.x+U(14),marker.y-U(12)},IM_COL32(255,110,110,255),loc::text("移动片段连接点"));
                 }
                 if (creationFusionPreview) {
                     const auto &fusion=*creationFusionPreview; ImVec2 a,b;
@@ -7643,7 +7647,7 @@ struct App {
                             draw->AddCircle(a,U(5),IM_COL32(255,218,103,210),12,U(1.5f));
                     if (screen(fusion.anchorPosition,a) && screen(fusion.pivot,b)) {
                         draw->AddLine(a,b,IM_COL32(255,218,103,255),U(3));
-                        draw->AddText({b.x+U(12),b.y-U(24)},IM_COL32(255,218,103,255),"松开连接 · 拖动转向");
+                        draw->AddText({b.x+U(12),b.y-U(24)},IM_COL32(255,218,103,255),loc::text("松开连接 · 拖动转向"));
                     }
                 }
             }
@@ -7689,7 +7693,7 @@ struct App {
                     if (visible[vertex]) draw->AddCircle(projected[vertex],U(5),IM_COL32(255,218,103,210),16,U(1.5f));
                 }
                 if (visible[0]) {
-                    const auto caption=std::to_string(ring.size)+(ring.aromatic?" 元芳香环":" 元碳环");
+                    const auto caption=loc::format(ring.aromatic?"%d 元芳香环":"%d 元碳环",int(ring.size));
                     draw->AddText({projected[0].x+U(12),projected[0].y-U(24)},IM_COL32(255,218,103,230),caption.c_str());
                 }
             }
@@ -7701,7 +7705,7 @@ struct App {
                 if(q.w>0 && q.z>0 && q.z<q.w) {
                     const ImVec2 center{p.x+(q.x/q.w+1)*avail.x*.5f,p.y+(1-q.y/q.w)*avail.y*.5f};
                     draw->AddCircle(center,U(9),IM_COL32(255,218,103,255),24,U(2));
-                    draw->AddText({center.x+U(13),center.y-U(18)},IM_COL32(255,218,103,255),"插入原子");
+                    draw->AddText({center.x+U(13),center.y-U(18)},IM_COL32(255,218,103,255),loc::text("插入原子"));
                 }
             }
             if (creationSketchPreviewValid && creationSketchAnchor>=0 && !pipelineBusy && !creationSketchInsert && creationInsertHover<0) {
@@ -8916,7 +8920,7 @@ struct App {
             ImGui::SetNextItemWidth(U(150));ImGui::InputInt(loc::label("屏幕标签上限"),&creationBondLabelDraft.budget);
             ImGui::TextDisabled(loc::text("1–2000，默认 500；大体系抽样显示；隐藏键不标注"));
             if(!valid)ImGui::TextColored({1,.65f,.2f,1},loc::text("体系已改变，请关闭后重新打开"));
-            if(!creationBondLabelMessage.empty())ImGui::TextWrapped("%s",creationBondLabelMessage.c_str());
+            if(!creationBondLabelMessage.empty())ImGui::TextWrapped("%s",loc::text(creationBondLabelMessage.c_str()));
             auto apply=[&](const creation::BondLabel &rule,bool all,const char *message,bool style) {
                 try {
                     auto next=creationDisplay;
@@ -9084,8 +9088,8 @@ struct App {
                 (!creationMovementPercent || creationMovementScreenSpan>0);
             const bool canRotate=std::isfinite(creationMovementAngle)&&creationMovementAngle>0;
             ImGui::BeginDisabled(!validCreationMovement() || documentsBusy());
-            auto action=[&](const char *label,const char *key,int axis,int sign,bool rotate) {
-                if (ImGui::Button(label,{U(134),U(34)})) applyCreationMovement(axis,sign,rotate);
+            auto action=[&](const char *caption,const char *key,int axis,int sign,bool rotate) {
+                if (ImGui::Button(loc::label(caption),{U(134),U(34)})) applyCreationMovement(axis,sign,rotate);
                 recordUiTestItem(key);
             };
             ImGui::BeginDisabled(!canTranslate);
@@ -9106,7 +9110,7 @@ struct App {
             action("Y -角度","creation.movement-rotate-neg-y",1,-1,true); ImGui::SameLine();
             action("Z -角度","creation.movement-rotate-neg-z",2,-1,true);
             ImGui::EndDisabled(); ImGui::EndDisabled();
-            if (!creationMovementMessage.empty()) ImGui::TextWrapped("%s",creationMovementMessage.c_str());
+            if (!creationMovementMessage.empty()) ImGui::TextWrapped("%s",loc::text(creationMovementMessage.c_str()));
             if (!validCreationMovement()) ImGui::TextUnformatted(loc::text("原标签或体系已改变，请关闭并重新打开"));
             ImGui::Separator();
             if (ImGui::Button(loc::label("关闭"),{U(100),0}) || ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -9170,7 +9174,7 @@ struct App {
         ImGui::SetNextWindowSize({U(580),U(580)},ImGuiCond_Appearing);
         if (ImGui::BeginPopupModal(loc::label("建晶体##v2"),nullptr,ImGuiWindowFlags_NoSavedSettings)) {
             referenceHelp("symmetry");
-            const char *presets="Cu · FCC\0NaCl · 岩盐\0Si · 金刚石\0Fe · BCC\0Mg · HCP\0自定义 P1\0按空间群构建\0";
+            const char *presets=loc::items("Cu · FCC\0NaCl · 岩盐\0Si · 金刚石\0Fe · BCC\0Mg · HCP\0自定义 P1\0按空间群构建\0");
             int preset=crystalPreset;
             if (ImGui::Combo(loc::label("结构模板"),&preset,presets)) configureCrystalPreset(preset);
             if (crystalPreset==6) {
@@ -9220,23 +9224,23 @@ struct App {
                 crystalAlpha,crystalBeta,crystalGamma)&&!crystalBasis.empty()&&
                 (crystalPreset!=6 || (crystalSpaceGroup>=1&&crystalSpaceGroup<=230));
             ImGui::BeginDisabled(!valid);
-            if (ImGui::Button(loc::label("生成晶胞"),{U(110),U(36)})) {
+            if (ImGui::Button(loc::label("生成晶胞"),{buttonWidth(loc::label("生成晶胞"),U(110)),U(36)})) {
                 try {
                     Dataset data=crystalFromDialog();
                     if (creationMode && crystalReplaceCurrent) adoptStructure(std::move(data),"已生成晶胞");
                     else {
-                        newStructureTab(std::move(data),"晶体 · 创作");
+                        newStructureTab(std::move(data),loc::text("晶体 · 创作"));
                         creationMode=true;
                         chooseCreationTool(CreationTool::Select);
                         cameras[3].mode=7; active=3;
-                        saveCreationSnapshot("晶体初始");
+                        saveCreationSnapshot(loc::text("晶体初始"));
                     }
                     ImGui::CloseCurrentPopup();
                 } catch (const std::exception &e) { status=e.what(); }
             }
             ImGui::EndDisabled();
             ImGui::SameLine();
-            if (ImGui::Button(loc::label("取消"),{U(80),U(36)})) ImGui::CloseCurrentPopup();
+            if (ImGui::Button(loc::label("取消"),{buttonWidth(loc::label("取消"),U(80)),U(36)})) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
         if (openSupercellDialog) { ImGui::OpenPopup(loc::label("超胞##v2")); openSupercellDialog=false; }
@@ -9277,7 +9281,7 @@ struct App {
                     [](int n){return n>=-6&&n<=6;})&&
                 std::all_of(source.pbc.begin(),source.pbc.end(),[](bool periodic){return periodic;});
             ImGui::BeginDisabled(!valid);
-            if (ImGui::Button(loc::label("生成切面"),{U(110),U(35)})) {
+            if (ImGui::Button(loc::label("生成切面"),{buttonWidth(loc::label("生成切面"),U(110)),U(35)})) {
                 auto slab=authoring::millerSurface(source,surfaceMiller[0],surfaceMiller[1],
                     surfaceMiller[2],surfaceLayers,surfaceVacuum);
                 if (slab) {
@@ -9314,10 +9318,10 @@ struct App {
         const float workH=std::max(U(80),bodyH-propertyH-footerH);
         fixed("Creation snapshots",0,y,leftW,workH);
         ImGui::TextDisabled(loc::text("工作区"));
-        ImGui::SameLine(leftW-U(68));
+        const float stashWidth=buttonWidth(loc::label("暂存"),U(50));ImGui::SameLine(leftW-U(18)-stashWidth);
         ImGui::PushStyleColor(ImGuiCol_Button,ui_design::rgb(ui_design::light()?0xfff1d8:0x40301c));
         ImGui::PushStyleColor(ImGuiCol_Text,ui_design::rgb(ui_design::light()?0x925200:0xffb03b));
-        if (ImGui::Button(loc::label("暂存"),{U(50),U(26)})) saveCreationSnapshot();
+        if (ImGui::Button(loc::label("暂存"),{stashWidth,U(26)})) saveCreationSnapshot();
         ImGui::PopStyleColor(2);
         ImGui::Separator();
         const bool documentsExpanded=ImGui::CollapsingHeader(loc::label("文档"));
@@ -9355,7 +9359,7 @@ struct App {
             if(closeIndex>=0){closeTab(closeIndex);explorerSelectedId=0;}
             if(ImGui::SmallButton(loc::label("保存工作区…")))projectDialog(true);
         }
-        ImGui::Text("%s",creationBasedOn.empty()?"未命名结构":creationBasedOn.c_str());
+        ImGui::Text("%s",creationBasedOn.empty()?loc::text("未命名结构"):creationBasedOn.c_str());
         ImGui::SameLine();
         ImGui::TextDisabled(loc::text("%zu 快照"),creationSnapshots.size());
         ImGui::Spacing();
@@ -9392,7 +9396,7 @@ struct App {
         if (creationPropertiesOpen) {
             fixed("Creation file properties",0,y+workH,leftW,propertyH);
             ImGui::TextDisabled(loc::text("体系属性"));ImGui::SameLine();referenceHelp("modeling");
-            creationPropertyPage=segmented("##creation-property-pages",creationPropertyPage,{"晶格","组成","选中","测量"},ImGui::GetContentRegionAvail().x);
+            creationPropertyPage=segmented("##creation-property-pages",creationPropertyPage,{"property-page.lattice","property-page.composition","property-page.selection","property-page.measurements"},ImGui::GetContentRegionAvail().x);
             ImGui::Separator();
             auto propertyRow=[&](const char *name,const std::string &value) {
                 ImGui::TextDisabled("%s",loc::text(name));
@@ -9507,7 +9511,7 @@ struct App {
                         }}
                     if(creationPropertyFilter[0] && name.find(creationPropertyFilter)==std::string::npos)continue;
                     const auto measured=geometry::value(result.data,m);char value[80];
-                    if(measured)snprintf(value,sizeof(value),"%.5f %s",*measured,m.count==2?"Å":"°");else snprintf(value,sizeof(value),"未定义");
+                    if(measured)snprintf(value,sizeof(value),"%.5f %s",*measured,m.count==2?"Å":"°");else snprintf(value,sizeof(value),"%s",loc::text("未定义"));
                     ImGui::PushID(int(row));
                     if(ImGui::Selectable(name.c_str(),creationDisplay.activeMonitor==int(row)))activateGeometry(int(row));
                     recordUiTestItem("creation.properties-measurement-"+std::to_string(row));
@@ -9591,10 +9595,11 @@ struct App {
         ImGui::End();
 
         fixed("Creation selection", w - rightW, y, rightW, bodyH);
+        ImGui::PushTextWrapPos(0); // Keep tool hints inside the panel at any caption length.
         geometryPanel();
         ui_design::checkbox(loc::label("自动更新氢"),&creationAutoHydrogens);recordUiTestItem("creation.auto-hydrogen");
         if(ImGui::IsItemHovered())ImGui::SetTooltip(loc::text("提交绘制、换元素、改键级、接环或删除时调整相邻位点；开关本身不改体系。\n默认关闭；大体系可用 H+ 后台预览。"));
-        if(!creationAutoHydrogenMessage.empty())ImGui::TextWrapped("%s",creationAutoHydrogenMessage.c_str());
+        if(!creationAutoHydrogenMessage.empty())ImGui::TextWrapped("%s",loc::text(creationAutoHydrogenMessage.c_str()));
         if (creationTool==CreationTool::Fragment) {
             ImGui::SeparatorText(loc::text("放置片段"));
             if (const auto *t=currentFragment()) ImGui::TextWrapped("%s",t->name.c_str());
@@ -9612,7 +9617,7 @@ struct App {
             ImGui::EndDisabled();
             ImGui::TextDisabled(loc::text("Alt 点击也可指定移动片段连接点"));
             if (creationFusionSeed || creationFusionPick) {
-                ImGui::TextWrapped("%s",creationFusionSeed?"已指定移动片段；点击另一片段的末端":"请选择移动片段的末端原子");
+                ImGui::TextWrapped("%s",loc::text(creationFusionSeed?"已指定移动片段；点击另一片段的末端":"请选择移动片段的末端原子"));
                 if (creationFusionSeed) ImGui::TextDisabled(loc::text("移动 %zu 个原子"),creationFusionSeed->indices.size());
                 if (ImGui::Button(loc::label("取消连接"))) clearCreationFusion();
                 recordUiTestItem("creation.fragment-fuse-cancel");
@@ -9623,7 +9628,7 @@ struct App {
             ImGui::SeparatorText(loc::text("绘制碳环"));
             ImGui::TextDisabled(loc::text("环大小")); ImGui::SameLine();
             for (int size=4;size<=6;++size) {
-                const auto caption=std::to_string(size)+" 元";
+                const auto caption=loc::format("%d 元",int(size));
                 if (ImGui::RadioButton(caption.c_str(),creationRingSize==size)) {
                     creationRingSize=size; creationRingPreviewValid=false;
                 }
@@ -9692,11 +9697,11 @@ struct App {
                 const auto &b=source.bonds[size_t(row)];const auto vector=bondVector(source,b);
                 ImGui::Text(loc::text("键 #%d · #%u — #%u"),row,b.a,b.b);
                 ImGui::Text(loc::text("键长 %.4f Å"),std::hypot(vector[0],vector[1],vector[2]));
-                ImGui::Text(loc::text("键级 %s"),b.order==4?"1.5 (芳香)":std::to_string(b.order).c_str());
+                ImGui::Text(loc::text("键级 %s"),b.order==4?loc::text("1.5 (芳香)"):std::to_string(b.order).c_str());
                 if(b.image!=std::array<int32_t,3>{})ImGui::TextDisabled(loc::text("周期像 (%d, %d, %d)"),b.image[0],b.image[1],b.image[2]);
                 int order=1;
-                for(const char *caption:{"单键","双键","三键","芳香"}) {
-                    if(ImGui::Button(caption,{U(56),U(28)}))editSelectedCreationBonds(order);
+                for(const char *caption:{"bond-button.single","bond-button.double","bond-button.triple","bond-button.aromatic"}) {
+                    if(ImGui::Button(loc::label(caption),{U(56),U(28)}))editSelectedCreationBonds(order);
                     recordUiTestItem("creation.selected-bond-order-"+std::to_string(order));
                     if(++order<5)ImGui::SameLine();
                 }
@@ -9717,9 +9722,9 @@ struct App {
         if (creationSelection.size()==2 && creationBondSelection.empty()) {
             ImGui::TextDisabled(loc::text("连接选中原子 / 修改键级"));
             int order=0;
-            for (const char *label:{"断键","单键","双键","三键","芳香"}) {
+            for (const char *label:{"bond-button.break","bond-button.single","bond-button.double","bond-button.triple","bond-button.aromatic"}) {
                 ImGui::PushID(order);
-                if (ImGui::Button(label,{U(58),U(28)}))
+                if (ImGui::Button(loc::label(label),{U(58),U(28)}))
                     editCreationBond(creationSelection[0],creationSelection[1],order);
                 recordUiTestItem("creation.bond-order-"+std::to_string(order));
                 ImGui::PopID(); if (++order<4) ImGui::SameLine();
@@ -9805,8 +9810,8 @@ struct App {
         ImGui::GetWindowDrawList()->AddRectFilled({row.x,row.y+U(2)},
             {row.x+U(3),row.y+U(23)},IM_COL32(32,163,241,255));
         ImGui::Indent(U(13));
-        const std::string origin = std::string(loc::current==loc::Language::Chinese?"从 ":"From ") +
-            (creationBasedOn.empty() ? std::string(loc::text("新结构")) : creationBasedOn);
+        const std::string origin = loc::format("从 %s",
+            (creationBasedOn.empty() ? std::string(loc::text("新结构")) : creationBasedOn).c_str());
         if (ImGui::Selectable(origin.c_str(),authorUndo.empty(),0,{rightW-U(75),U(27)}))
             jumpCreationHistory(0);
         ImGui::SameLine();
@@ -9824,7 +9829,7 @@ struct App {
             ImGui::SameLine();
             if (ImGui::Button(loc::label("重做"), {U(80), U(30)})) history(true);
         }
-        ImGui::End();
+        ImGui::PopTextWrapPos();ImGui::End();
         verticalSplitter("Creation workspace edge",leftW,h,pipelinePane,180.f,std::max(180.f,(w-rightW-U(320))/uiScale),1.f,264.f);
         verticalSplitter("Creation properties edge",w-rightW,h,propertiesPane,200.f,std::max(200.f,(w-leftW-U(320))/uiScale),-1.f,288.f);
         if(creationPropertiesOpen) {
@@ -9842,6 +9847,8 @@ struct App {
     void right(float w, float h) {
         fixed("Properties", w - rightWidth(), topInset(), rightWidth(),
               h - topInset() - statusHeight());
+        // Longer translated captions keep their place beside the controls.
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x*(loc::current==loc::Language::Chinese?.65f:.5f));
         // Tighter than the global theme so checkboxes, combos and sliders hug
         // their labels. release() runs before End(): End() asserts
         // "Missing PopStyleVar()" (and blocks startup) if these are still pushed.
@@ -11423,7 +11430,7 @@ struct App {
                     loc::text("Hundreds of millions of full-resolution atoms and advanced OVITO analysis are "
                     "development targets, not validated capabilities."));
             }
-        panelStyle.release();
+        ImGui::PopItemWidth();panelStyle.release();
         ImGui::End();
     }
     void rebuildFont() {

@@ -23,7 +23,9 @@ To add a language, extend `Language`, `languages` and each pack row. Right-to-le
 scripts are not supported because Dear ImGui does not shape them.
 Use `localization::text` for captions/tooltips and `localization::label` for
 ImGui controls/window titles. Labels keep a language-independent `###` ID.
-`localization::items` preserves NUL-separated combo lists. Keep printf argument
+`localization::items` preserves NUL-separated combo lists.
+`localization::format` builds runtime messages from one printf row; do not join
+translated fragments, because word order differs by language. Keep printf argument
 types/order identical, including `%%` escapes. Both language glyph sets are
 built into the existing font atlas, so switching does not rebuild GPU resources.
 
