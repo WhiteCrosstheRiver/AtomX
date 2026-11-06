@@ -273,6 +273,11 @@ static LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
+// One name and pattern pair of an OPENFILENAME filter, in the interface language.
+static std::wstring fileFilter(const char *name,const wchar_t *pattern) {
+    wchar_t text[128]{};MultiByteToWideChar(CP_UTF8,0,loc::text(name),-1,text,127);
+    std::wstring out=text;out.push_back(0);out+=pattern;out.push_back(0);return out;
+}
 static std::filesystem::path dialog(HWND window, bool save, const wchar_t *filter,
                                     const wchar_t *ext, const std::filesystem::path &suggested = {}) {
     wchar_t path[32768]{};
@@ -1033,7 +1038,7 @@ struct App {
         projectBusy=true;status="正在打开工作区…";
     }
     void projectDialog(bool save) {
-        const auto chosen=dialog(window,save,L"AtomX workspace (*.atomx-project)\0*.atomx-project\0\0",L"atomx-project");
+        const auto chosen=dialog(window,save,fileFilter("AtomX workspace (*.atomx-project)",L"*.atomx-project").c_str(),L"atomx-project");
         if(chosen.empty())return;if(save)saveProject(chosen);else loadProject(chosen);
     }
     std::vector<StructureTab> tabs;
@@ -1693,7 +1698,7 @@ struct App {
         update();
         status = op == Op::CreateBonds && result.data.atoms.size() > 10000
             ? "Large structure: set a bond cutoff explicitly; fast lines are the default"
-            : std::string("Added ") + opName(op);
+            : loc::format("Added %s",loc::text(opName(op)));
     }
     // Display-only synchronous preview of the simulation cell entering pipeline
     // node `nodeIndex`: applies the cell-affecting modifiers upstream without
@@ -1748,7 +1753,7 @@ struct App {
         const auto choices = pipelineInputPropertyChoices(
             source, mods, std::min(modifierGraph.selected, mods.size()), includeVectorComponents);
         bool changed = false;
-        if (ImGui::BeginCombo(label, property.c_str())) {
+        if (ImGui::BeginCombo(loc::label(label), property.c_str())) {
             for (const auto &name : choices) {
                 bool selected = property == name;
                 if (ImGui::Selectable(name.c_str(), selected)) {
@@ -1772,7 +1777,7 @@ struct App {
             if (text.size() > 28) text.resize(28);
             return text;
         }
-        return "Untitled structure";
+        return loc::text("Untitled structure");
     }
     StructureTab captureTab() const {
         StructureTab tab;
@@ -1907,7 +1912,7 @@ struct App {
         tabs[activeTab] = captureTab();
         activeTab = index;
         restoreTab(tabs[activeTab]);
-        status = "Switched to " + tabs[activeTab].title;
+        status = loc::format("Switched to %s",tabs[activeTab].title.c_str());
     }
     void newStructureTab(Dataset data, const std::string &title) {
         if (documentsBusy()) {
@@ -1926,7 +1931,7 @@ struct App {
         if (replaceHome) tabs[size_t(activeTab)] = std::move(tab);
         else { tabs.push_back(std::move(tab)); activeTab = int(tabs.size()) - 1; }
         restoreTab(tabs[activeTab]);
-        status = "New tab: " + title;
+        status = loc::format("New tab: %s",title.c_str());
     }
     void newBlankCreation() {
         if(documentsBusy())return;
@@ -2144,9 +2149,9 @@ struct App {
             if(ljPreset==1) {
                 if(ImGui::Button(loc::label("导入 UFF CSV..."))) {
                     wchar_t file[32768]=L"lj_uff.csv";OPENFILENAMEW dialog{sizeof(dialog)};dialog.hwndOwner=window;
-                    dialog.lpstrFilter=L"UFF parameters (*.csv)\0*.csv\0";dialog.lpstrFile=file;dialog.nMaxFile=32768;
+                    const auto uffFilter=fileFilter("UFF parameters (*.csv)",L"*.csv");dialog.lpstrFilter=uffFilter.c_str();dialog.lpstrFile=file;dialog.nMaxFile=32768;
                     dialog.Flags=OFN_FILEMUSTEXIST|OFN_NOCHANGEDIR;
-                    if(GetOpenFileNameW(&dialog))try{ljUff=lj::readUff(file);resetLJParameters();ljMessage="UFF CSV loaded: "+std::to_string(ljUff.size())+" types";}
+                    if(GetOpenFileNameW(&dialog))try{ljUff=lj::readUff(file);resetLJParameters();ljMessage=loc::format("UFF CSV loaded: %zu types",ljUff.size());}
                     catch(const std::exception &e){ljMessage=e.what();}
                 }
                 ImGui::TextWrapped(loc::text("逐个指定原子类型；不自动判断杂化。此计算包含所有原子对，不是完整 UFF。默认截断为 4 sigma（可编辑）。"));
@@ -2264,7 +2269,7 @@ struct App {
         creationSelection.clear(); creationBondSelection.clear();
         creationSnapshots.clear();
         saveCreationSnapshot(loc::format("原始 · %s",basedOn.c_str()));
-        status = "Creation Mode: " + title;
+        status = loc::format("Creation Mode: %s",title.c_str());
     }
     void duplicateCreationTab(int index=-1) {
         if(documentsBusy() || tabs.empty() || creationDrag!=CreationDrag::None)return;
@@ -2301,7 +2306,7 @@ struct App {
         if(documentsBusy() || index<0 || index>=int(tabs.size()))return;
         tabs[size_t(activeTab)]=captureTab();
         auto copy=tabs[size_t(index)];copy.id=nextTabId++;copy.pinned=false;
-        copy.title+=" (copy)";copy.documentPath.clear();
+        copy.title=loc::format("%s (copy)",copy.title.c_str());copy.documentPath.clear();
         tabs.insert(tabs.begin()+index+1,std::move(copy));activeTab=index+1;
         normalizeTabPins();restoreTab(tabs[size_t(activeTab)]);
     }
@@ -2416,7 +2421,7 @@ struct App {
         syncAppearance(source.species);
         update();
         status = message;
-        if(!creationAutoHydrogenMessage.empty())status+=" · "+creationAutoHydrogenMessage;
+        if(!creationAutoHydrogenMessage.empty())status=std::string(loc::text(status.c_str()))+" · "+loc::text(creationAutoHydrogenMessage.c_str());
     }
     // Run only at a committed chemical edit, never during hover or dragging.
     // Hydrogen compaction also remaps the touched atoms and UI indices.
@@ -3130,7 +3135,7 @@ struct App {
             return;
         }
         int index = creationPick;
-        editStructure("Moved atom " + std::to_string(index + 1), [&](Dataset &data) {
+        editStructure(loc::format("Moved atom %d",index + 1), [&](Dataset &data) {
             float &coord = axis == 0 ? data.atoms[index].x : axis == 1 ? data.atoms[index].y
                                                                         : data.atoms[index].z;
             coord += delta;
@@ -3451,7 +3456,7 @@ struct App {
                     activeTab=offset+loaded.active;restoreTab(tabs[size_t(activeTab)]);
                 }
                 status=loaded.message;
-            }catch(const std::exception &e){status=std::string("Workspace: ")+loc::text(e.what());}
+            }catch(const std::exception &e){status=loc::format("Workspace: %s",loc::text(e.what()));}
         }
         if(hydrogenBusy && hydrogenJob.valid() && hydrogenJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             hydrogenBusy=false;
@@ -3669,8 +3674,8 @@ struct App {
                 }
                 if (l.documentView) restoreDocumentView(*l.documentView);
                 update(SIZE_MAX, true);
-                status = "Opened " + utf8(path.filename().wstring()) + ": " +
-                         number(source.sourceCount) + " atoms" + dropNotice;
+                status = loc::format("Opened %s: %s atoms",utf8(path.filename().wstring()).c_str(),
+                                    number(source.sourceCount).c_str()) + dropNotice;
                 dropNotice.clear();
             } catch (const std::exception &e) {
                 error = e.what();
@@ -3693,7 +3698,8 @@ struct App {
         // one another, and keep all remaining files when one fails to load.
         std::vector<wchar_t> buffer(65536);OPENFILENAMEW of{};of.lStructSize=sizeof(of);of.hwndOwner=window;
         of.lpstrFile=buffer.data();of.nMaxFile=DWORD(buffer.size());of.lpstrDefExt=L"xyz";
-        of.lpstrFilter=L"Atom structures\0*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*.data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro;*.mol;*.sdf;*.sd;*.xsf;*.atomx;*.atomx-project\0All files\0*.*\0";
+        const auto openFilter=fileFilter("Atom structures",L"*.xyz;*.extxyz;*.vasp;*.poscar;*.contcar;POSCAR;CONTCAR;*.cif;*.data;*.lmp;*.dump;*.lammpstrj;*.pdb;*.ent;*.gro;*.mol;*.sdf;*.sd;*.xsf;*.atomx;*.atomx-project")+fileFilter("All files",L"*.*");
+        of.lpstrFilter=openFilter.c_str();
         of.Flags=OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|OFN_FILEMUSTEXIST|OFN_EXPLORER|OFN_ALLOWMULTISELECT;
         const bool accepted=GetOpenFileNameW(&of)!=FALSE;
         if(ImGui::GetCurrentContext()){auto &io=ImGui::GetIO();io.ClearEventsQueue();io.ClearInputKeys();io.ClearInputMouse();}
@@ -3811,7 +3817,7 @@ struct App {
         ShellExecuteA(window, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
     }
     void exportImage() {
-        auto p = dialog(window, true, L"PNG image\0*.png\0", L"png");
+        auto p = dialog(window, true, fileFilter("PNG image",L"*.png").c_str(), L"png");
         if (p.empty())
             return;
         Target t;
@@ -3826,7 +3832,7 @@ struct App {
             legend={r.kind==creation::ColorKind::Property && r.legend,r.property,r.gradient,r.low,r.high,r.reverse,r.discrete};
         }
         gpu.png(t, p, legend);
-        status = "Rendered " + utf8(p.filename().wstring());
+        status = loc::format("Rendered %s",utf8(p.filename().wstring()).c_str());
     }
     void fixed(const char *name, float x, float y, float w, float h) {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,0);
@@ -4069,7 +4075,7 @@ struct App {
         char count[160];
         snprintf(count, sizeof(count), "%s %s%s", number(shown).c_str(), noun, suffix);
         ImGui::SetNextItemWidth(U(220));
-        ImGui::InputTextWithHint(id, "Filter...", filterText, 128);
+        ImGui::InputTextWithHint(id, loc::text("Filter..."), filterText, 128);
         recordUiTestItem(std::string("inspector.filter.") + (id + 2));
         ImGui::SameLine();
         const float textWidth = ImGui::CalcTextSize(count).x;
@@ -4359,7 +4365,7 @@ struct App {
                 if(authorHistoryActive()) {
                     const auto &stack=forward?authorRedo:authorUndo;
                     label+=loc::text(stack[stack.size()-1-i].action.c_str());
-                } else label+="Pipeline edit";
+                } else label+=loc::text("Pipeline edit");
                 if(ImGui::Selectable(label.c_str()))chosen=int(i+1);
                 recordUiTestItem(std::string(key)+"."+std::to_string(i));
             }
@@ -4690,7 +4696,7 @@ struct App {
                 ImGui::PopStyleColor();
             }
             if(hover) {
-                ImGui::SetTooltip("%s\n%s · %zu atoms",name.c_str(),authored?"Creation":"View",selected?source.atoms.size():tabs[size_t(index)].source.atoms.size());
+                ImGui::SetTooltip(loc::text("%s\n%s · %zu atoms"),name.c_str(),loc::text(authored?"Creation":"View"),selected?source.atoms.size():tabs[size_t(index)].source.atoms.size());
                 if(ImGui::IsMouseDoubleClicked(0))beginTabRename(index);
             }
             if(tabs[size_t(index)].pinned)d->AddCircleFilled({lo.x+U(5),lo.y+titleH*.5f},U(2),ImGui::GetColorU32(tone));
@@ -5185,11 +5191,11 @@ struct App {
                     adoptStructure(authoring::addVacuum(source, 2, 15), "Added 15 A of vacuum along c");
                 if (enabledItem("Build Layers...", "menu.build.layer")) requestLayerBuilder();
                 if (enabledItem("Graphene Sheet", "menu.build.graphene"))
-                    newStructureTab(authoring::grapheneSheet(6, 4), "Graphene sheet");
+                    newStructureTab(authoring::grapheneSheet(6, 4), loc::text("Graphene sheet"));
                 if (enabledItem("Zigzag Nanotube (8,0)", "menu.build.nanotube"))
-                    newStructureTab(authoring::zigzagNanotube(8, 6), "Zigzag nanotube (8,0)");
+                    newStructureTab(authoring::zigzagNanotube(8, 6), loc::text("Zigzag nanotube (8,0)"));
                 if (enabledItem("FCC Nanoparticle", "menu.build.nanoparticle"))
-                    newStructureTab(authoring::fccNanoparticle("Cu", 8), "FCC nanoparticle");
+                    newStructureTab(authoring::fccNanoparticle("Cu", 8), loc::text("FCC nanoparticle"));
                 if (enabledItem("Place Water Above Structure", "menu.build.water"))
                     adoptStructure(authoring::placeWater(source, 3), "Placed a water molecule 3 A above the structure");
                 ImGui::EndMenu();
@@ -5200,17 +5206,17 @@ struct App {
                 if (enabledItem("Show Lattice Parameters", "menu.tools.lattice")) showLatticePanel = true;
                 if (enabledItem("Measure Distance Between Two Atoms", "menu.tools.measure")) {
                     if (creationPick >= 0 && creationMeasure >= 0)
-                        status = "Distance " + std::to_string(authoring::distance(source, creationPick, creationMeasure)) + " angstrom";
+                        status = loc::format("Distance %s angstrom",std::to_string(authoring::distance(source, creationPick, creationMeasure)).c_str());
                     else status = "Click the first atom, then Shift-click the second atom";
                 }
                 if (enabledItem("Measure Bond Angle of Three Atoms", "menu.tools.angle")) {
                     if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0)
-                        status = "Bond angle " + std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)) + " degrees (vertex is the second atom)";
+                        status = loc::format("Bond angle %s degrees (vertex is the second atom)",std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)).c_str());
                     else status = "Click, Shift-click the vertex, then Ctrl-click the third atom";
                 }
                 if (enabledItem("Measure Dihedral Angle of Four Atoms", "menu.tools.dihedral")) {
                     if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0)
-                        status = "Dihedral " + std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)) + " degrees";
+                        status = loc::format("Dihedral %s degrees",std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)).c_str());
                     else status = "Click, Shift-click, Ctrl-click, then Alt-click the fourth atom";
                 }
                 ImGui::EndMenu();
@@ -5273,7 +5279,7 @@ struct App {
         ImGui::Selectable(path.empty() ? loc::label("  Cu-Ni / FCC specimen")
                                        : (loc::label("  ") + utf8(path.filename().wstring())).c_str(),
                           true);
-        ImGui::TextDisabled(loc::text("    %s"), path.empty() ? "Generated dataset" : "XYZ trajectory");
+        ImGui::TextDisabled(loc::text("    %s"), loc::text(path.empty() ? "Generated dataset" : "XYZ trajectory"));
         ImGui::Spacing();
         if (ImGui::Button(loc::label("+ Import dataset"), {-1, U(32)}))
             open();
@@ -5328,7 +5334,7 @@ struct App {
     // name, right meta). All recorded names and actions are identical to the
     // previous pipeline stack + action strip.
     static std::string nodeBadgeText(const ModifierNode &m) {
-        const char *name = m.displayName.empty() ? loc::text(opName(m.op)) : m.displayName.c_str();
+        const char *name = loc::text(m.displayName.empty() ? opName(m.op) : m.displayName.c_str());
         std::string letters;
         bool lastSpace = true;
         for (const char *p = name; *p && letters.size() < 2; ++p) {
@@ -5533,7 +5539,7 @@ struct App {
             const std::string name = m.displayName.empty() ? opName(m.op) : m.displayName;
             ImGui::PushID(m.id.c_str());
             const std::string enabledRecord = std::string("pipeline.node.enabled.") + m.id;
-            pipelineRow(m.id.c_str(), nodeBadgeText(m).c_str(), name.c_str(), meta.c_str(),
+            pipelineRow(m.id.c_str(), nodeBadgeText(m).c_str(), loc::text(name.c_str()), meta.c_str(),
                         &enabled, panelSelection == i, true, i, enabledRecord.c_str());
             if (enabled != m.enabled) {
                 checkpoint();
@@ -5551,13 +5557,13 @@ struct App {
         {
             std::string meta = std::to_string(result.data.atoms.size());
             bool on = particles;
-            pipelineRow("particles", "PA", "Particles", meta.c_str(), &on, panelSelection == -2, false, -2);
+            pipelineRow("particles", "PA", loc::text("Particles"), meta.c_str(), &on, panelSelection == -2, false, -2);
             if (on != particles) particles = on;
             bool onCell = cell;
             const double a = std::hypot(result.data.cell[0], result.data.cell[1], result.data.cell[2]);
             char cellMeta[32];
             snprintf(cellMeta, sizeof(cellMeta), "%.2f A", a);
-            pipelineRow("cell", "SC", "Simulation cell", a > 0 ? cellMeta : "", &onCell,
+            pipelineRow("cell", "SC", loc::text("Simulation cell"), a > 0 ? cellMeta : "", &onCell,
                         panelSelection == -3, false, -3);
             if (onCell != cell) cell = onCell;
         }
@@ -7898,7 +7904,7 @@ struct App {
                 if (age >= 0 && age < 4.0) {
                     const float fade = float(std::min(4.0 - age, 1.0));
                     char line[256];
-                    snprintf(line, sizeof(line), "%s", overlayStatus.c_str());
+                    snprintf(line, sizeof(line), "%s", loc::text(overlayStatus.c_str()));
                     const ImVec2 size = ImGui::CalcTextSize(line);
                     const ImVec2 min{p.x + U(12), p.y + avail.y - U(60)};
                     const ImVec2 max{std::min(p.x + avail.x - U(12), min.x + size.x + U(18)),
@@ -7988,7 +7994,7 @@ struct App {
         const float clusterStart = std::max(labelEnd + U(10), windowRight - cluster);
         // P11: the scrub hint was redundant with the obvious ruler; keep only
         // the single-frame note when there is nothing to scrub.
-        const char *hintText = frames.size() > 1 ? nullptr : "Single frame";
+        const char *hintText = frames.size() > 1 ? nullptr : loc::text("Single frame");
         const float hintWidth = hintText ? ImGui::CalcTextSize(hintText).x + gap : 0;
         if (hintText && labelEnd + U(6) + hintWidth <= clusterStart) {
             ImGui::SameLine();
@@ -8044,7 +8050,7 @@ struct App {
         if (ImGui::InputInt("##frame number", &edit, 1, 100)) seekFrame(std::max(0,edit-1));
         ImGui::SameLine();
         ImGui::Text("%s", totalLabel.c_str());
-        if (frames.empty()) ImGui::SetItemTooltip("No trajectory frames are loaded");
+        if (frames.empty()) ImGui::SetItemTooltip("%s", loc::text("No trajectory frames are loaded"));
         ImGui::SameLine();
         if (iconButton("timeline.clock", 0xE823, "Clock", "Animation settings", false, square))
             animationSettings = true;
@@ -8135,7 +8141,7 @@ struct App {
             // file name it cannot represent, such as Chinese on Western Windows.
             const std::string name = utf8(path.filename().wstring());
             ImGui::SetTooltip(loc::text("%s (Frame %d)"),
-                              name.empty() ? "Trajectory" : name.c_str(), frame);
+                              name.empty() ? loc::text("Trajectory") : name.c_str(), frame);
         }
         if (focused && last>0) {
             if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) seekFrame(selected-1);
@@ -8153,8 +8159,8 @@ struct App {
         int closing = -1;
         for (int i = 0; i < int(tabs.size()); ++i) {
             ImGui::PushID(i);
-            std::string label = tabs[i].title.empty() ? "Untitled structure" : tabs[i].title;
-            if (i == activeTab && creationMode) label += "  [Creation]";
+            std::string label = tabs[i].title.empty() ? loc::text("Untitled structure") : tabs[i].title;
+            if (i == activeTab && creationMode) label += loc::text("  [Creation]");
             if (ImGui::Selectable(label.c_str(), i == activeTab, 0, {U(168), U(22)})) switchTab(i);
             recordUiTestItem("document.tab." + std::to_string(i), label.c_str());
             ImGui::SameLine(0, U(2));
@@ -8172,13 +8178,13 @@ struct App {
     void modelingToolbar() {
         ImGui::BeginChild("##modeling-toolbar", {-1, U(72)}, ImGuiChildFlags_None,
                           ImGuiWindowFlags_NoScrollbar);
-        auto action = [&](const char *name, const char *label, const char *tip, auto &&fn) {
-            const float width = ImGui::CalcTextSize(label).x + U(28);
+        auto action = [&](const char *name, const char *caption, const char *tip, auto &&fn) {
+            const float width = ImGui::CalcTextSize(loc::text(caption)).x + U(28);
             if (ImGui::GetCursorPosX() > U(12) && ImGui::GetContentRegionAvail().x < width)
                 ImGui::NewLine();
-            if (ImGui::Button(label)) fn();
+            if (ImGui::Button(loc::label(caption))) fn();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", loc::text(tip));
-            recordUiTestItem(name, label);
+            recordUiTestItem(name, caption);
             ImGui::SameLine();
         };
         action("model.creation-mode", creationMode ? "Exit Creation Mode" : "Enter Creation Mode",
@@ -8211,21 +8217,21 @@ struct App {
                "Report the distance between the clicked atom and the Shift-clicked atom", [&] {
                    if(creationMode) { chooseCreationTool(CreationTool::Distance); return; }
                    if (creationPick >= 0 && creationMeasure >= 0)
-                       status = "Distance " + std::to_string(authoring::distance(source, creationPick, creationMeasure)) + " angstrom";
+                       status = loc::format("Distance %s angstrom",std::to_string(authoring::distance(source, creationPick, creationMeasure)).c_str());
                    else status = "Click the first atom, then Shift-click the second atom";
                });
         action("model.measure-angle", "Measure Bond Angle",
                "Report the angle at the Shift-clicked atom", [&] {
                    if(creationMode) { chooseCreationTool(CreationTool::Angle); return; }
                    if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0)
-                       status = "Bond angle " + std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)) + " degrees";
+                       status = loc::format("Bond angle %s degrees",std::to_string(authoring::bondAngle(source, creationPick, creationMeasure, creationAngle)).c_str());
                    else status = "Click, Shift-click the vertex, then Ctrl-click the third atom";
                });
         action("model.measure-dihedral", "Measure Dihedral Angle",
                "Report the dihedral of four picked atoms", [&] {
                    if(creationMode) { chooseCreationTool(CreationTool::Torsion); return; }
                    if (creationPick >= 0 && creationMeasure >= 0 && creationAngle >= 0 && creationDihedral >= 0)
-                       status = "Dihedral " + std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)) + " degrees";
+                       status = loc::format("Dihedral %s degrees",std::to_string(authoring::dihedralAngle(source, creationPick, creationMeasure, creationAngle, creationDihedral)).c_str());
                    else status = "Click, Shift-click, Ctrl-click, then Alt-click the fourth atom";
                });
         action("model.vacancy", "Create Vacancy", "Remove the picked atom and leave a vacancy", [&] { deletePickedAtom(); });
@@ -8332,8 +8338,7 @@ struct App {
             ImGui::BeginChild("Inspector", {-1, dataH}, ImGuiChildFlags_Borders);
             std::string inspectLabel = "Final pipeline output";
             if (inspectorNode >= 0 && inspectorNode < int(mods.size()))
-                inspectLabel = "Node " + std::to_string(inspectorNode + 1) + ": " +
-                               mods[size_t(inspectorNode)].displayName;
+                inspectLabel = loc::format("Node %d: %s",inspectorNode + 1,loc::text(mods[size_t(inspectorNode)].displayName.c_str()));
             if (ImGui::BeginCombo(loc::label("Inspect output"), inspectLabel.c_str())) {
                 if (ImGui::Selectable(loc::label("Final pipeline output"), inspectorNode < 0)) {
                     inspectorCancel = true;
@@ -8350,7 +8355,7 @@ struct App {
                     ImGui::EndDisabled();
                     if (mods[i].outputs.empty()) {
                         ImGui::Indent();
-                        ImGui::TextDisabled("%s", mods[i].enabled ? "Output not evaluated" : "Disabled");
+                        ImGui::TextDisabled("%s", loc::text(mods[i].enabled ? "Output not evaluated" : "Disabled"));
                         ImGui::Unindent();
                     } else {
                         ImGui::Indent();
@@ -8361,7 +8366,7 @@ struct App {
                                 output.kind==DataObject::Kind::Cell ? "Simulation cell" :
                                 output.kind==DataObject::Kind::Table ? "Data table" :
                                 output.kind==DataObject::Kind::GlobalAttributes ? "Global attributes" : "Data object";
-                            ImGui::TextDisabled(loc::text("↳ %s (%s)"),output.name.c_str(),kind);
+                            ImGui::TextDisabled(loc::text("↳ %s (%s)"),output.name.c_str(),loc::text(kind));
                         }
                         ImGui::Unindent();
                     }
@@ -8377,7 +8382,7 @@ struct App {
                 const size_t activeStage = std::min(inspectorActiveNode.load(), stageCount);
                 const float inspectionProgress = float(activeStage) / float(stageCount);
                 char overlay[48]{};
-                snprintf(overlay, sizeof(overlay), "%zu / %zu stages", activeStage, stageCount);
+                snprintf(overlay, sizeof(overlay), loc::text("%zu / %zu stages"), activeStage, stageCount);
                 ImGui::ProgressBar(inspectionProgress, ImVec2(-1, 0), overlay);
                 if (ImGui::Button(loc::label("Cancel node inspection"))) inspectorCancel = true;
             } else if (inspectorBusy) {
@@ -8403,9 +8408,9 @@ struct App {
                                            });
                     const bool filtering = particleFilter[0];
                     const std::string particleSuffix = inspectedSelected
-                        ? "  |  " + std::to_string(inspectedSelected) + " selected"
-                            + (inspected->data.sampled() ? "  |  sampled preview" : "")
-                        : inspected->data.sampled() ? "  |  sampled preview" : "";
+                        ? loc::format("  |  %s selected",std::to_string(inspectedSelected).c_str())
+                            + (inspected->data.sampled() ? loc::text("  |  sampled preview") : "")
+                        : inspected->data.sampled() ? loc::text("  |  sampled preview") : "";
                     inspectorToolRow("##particle-filter", particleFilter,
                                      filtering ? filteredParticles.size() : atomCount,
                                      atomCount, "particles", particleSuffix.c_str());
@@ -8670,9 +8675,9 @@ struct App {
                         ImGui::PushID(int(tableIndex));
                         if (ImGui::CollapsingHeader(table.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
                             if (ImGui::SmallButton(loc::label("Export CSV..."))) {
-                                const auto outputPath = dialog(window, true, L"CSV file\0*.csv\0", L"csv");
+                                const auto outputPath = dialog(window, true, fileFilter("CSV file",L"*.csv").c_str(), L"csv");
                                 if (!outputPath.empty()) {
-                                    try { writeDataTableCsv(outputPath, table); status = "Exported " + table.name; }
+                                    try { writeDataTableCsv(outputPath, table); status = loc::format("Exported %s",table.name.c_str()); }
                                     catch (const std::exception &exception) { error = exception.what(); }
                                 }
                             }
@@ -8775,7 +8780,7 @@ struct App {
                                     if (ImGui::IsItemHovered())
                                         ImGui::SetTooltip(loc::text("%zu plotted pairs%s"),points.size(),
                                             table.name.find("deterministic preview")!=std::string::npos
-                                                ? " (deterministic preview subset)" : "");
+                                                ? loc::text(" (deterministic preview subset)") : "");
                                 }
                             }
                             if (ImGui::BeginTable("table", int(table.columns.size()), ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, {-1, U(240)})) {
@@ -9945,19 +9950,19 @@ struct App {
             if (rightTab == 0 && modifierGraph.selected >= mods.size()) {
                 if (panelSelection == -1) {
                     ImGui::Spacing();
-                    auto gridLabel = [](const char *label) {
+                    auto gridLabel = [](const char *caption) {
                         ImGui::PushStyleColor(ImGuiCol_Text, ui_design::secondary());
-                        ImGui::TextUnformatted(label);
+                        ImGui::TextUnformatted(loc::text(caption));
                         ImGui::PopStyleColor();
                     };
                     gridLabel("File");
-                    ImGui::TextWrapped("%s", path.empty() ? "(generated)"
+                    ImGui::TextWrapped("%s", path.empty() ? loc::text("(generated)")
                                                           : utf8(path.wstring()).c_str());
                     gridLabel("Reader");
-                    ImGui::TextUnformatted(readerName.c_str());
+                    ImGui::TextUnformatted(loc::text(readerName.c_str()));
                     gridLabel("Frames");
                     ImGui::Text(loc::text("%zu%s"), std::max<size_t>(frames.size(), 1),
-                                frames.size() > 1 ? " · indexed" : "");
+                                frames.size() > 1 ? loc::text(" · indexed") : "");
                     gridLabel("Particles");
                     ImGui::Text(loc::text("%s · stride %d"), number(source.sourceCount).c_str(),
                                 int(source.stride));
@@ -10097,7 +10102,7 @@ struct App {
                         changed |= ImGui::DragFloat(loc::label("Normal (z)"), &normal[2], .01f);
                         const double minimumWidth = 0;
                         ImGui::SetNextItemWidth(U(140));
-                        changed |= ImGui::DragScalar("Slab width", ImGuiDataType_Double, &width,
+                        changed |= ImGui::DragScalar(loc::label("Slab width"), ImGuiDataType_Double, &width,
                                                      .02f, &minimumWidth, nullptr, "%.4g");                        changed |= ui_design::checkbox(loc::label("Reverse orientation"), &reverse);
                         changed |= ui_design::checkbox(loc::label("Create selection (do not delete)"), &createSelection);
                         changed |= ui_design::checkbox(loc::label("Apply to selection only"), &applySelectionOnly);
@@ -10122,7 +10127,7 @@ struct App {
                                                  "Dislocations (not present)", "Lines (not present)",
                                                  "Vectors (not present)"}) {
                             ImGui::PushID(kind);
-                            ui_design::checkbox(kind, &absent);
+                            ui_design::checkbox(loc::label(kind), &absent);
                             ImGui::PopID();
                         }
                         ImGui::EndDisabled();
@@ -10859,9 +10864,9 @@ struct App {
                                 ImGui::BeginDisabled(!hasPR);
                                 double low = hasPR ? plo : 0, high = hasPR ? phi : 1;
                                 if (scrubBar("##Color start", &low, sMin, sMax, "%.4g", nullptr,
-                                             0, "START") |
+                                             0, loc::text("START")) |
                                     scrubBar("##Color end", &high, sMin, sMax, "%.4g", nullptr,
-                                             0, "END")) {
+                                             0, loc::text("END"))) {
                                     edited.colorMin = float(low);
                                     edited.colorMax = float(high);
                                     edited.colorAutoRange = false;
@@ -10874,13 +10879,13 @@ struct App {
                             } else {
                                 double low = edited.colorMin, high = edited.colorMax;
                                 if (scrubBar("##Color start", &low, sMin, sMax, "%.4g", nullptr,
-                                             0, "START")) {
+                                             0, loc::text("START"))) {
                                     edited.colorMin = float(low);
                                     edited.colorAllFramesRange = false;
                                     changed = true;
                                 }
                                 if (scrubBar("##Color end", &high, sMin, sMax, "%.4g", nullptr,
-                                             0, "END")) {
+                                             0, loc::text("END"))) {
                                     edited.colorMax = float(high);
                                     edited.colorAllFramesRange = false;
                                     changed = true;
@@ -10928,7 +10933,7 @@ struct App {
                             checkpoint(); m.colorLegend = showLegend; colorLegend = showLegend;
                         }
                         if (colorRangeRunning) {
-                            ImGui::ProgressBar(colorRangeProgress.load(), ImVec2(-1, 0), "Scanning trajectory");
+                            ImGui::ProgressBar(colorRangeProgress.load(), ImVec2(-1, 0), loc::text("Scanning trajectory"));
                             if (ImGui::Button(loc::label("Cancel range calculation"))) colorRangeCancel = true;
                         } else if (m.colorAllFramesRange) {
                             ImGui::TextDisabled(loc::text("Range: %.6g to %.6g across %zu frames"), m.colorMin, m.colorMax, frames.size());
@@ -11066,7 +11071,7 @@ struct App {
                             }
                             if (cylinders)
                                 changed |= ImGui::DragFloat(loc::label("Cylinder radius"), &bondRadius, .005f,
-                                                            .001f, 100.f, "%.4g units");
+                                                            .001f, 100.f, loc::text("%.4g units"));
                             else
                                 changed |= ImGui::SliderFloat(loc::label("Line width"), &width, .5f, 12.f, "%.1f px");
                             changed |= ui_design::checkbox(loc::label("Color by particle type"), &colorByType);
@@ -11244,7 +11249,7 @@ struct App {
                             "normalized to unit radius. High mesh counts cost more GPU time."));
                         ImGui::Text(loc::text("Loaded triangles: %zu"), gpu.meshTriangleCount);
                         if (ImGui::Button(loc::label("Load particle OBJ..."))) {
-                            auto p = dialog(window, false, L"Triangle mesh\0*.obj\0", L"obj");
+                            auto p = dialog(window, false, fileFilter("Triangle mesh",L"*.obj").c_str(), L"obj");
                             if (!p.empty())
                                 try {
                                     gpu.loadParticleMesh(p);
@@ -11267,14 +11272,14 @@ struct App {
                         const float shownMax=activeColor->colorAutoRange && !activeColor->colorAllFramesRange
                             ? colorMax : activeColor->colorMax;
                         ImGui::Text(loc::text("Range: %.6g to %.6g%s"),shownMin,shownMax,
-                                    activeColor->colorAutoRange ? " (automatic)" : " (manual)");
-                        ImGui::Text(loc::text("Gradient: %s"),activeColor->colorGradient>=0 && activeColor->colorGradient<10
+                                    loc::text(activeColor->colorAutoRange ? " (automatic)" : " (manual)"));
+                        ImGui::Text(loc::text("Gradient: %s"),loc::text(activeColor->colorGradient>=0 && activeColor->colorGradient<10
                             ? std::array<const char *,10>{"Rainbow","Blue-White-Red","Cyclic Rainbow","Fast",
                                 "Grayscale","Hot","Jet","Magma","Viridis","Plasma"}[activeColor->colorGradient]
-                            : "Custom");
-                        ImGui::Text(loc::text("%s%s%s"),activeColor->colorSelectedOnly ? "Selected only  " : "All particles  ",
-                                    activeColor->colorDiscrete ? "Discrete  " : "Continuous  ",
-                                    activeColor->colorReverse ? "Reversed" : "");
+                            : "Custom"));
+                        ImGui::Text(loc::text("%s%s%s"),loc::text(activeColor->colorSelectedOnly ? "Selected only  " : "All particles  "),
+                                    loc::text(activeColor->colorDiscrete ? "Discrete  " : "Continuous  "),
+                                    loc::text(activeColor->colorReverse ? "Reversed" : ""));
                         ImGui::TextDisabled(loc::text("Edit coloring parameters on the selected Color coding node in Pipeline."));
                     }
                 }
@@ -11338,7 +11343,7 @@ struct App {
                     ImGui::Text(loc::text("Analyzed: %llu"), dxa->analyzed); ImGui::Text(loc::text("Candidate core atoms: %llu"), dxa->defectAtoms);
                     for (auto& [name,count] : dxa->structures) ImGui::Text(loc::text("%s: %llu"), name.c_str(), count);
                     ImGui::TextWrapped("%s", dxa->message.c_str());
-                    if (ImGui::Button(loc::label("Export DXA prepass CSV"), {-1,U(30)})) { auto p=dialog(window,true,L"CSV file\0*.csv\0",L"csv"); if(!p.empty()){std::ofstream out(p);out<<"atom_index,coordination\n"; auto n=neighbors(result.data,dxaCutoff); for(auto i:dxa->coreAtoms)out<<i<<","<<n.coordination[i]<<"\n"; status="DXA prepass exported";} }
+                    if (ImGui::Button(loc::label("Export DXA prepass CSV"), {-1,U(30)})) { auto p=dialog(window,true,fileFilter("CSV file",L"*.csv").c_str(),L"csv"); if(!p.empty()){std::ofstream out(p);out<<"atom_index,coordination\n"; auto n=neighbors(result.data,dxaCutoff); for(auto i:dxa->coreAtoms)out<<i<<","<<n.coordination[i]<<"\n"; status="DXA prepass exported";} }
                 }
                 heading("NEIGHBOR ANALYSIS");
                 ImGui::TextWrapped(loc::text("Coordination number and connected clusters using spatial bins "
@@ -11372,7 +11377,7 @@ struct App {
                         ImGui::PlotLines("##rdf",rdf.data(),int(rdf.size()),0,nullptr,0,FLT_MAX,{-1,75});
                     } else ImGui::TextWrapped(loc::text("Bulk RDF requires a valid fully periodic 3D cell."));
                     if (ImGui::Button(loc::label("Export distributions CSV"), {-1, U(30)})) {
-                        auto p = dialog(window, true, L"CSV file\0*.csv\0", L"csv");
+                        auto p = dialog(window, true, fileFilter("CSV file",L"*.csv").c_str(), L"csv");
                         if (!p.empty()) {
                             std::ofstream out(p); out << "r_min,r_max,pair_count,g_r\n";
                             for (size_t i=0;i<analysis->pairHistogram.size();++i) {
@@ -11386,7 +11391,7 @@ struct App {
                         }
                     }
                     if (ImGui::Button(loc::label("Export analysis CSV"), {-1, U(32)})) {
-                        auto p = dialog(window, true, L"CSV file\0*.csv\0", L"csv");
+                        auto p = dialog(window, true, fileFilter("CSV file",L"*.csv").c_str(), L"csv");
                         if (!p.empty()) {
                             std::ofstream out(p);
                             out << "index,coordination,cluster\n";
@@ -11407,9 +11412,9 @@ struct App {
                 for (auto a : gpu.adapters) {
                     if (a.duplicate) continue;
                     ImGui::TextWrapped(loc::text("[%u] %s%s"), a.index, utf8(a.name).c_str(),
-                                       a.active ? "  • IN USE" : "");
+                                       a.active ? loc::text("  • IN USE") : "");
                     ImGui::TextDisabled(loc::text("Dedicated memory: %.2f GiB%s"), a.memory / 1073741824.,
-                                        a.active ? "  |  Active renderer" : "");
+                                        a.active ? loc::text("  |  Active renderer") : "");
                 }
                 ImGui::TextDisabled(loc::text("DXGI aliases are grouped by adapter LUID; distinct devices keep their own index."));
                 ImGui::TextWrapped(loc::text("Select at launch: AtomX.exe --adapter N"));
@@ -11653,8 +11658,7 @@ struct App {
                                               : MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
                         throw std::runtime_error(
                             "Could not publish export file; check destination permissions");
-                return std::string("Exported ") + std::to_string(total) + " frame(s) to " +
-                       utf8(destination.wstring());
+                return loc::format("Exported %s frame(s) to %s",std::to_string(total).c_str(),utf8(destination.wstring()).c_str());
             } catch (...) {
                 cleanup();
                 throw;
@@ -11767,12 +11771,8 @@ struct App {
             try {
                 std::string e = io::info(fmt).extension;
                 std::wstring ext(e.begin(), e.end());
-                std::wstring exportFilter = L"Selected format";
-                exportFilter.push_back(0);
                 // POSCAR has no suffix. A wildcard filter avoids the shell inferring .vasp.
-                exportFilter += fmt == io::Format::POSCAR ? L"*.*" : L"*." + ext;
-                exportFilter.push_back(0);
-                exportFilter.push_back(0);
+                const std::wstring exportFilter=fileFilter("Selected format",(fmt == io::Format::POSCAR ? std::wstring(L"*.*") : L"*." + ext).c_str());
                 const auto &exportTitle = tabs[size_t(activeTab)].title;
                 auto exportSource = path.empty() ? std::filesystem::path(std::u8string(
                     reinterpret_cast<const char8_t *>(exportTitle.data()), exportTitle.size())) : path;
@@ -11889,26 +11889,27 @@ struct App {
             ImGui::SetNextItemWidth(-1);
             ImGui::InputTextWithHint("##search", loc::text("Search modifications..."), modifierSearch, sizeof(modifierSearch));
             auto matches = [&](const char *name) {
-                std::string a=name, b=modifierSearch;
-                for (auto &c:a) c=char(std::tolower((unsigned char)c));
-                for (auto &c:b) c=char(std::tolower((unsigned char)c));
-                return a.find(b)!=std::string::npos;
+                // English names keep working as search terms in every language.
+                std::string a=name, shown=loc::text(name), b=modifierSearch;
+                for (auto *text:{&a,&shown,&b}) for (auto &c:*text) c=char(std::tolower((unsigned char)c));
+                return a.find(b)!=std::string::npos || shown.find(b)!=std::string::npos;
             };
             auto operation = [&](Op op, const char *hint) {
                 if (!matches(opName(op))) return;
                 if (ImGui::Selectable(loc::label(opName(op)))) { add(op); ImGui::CloseCurrentPopup(); }
                 recordUiTestItem(std::string("catalog.")+opName(op));
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",hint);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",loc::text(hint));
             };
             auto planned = [&](const char *name) {
                 if (!matches(name)) return;
                 ImGui::BeginDisabled();
-                ImGui::Selectable(name);
+                ImGui::Selectable(loc::label(name));
                 ImGui::EndDisabled();
                 // P12: muted entries carry the mono PLANNED badge.
                 const ImVec2 r = ImGui::GetItemRectMax();
-                ImGui::GetWindowDrawList()->AddText({r.x - ImGui::CalcTextSize("PLANNED").x - U(8), r.y - ImGui::GetTextLineHeight() - U(1)},
-                                                    ImGui::GetColorU32(ui_design::faint()), "PLANNED");
+                const char *badge=loc::text("PLANNED");
+                ImGui::GetWindowDrawList()->AddText({r.x - ImGui::CalcTextSize(badge).x - U(8), r.y - ImGui::GetTextLineHeight() - U(1)},
+                                                    ImGui::GetColorU32(ui_design::faint()), badge);
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip(loc::text("Not implemented. This entry does not execute an algorithm."));
             };
@@ -11917,7 +11918,7 @@ struct App {
                                   ImGuiWindowFlags_NoScrollbar);
                 // P12: amber group caption (design: amber uppercase headers).
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(ImGuiCol_NavCursor));
-                ImGui::TextUnformatted(title);
+                ImGui::TextUnformatted(loc::text(title));
                 ImGui::PopStyleColor();
                 ImGui::Separator();
             };
@@ -12003,11 +12004,11 @@ struct App {
     std::vector<const Command *> paletteMatches() const {
         std::vector<const Command *> matches;
         for (const auto &command : commandRegistry()) {
-            std::string text = std::string(command.category) + ": " + command.label;
-            std::string a = text, b = commandSearch;
-            for (auto &c : a) c = char(std::tolower((unsigned char)c));
-            for (auto &c : b) c = char(std::tolower((unsigned char)c));
-            if (b.empty() || a.find(b) != std::string::npos) matches.push_back(&command);
+            // English names keep working as search terms in every language.
+            std::string a = std::string(command.category) + ": " + command.label, b = commandSearch;
+            std::string shown = std::string(loc::text(command.category)) + ": " + loc::text(command.label);
+            for (auto *text : {&a, &shown, &b}) for (auto &c : *text) c = char(std::tolower((unsigned char)c));
+            if (b.empty() || a.find(b) != std::string::npos || shown.find(b) != std::string::npos) matches.push_back(&command);
         }
         return matches;
     }
@@ -12092,7 +12093,8 @@ struct App {
         for (const Command *command : matches) {
             const std::string label =
                 std::string(command->category) + ": " + command->label;
-            if (ImGui::Selectable(label.c_str(), index == paletteIndex)) executePaletteEntry();
+            const std::string shown = std::string(loc::text(command->category)) + ": " + loc::text(command->label);
+            if (ImGui::Selectable(shown.c_str(), index == paletteIndex)) executePaletteEntry();
             recordUiTestItem("palette.item." + label, label.c_str());
             ++index;
         }
@@ -12137,9 +12139,9 @@ struct App {
         ImGui::SameLine();
         ImGui::TextDisabled(loc::text("%s selected"), number(selectedCount).c_str());
         ImGui::SameLine();
-        ImGui::TextDisabled(loc::text("tool %s"), viewportTool == 0 ? "zoom"
+        ImGui::TextDisabled(loc::text("tool %s"), loc::text(viewportTool == 0 ? "zoom"
                                      : viewportTool == 1 ? "pan"
-                                     : viewportTool == 2 ? "orbit" : "fov");
+                                     : viewportTool == 2 ? "orbit" : "fov"));
         ImGui::PopStyleVar();
         ImGui::End();
     }
@@ -12253,7 +12255,7 @@ struct App {
                 newCellB = std::clamp(newCellB, 1.f, 200.f);
                 newCellC = std::clamp(newCellC, 1.f, 200.f);
                 newStructureTab(authoring::orthogonalCell(newCellA, newCellB, newCellC, creationElement),
-                                "Orthogonal cell");
+                                loc::text("Orthogonal cell"));
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
@@ -12278,7 +12280,7 @@ struct App {
                 newGamma = std::clamp(newGamma, 20.f, 160.f);
                 newStructureTab(authoring::triclinicCell(newCellA, newCellB, newCellC, newAlpha, newBeta, newGamma,
                                                         creationElement),
-                                "Triclinic cell");
+                                loc::text("Triclinic cell"));
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();

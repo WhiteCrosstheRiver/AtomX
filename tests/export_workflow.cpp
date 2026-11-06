@@ -174,7 +174,7 @@ int main(int argc,char **argv) {
             auto finish = [&]() {
                 auto message = app.exportJob.get();
                 app.exporting = false;
-                requireExport(message.find("Exported") != std::string::npos, "export result");
+                requireExport(message.find("已导出") != std::string::npos, "export result");
             };
             app.exportRange = true;
             app.exportFirst = 0;
@@ -2033,7 +2033,7 @@ int main(int argc,char **argv) {
                     const auto nativePath=dir/"creation.atomx";
                     auto finishNative=[&]() {
                         app.exportJob.wait(); app.poll();
-                        requireExport(!app.exporting && app.status.find("Exported")!=std::string::npos,
+                        requireExport(!app.exporting && app.status.find("已导出")!=std::string::npos,
                                       "native export finishes through application polling");
                     };
                     app.startDataExport(nativePath); finishNative();
