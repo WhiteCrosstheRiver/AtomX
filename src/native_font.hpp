@@ -28,11 +28,14 @@ inline ImFont* add(ImFontAtlas* atlas, const char* file, float pixels,
     else if (std::strstr(file, "consola")) family = "Consolas";
     else if (std::strstr(file, "msyh")) family = "Microsoft YaHei";
     else if (std::strstr(file, "Deng")) family = "DengXian";
+    else if (std::strstr(file, "malgun")) family = "Malgun Gothic";
+    else if (std::strstr(file, "msjh")) family = "Microsoft JhengHei";
     else if (std::strstr(file, "simhei")) family = "SimHei";
     else if (std::strstr(file, "segmdl2") || std::strstr(file, "SegoeMDL2")) family = "Segoe MDL2 Assets";
     else if (std::strstr(file, "segfluent")) family = "Segoe Fluent Icons";
     if (family) ImFormatString(config.Name, IM_ARRAYSIZE(config.Name), "@win:%s", family);
-    if (std::strstr(file, "segoeuib") || std::strstr(file, "msyhbd")) config.FontBuilderFlags = FW_BOLD;
+    if (std::strstr(file, "segoeuib") || std::strstr(file, "msyhbd") ||
+        std::strstr(file, "malgunbd") || std::strstr(file, "msjhbd")) config.FontBuilderFlags = FW_BOLD;
     return atlas->AddFontFromFileTTF(file, pixels, &config, ranges);
 }
 
@@ -85,7 +88,7 @@ struct Face {
         // Center the face's ordinary ink in the existing logical line box.
         // This preserves layout size instead of importing generous CJK leading.
         const MAT2 identity = {{0,1},{0,0},{0,0},{0,1}};
-        const bool cjk = std::wcsstr(family,L"YaHei") || std::wcsstr(family,L"Deng") || std::wcsstr(family,L"SimHei");
+        const bool cjk = std::wcsstr(family,L"YaHei") || std::wcsstr(family,L"JhengHei") || std::wcsstr(family,L"Deng") || std::wcsstr(family,L"SimHei");
         const bool icons = std::wcsstr(family,L"Assets") || std::wcsstr(family,L"Icons");
         const wchar_t sample = cjk ? L'\x4e2d' : icons ? L'\xe710' : L'H';
         WORD sampleIndex = 0xffff;

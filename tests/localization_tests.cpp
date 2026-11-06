@@ -95,6 +95,12 @@ int main() {
     check(std::string(loc::text("NaCl.xyz")) == "NaCl.xyz", "unknown text is left alone");
     check(loc::format("删除 %zu 个原子", size_t(3)) == "Supprimer 3 atomes", "runtime message uses the pack");
     check(loc::format("%s · 创作", "NaCl.xyz") == "NaCl.xyz · Création", "user text passes through a message");
+    for (auto language : {loc::Language::Italian, loc::Language::Korean, loc::Language::TraditionalChinese,
+                           loc::Language::Polish, loc::Language::Turkish, loc::Language::Ukrainian}) {
+        loc::current = language;
+        check(std::string(loc::text("Edit")) != "Edit", "new language pack is reached in enum order");
+    }
+    loc::current = loc::Language::French;
     const std::string french = loc::label("File");
     loc::current = loc::Language::Japanese;
     const std::string japanese = loc::label("File");

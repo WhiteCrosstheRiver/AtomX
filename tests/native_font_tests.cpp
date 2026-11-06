@@ -12,12 +12,16 @@ static void checkAtlas(float dpi, int choice) {
     const char* latin[] = {"C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/consola.ttf"};
     static const ImWchar icons[] = {0xe700, 0xe711, 0};
     static const ImWchar cjk[] = {0x4e2d, 0x4e2d, 0x5b57, 0x5b57, 0x6d4b, 0x6d4b, 0x91cf, 0x91cf, 0};
+    static const ImWchar hangul[] = {0xd55c, 0xd55c, 0xad6d, 0xad6d, 0};
+    static const ImWchar traditional[] = {0x7e41, 0x7e41, 0x9ad4, 0x9ad4, 0};
     for (float logical : {14.f, 11.f, 16.f, 30.f}) {
         const float pixels = std::round(logical * dpi);
         ImFontConfig config{}; config.PixelSnapH = true;
         require(atomx::native_font::add(&atlas, latin[choice], pixels, &config) != nullptr, "Latin source");
         config.MergeMode = true;
         require(atomx::native_font::add(&atlas, "C:/Windows/Fonts/msyh.ttc", pixels, &config, cjk) != nullptr, "CJK source");
+        require(atomx::native_font::add(&atlas, "C:/Windows/Fonts/malgun.ttf", pixels, &config, hangul) != nullptr, "Hangul source");
+        require(atomx::native_font::add(&atlas, "C:/Windows/Fonts/msjh.ttc", pixels, &config, traditional) != nullptr, "Traditional source");
         require(atomx::native_font::add(&atlas, "C:/Windows/Fonts/segmdl2.ttf", pixels, &config, icons) != nullptr, "Icon source");
     }
     require(atlas.Build(), "Atlas build");

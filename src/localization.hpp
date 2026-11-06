@@ -10,14 +10,19 @@
 // serialized documents retain their original spelling. No network/dependencies.
 namespace localization {
 // Values index every per-language array. Append new languages at the end.
-enum class Language { Chinese, English, French, German, Spanish, Portuguese, Russian, Japanese };
-inline constexpr int languageCount = 8;
+enum class Language {
+    Chinese, English, French, German, Spanish, Portuguese, Russian, Japanese,
+    Italian, Korean, TraditionalChinese, Polish, Turkish, Ukrainian
+};
+inline constexpr int languageCount = 14;
 // Languages after Chinese and English come from localization_packs.inc.
 inline constexpr int packLanguageCount = languageCount - 2;
 struct LanguageInfo { const wchar_t *code; const char *name; };
 inline constexpr LanguageInfo languages[languageCount] = {
     {L"zh-CN", "简体中文"}, {L"en", "English"},   {L"fr", "Français"}, {L"de", "Deutsch"},
     {L"es", "Español"},     {L"pt", "Português"}, {L"ru", "Русский"},  {L"ja", "日本語"},
+    {L"it", "Italiano"},    {L"ko", "한국어"},    {L"zh-TW", "繁體中文"}, {L"pl", "Polski"},
+    {L"tr", "Türkçe"},        {L"uk", "Українська"},
 };
 inline Language current = Language::Chinese;
 inline const wchar_t *code(Language value) { return languages[int(value)].code; }
@@ -30,7 +35,7 @@ struct Entry { const char *source; const char *chinese; const char *english; };
 inline constexpr Entry entries[] = {
 #include "localization_strings.inc"
 };
-// French, German, Spanish, Portuguese, Russian, Japanese, in enum order. A source
+// Every language after Chinese and English, in enum order. A source
 // missing here shows its English text, so a pack can grow one row at a time.
 struct PackEntry { const char *source; const char *text[packLanguageCount]; };
 inline constexpr PackEntry packEntries[] = {

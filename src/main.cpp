@@ -11506,6 +11506,13 @@ struct App {
         chineseBuilder.AddRanges(extraRanges);
         ImVector<ImWchar> chineseRanges;
         chineseBuilder.BuildRanges(&chineseRanges);
+        // YaHei has no Hangul and lacks some Traditional characters. Merged fonts
+        // only fill glyphs still missing, so these change no existing language.
+        auto addScriptFallbacks=[&](bool bold,float pixels,const ImFontConfig *config,const ImWchar *ranges) {
+            for(const char *file:{bold?"C:/Windows/Fonts/malgunbd.ttf":"C:/Windows/Fonts/malgun.ttf",
+                                  bold?"C:/Windows/Fonts/msjhbd.ttc":"C:/Windows/Fonts/msjh.ttc"})
+                native_font::add(io.Fonts,file,std::round(pixels),config,ranges);
+        };
         {
             ImFontConfig cjkMerge=textConfig;
             cjkMerge.MergeMode = true;
@@ -11515,6 +11522,7 @@ struct App {
                                                  &cjkMerge, chineseRanges.Data))
                     break;
             }
+            addScriptFallbacks(false,float(preferences.size),&cjkMerge,chineseRanges.Data);
         }
         auto sizedFont=[&](float size,bool bold,const ImWchar *ranges) {
             auto config=textConfig;
@@ -11523,6 +11531,7 @@ struct App {
             config.MergeMode=true;
             for(const char *file:{bold?"C:/Windows/Fonts/msyhbd.ttc":"C:/Windows/Fonts/msyh.ttc","C:/Windows/Fonts/simhei.ttf"})
                 if(native_font::add(io.Fonts,file,std::round(U(size)),&config,ranges))break;
+            addScriptFallbacks(bold,U(size),&config,ranges);
             return font;
         };
         headingFont=sizedFont(float(preferences.size),true,chineseRanges.Data);
@@ -11828,7 +11837,7 @@ struct App {
             if(settingsPage==0) {
                 intro("Language","Language changes apply immediately and are saved for the next launch.");
                 ImGui::SetNextItemWidth(-1);
-                const bool choosing=ImGui::BeginCombo("##language",loc::languages[int(preferences.language)].name);recordUiTestItem("settings.language");
+                const bool choosing=ImGui::BeginCombo("##language",loc::languages[int(preferences.language)].name,ImGuiComboFlags_HeightLargest);recordUiTestItem("settings.language");
                 if(choosing){for(int i=0;i<loc::languageCount;++i){if(ImGui::Selectable(loc::languages[i].name,int(preferences.language)==i))setLanguage(loc::Language(i));recordUiTestItem("settings.language."+std::to_string(i));}ImGui::EndCombo();}
                 rule();intro("外观主题","只影响界面，不影响 3D 视窗背景。");
                 int selected=segmented("##theme-segments",preferences.theme,{"深色","浅色","Midnight"},ImGui::GetContentRegionAvail().x);

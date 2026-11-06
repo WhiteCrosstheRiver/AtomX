@@ -5,7 +5,9 @@ Viewer and Creation tabs. Edit > Application Settings and the existing toolbar
 entry open the same dialog.
 
 - Languages: Simplified Chinese (`zh-CN`, default), English (`en`), French (`fr`),
-  German (`de`), Spanish (`es`), Portuguese (`pt`), Russian (`ru`), Japanese (`ja`).
+  German (`de`), Spanish (`es`), Portuguese (`pt`), Russian (`ru`), Japanese (`ja`),
+  Italian (`it`), Korean (`ko`), Traditional Chinese (`zh-TW`), Polish (`pl`),
+  Turkish (`tr`), Ukrainian (`uk`).
   Text missing from a pack shows in English.
 - Language, theme, font and size apply immediately. No restart or network is needed.
 - Preferences are saved in `%LOCALAPPDATA%/AtomX/settings.ini`; missing or
@@ -20,7 +22,10 @@ entry open the same dialog.
 `src/localization_packs.inc` adds the other languages, one row per source;
 `localization_tests` rejects unknown sources, gaps and changed placeholders.
 To add a language, extend `Language`, `languages` and each pack row. Right-to-left
-scripts are not supported because Dear ImGui does not shape them.
+scripts and scripts that need shaping (Arabic, Hebrew, Hindi, Thai) are not supported
+because Dear ImGui does not shape them. Korean and Traditional Chinese glyphs are
+merged from the installed Malgun Gothic and Microsoft JhengHei, so Han characters
+stay in the installed YaHei forms where YaHei has them.
 Use `localization::text` for captions/tooltips and `localization::label` for
 ImGui controls/window titles. Labels keep a language-independent `###` ID.
 `localization::items` preserves NUL-separated combo lists.
