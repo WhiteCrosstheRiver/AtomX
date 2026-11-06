@@ -11225,8 +11225,8 @@ struct App {
                     int typeShape = int(style.visual[1]) + 1;
                     if (ImGui::Combo(
                             loc::label("Type shape"), &typeShape,
-                            "Use default\0Sphere / Ellipsoid\0Circle\0Cube / "
-                            "Box\0Cylinder\0Spherocylinder\0Square\0Mesh / User-defined\0"))
+                            loc::items("Use default\0Sphere / Ellipsoid\0Circle\0Cube / "
+                                       "Box\0Cylinder\0Spherocylinder\0Square\0Mesh / User-defined\0")))
                         style.visual[1] = float(typeShape - 1);
                     int effective = style.visual[1] < 0 ? particleShape : int(style.visual[1]);
                     if (effective == 0 || effective == 2 || effective == 6)
