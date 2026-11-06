@@ -234,8 +234,11 @@ int main(int argc,char **argv) {
             requireExport(frames.size() == 2, "failed export preserves old destination");
             for (const auto &e : std::filesystem::directory_iterator(dir))
                 requireExport(e.path().extension() != ".tmp", "staging files removed");
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
-            app.poll();
+            for (int attempt=0; attempt<8 && app.pipelineBusy; ++attempt) {
+                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                app.poll();
+            }
+            requireExport(!app.pipelineBusy,"fixture pipeline settles before its nodes are cleared");
             app.pipelineCheckpoint.reset();
             app.pipelineCheckpointNode=SIZE_MAX;
             app.mods.clear();
@@ -272,11 +275,15 @@ int main(int argc,char **argv) {
                 ImGui::Render();
             };
             auto settlePipeline=[&]() {
-                for (int attempt=0; attempt<8 && app.pipelineBusy; ++attempt) {
-                    if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                // A cancelled evaluation relaunches on the next frame, and an edit made during a node
+                // inspection starts only after it, so one wait is not enough before reading app.result.
+                auto unsettled=[&]{return app.pipelineBusy || app.inspectorBusy || app.pipelineDeferredForInspector;};
+                for (int attempt=0; attempt<8 && unsettled(); ++attempt) {
+                    if (app.pipelineBusy && app.pipelineJob.valid()) app.pipelineJob.wait();
+                    if (app.inspectorBusy && app.inspectorJob.valid()) app.inspectorJob.wait();
                     frame();
                 }
-                requireExport(!app.pipelineBusy,"asynchronous pipeline did not settle after repeated cancellation/relaunch");
+                requireExport(!unsettled(),"asynchronous pipeline did not settle after repeated cancellation/relaunch");
             };
             auto click=[&](const std::string &name,float xFraction=.5f) {
                 auto found=app.uiTestItems.find(name);
@@ -2151,7 +2158,7 @@ int main(int argc,char **argv) {
             click("catalog.Radial distribution function (RDF)");
             requireExport(app.mods.size()==1 && app.mods[0].op==Op::RadialDistribution,
                           "mouse interaction inserts the selected real modifier");
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             app.selectPipeline=true;
             frame();
             const auto originalNodeId=app.mods[0].id;
@@ -2165,18 +2172,18 @@ int main(int argc,char **argv) {
             guiIO.AddInputCharactersUTF8("16"); frame();
             guiIO.AddKeyEvent(ImGuiKey_Enter,true); frame();
             guiIO.AddKeyEvent(ImGuiKey_Enter,false); frame();
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             requireExport(app.mods[0].rdfBins==16 && app.result.data.tables.back().rows.size()==16 &&
                               app.error.empty(),
                           "keyboard editing changes the actual RDF modifier and its computed table");
             click("toolbar.undo");
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             requireExport(app.mods[0].rdfBins==128 && app.result.data.tables.back().rows.size()==128,
                           "Undo control restores the modifier parameters and recomputes its original table");
             click("toolbar.redo");
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             requireExport(app.mods[0].rdfBins==16 && app.result.data.tables.back().rows.size()==16,
                           "Redo control restores the edited modifier parameters and recomputes its table");
@@ -2184,7 +2191,7 @@ int main(int argc,char **argv) {
             requireExport(app.mods.size()==2 && app.mods[1].op==Op::RadialDistribution &&
                               app.mods[1].rdfBins==16,
                           "pipeline Copy duplicates the selected node and its independent parameters");
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             const auto copiedNodeId=app.mods[1].id;
             click("pipeline.node.select."+copiedNodeId);
@@ -2197,29 +2204,29 @@ int main(int argc,char **argv) {
             guiIO.AddInputCharactersUTF8("8"); frame();
             guiIO.AddKeyEvent(ImGuiKey_Enter,true); frame();
             guiIO.AddKeyEvent(ImGuiKey_Enter,false); frame();
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             requireExport(app.mods[0].rdfBins==16 && app.mods[1].rdfBins==8 &&
                               app.result.data.tables.back().rows.size()==8,
                           "copied node parameters are independent and drive its real recomputation");
             click("pipeline.node.enabled."+copiedNodeId);
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             requireExport(!app.mods[1].enabled && app.result.data.tables.back().rows.size()==16,
                           "disabling a node bypasses its work and publishes the upstream table");
             click("pipeline.node.enabled."+copiedNodeId);
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             requireExport(app.mods[1].enabled && app.result.data.tables.back().rows.size()==8,
                           "re-enabling a node restores its computed output");
             click("pipeline.node.down."+copiedNodeId);
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             requireExport(app.mods[0].id==copiedNodeId && app.mods[1].id==originalNodeId &&
                               app.result.data.tables.back().rows.size()==16,
                           "visual down moves the node earlier in execution order");
             click("pipeline.node.up."+copiedNodeId);
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             requireExport(app.mods[0].id==originalNodeId && app.mods[1].id==copiedNodeId &&
                               app.result.data.tables.back().rows.size()==8,
@@ -2227,7 +2234,7 @@ int main(int argc,char **argv) {
             click("pipeline.node.delete."+copiedNodeId);
             requireExport(app.mods.size()==1 && app.mods[0].id==originalNodeId,
                           "pipeline Delete removes only the selected copied node");
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             for (const auto &[width,height,scale] : std::vector<std::tuple<float,float,float>>{
                      {1280.f,900.f,1.f},{1560.f,1000.f,1.f},
@@ -2248,11 +2255,11 @@ int main(int argc,char **argv) {
                                   ("responsive Pipeline control exceeds viewport bounds: "+control).c_str());
                 }
                 click("pipeline.node.copy."+originalNodeId);
-                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                settlePipeline();
                 frame();
                 const auto responsiveCopyId=app.mods[1].id;
                 click("pipeline.node.delete."+responsiveCopyId);
-                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                settlePipeline();
                 frame();
                 requireExport(app.mods.size()==1 && app.mods[0].id==originalNodeId,
                               "Pipeline copy/delete controls remain clickable at tested width and scale");
@@ -2327,7 +2334,7 @@ int main(int argc,char **argv) {
             requireExport(app.uiTestItems.contains("catalog.Scatter plot"),
                           "Scatter plot is available as an executable Analysis catalog operation");
             click("catalog.Scatter plot");
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame();
             const auto scatterNodeId=app.mods.back().id;
             requireExport(app.mods.back().op==Op::ScatterPlot &&
@@ -2519,7 +2526,7 @@ int main(int argc,char **argv) {
             requireExport(app.current == 0,
                           "clicking the left end of the ruler track seeks to frame 0");
             for (int attempt=0; attempt<16 && app.pipelineBusy; ++attempt) {
-                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                settlePipeline();
                 frame();
             }
             requireExport(!app.pipelineBusy,
@@ -2540,7 +2547,7 @@ int main(int argc,char **argv) {
             app.result=evaluate(app.source, std::vector<Modifier>{});
             app.update(0);
             for (int attempt=0; attempt<16 && app.pipelineBusy; ++attempt) {
-                if (app.pipelineJob.valid()) app.pipelineJob.wait();
+                settlePipeline();
                 frame();
             }
             requireExport(!app.pipelineBusy && app.error.empty(),
@@ -2563,7 +2570,7 @@ int main(int argc,char **argv) {
             app.staleResult=false;
             app.update(failingNodeIndex);
             requireExport(app.staleResult,"a pipeline edit marks the previously published frame stale immediately");
-            if (app.pipelineJob.valid()) app.pipelineJob.wait();
+            settlePipeline();
             frame(); // Poll and publish the asynchronous node failure.
             requireExport(app.error=="Scale must be positive" &&
                               app.mods[failingNodeIndex].id==failingNodeId &&
