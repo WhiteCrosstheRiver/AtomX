@@ -5348,6 +5348,23 @@ struct App {
         while (letters.size() < 2 && name[0]) letters += char(toupper((unsigned char)name[1]));
         return letters;
     }
+    // One line of text kept left of `right`, ending in an ellipsis when it does
+    // not fit. Translations vary widely in length. Returns true when shortened.
+    bool fittedText(ImDrawList *draw, ImVec2 at, float right, ImU32 color, const char *text) {
+        const ImVec2 size = ImGui::CalcTextSize(text);
+        ImGui::PushStyleColor(ImGuiCol_Text, color);
+        ImGui::RenderTextEllipsis(draw, pixelPosition(at), {right, at.y + size.y}, right, right,
+                                  text, nullptr, &size);
+        ImGui::PopStyleColor();
+        return at.x + size.x > right;
+    }
+    // Status strip text at the cursor, with the full wording on hover if shortened.
+    void statusText(float right, ImU32 color, const char *text) {
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        const bool shortened = fittedText(ImGui::GetWindowDrawList(), at, right, color, text);
+        ImGui::Dummy({std::max(1.f, right - at.x), ImGui::GetTextLineHeight()});
+        if (shortened && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", text);
+    }
     void pipelineRow(const char *id, const char *badge, const char *name, const char *meta,
                      bool *enabled, bool selected, bool isModifier, int index,
                      const char *enabledRecordName = nullptr) {
@@ -5410,15 +5427,19 @@ struct App {
         monoBadge(badge, selected);
         x += U(24) + U(9);
         {
-            const ImVec2 ts = ImGui::CalcTextSize(name);
-            dl->AddText({x, p.y + (rowH - ts.y) * .5f},
-                        ImGui::GetColorU32(*enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled),
-                        name);
+            const float rowRight = p.x + w - U(12);
+            float nameRight = rowRight;
+            const float textY = p.y + (rowH - ImGui::GetTextLineHeight()) * .5f;
             if (meta && meta[0]) {
-                const ImVec2 ms = ImGui::CalcTextSize(meta);
-                dl->AddText({p.x + w - ms.x - U(12), p.y + (rowH - ms.y) * .5f},
-                            ImGui::GetColorU32(ImGuiCol_TextDisabled), meta);
+                // Long translated names must not run into the value.
+                const float metaWidth = std::min(ImGui::CalcTextSize(meta).x, (rowRight - x) * .45f);
+                nameRight = rowRight - metaWidth - U(12);
+                fittedText(dl, {rowRight - metaWidth, textY}, rowRight,
+                           ImGui::GetColorU32(ImGuiCol_TextDisabled), meta);
             }
+            const bool shortened = fittedText(dl, {x, textY}, nameRight,
+                ImGui::GetColorU32(*enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled), name);
+            if (shortened && hovered) ImGui::SetTooltip("%s", name);
         }
         // The row button already advanced the flow; pin the cursor to the row
         // end so the badge Dummy cannot push following rows down.
@@ -9404,11 +9425,14 @@ struct App {
             creationPropertyPage=segmented("##creation-property-pages",creationPropertyPage,{"property-page.lattice","property-page.composition","property-page.selection","property-page.measurements"},ImGui::GetContentRegionAvail().x);
             ImGui::Separator();
             auto propertyRow=[&](const char *name,const std::string &value) {
-                ImGui::TextDisabled("%s",loc::text(name));
-                ImGui::SameLine();
-                ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
-                    leftW-ImGui::CalcTextSize(value.c_str()).x-U(24)));
-                ImGui::TextUnformatted(loc::text(value.c_str()));
+                const char *label=loc::text(name),*shown=loc::text(value.c_str());
+                const float start=ImGui::GetCursorPosX(),avail=ImGui::GetContentRegionAvail().x;
+                const float labelWidth=ImGui::CalcTextSize(label).x,valueWidth=ImGui::CalcTextSize(shown).x;
+                ImGui::TextDisabled("%s",label);
+                // A value that cannot sit beside its label moves to its own line.
+                if(labelWidth+U(16)+valueWidth<=avail)ImGui::SameLine();
+                ImGui::SetCursorPosX(start+std::max(0.f,avail-valueWidth));
+                ImGui::TextUnformatted(shown);
                 ImGui::Separator();
             };
             if (creationPropertyPage==0) {
@@ -12131,18 +12155,23 @@ struct App {
         if (creationMode) {
             ImGui::TextColored({0.29f,0.87f,0.51f,1},loc::text("%s"),loc::text("创作"));
             ImGui::SameLine();
-            ImGui::TextDisabled(loc::text("点击选择 · Shift 添加 · Ctrl 切换 · 双击片段 · 右键/中键旋转 · Alt+右键平移 · 滚轮缩放"));
-            ImGui::SameLine(std::max(U(900),w-U(370)));
-            ImGui::TextDisabled(loc::text("%zu 原子 · 选中 %zu 原子 / %zu 键 · Å"),
+            // The counts stay whole at the right edge; the hint gets what is left.
+            char counts[256];
+            snprintf(counts,sizeof(counts),loc::text("%zu 原子 · 选中 %zu 原子 / %zu 键 · Å"),
                 source.atoms.size(),creationSelection.size(),creationBondSelection.size());
+            const float countsWidth=ImGui::CalcTextSize(counts).x;
+            const float countsX=std::max(ImGui::GetCursorPosX(),w-ImGui::GetStyle().WindowPadding.x-countsWidth);
+            statusText(ImGui::GetWindowPos().x+countsX-U(16),ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                loc::text("点击选择 · Shift 添加 · Ctrl 切换 · 双击片段 · 右键/中键旋转 · Alt+右键平移 · 滚轮缩放"));
+            ImGui::SameLine(countsX);
+            ImGui::TextDisabled("%s",counts);
             ImGui::End();
             return;
         }
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {U(12), U(4)});
-        ImGui::PushStyleColor(ImGuiCol_Text, playing ? ui_design::accentColor
-                                                     : ui_design::success());
-        ImGui::TextUnformatted(loc::text(status.c_str()));
-        ImGui::PopStyleColor();
+        statusText(ImGui::GetWindowPos().x+U(408),
+                   ImGui::GetColorU32(playing ? ui_design::accentColor : ui_design::success()),
+                   loc::text(status.c_str()));
         ImGui::SameLine(U(420));
         ImGui::TextDisabled(loc::text("%s particles"), number(result.data.atoms.size()).c_str());
         ImGui::SameLine();
