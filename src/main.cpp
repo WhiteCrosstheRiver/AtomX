@@ -3451,7 +3451,7 @@ struct App {
                     activeTab=offset+loaded.active;restoreTab(tabs[size_t(activeTab)]);
                 }
                 status=loaded.message;
-            }catch(const std::exception &e){status=std::string("Workspace: ")+e.what();}
+            }catch(const std::exception &e){status=std::string("Workspace: ")+loc::text(e.what());}
         }
         if(hydrogenBusy && hydrogenJob.valid() && hydrogenJob.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             hydrogenBusy=false;
@@ -5541,7 +5541,7 @@ struct App {
                 update(size_t(i));
             }
             if (!m.error.empty() && ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", m.error.c_str());
+                ImGui::SetTooltip("%s", loc::text(m.error.c_str()));
             ImGui::PopID();
         }
         // VISUAL ELEMENTS rows.
@@ -6414,7 +6414,7 @@ struct App {
             ImGui::EndTabBar();
         }
         ImGui::Separator();
-        if (!validation.empty()) ImGui::TextWrapped("%s",validation.c_str());
+        if (!validation.empty()) ImGui::TextWrapped("%s",loc::text(validation.c_str()));
         else {
             ImGui::Text(loc::text("%s 原子 · a %.4f Å · b %.4f Å · γ %.3f°"),number(count).c_str(),preview.al,preview.bl,preview.gamma);
             for (size_t i=0;i<preview.mismatch.size();++i) if (preview.mismatch[i]>layerOptions.warningPercent)
@@ -12408,7 +12408,7 @@ struct App {
         if (ImGui::BeginPopupModal(loc::label("Operation failed"), nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::PushTextWrapPos(U(660));
-            ImGui::TextWrapped("%s", error.c_str());
+            ImGui::TextWrapped("%s", loc::text(error.c_str()));
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
             ImGui::Separator();

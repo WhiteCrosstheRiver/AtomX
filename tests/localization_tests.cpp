@@ -2,6 +2,8 @@
 #include "../src/localization.hpp"
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <set>
 #include <vector>
@@ -62,8 +64,31 @@ int main() {
         }
     }
 
+    // Headers throw their source text and main.cpp translates it where it is
+    // shown, so every Chinese exception in a header needs a table row.
+    size_t thrown = 0;
+    for (const auto &file : std::filesystem::directory_iterator("src")) {
+        if (file.path().extension() != ".hpp")
+            continue;
+        std::ifstream in(file.path(), std::ios::binary);
+        const std::string code((std::istreambuf_iterator<char>(in)), {});
+        for (size_t at = code.find("throw "); at != std::string::npos; at = code.find("throw ", at + 1)) {
+            const size_t open = code.find('"', at), end = code.find(';', at);
+            const size_t close = open < end ? code.find('"', open + 1) : std::string::npos;
+            if (close == std::string::npos)
+                continue;
+            const std::string message = code.substr(open + 1, close - open - 1);
+            if (!std::any_of(message.begin(), message.end(), [](char c) { return c & 0x80; }))
+                continue;
+            ++thrown;
+            check(sources.count(message) == 1, "header message has no table row: " + message);
+        }
+    }
+    check(thrown > 100, "header scan found the exception messages");
+
     const auto original = loc::current;
     loc::current = loc::Language::French;
+    check(std::string(loc::text("请选择原子")) == "Sélectionnez des atomes", "header message is translated");
     check(std::string(loc::text("File")) == "Fichier", "pack text is used");
     check(std::string(loc::text("Open official source")) == "Ouvrir la source officielle", "panel text is translated");
     check(std::string(loc::text("Position X")) == "Position X", "property identifiers stay untranslated");
@@ -85,5 +110,6 @@ int main() {
         return EXIT_FAILURE;
     std::cout << "PASS: " << loc::languageCount << " languages, " << std::size(loc::packEntries) << " of "
               << std::size(loc::entries) << " rows translated (" << sources.size() - packed.size()
-              << " kept in English), placeholders, runtime messages, stable IDs\n";
+              << " kept in English), " << thrown
+              << " header messages, placeholders, runtime messages, stable IDs\n";
 }

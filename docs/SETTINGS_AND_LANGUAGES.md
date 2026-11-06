@@ -6,7 +6,7 @@ entry open the same dialog.
 
 - Languages: Simplified Chinese (`zh-CN`, default), English (`en`), French (`fr`),
   German (`de`), Spanish (`es`), Portuguese (`pt`), Russian (`ru`), Japanese (`ja`).
-  The last six are partial packs: text not yet translated shows in English.
+  Text missing from a pack shows in English.
 - Language, theme, font and size apply immediately. No restart or network is needed.
 - Preferences are saved in `%LOCALAPPDATA%/AtomX/settings.ini`; missing or
   unknown language codes fall back to Simplified Chinese.

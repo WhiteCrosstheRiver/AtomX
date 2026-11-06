@@ -1,5 +1,6 @@
 #pragma once
 #include "authoring.hpp"
+#include "localization.hpp"
 
 // Explicit membership is a particle property, so deletion, history and native
 // documents use the same index mapping as other scientific properties.
@@ -40,7 +41,7 @@ inline std::vector<Group> catalog(const Dataset &d) {
     std::vector<Group> out;
     for (const auto &[key,count]:counts) {
         const auto name=labels.find(key);
-        out.push_back({key,name==labels.end()?"分组 "+std::to_string(key):name->second,count});
+        out.push_back({key,name==labels.end()?localization::format("分组 %d",key):name->second,count});
     }
     return out;
 }
@@ -106,7 +107,7 @@ inline Assignment automatic(size_t count,const std::vector<Bond> &bonds) {
         if (periodic[r]) { ++out.skipped; continue; }
         if (!assigned.contains(r)) {
             if (assigned.size()>=groupLimit) throw std::invalid_argument("独立片段超过 512 组，请按选择分组");
-            const int key=int(assigned.size())+1; assigned[r]=key; out.labels[key]="片段 "+std::to_string(key);
+            const int key=int(assigned.size())+1; assigned[r]=key; out.labels[key]=localization::format("片段 %d",key);
         }
         out.values[i]=assigned.at(r);
     }
