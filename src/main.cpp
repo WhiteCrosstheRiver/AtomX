@@ -594,9 +594,17 @@ static const char *opCategory(Op op) {
                                op == Op::CentrosymmetryParameter ||
                                op == Op::DisplacementVectors ||
                                op == Op::BondLengthDistribution || op == Op::BondAngleDistribution ||
-                               op == Op::ScatterPlot
+                               op == Op::ScatterPlot || op == Op::SteinhardtOrderParameters ||
+                               op == Op::AcklandJonesAnalysis || op == Op::AtomicStrain ||
+                               op == Op::WignerSeitzAnalysis
                          ? "Analysis"
                          : "Modification";
+}
+
+// Nodes that read a raw reference frame of the loaded trajectory.
+static bool usesReferenceFrame(Op op) {
+    return op == Op::DisplacementVectors || op == Op::AtomicStrain ||
+           op == Op::WignerSeitzAnalysis || op == Op::CenterOfMassCorrection;
 }
 
 // One executable entry of the Quick command search (Ctrl+P). The single
@@ -623,6 +631,8 @@ static const std::vector<Command> &commandRegistry() {
                       Op::CentrosymmetryParameter, Op::CoordinationAnalysis, Op::ClusterAnalysis,
                       Op::RadialDistribution, Op::Histogram, Op::ReduceProperty, Op::ScatterPlot,
                       Op::BondLengthDistribution, Op::BondAngleDistribution, Op::DisplacementVectors,
+                      Op::SteinhardtOrderParameters, Op::AcklandJonesAnalysis, Op::AtomicStrain,
+                      Op::WignerSeitzAnalysis, Op::CenterOfMassCorrection, Op::ShrinkWrapBox,
                       Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
@@ -1450,11 +1460,11 @@ struct App {
                 std::map<size_t, Dataset> freezeReferences;
                 std::function<const Dataset &(size_t)> referenceProvider;
                 const bool hasDisplacement = std::any_of(executable.begin(), executable.end(),
-                    [](const Modifier &m) { return m.op == Op::DisplacementVectors; });
+                    [](const Modifier &m) { return usesReferenceFrame(m.op); });
                 const bool hasFreeze = std::any_of(executable.begin(), executable.end(),
                     [](const Modifier &m) { return m.op == Op::FreezeProperty; });
                 Dataset freezeSource;
-                if (hasFreeze) freezeSource = source;
+                if (hasFreeze || (hasDisplacement && frameSnapshot.empty())) freezeSource = source;
                 if (hasDisplacement || hasFreeze)
                     referenceProvider = [&](size_t node) -> const Dataset & {
                         const Modifier &m = executable.at(node);
@@ -1475,6 +1485,8 @@ struct App {
                                 .emplace(node, std::move(evaluated.data))
                                 .first->second;
                         }
+                        // A single structure has no frame index; it is its own frame 0.
+                        if (frameSnapshot.empty()) return freezeSource;
                         const int frame = resolveDisplacementReferenceFrame(
                             m, currentFrame, int(frameSnapshot.size()));
                         return rawFrameReferences
@@ -1552,11 +1564,11 @@ struct App {
                 std::map<size_t, Dataset> freezeReferences;
                 std::function<const Dataset &(size_t)> referenceProvider;
                 const bool hasDisplacement = std::any_of(executable.begin(), executable.end(),
-                    [](const Modifier &m) { return m.op == Op::DisplacementVectors; });
+                    [](const Modifier &m) { return usesReferenceFrame(m.op); });
                 const bool hasFreeze = std::any_of(executable.begin(), executable.end(),
                     [](const Modifier &m) { return m.op == Op::FreezeProperty; });
                 Dataset freezeSource;
-                if (hasFreeze) freezeSource = input;
+                if (hasFreeze || (hasDisplacement && frameSnapshot.empty())) freezeSource = input;
                 if (hasDisplacement || hasFreeze)
                     referenceProvider = [&](size_t node) -> const Dataset & {
                         const Modifier &m = executable.at(node);
@@ -1575,6 +1587,8 @@ struct App {
                                 .emplace(node, std::move(evaluated.data))
                                 .first->second;
                         }
+                        // A single structure has no frame index; it is its own frame 0.
+                        if (frameSnapshot.empty()) return freezeSource;
                         const int frame = resolveDisplacementReferenceFrame(
                             m, currentFrame, int(frameSnapshot.size()));
                         return rawFrameReferences
@@ -1657,6 +1671,17 @@ struct App {
                               m.sliceNormal[2] * center[2];
         }
         if (op == Op::Scale) m.value = 1;
+        if (op == Op::AtomicStrain) {
+            // The neighbor search reaches half a periodic cell, so start inside that.
+            double cutoff = 3;
+            for (int axis = 0; axis < 3; ++axis) {
+                const double length = std::hypot(result.data.cell[size_t(axis) * 3],
+                                                 result.data.cell[size_t(axis) * 3 + 1],
+                                                 result.data.cell[size_t(axis) * 3 + 2]);
+                if (result.data.pbc[size_t(axis)] && length > 0) cutoff = std::min(cutoff, .49 * length);
+            }
+            m.value = float(cutoff);
+        }
         if (op == Op::Replicate) {
             m.replicateN[0] = 1; m.replicateN[1] = 1; m.replicateN[2] = 1;
             m.replicateAdjustBox = true;
@@ -10519,6 +10544,85 @@ struct App {
                             }
                         }
                     }
+                    if (m.op == Op::SteinhardtOrderParameters) {
+                        int neighbors = m.cspNeighbors;
+                        if (ImGui::InputInt(loc::label("Number of neighbors"), &neighbors)) {
+                            checkpoint();
+                            m.cspNeighbors = std::clamp(neighbors, 1, 64);
+                            update();
+                        }
+                        recordUiTestItem(std::string("pipeline.steinhardt-neighbors.") + m.id,
+                                         "Number of neighbors");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        ImGui::TextDisabled(loc::text("Publishes q4 and q6. Use 12 for FCC/HCP and 8 or 14 for BCC."));
+                        if (const auto found = result.data.globalAttributes.find("SteinhardtOrderParameters.mean_q6");
+                            found != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("Mean q4 %.4f · q6 %.4f"),
+                                                result.data.globalAttributes["SteinhardtOrderParameters.mean_q4"],
+                                                found->second);
+                    }
+                    if (m.op == Op::AcklandJonesAnalysis) {
+                        ImGui::TextDisabled(loc::text("Classifies each particle from the bond angles of its nearest neighbors. No parameters."));
+                        ImGui::SameLine();referenceHelp("analysis");
+                        for (const char *name : {"FCC", "HCP", "BCC", "Icosahedral", "Other"})
+                            if (const auto found = result.data.globalAttributes.find(std::string("AcklandJones.counts.") + name);
+                                found != result.data.globalAttributes.end())
+                                ImGui::Text("%s  %.0f", name, found->second);
+                    }
+                    if (m.op == Op::AtomicStrain || m.op == Op::WignerSeitzAnalysis ||
+                        m.op == Op::CenterOfMassCorrection) {
+                        ImGui::SeparatorText(loc::text("Reference configuration"));
+                        bool changed = ImGui::RadioButton(loc::label("Fixed frame"), !m.displacementRelative);
+                        if (changed) { checkpoint(); m.displacementRelative = false; update(); }
+                        ImGui::SameLine();
+                        if (ImGui::RadioButton(loc::label("Relative to current frame"), m.displacementRelative)) {
+                            checkpoint(); m.displacementRelative = true; update();
+                        }
+                        ImGui::SameLine();referenceHelp("analysis");
+                        int frame = m.displacementRelative ? m.displacementOffset : m.displacementFrame;
+                        if (ImGui::InputInt(loc::label(m.displacementRelative ? "Frame offset" : "Reference frame"), &frame)) {
+                            checkpoint();
+                            if (m.displacementRelative) m.displacementOffset = frame;
+                            else m.displacementFrame = std::max(frame, 0);
+                            update();
+                        }
+                        recordUiTestItem(std::string("pipeline.reference-frame.") + m.id, "Reference frame");
+                        if (m.op == Op::AtomicStrain) {
+                            float cutoff = m.value;
+                            ImGui::InputFloat(loc::label("Cutoff radius (Å)"), &cutoff, 0, 0, "%.3f");
+                            recordUiTestItem(std::string("pipeline.strain-cutoff.") + m.id, "Cutoff radius");
+                            if (ImGui::IsItemDeactivatedAfterEdit() && cutoff > 0) {
+                                checkpoint(); m.value = cutoff; update();
+                            }
+                            ImGui::TextDisabled(loc::text("Green-Lagrangian strain, dimensionless. Particles with too few or coplanar reference neighbors report 0 and are counted as invalid."));
+                            if (const auto found = result.data.globalAttributes.find("AtomicStrain.invalid_particle_count");
+                                found != result.data.globalAttributes.end())
+                                ImGui::TextDisabled(loc::text("Invalid particles: %.0f"), found->second);
+                        }
+                        if (m.op == Op::WignerSeitzAnalysis) {
+                            bool sites = m.adaptive;
+                            if (ui_design::checkbox(loc::label("Output reference sites"), &sites)) {
+                                checkpoint(); m.adaptive = sites; update();
+                            }
+                            recordUiTestItem(std::string("pipeline.ws-sites.") + m.id, "Output reference sites");
+                            ImGui::TextDisabled(loc::text("Reference sites keep vacancies visible as sites with Occupancy 0. Otherwise each particle receives its site index."));
+                            if (const auto found = result.data.globalAttributes.find("WignerSeitz.vacancy_count");
+                                found != result.data.globalAttributes.end())
+                                ImGui::TextDisabled(loc::text("Vacancies %.0f · Interstitials %.0f"), found->second,
+                                                    result.data.globalAttributes["WignerSeitz.interstitial_count"]);
+                        }
+                        if (m.op == Op::CenterOfMassCorrection) {
+                            bool onlySelected = m.cspOnlySelected;
+                            if (ui_design::checkbox(loc::label("Use only selected particles"), &onlySelected)) {
+                                checkpoint(); m.cspOnlySelected = onlySelected; update();
+                            }
+                            ImGui::TextDisabled(loc::text("Uses positions as stored, so unwrap a wrapped trajectory first. Weighted by a Mass property when present, otherwise equal weights."));
+                        }
+                    }
+                    if (m.op == Op::ShrinkWrapBox) {
+                        ImGui::TextDisabled(loc::text("Sets the cell to the bounding box of the particle centers and keeps the periodic flags. Flat directions get an extent of 1."));
+                        ImGui::SameLine();referenceHelp("analysis");
+                    }
                     if (m.op == Op::DisplacementVectors) {
                         ImGui::SeparatorText(loc::text("Calculate displacements"));
                         // Reference configuration source (v1: same pipeline only).
@@ -11959,17 +12063,21 @@ struct App {
             if (ImGui::BeginTable("Modifier categories",4,ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
                 ImGui::TableNextColumn();
                 beginCard("Analysis");
-                for (auto name : {"Atomic strain", "Bader charge integration", "Bond order"}) planned(name);
+                operation(Op::AtomicStrain,"Compute each particle's local deformation gradient from its reference-frame neighbors; publishes shear and volumetric strain and the non-affine residual.");
+                for (auto name : {"Bader charge integration", "Bond order"}) planned(name);
                 operation(Op::BondAngleDistribution,"Build a 0–180 degree histogram from pairs of incident bonds, resolving periodic image shifts.");
                 operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
                 operation(Op::ClusterAnalysis,"Build connected components by a periodic cutoff or existing bond topology; adds per-particle Cluster IDs and a cluster-size table."); planned("Difference between frames");
                 operation(Op::CoordinationAnalysis,"Compute periodic neighbor counts and publish the Coordination particle property.");
+                planned("Diffusion coefficient");
                 operation(Op::DisplacementVectors,"Match particles against a reference animation frame and publish the Displacement vector and Displacement Magnitude particle properties.");
                 operation(Op::Histogram,"Build a finite-value histogram data table for a particle scalar or position component.");
                 operation(Op::RadialDistribution,"Compute a periodic 3D radial distribution table from the current pipeline data.");
                 operation(Op::ReduceProperty,"Reduce a scalar particle property to a global minimum, maximum, mean, or sum.");
                 operation(Op::ScatterPlot,"Plot two upstream particle properties and export the finite data pairs as a table; large inputs are deterministically sampled.");
-                for (auto name : {"Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis", "Wigner-Seitz defect analysis"}) planned(name);
+                for (auto name : {"Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis"}) planned(name);
+                operation(Op::WignerSeitzAnalysis,"Assign particles to their nearest reference-frame sites to count vacancies and interstitials.");
+                planned("Measure");
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Modification");
@@ -11985,13 +12093,16 @@ struct App {
                 operation(Op::Scale,"Scale positions and simulation cell uniformly.");
                 operation(Op::Slice,"Cut the structure at a plane: keep one side, or a slab of adjustable width.");
                 planned("Smooth trajectory");
+                operation(Op::CenterOfMassCorrection,"Remove center-of-mass drift by shifting particles to match a reference frame. Unwrap wrapped trajectories first.");
+                planned("Hide selected");
                 operation(Op::Translate,"Translate particle positions along an axis.");
                 operation(Op::UnwrapTrajectories,"Continuously unwraps particle positions across periodic boundaries using per-frame minimum-image steps.");
                 operation(Op::Wrap,"Wrap positions into orthogonal or triclinic periodic cells, including partially periodic cells.");
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Structure identification");
-                planned("Ackland-Jones analysis");
+                operation(Op::AcklandJonesAnalysis,"Classify FCC, HCP, BCC and icosahedral environments from the bond-angle distribution of each particle.");
+                operation(Op::SteinhardtOrderParameters,"Compute the q4 and q6 bond-orientational order parameters of every particle from its nearest neighbors.");
                 operation(Op::CentrosymmetryParameter,"Computes the centrosymmetry parameter to identify atoms in defective crystal environments (stacking faults, surfaces, dislocations).");
                 planned("Chill+");
                 operation(Op::CommonNeighborAnalysis,"Fixed-cutoff Honeycutt–Andersen pair signatures; FCC and BCC are verified against periodic reference crystals. Unsupported or ambiguous motifs remain Other.");
@@ -12017,7 +12128,8 @@ struct App {
                 operation(Op::SelectType,"Select particles of one or more checked particle types.");
                 endCard();
                 beginCard("Python modifiers");
-                for (auto name : {"Assign shared visual element", "Calculate local entropy", "Identify fcc planar faults", "Render LAMMPS regions", "Shrink-wrap simulation box"}) planned(name);
+                for (auto name : {"Assign shared visual element", "Calculate local entropy", "Identify fcc planar faults", "Render LAMMPS regions"}) planned(name);
+                operation(Op::ShrinkWrapBox,"Replace the simulation cell with the axis-aligned bounding box of the particle centers.");
                 endCard();
                 beginCard("Coloring");
                 planned("Ambient occlusion");

@@ -312,7 +312,9 @@ int main(int argc,char **argv) {
                         " hovered="+(down!=app.uiTestItems.end()&&down->second.hovered?"true":"false")+
                         " clicked="+(down!=app.uiTestItems.end()&&down->second.clicked?"true":"false")+
                         " hovered-window="+(ImGui::GetCurrentContext()->HoveredWindow?ImGui::GetCurrentContext()->HoveredWindow->Name:"none")+
-                        " popups="+std::to_string(ImGui::GetCurrentContext()->OpenPopupStack.size()));
+                        " popups="+std::to_string(ImGui::GetCurrentContext()->OpenPopupStack.size())+
+                        " top-popup="+(ImGui::GetTopMostPopupModal()?ImGui::GetTopMostPopupModal()->Name:"none")+
+                        " error="+app.error+" status="+app.status);
                 guiIO.AddMouseButtonEvent(0,false); frame();
             };
             app.preferences.menuPinned=true;
@@ -1171,6 +1173,8 @@ int main(int argc,char **argv) {
                 const auto monitorFile=dir/"geometry.atomx"; io::ExportOptions monitorOptions;
                 monitorOptions.documentView=app.captureDocumentView(); io::write(monitorFile,io::Format::AtomX,app.source,monitorOptions);
                 requireExport(document::read(monitorFile).view.display.monitors==app.creationDisplay.monitors,"GUI-created monitors persist in native document");
+                // Restoring the tab above relaunches the pipeline, and this button is disabled until it settles.
+                settlePipeline(); frame();
                 click("creation.geometry-remove"); requireExport(app.creationDisplay.monitors.size()==2,"remove control deletes monitor only");
                 app.history(false); frame(); requireExport(app.creationDisplay.monitors.size()==3,"display-only undo restores removed monitor");
                 click("creation.edit-measurement-constraints");frame();click("creation.measurement-select-none");frame();
@@ -2146,6 +2150,38 @@ int main(int argc,char **argv) {
             frame();
             requireExport(app.overlayStatus == "Opened test.xyz: 108 atoms",
                           "status messages surface through the viewport overlay");
+            // The OVITO-parity analyses through the real catalog, the async pipeline and the
+            // reference-frame reader. Numerical accuracy lives in analysis_modifier_tests.
+            for (const auto &[name,op,output] : {
+                     std::tuple{"Steinhardt order parameters",Op::SteinhardtOrderParameters,"q6"},
+                     std::tuple{"Ackland-Jones analysis",Op::AcklandJonesAnalysis,"Structure Type"},
+                     std::tuple{"Atomic strain",Op::AtomicStrain,"Shear Strain"},
+                     std::tuple{"Wigner-Seitz defect analysis",Op::WignerSeitzAnalysis,"Site Occupancy"},
+                     std::tuple{"Center of mass correction",Op::CenterOfMassCorrection,""},
+                     std::tuple{"Shrink-wrap simulation box",Op::ShrinkWrapBox,""}}) {
+                strcpy_s(app.modifierSearch,name);
+                click("pipeline.add-modification");
+                frame();
+                click(std::string("catalog.")+name);
+                requireExport(app.mods.size()==1 && app.mods[0].op==op,(std::string("catalog adds ")+name+
+                              " (nodes="+std::to_string(app.mods.size())+")").c_str());
+                settlePipeline();
+                frame();
+                requireExport(app.error.empty(),(std::string(name)+" runs in the real pipeline: "+app.error).c_str());
+                if (*output)
+                    requireExport(app.result.data.scalarProperties.contains(output),(std::string(name)+" publishes "+output).c_str());
+                app.selectPipeline=true;
+                app.modifierGraph.selected=0;
+                app.panelSelection=0;
+                frame();
+                frame(); // Draws the node's parameter panel with its published results.
+                requireExport(app.error.empty(),(std::string(name)+" panel draws").c_str());
+                app.modifierGraph.erase(0);
+                app.update(0);
+                settlePipeline();
+                frame();
+            }
+            strcpy_s(app.modifierSearch,"Radial distribution function (RDF)");
             click("pipeline.add-modification");
             frame(); // Allow the newly opened popup to settle before using its recorded item rectangles.
             requireExport(app.uiTestItems.contains("catalog.Radial distribution function (RDF)"),

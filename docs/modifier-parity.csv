@@ -1,5 +1,5 @@
 id,category,name,reference_url,reference_shots,menu,panel,engine,output,numeric_test,ui_test,owner,commit,limitations
-A01,Analysis,Atomic strain,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,Requires reference config + deformation gradient fitting
+A01,Analysis,Atomic strain,https://docs.ovito.org/reference/pipelines/modifiers/atomic_strain.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Cutoff + fixed/relative reference frame; shear/volumetric/D2min/tensor; no affine cell mapping or deformation gradient output; reference is raw frame
 A02,Analysis,Bader charge integration,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,Requires voxel charge density input
 A03,Analysis,Bond angle distribution,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,From explicit bond topology with image shifts
 A04,Analysis,Bond length distribution,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,From explicit bond topology with image shifts
@@ -21,7 +21,7 @@ A19,Analysis,Structure factor,,docs/parity/ovito/,partial,todo,todo,todo,todo,to
 A20,Analysis,Time averaging,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A21,Analysis,Time series,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A22,Analysis,Voronoi analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-A23,Analysis,Wigner-Seitz defect analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+A23,Analysis,Wigner-Seitz defect analysis,https://docs.ovito.org/reference/pipelines/modifiers/wigner_seitz_analysis.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Reference-site or per-particle output; no affine cell mapping and no per-type occupancy
 M01,Modification,Affine transformation,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,P2,,,,Enter rotation modal + reduced coords + only-selected + live cell readout; normals not inverse-transformed
 M02,Modification,Combine datasets,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 M03,Modification,Compute property,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Scalar expressions only; no vector output
@@ -37,7 +37,7 @@ M12,Modification,Slice,,docs/parity/ovito/,pass,pass,pass,pass,pass,pass,P1,,,,C
 M13,Modification,Smooth trajectory,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 M14,Modification,Unwrap trajectories,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,N3,be37489,Parameterless like OVITO; per-node minimum-image accumulator chains across sequential frames; frame jumps bootstrap from wrapped positions
 M15,Modification,Wrap at periodic boundaries,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Partial PBC axes handled
-S01,Structure identification,Ackland-Jones analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+S01,Structure identification,Ackland-Jones analysis,https://docs.ovito.org/reference/pipelines/modifiers/bond_angle_analysis.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Verified on ideal and noisy crystals; no Only selected option yet
 S02,Structure identification,Centrosymmetry parameter,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,N1,a07407d,Histogram panel simpler than OVITO; under-coordinated fallback documented (even>=4 else 0 + counter)
 S03,Structure identification,Chill+,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,Needs water/bond topology model
 S04,Structure identification,Common neighbor analysis,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Fixed cutoff; no adaptive mode; 128-neighbor cap
@@ -61,7 +61,12 @@ P01,Python modifiers,Assign shared visual element,,docs/parity/ovito/,partial,to
 P02,Python modifiers,Calculate local entropy,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 P03,Python modifiers,Identify fcc planar faults,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 P04,Python modifiers,Render LAMMPS regions,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-P05,Python modifiers,Shrink-wrap simulation box,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+P05,Python modifiers,Shrink-wrap simulation box,https://docs.ovito.org/reference/pipelines/modifiers/shrink_wrap_box.html,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,,,,Native C++; periodic flags kept; flat axes get extent 1
+S08,Structure identification,Steinhardt order parameters,https://docs.ovito.org/reference/pipelines/modifiers/steinhardt_parameters.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,q4 and q6 only from N nearest neighbors; no w_l or neighbor-averaged variants
+M16,Modification,Center of mass correction,https://docs.ovito.org/reference/pipelines/modifiers/center_of_mass_correction.html,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,,,,Uses a Mass particle property or equal weights; no per-type mass table
+M17,Modification,Hide selected,https://docs.ovito.org/reference/pipelines/modifiers/hide_selected.html,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Listed in OVITO 3.17.2; not in the original 67-item plan
+A24,Analysis,Measure,https://docs.ovito.org/reference/pipelines/modifiers/measure.html,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Listed in OVITO 3.17.2; viewport picking needed; Creation mode already has geometry monitors
+A25,Analysis,Diffusion coefficient,https://docs.ovito.org/reference/pipelines/modifiers/diffusion.html,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Listed in OVITO 3.17.2; needs whole-trajectory evaluation
 C01,Coloring,Ambient occlusion,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 C02,Coloring,Assign color,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Not written to structure files on export
 C03,Coloring,Color by type,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,8-color palette

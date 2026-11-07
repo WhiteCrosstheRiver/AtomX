@@ -787,6 +787,13 @@ enum class Op {
     ,DisplacementVectors
     ,FreezeProperty
     ,UnwrapTrajectories
+    // Append only: project archives store these values.
+    ,SteinhardtOrderParameters
+    ,AcklandJonesAnalysis
+    ,AtomicStrain
+    ,WignerSeitzAnalysis
+    ,CenterOfMassCorrection
+    ,ShrinkWrapBox
 };
 struct Modifier {
     Op op;
@@ -917,6 +924,23 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
             scalar.insert("Displacement Magnitude");
             vector.insert("Displacement");
             break;
+        case Op::SteinhardtOrderParameters:
+            scalar.insert("q4");
+            scalar.insert("q6");
+            break;
+        case Op::AcklandJonesAnalysis:
+            scalar.insert("Structure Type");
+            break;
+        case Op::AtomicStrain:
+            for (const char *name : {"Shear Strain", "Volumetric Strain", "Nonaffine Squared Displacement",
+                                     "Strain Tensor.XX", "Strain Tensor.YY", "Strain Tensor.ZZ",
+                                     "Strain Tensor.XY", "Strain Tensor.XZ", "Strain Tensor.YZ"})
+                scalar.insert(name);
+            break;
+        case Op::WignerSeitzAnalysis:
+            if (modifier.adaptive) scalar.insert("Occupancy");
+            else { scalar.insert("Site Index"); scalar.insert("Site Occupancy"); }
+            break;
         default:
             break;
         }
@@ -991,6 +1015,27 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Particles,"Displacement");
         add(Kind::Particles,"Displacement Magnitude");
     }
+    if (modifier.op==Op::SteinhardtOrderParameters) {
+        add(Kind::Particles,"Steinhardt q4 and q6");
+        add(Kind::GlobalAttributes,"Steinhardt statistics");
+    }
+    if (modifier.op==Op::AcklandJonesAnalysis) {
+        add(Kind::Particles,"Ackland-Jones structure types");
+        add(Kind::GlobalAttributes,"Structure counts");
+        add(Kind::Table,"Ackland-Jones analysis");
+    }
+    if (modifier.op==Op::AtomicStrain) {
+        add(Kind::Particles,"Atomic strain");
+        add(Kind::GlobalAttributes,"Atomic strain statistics");
+    }
+    if (modifier.op==Op::WignerSeitzAnalysis) {
+        add(Kind::Particles,modifier.adaptive ? "Reference sites" : "Site assignment");
+        add(Kind::GlobalAttributes,"Point defect counts");
+        add(Kind::Table,"Wigner-Seitz site occupancy");
+    }
+    if (modifier.op==Op::CenterOfMassCorrection)
+        add(Kind::GlobalAttributes,"Center of mass");
+    if (modifier.op==Op::ShrinkWrapBox) add(Kind::Cell,"Simulation cell");
     if (modifier.op==Op::ClusterAnalysis) {
         add(Kind::Particles,"Cluster IDs");
         add(Kind::GlobalAttributes,"Cluster statistics");
@@ -2066,6 +2111,12 @@ inline const char *opName(Op op) {
     case Op::DisplacementVectors: return "Displacement vectors";
     case Op::FreezeProperty: return "Freeze property";
     case Op::UnwrapTrajectories: return "Unwrap trajectories";
+    case Op::SteinhardtOrderParameters: return "Steinhardt order parameters";
+    case Op::AcklandJonesAnalysis: return "Ackland-Jones analysis";
+    case Op::AtomicStrain: return "Atomic strain";
+    case Op::WignerSeitzAnalysis: return "Wigner-Seitz defect analysis";
+    case Op::CenterOfMassCorrection: return "Center of mass correction";
+    case Op::ShrinkWrapBox: return "Shrink-wrap simulation box";
     default:
         return "Color by type";
     }
@@ -2117,13 +2168,14 @@ struct ModifierExecutionError : std::runtime_error {
     ModifierExecutionError(size_t node, const std::string &message)
         : std::runtime_error(message), nodeIndex(node) {}
 };
+#include "analysis_modifiers.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
 inline int resolveDisplacementReferenceFrame(const Modifier &m, int currentFrame,
                                              int frameCount) {
     if (frameCount <= 0)
-        throw std::runtime_error("Displacement vectors requires a loaded trajectory for its reference configuration");
+        throw std::runtime_error("A reference configuration requires a loaded trajectory");
     const int requested = m.displacementRelative ? currentFrame + m.displacementOffset
                                                  : m.displacementFrame;
     return std::clamp(requested, 0, frameCount - 1);
@@ -2136,38 +2188,7 @@ inline int resolveDisplacementReferenceFrame(const Modifier &m, int currentFrame
 inline void computeDisplacements(Dataset &data, const Dataset &reference,
                                  const Modifier &m, std::atomic<bool> *cancel = nullptr) {
     const size_t count = data.atoms.size();
-    const size_t referenceCount = reference.atoms.size();
-    // Per-current-particle index of the matching reference particle. Equal
-    // particle counts pair by atom index; otherwise a Particle Identifier
-    // property on both sides establishes the correspondence, and without one
-    // the OVITO count-mismatch error is raised.
-    std::vector<uint32_t> mapping(count);
-    if (referenceCount == count) {
-        for (size_t i = 0; i < count; ++i) mapping[i] = uint32_t(i);
-    } else {
-        const auto referenceIds = reference.scalarProperties.find("Particle Identifier");
-        const auto currentIds = data.scalarProperties.find("Particle Identifier");
-        if (referenceIds == reference.scalarProperties.end() ||
-            currentIds == data.scalarProperties.end() ||
-            referenceIds->second.size() != referenceCount ||
-            currentIds->second.size() != count)
-            throw std::runtime_error(
-                "Particle counts of the reference and current configuration do not match.");
-        std::unordered_map<double, uint32_t> byIdentifier;
-        byIdentifier.reserve(referenceCount * 2);
-        for (size_t i = 0; i < referenceCount; ++i) {
-            if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
-            byIdentifier.emplace(referenceIds->second[i], uint32_t(i));
-        }
-        for (size_t i = 0; i < count; ++i) {
-            if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
-            const auto found = byIdentifier.find(currentIds->second[i]);
-            if (found == byIdentifier.end())
-                throw std::runtime_error(
-                    "Particle counts of the reference and current configuration do not match.");
-            mapping[i] = found->second;
-        }
-    }
+    const auto mapping = matchReferenceParticles(data, reference, cancel);
     // Cell mapping option: wrap current positions into the reference cell, or
     // reference positions into the current cell, before differencing.
     Dataset referenceCellSource;
@@ -2879,6 +2900,29 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                         "Displacement vectors has no reference configuration provider");
                 const Dataset &reference = referenceProvider(modifierIndex);
                 computeDisplacements(r.data, reference, m, cancel);
+                continue;
+            }
+            if (m.op == Op::SteinhardtOrderParameters) {
+                computeSteinhardt(r.data, m.cspNeighbors, cancel);
+                continue;
+            }
+            if (m.op == Op::AcklandJonesAnalysis) {
+                computeAcklandJones(r.data, cancel);
+                continue;
+            }
+            if (m.op == Op::ShrinkWrapBox) {
+                shrinkWrapCell(r.data);
+                continue;
+            }
+            if (m.op == Op::AtomicStrain || m.op == Op::WignerSeitzAnalysis ||
+                m.op == Op::CenterOfMassCorrection) {
+                if (!referenceProvider)
+                    throw std::runtime_error(std::string(opName(m.op)) +
+                                             " has no reference configuration provider");
+                const Dataset &reference = referenceProvider(modifierIndex);
+                if (m.op == Op::AtomicStrain) computeAtomicStrain(r.data, reference, m.value, cancel);
+                else if (m.op == Op::WignerSeitzAnalysis) computeWignerSeitz(r, reference, m.adaptive, cancel);
+                else correctCenterOfMass(r, reference, m.cspOnlySelected, cancel);
                 continue;
             }
             if (m.op == Op::FreezeProperty) {

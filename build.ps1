@@ -50,6 +50,10 @@ cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj tests\localization_tests.
 if %errorlevel% neq 0 exit /b 1
 build\localization_tests.exe
 if %errorlevel% neq 0 exit /b 1
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /D SPG_STATIC_LIBRARY tests\analysis_modifier_tests.cpp /Fo:build\ /Fe:build\analysis_modifier_tests.exe /link build\spglib.lib
+if %errorlevel% neq 0 exit /b 1
+build\analysis_modifier_tests.exe
+if %errorlevel% neq 0 exit /b 1
 cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj tests\render_shapes.cpp /Fo:build\ /Fe:build\render_shapes.exe
 if %errorlevel% neq 0 exit /b 1
 build\render_shapes.exe
