@@ -9,7 +9,7 @@ A07,Analysis,Difference between frames,https://docs.ovito.org/reference/pipeline
 A08,Analysis,Dislocation analysis (DXA),,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Only approximate coordination prepass exists outside pipeline
 A09,Analysis,Displacement vectors,,docs/parity/ovito/,pass,pass,partial,pass,pass,partial,N2,12262a9,Absolute/relative reference frames + MIC + cell mapping; external-file source and arrow visual element are documented stubs; reference is raw frame not upstream-modified
 A10,Analysis,Elastic strain calculation,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-A11,Analysis,Find rings,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+A11,Analysis,Find rings,https://docs.ovito.org/reference/pipelines/modifiers/find_rings.html,docs/parity/ovito/,pass,pass,pass,partial,pass,partial,,,,Shortest-path rings in tables; no ring polygon mesh; vertices are particles so rings closing only through a periodic image in very small cells are not resolved
 A12,Analysis,Grain segmentation,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A13,Analysis,Histogram,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,No bond properties yet
 A14,Analysis,Radial distribution function (RDF),,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Requires fully periodic 3D cell; no partial type-pair RDF
@@ -18,8 +18,9 @@ A16,Analysis,Scatter plot,,docs/parity/ovito/,pass,pass,partial,pass,partial,par
 A17,Analysis,Spatial binning,https://docs.ovito.org/reference/pipelines/modifiers/bin_and_reduce.html,docs/parity/ovito/,pass,partial,pass,partial,pass,partial,,,,Particles only; output is a data table with no voxel grid; 1M bin limit; no dislocation mode
 A18,Analysis,Spatial correlation function,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A19,Analysis,Structure factor,https://docs.ovito.org/reference/pipelines/modifiers/structure_factor.html,docs/parity/ovito/,pass,partial,partial,pass,pass,partial,,,,Direct method only and single-threaded with a work limit; no Debye method; no partial or X-ray factors
-A20,Analysis,Time averaging,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-A21,Analysis,Time series,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+A20,Analysis,Time averaging,https://docs.ovito.org/reference/pipelines/modifiers/time_averaging.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,One particle property or attribute; no data table or cell averaging; whole frame range only
+A21,Analysis,Time series,https://docs.ovito.org/reference/pipelines/modifiers/time_series.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,One attribute against frame number; no custom time axis; no plot view yet
+A25,Analysis,Diffusion coefficient,https://docs.ovito.org/reference/pipelines/modifiers/diffusion.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Total 3D value with windowed MSD and free-intercept fit; no a/b/c decomposition; no selection; no sampling stride
 A22,Analysis,Voronoi analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A23,Analysis,Wigner-Seitz defect analysis,https://docs.ovito.org/reference/pipelines/modifiers/wigner_seitz_analysis.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Reference-site or per-particle output; no affine cell mapping and no per-type occupancy
 M01,Modification,Affine transformation,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,P2,,,,Enter rotation modal + reduced coords + only-selected + live cell readout; normals not inverse-transformed
@@ -34,7 +35,7 @@ M09,Modification,Python script,,docs/parity/ovito/,partial,deferred,deferred,def
 M10,Modification,Remove property,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,Rejects Position/Particle Type
 M11,Modification,Replicate,,docs/parity/ovito/,partial,partial,pass,pass,pass,partial,P1,,,,Three-axis Na/Nb/Nc + adjust box + bond remap; OVITO labels Number of images/Assign unique IDs not yet mirrored
 M12,Modification,Slice,,docs/parity/ovito/,pass,pass,pass,pass,pass,pass,P1,,,,Counts match live OVITO (64/18); align-view buttons and Miller indices are stubs; results line reflects last slice node only
-M13,Modification,Smooth trajectory,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+M13,Modification,Smooth trajectory,https://docs.ovito.org/reference/pipelines/modifiers/smooth_trajectory.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Averaging mode for positions only; no sub-frame interpolation; scalar properties and orientations are not smoothed
 M14,Modification,Unwrap trajectories,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,N3,be37489,Parameterless like OVITO; per-node minimum-image accumulator chains across sequential frames; frame jumps bootstrap from wrapped positions
 M15,Modification,Wrap at periodic boundaries,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Partial PBC axes handled
 S01,Structure identification,Ackland-Jones analysis,https://docs.ovito.org/reference/pipelines/modifiers/bond_angle_analysis.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Verified on ideal and noisy crystals; no Only selected option yet
@@ -66,7 +67,6 @@ S08,Structure identification,Steinhardt order parameters,https://docs.ovito.org/
 M16,Modification,Center of mass correction,https://docs.ovito.org/reference/pipelines/modifiers/center_of_mass_correction.html,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,,,,Uses a Mass particle property or equal weights; no per-type mass table
 M17,Modification,Hide selected,https://docs.ovito.org/reference/pipelines/modifiers/hide_selected.html,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Listed in OVITO 3.17.2; not in the original 67-item plan
 A24,Analysis,Measure,https://docs.ovito.org/reference/pipelines/modifiers/measure.html,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Listed in OVITO 3.17.2; viewport picking needed; Creation mode already has geometry monitors
-A25,Analysis,Diffusion coefficient,https://docs.ovito.org/reference/pipelines/modifiers/diffusion.html,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Listed in OVITO 3.17.2; needs whole-trajectory evaluation
 C01,Coloring,Ambient occlusion,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 C02,Coloring,Assign color,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Not written to structure files on export
 C03,Coloring,Color by type,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,8-color palette

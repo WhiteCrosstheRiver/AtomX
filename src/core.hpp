@@ -798,6 +798,11 @@ enum class Op {
     ,SpatialBinning
     ,StructureFactor
     ,IdentifyDiamond
+    ,TimeSeries
+    ,TimeAveraging
+    ,SmoothTrajectory
+    ,DiffusionCoefficient
+    ,FindRings
 };
 struct Modifier {
     Op op;
@@ -886,6 +891,10 @@ struct Modifier {
     // cspOnlySelected: "only selected" options, and Select new elements for frame differences.
     // adaptive: Wigner-Seitz site output, tolerate new elements, 1D binning derivative.
     // value/upper: Structure factor minimum/maximum k. rdfBins: its histogram bins.
+    // property: Time series attribute and Time averaging input. adaptive: replace the
+    // original with the average, Smooth trajectory minimum image.
+    // cspNeighbors: smoothing window, Diffusion origin stride. value: time per frame.
+    // histogramRangeStart/End: Diffusion fit window. replicateN[0..1]: ring size range.
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -957,6 +966,12 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
             break;
         case Op::IdentifyDiamond:
             scalar.insert("Structure Type");
+            break;
+        case Op::TimeAveraging:
+            if (!modifier.property.empty() && !modifier.adaptive) scalar.insert(modifier.property + " Average");
+            break;
+        case Op::FindRings:
+            scalar.insert("Ring Count");
             break;
         default:
             break;
@@ -1058,6 +1073,19 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::GlobalAttributes,"Attribute differences");
     }
     if (modifier.op==Op::SpatialBinning) add(Kind::Table,"Spatial binning");
+    if (modifier.op==Op::TimeSeries) add(Kind::Table,"Time series");
+    if (modifier.op==Op::TimeAveraging) add(Kind::Particles,modifier.property+" Average");
+    if (modifier.op==Op::SmoothTrajectory) add(Kind::Particles,"Smoothed positions");
+    if (modifier.op==Op::DiffusionCoefficient) {
+        add(Kind::Table,"Mean squared displacement");
+        add(Kind::GlobalAttributes,"Diffusion coefficient");
+    }
+    if (modifier.op==Op::FindRings) {
+        add(Kind::Table,"Ring size histogram");
+        add(Kind::Table,"Rings");
+        add(Kind::Particles,"Ring Count");
+        add(Kind::GlobalAttributes,"Ring count");
+    }
     if (modifier.op==Op::StructureFactor) {
         add(Kind::Table,"Structure factor");
         add(Kind::GlobalAttributes,"Structure factor peak");
@@ -2152,6 +2180,11 @@ inline const char *opName(Op op) {
     case Op::SpatialBinning: return "Spatial binning";
     case Op::StructureFactor: return "Structure factor";
     case Op::IdentifyDiamond: return "Identify diamond structure";
+    case Op::TimeSeries: return "Time series";
+    case Op::TimeAveraging: return "Time averaging";
+    case Op::SmoothTrajectory: return "Smooth trajectory";
+    case Op::DiffusionCoefficient: return "Diffusion coefficient";
+    case Op::FindRings: return "Find rings";
     default:
         return "Color by type";
     }
@@ -2205,6 +2238,7 @@ struct ModifierExecutionError : std::runtime_error {
 };
 #include "analysis_modifiers.inc"
 #include "analysis_modifiers_fields.inc"
+#include "analysis_trajectory.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -2403,6 +2437,12 @@ struct ModifierFrameState {
     std::function<const std::vector<Vec3> *(size_t node)> previousUnwrapped;
     // Stores the node's unwrapped output positions for the evaluated frame.
     std::function<void(size_t node, std::vector<Vec3> positions)> storeUnwrapped;
+    // Whole-trajectory access: the output of the nodes before `node` at any frame.
+    int frameCount = 0;
+    std::function<Dataset(size_t node, int frame)> frameBefore;
+    // Finished sweeps, valid until the pipeline is edited.
+    std::function<std::optional<TrajectoryOutput>(size_t node)> cachedSweep;
+    std::function<void(size_t node, TrajectoryOutput output)> storeSweep;
 };
 inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> &mods,
                                    size_t firstNode=0,std::atomic<bool> *cancel=nullptr,
@@ -2948,6 +2988,34 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             }
             if (m.op == Op::ShrinkWrapBox) {
                 shrinkWrapCell(r.data);
+                continue;
+            }
+            if (m.op == Op::FindRings) {
+                computeRings(r.data, m.replicateN[0], m.replicateN[1], cancel);
+                continue;
+            }
+            if (m.op == Op::TimeSeries || m.op == Op::TimeAveraging || m.op == Op::SmoothTrajectory ||
+                m.op == Op::DiffusionCoefficient) {
+                if ((m.op == Op::TimeSeries || m.op == Op::TimeAveraging) && m.property.empty())
+                    continue; // Nothing chosen yet.
+                if (!frameState.frameBefore)
+                    throw std::runtime_error(std::string(opName(m.op)) + " has no access to the trajectory");
+                const FrameEvaluator evaluateFrame = [&](int frame) { return frameState.frameBefore(modifierIndex, frame); };
+                const int frames = std::max(1, frameState.frameCount);
+                if (m.op == Op::SmoothTrajectory) {
+                    smoothTrajectory(r.data, currentFrame, frames, m.cspNeighbors, m.adaptive, evaluateFrame, cancel);
+                    continue;
+                }
+                auto swept = frameState.cachedSweep ? frameState.cachedSweep(modifierIndex)
+                                                    : std::optional<TrajectoryOutput>{};
+                if (!swept) {
+                    swept = m.op == Op::TimeSeries ? sweepTimeSeries(m.property, frames, evaluateFrame, cancel)
+                          : m.op == Op::TimeAveraging ? sweepTimeAverage(m.property, m.adaptive, frames, evaluateFrame, cancel)
+                          : sweepDiffusion(frames, m.cspNeighbors, m.value, m.histogramRangeStart, m.histogramRangeEnd,
+                                           evaluateFrame, cancel);
+                    if (frameState.storeSweep) frameState.storeSweep(modifierIndex, *swept);
+                }
+                applyTrajectoryOutput(r.data, *swept, cancel);
                 continue;
             }
             if (m.op == Op::SpatialBinning) {

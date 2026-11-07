@@ -831,8 +831,281 @@ static void testBatchTwoPipeline() {
           "the difference appears in downstream property choices");
 }
 
+// An in-memory trajectory standing in for the application's frame reader.
+struct Trajectory {
+    std::vector<Dataset> frames;
+    int evaluations = 0;
+    FrameEvaluator evaluator() {
+        return [this](int frame) { ++evaluations; return frames.at(size_t(frame)); };
+    }
+    int size() const { return int(frames.size()); }
+};
+static Trajectory attributeTrajectory(std::initializer_list<double> values) {
+    Trajectory t;
+    for (double value : values) {
+        Dataset d = fcc(2);
+        d.globalAttributes["Energy"] = value;
+        d.scalarProperties["Charge"].assign(d.atoms.size(), value);
+        t.frames.push_back(std::move(d));
+    }
+    return t;
+}
+static void testTimeSeriesAndAverage() {
+    Trajectory t = attributeTrajectory({1, 3, 8});
+    const auto series = sweepTimeSeries("Energy", t.size(), t.evaluator(), nullptr);
+    check(series.tables.size() == 1 && series.tables[0].rows.size() == 3, "one row per frame");
+    near(std::stod(series.tables[0].rows[2][1]), 8, 0, "time series value");
+    near(std::stod(series.tables[0].rows[2][0]), 2, 0, "time series frame");
+    check(t.evaluations == 3, "the sweep visits each frame once");
+    throwsWith([&] { sweepTimeSeries("Missing", t.size(), t.evaluator(), nullptr); }, "no global attribute", "unknown attribute");
+
+    const auto attribute = sweepTimeAverage("Energy", false, t.size(), t.evaluator(), nullptr);
+    near(attribute.attributes.at("Energy Average"), 4, 1e-12, "attribute average");
+    const auto property = sweepTimeAverage("Charge", false, t.size(), t.evaluator(), nullptr);
+    near(property.scalars.at("Charge Average")[0], 4, 1e-12, "particle property average");
+    const auto replaced = sweepTimeAverage("Charge", true, t.size(), t.evaluator(), nullptr);
+    check(replaced.scalars.count("Charge") == 1, "replace keeps the original name");
+    const auto positions = sweepTimeAverage("Position.X", false, t.size(), t.evaluator(), nullptr);
+    near(positions.scalars.at("Position.X Average")[1], t.frames[0].atoms[1].x, 1e-6, "position components can be averaged");
+    throwsWith([&] { sweepTimeAverage("Missing", false, t.size(), t.evaluator(), nullptr); }, "no property or attribute", "unknown input");
+
+    // Averages follow particle identity, and the output is re-applied in display order.
+    Trajectory shuffled;
+    for (int frame = 0; frame < 2; ++frame) {
+        Dataset d;
+        d.species = {"X"};
+        d.atoms = {{0, 0, 0, 0}, {1, 0, 0, 0}};
+        d.scalarProperties["Particle Identifier"] = frame ? std::vector<double>{2, 1} : std::vector<double>{1, 2};
+        d.scalarProperties["Charge"] = frame ? std::vector<double>{20, 10} : std::vector<double>{10, 20};
+        shuffled.frames.push_back(std::move(d));
+    }
+    const auto byIdentity = sweepTimeAverage("Charge", false, shuffled.size(), shuffled.evaluator(), nullptr);
+    near(byIdentity.scalars.at("Charge Average")[0], 10, 1e-12, "the average tracks identifiers");
+    Dataset displayed = shuffled.frames[1];
+    applyTrajectoryOutput(displayed, byIdentity, nullptr);
+    near(displayed.scalarProperties.at("Charge Average")[0], 20, 1e-12, "output follows the displayed order");
+
+    Trajectory changing = attributeTrajectory({1, 2});
+    changing.frames[1].atoms.pop_back();
+    changing.frames[1].scalarProperties["Charge"].pop_back();
+    throwsWith([&] { sweepTimeAverage("Charge", false, changing.size(), changing.evaluator(), nullptr); },
+               "constant number", "changing particle counts are rejected");
+}
+
+static void testSmoothing() {
+    Trajectory t;
+    for (double x : {0.0, 1.0, 5.0, 3.0, 4.0}) {
+        Dataset d;
+        d.species = {"X"};
+        d.cell = {100, 0, 0, 0, 100, 0, 0, 0, 100};
+        d.atoms = {{float(x), 0, 0, 0}};
+        t.frames.push_back(std::move(d));
+    }
+    Dataset middle = t.frames[2];
+    smoothTrajectory(middle, 2, t.size(), 3, false, t.evaluator(), nullptr);
+    near(middle.atoms[0].x, 3, 1e-5, "a three-frame centered mean");
+    Dataset start = t.frames[0];
+    smoothTrajectory(start, 0, t.size(), 3, false, t.evaluator(), nullptr);
+    near(start.atoms[0].x, .5, 1e-5, "the window is cut short at the first frame");
+    Dataset same = t.frames[2];
+    smoothTrajectory(same, 2, t.size(), 1, false, t.evaluator(), nullptr);
+    near(same.atoms[0].x, 5, 0, "a window of one changes nothing");
+
+    // A particle crossing the boundary: 9.8, then 0.2 in a 10 long cell, is a step of 0.4.
+    Trajectory wrapped;
+    for (float x : {9.8f, .2f}) {
+        Dataset d;
+        d.species = {"X"};
+        d.cell = {10, 0, 0, 0, 10, 0, 0, 0, 10};
+        d.pbc = {true, true, true};
+        d.atoms = {{x, 5, 5, 0}};
+        wrapped.frames.push_back(std::move(d));
+    }
+    Dataset crossing = wrapped.frames[1];
+    smoothTrajectory(crossing, 1, 2, 3, true, wrapped.evaluator(), nullptr);
+    near(crossing.atoms[0].x, 0, 1e-5, "the minimum image keeps the mean continuous");
+    Dataset naive = wrapped.frames[1];
+    smoothTrajectory(naive, 1, 2, 3, false, wrapped.evaluator(), nullptr);
+    near(naive.atoms[0].x, 5, 1e-5, "without it the mean jumps across the cell");
+    throwsWith([&] { smoothTrajectory(same, 2, 5, 0, false, t.evaluator(), nullptr); }, "smoothing window", "zero window");
+}
+
+static void testDiffusion() {
+    // A 3D random walk with step variance s per axis has MSD = 3 s tau, so D = s / 2.
+    constexpr double sigma = .2, cell = 12;
+    constexpr int particles = 1500, steps = 120;
+    auto walk = [&](bool periodic) {
+        std::mt19937 random(9);
+        std::normal_distribution<double> step(0, sigma);
+        std::uniform_real_distribution<double> place(0, cell);
+        std::vector<std::array<double, 3>> position(particles);
+        for (auto &p : position) p = {place(random), place(random), place(random)};
+        Trajectory t;
+        for (int frame = 0; frame < steps; ++frame) {
+            Dataset d;
+            d.species = {"X"};
+            d.cell = {cell, 0, 0, 0, cell, 0, 0, 0, cell};
+            d.pbc = {periodic, periodic, periodic};
+            for (const auto &p : position) {
+                Atom a{float(p[0]), float(p[1]), float(p[2]), 0};
+                d.atoms.push_back(periodic ? wrapAtomInCell(d, a) : a);
+            }
+            t.frames.push_back(std::move(d));
+            for (auto &p : position) for (double &x : p) x += step(random);
+        }
+        return t;
+    };
+    Trajectory open = walk(false);
+    const auto free = sweepDiffusion(open.size(), 2, 1, 0, .3, open.evaluator(), nullptr);
+    const double expected = sigma * sigma / 2;
+    near(free.attributes.at("Diffusion.coefficient"), expected, .1 * expected, "random-walk diffusion coefficient");
+    Trajectory wrapped = walk(true);
+    const auto folded = sweepDiffusion(wrapped.size(), 2, 1, 0, .3, wrapped.evaluator(), nullptr);
+    near(folded.attributes.at("Diffusion.coefficient"), free.attributes.at("Diffusion.coefficient"), .02 * expected,
+         "wrapped coordinates give the same coefficient");
+    const auto scaled = sweepDiffusion(open.size(), 2, .5, 0, .3, open.evaluator(), nullptr);
+    near(scaled.attributes.at("Diffusion.coefficient"), 2 * free.attributes.at("Diffusion.coefficient"), 1e-6,
+         "the time unit scales D");
+
+    // Exact: one particle at constant velocity has MSD = v^2 tau^2.
+    Trajectory ballistic;
+    for (int frame = 0; frame < 6; ++frame) {
+        Dataset d;
+        d.species = {"X"};
+        d.atoms = {{float(frame * 2), 0, 0, 0}};
+        ballistic.frames.push_back(std::move(d));
+    }
+    const auto msd = sweepDiffusion(ballistic.size(), 1, 1, 0, 1, ballistic.evaluator(), nullptr);
+    near(std::stod(msd.tables[0].rows[2][1]), 36, 1e-6, "MSD at lag 3");
+    near(std::stod(msd.tables[0].rows[0][2]), 5, 0, "five origins contribute to lag 1");
+    near(std::stod(msd.tables[0].rows[4][2]), 1, 0, "one origin contributes to the longest lag");
+
+    Trajectory single;
+    single.frames.push_back(fcc(2));
+    const auto none = sweepDiffusion(1, 1, 1, 0, 1, single.evaluator(), nullptr);
+    check(none.tables[0].rows.empty() && !none.attributes.count("Diffusion.coefficient"), "one frame gives no coefficient");
+    throwsWith([&] { sweepDiffusion(2, 0, 1, 0, 1, single.evaluator(), nullptr); }, "origin stride", "zero stride");
+    throwsWith([&] { sweepDiffusion(2, 1, 0, 0, 1, single.evaluator(), nullptr); }, "time per frame", "zero time step");
+    throwsWith([&] { sweepDiffusion(2, 1, 1, .8, .2, single.evaluator(), nullptr); }, "fit window", "reversed fit window");
+}
+
+static Dataset graphOf(int count, std::initializer_list<std::pair<uint32_t, uint32_t>> edges) {
+    Dataset d;
+    d.species = {"X"};
+    d.atoms.assign(size_t(count), Atom{});
+    for (const auto &[a, b] : edges) { Bond bond; bond.a = a; bond.b = b; d.bonds.push_back(bond); }
+    return d;
+}
+static double ringsOf(Dataset d, int size, int minSize = 3, int maxSize = 12) {
+    computeRings(d, minSize, maxSize, nullptr);
+    for (const auto &row : d.tables[d.tables.size() - 2].rows)
+        if (std::stoi(row[0]) == size) return std::stod(row[1]);
+    return -1;
+}
+static void testRings() {
+    near(ringsOf(graphOf(3, {{0, 1}, {1, 2}, {2, 0}}), 3), 1, 0, "a triangle is one ring");
+    near(ringsOf(graphOf(6, {{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 0}}), 6), 1, 0, "a hexagon is one ring");
+    near(ringsOf(graphOf(5, {{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 0}}), 5), 1, 0, "an odd ring is found");
+    near(ringsOf(graphOf(4, {{0, 1}, {1, 2}, {2, 3}}), 4), 0, 0, "a chain has no ring");
+    near(ringsOf(graphOf(9, {{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {7, 8}, {8, 0}}), 8, 3, 8), 0, 0,
+         "a ring above the maximum size is skipped");
+    // Naphthalene: two hexagons sharing a bond. The outer 10-cycle has a shortcut, so it is no ring.
+    const auto naphthalene = graphOf(10, {{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 0}, {4, 6}, {6, 7}, {7, 8}, {8, 9}, {9, 5}});
+    near(ringsOf(naphthalene, 6), 2, 0, "naphthalene has two six-rings");
+    near(ringsOf(naphthalene, 10), 0, 0, "its outer cycle is not a shortest-path ring");
+    // A cube has six square faces, and its four Petrie hexagons are shortest-path rings:
+    // opposite corners are three bonds apart both around the ring and through the graph.
+    const auto cube = graphOf(8, {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}});
+    near(ringsOf(cube, 4), 6, 0, "a cube has six four-rings");
+    near(ringsOf(cube, 6), 4, 0, "a cube has four Petrie hexagons");
+    near(ringsOf(cube, 5), 0, 0, "a bipartite cube has no odd rings");
+    // Smaller rings must survive a large maximum size.
+    near(ringsOf(cube, 4, 3, 36), 6, 0, "the maximum size does not hide small rings");
+    // A periodic honeycomb sheet: every hexagon, each counted once.
+    constexpr int width = 6, height = 6;
+    Dataset sheet;
+    sheet.species = {"X"};
+    sheet.atoms.assign(size_t(2 * width * height), Atom{});
+    auto site = [&](int x, int y, int sublattice) {
+        return uint32_t(2 * (((y + height) % height) * width + (x + width) % width) + sublattice);
+    };
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            for (const auto [dx, dy] : {std::pair{0, 0}, std::pair{-1, 0}, std::pair{0, -1}}) {
+                Bond bond; bond.a = site(x, y, 0); bond.b = site(x + dx, y + dy, 1); sheet.bonds.push_back(bond);
+            }
+    near(ringsOf(sheet, 6, 3, 8), width * height, 0, "a periodic honeycomb has one hexagon per cell");
+
+    Dataset counted = graphOf(4, {{0, 1}, {1, 2}, {2, 0}, {2, 3}});
+    computeRings(counted, 3, 6, nullptr);
+    near(attribute(counted, "FindRings.ring_count"), 1, 0, "ring count attribute");
+    near(counted.scalarProperties.at("Ring Count")[2], 1, 0, "ring members are counted");
+    near(counted.scalarProperties.at("Ring Count")[3], 0, 0, "a dangling atom is in no ring");
+    check(counted.tables.back().rows[0][1] == "0 1 2", "the ring list names its particles");
+
+    Dataset duplicate = graphOf(3, {{0, 1}, {1, 0}, {1, 2}, {2, 0}, {0, 0}});
+    near(ringsOf(duplicate, 3), 1, 0, "duplicate and self bonds are ignored");
+    Dataset none = fcc(2);
+    near(ringsOf(none, 3), 0, 0, "no bonds gives no rings");
+    Dataset bad = graphOf(3, {{0, 9}});
+    throwsWith([&] { computeRings(bad, 3, 6, nullptr); }, "outside the dataset", "a bad bond is rejected");
+    Dataset fine = graphOf(3, {{0, 1}});
+    throwsWith([&] { computeRings(fine, 2, 6, nullptr); }, "Ring sizes", "minimum below 3");
+    throwsWith([&] { computeRings(fine, 3, 37, nullptr); }, "Ring sizes", "maximum above 36");
+    throwsWith([&] { computeRings(fine, 8, 6, nullptr); }, "Ring sizes", "reversed range");
+}
+
+static void testTrajectoryPipeline() {
+    Trajectory t = attributeTrajectory({2, 4});
+    int calls = 0;
+    std::optional<TrajectoryOutput> stored;
+    ModifierFrameState state;
+    state.frameCount = 2;
+    state.frameBefore = [&](size_t, int frame) { ++calls; return t.frames.at(size_t(frame)); };
+    state.cachedSweep = [&](size_t) { return stored; };
+    state.storeSweep = [&](size_t, TrajectoryOutput output) { stored = std::move(output); };
+    Modifier average{Op::TimeAveraging};
+    average.property = "Energy";
+    Modifier select{Op::ExpressionSelect};
+    select.property = "`Charge` > 1";
+    std::vector<Modifier> stack{average, select};
+    auto run = [&](int frame) {
+        return evaluateFrom(resultOf(t.frames.at(size_t(frame))), stack, 0, nullptr, nullptr, SIZE_MAX, {}, {}, frame, state);
+    };
+    const auto first = run(0);
+    near(attribute(first.data, "Energy Average"), 3, 1e-12, "the pipeline publishes the average");
+    check(calls == 2, "the first evaluation sweeps every frame");
+    const auto second = run(1);
+    near(attribute(second.data, "Energy Average"), 3, 1e-12, "the average does not depend on the frame");
+    check(calls == 2, "changing frames reuses the sweep");
+
+    Modifier unset{Op::TimeSeries};
+    unset.property.clear();
+    std::vector<Modifier> empty{unset};
+    (void)evaluateFrom(resultOf(fcc(2)), empty, 0);
+    check(true, "a node with nothing chosen yet is not an error");
+    Modifier series{Op::TimeSeries};
+    series.property = "Energy";
+    std::vector<Modifier> noAccess{series};
+    throwsWith([&] { (void)evaluateFrom(resultOf(fcc(2)), noAccess, 0); }, "no access to the trajectory", "missing trajectory access");
+    for (Op op : {Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory, Op::DiffusionCoefficient, Op::FindRings}) {
+        check(std::string(opName(op)) != "Color by type", "every new operation has a name");
+        check(!modifierOutputs(Modifier{op}, 0).empty(), std::string(opName(op)) + " declares its outputs");
+    }
+}
+
 static void testCancellation() {
     std::atomic<bool> cancel{true};
+    {
+        Trajectory t = attributeTrajectory({1, 2});
+        throwsWith([&] { sweepTimeSeries("Energy", 2, t.evaluator(), &cancel); }, "Cancelled", "time series cancels");
+        throwsWith([&] { sweepTimeAverage("Energy", false, 2, t.evaluator(), &cancel); }, "Cancelled", "time averaging cancels");
+        throwsWith([&] { sweepDiffusion(2, 1, 1, 0, 1, t.evaluator(), &cancel); }, "Cancelled", "diffusion cancels");
+        Dataset d = t.frames[0];
+        throwsWith([&] { smoothTrajectory(d, 0, 2, 3, false, t.evaluator(), &cancel); }, "Cancelled", "smoothing cancels");
+        Dataset rings = graphOf(3, {{0, 1}, {1, 2}, {2, 0}});
+        throwsWith([&] { computeRings(rings, 3, 6, &cancel); }, "Cancelled", "rings cancel");
+    }
     {
         Dataset d = fcc(4);
         const int bins[3]{4, 1, 1};
@@ -869,6 +1142,11 @@ int main() {
     testStructureFactor();
     testDiamond();
     testBatchTwoPipeline();
+    testTimeSeriesAndAverage();
+    testSmoothing();
+    testDiffusion();
+    testRings();
+    testTrajectoryPipeline();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
@@ -876,5 +1154,5 @@ int main() {
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
                  "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
-                 "diamond identification, pipeline composition, cancellation\n";
+                 "diamond identification, trajectory sweeps, diffusion, rings, pipeline composition, cancellation\n";
 }

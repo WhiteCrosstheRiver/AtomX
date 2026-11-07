@@ -294,7 +294,10 @@ int main(int argc,char **argv) {
                               ("interactive UI control has an empty rectangle: "+name).c_str());
                 requireExport(item.min.x>=0 && item.min.y>=0 &&
                                   item.max.x<=guiIO.DisplaySize.x && item.max.y<=guiIO.DisplaySize.y,
-                              ("interactive UI control exceeds application bounds: "+name).c_str());
+                              ("interactive UI control exceeds application bounds: "+name+" rect="+
+                               std::to_string(item.min.x)+","+std::to_string(item.min.y)+"-"+
+                               std::to_string(item.max.x)+","+std::to_string(item.max.y)+" display="+
+                               std::to_string(guiIO.DisplaySize.x)+"x"+std::to_string(guiIO.DisplaySize.y)).c_str());
                 const ImVec2 point{item.min.x+(item.max.x-item.min.x)*xFraction,
                                    (item.min.y+item.max.y)*.5f};
                 // Move first, press in a later frame: coalescing a jump with
@@ -2162,7 +2165,12 @@ int main(int argc,char **argv) {
                      std::tuple{"Difference between frames",Op::DifferenceBetweenFrames,"Position.X (Difference)"},
                      std::tuple{"Spatial binning",Op::SpatialBinning,""},
                      std::tuple{"Structure factor",Op::StructureFactor,""},
-                     std::tuple{"Identify diamond structure",Op::IdentifyDiamond,"Structure Type"}}) {
+                     std::tuple{"Identify diamond structure",Op::IdentifyDiamond,"Structure Type"},
+                     std::tuple{"Time series",Op::TimeSeries,""},
+                     std::tuple{"Time averaging",Op::TimeAveraging,""},
+                     std::tuple{"Smooth trajectory",Op::SmoothTrajectory,""},
+                     std::tuple{"Diffusion coefficient",Op::DiffusionCoefficient,""},
+                     std::tuple{"Find rings",Op::FindRings,"Ring Count"}}) {
                 strcpy_s(app.modifierSearch,name);
                 click("pipeline.add-modification");
                 frame();
@@ -2180,6 +2188,29 @@ int main(int argc,char **argv) {
                 frame();
                 frame(); // Draws the node's parameter panel with its published results.
                 requireExport(app.error.empty(),(std::string(name)+" panel draws").c_str());
+                if (op==Op::AtomicStrain || op==Op::StructureFactor) {
+                    // A value typed into the panel must reach the node. The panel redraws from
+                    // the node every frame, so an edit held only in a local copy would be lost.
+                    const std::string field=(op==Op::AtomicStrain?"pipeline.strain-cutoff.":"pipeline.sk-max.")+app.mods[0].id;
+                    const float before=op==Op::AtomicStrain?app.mods[0].value:app.mods[0].upper;
+                    const float typed=before*.5f;
+                    char text[32];
+                    snprintf(text,sizeof(text),"%.3f",typed);
+                    // The field can start below the fold; scroll the panel as a user would.
+                    for (int attempt=0;attempt<60 && app.uiTestItems.at(field).max.y>guiIO.DisplaySize.y-40;++attempt) {
+                        guiIO.AddMousePosEvent(guiIO.DisplaySize.x-60,guiIO.DisplaySize.y*.5f);frame();
+                        guiIO.AddMouseWheelEvent(0,-3);frame();frame();
+                    }
+                    click(field,.28f); // Inside the text area.
+                    guiIO.AddInputCharactersUTF8(text);frame();
+                    guiIO.AddKeyEvent(ImGuiKey_Enter,true);frame();
+                    guiIO.AddKeyEvent(ImGuiKey_Enter,false);frame();
+                    settlePipeline();
+                    frame();
+                    const float now=op==Op::AtomicStrain?app.mods[0].value:app.mods[0].upper;
+                    requireExport(std::abs(now-typed)<.01f,(std::string(name)+" keeps a typed value").c_str());
+                    requireExport(app.error.empty(),(std::string(name)+" recomputes after typing: "+app.error).c_str());
+                }
                 app.modifierGraph.erase(0);
                 app.update(0);
                 settlePipeline();

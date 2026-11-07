@@ -9,6 +9,8 @@
 #include "atom_constraints.hpp"
 #include "structure_clipboard.hpp"
 #include "project_archive.hpp"
+#include <mutex>
+#include <set>
 #include "bond_insertion.hpp"
 #include "creation_bonds.hpp"
 #include "motion_groups.hpp"
@@ -598,7 +600,9 @@ static const char *opCategory(Op op) {
                                op == Op::AcklandJonesAnalysis || op == Op::AtomicStrain ||
                                op == Op::WignerSeitzAnalysis || op == Op::DifferenceBetweenFrames ||
                                op == Op::SpatialBinning || op == Op::StructureFactor ||
-                               op == Op::IdentifyDiamond
+                               op == Op::IdentifyDiamond || op == Op::TimeSeries ||
+                               op == Op::TimeAveraging || op == Op::DiffusionCoefficient ||
+                               op == Op::FindRings
                          ? "Analysis"
                          : "Modification";
 }
@@ -608,6 +612,32 @@ static bool usesReferenceFrame(Op op) {
     return op == Op::DisplacementVectors || op == Op::AtomicStrain ||
            op == Op::WignerSeitzAnalysis || op == Op::CenterOfMassCorrection ||
            op == Op::DifferenceBetweenFrames;
+}
+// Nodes whose result depends on every frame of the trajectory, or on a window of them.
+static bool readsWholeTrajectory(Op op) {
+    return op == Op::TimeSeries || op == Op::TimeAveraging || op == Op::SmoothTrajectory ||
+           op == Op::DiffusionCoefficient;
+}
+// The output of the nodes before `node` at any frame. Reference frames are resolved for
+// that frame, so a time series of strain measures each frame against its own reference.
+static Dataset evaluateNodesAtFrame(const std::vector<Modifier> &nodes, size_t node, int frame,
+                                    const std::filesystem::path &file, const std::vector<Frame> &frames,
+                                    const Dataset &single, int budget, std::atomic<bool> *cancel) {
+    const std::vector<Modifier> prefix(nodes.begin(), nodes.begin() + node);
+    Dataset raw = frames.empty() ? single : io::read(file, frames.at(size_t(frame)), budget, nullptr, cancel);
+    std::map<size_t, Dataset> references;
+    const std::function<const Dataset &(size_t)> provider = [&](size_t n) -> const Dataset & {
+        const Modifier &m = prefix.at(n);
+        if (m.op == Op::FreezeProperty)
+            throw std::runtime_error("Freeze property cannot run before a whole-trajectory node");
+        if (frames.empty()) return single;
+        if (const auto found = references.find(n); found != references.end()) return found->second;
+        const int target = resolveDisplacementReferenceFrame(m, frame, int(frames.size()));
+        return references.emplace(n, io::read(file, frames.at(size_t(target)), budget, nullptr, cancel)).first->second;
+    };
+    const size_t count = raw.atoms.size();
+    PipelineResult input{std::move(raw), std::vector<uint8_t>(count), std::vector<uint8_t>(count, 1)};
+    return evaluateFrom(std::move(input), prefix, 0, cancel, nullptr, SIZE_MAX, {}, provider, frame).data;
 }
 // Frame differences need upstream properties, so the reference frame runs the nodes before it.
 static Dataset evaluatePrefixOn(Dataset frame, const std::vector<Modifier> &nodes, size_t node,
@@ -645,7 +675,8 @@ static const std::vector<Command> &commandRegistry() {
                       Op::SteinhardtOrderParameters, Op::AcklandJonesAnalysis, Op::AtomicStrain,
                       Op::WignerSeitzAnalysis, Op::CenterOfMassCorrection, Op::ShrinkWrapBox,
                       Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
-                      Op::IdentifyDiamond, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::IdentifyDiamond, Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory,
+                      Op::DiffusionCoefficient, Op::FindRings, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -826,6 +857,9 @@ struct App {
     // frame-by-frame playback chains continuously; cleared when a new file is
     // loaded. Only touched by the single active pipeline worker thread.
     std::map<std::string, std::pair<int, std::vector<Vec3>>> unwrapAccumulators;
+    std::mutex trajectoryMutex;
+    std::map<std::string, TrajectoryOutput> trajectoryOutputs;
+    uint64_t trajectoryRevision = 0;
     std::shared_ptr<const PipelineResult> pipelineCheckpoint;
     size_t pipelineCheckpointNode = SIZE_MAX;
     std::atomic<float> progress{0};
@@ -1428,6 +1462,40 @@ struct App {
             }
         } else camera.fitSelected=false;
     }
+    // Sizes the next labeled field so that it, its label and an optional ? button fit.
+    void fitNextField(const char *label, bool helpButton = false) {
+        const float reserved = ImGui::CalcTextSize(loc::text(label)).x + ImGui::GetStyle().ItemInnerSpacing.x +
+                               (helpButton ? U(28) : 0);
+        ImGui::SetNextItemWidth(std::max(U(50), ImGui::GetContentRegionAvail().x - reserved));
+    }
+    // Sweep results outlive frame changes and are dropped when the pipeline is edited.
+    // The revision stops a job started before an edit from storing its stale result.
+    void attachTrajectoryAccess(ModifierFrameState &state, const std::vector<Modifier> &nodes,
+                                const std::filesystem::path &file, const std::vector<Frame> &frameList,
+                                const Dataset &single, int readBudget, std::atomic<bool> *cancel,
+                                const std::vector<std::string> &nodeIds, uint64_t revision) {
+        state.frameCount = int(frameList.size());
+        state.frameBefore = [&nodes, &file, &frameList, &single, readBudget, cancel](size_t node, int frame) {
+            return evaluateNodesAtFrame(nodes, node, frame, file, frameList, single, readBudget, cancel);
+        };
+        state.cachedSweep = [this, &nodeIds, revision](size_t node) -> std::optional<TrajectoryOutput> {
+            const std::lock_guard lock(trajectoryMutex);
+            if (revision != trajectoryRevision) return std::nullopt;
+            const auto found = trajectoryOutputs.find(nodeIds.at(node));
+            if (found == trajectoryOutputs.end()) return std::nullopt;
+            return found->second;
+        };
+        state.storeSweep = [this, &nodeIds, revision](size_t node, TrajectoryOutput output) {
+            const std::lock_guard lock(trajectoryMutex);
+            if (revision == trajectoryRevision)
+                trajectoryOutputs.insert_or_assign(nodeIds.at(node), std::move(output));
+        };
+    }
+    void forgetTrajectorySweeps() {
+        const std::lock_guard lock(trajectoryMutex);
+        ++trajectoryRevision;
+        trajectoryOutputs.clear();
+    }
     void launchPipeline() {
         if (pipelineBusy) return;
         std::vector<Modifier> executable;
@@ -1462,7 +1530,8 @@ struct App {
         pipelineJob = std::async(std::launch::async,
             [this, input = std::move(input), executable = std::move(executable),
              cachedPrefix = std::move(cachedPrefix), firstNode, checkpointTarget, currentFrame,
-             inputPath, frameSnapshot = std::move(frameSnapshot), readBudget]() mutable {
+             inputPath, frameSnapshot = std::move(frameSnapshot), readBudget,
+             nodeIds = pipelineJobNodeIds, revision = trajectoryRevision]() mutable {
                 // Displacement vectors nodes read their reference configuration
                 // from the raw data source at the requested frame; Freeze
                 // property nodes re-evaluate their upstream chain at the
@@ -1476,7 +1545,9 @@ struct App {
                 const bool hasFreeze = std::any_of(executable.begin(), executable.end(),
                     [](const Modifier &m) { return m.op == Op::FreezeProperty; });
                 Dataset freezeSource;
-                if (hasFreeze || (hasDisplacement && frameSnapshot.empty())) freezeSource = source;
+                const bool sweeps = std::any_of(executable.begin(), executable.end(),
+                    [](const Modifier &m) { return readsWholeTrajectory(m.op); });
+                if (hasFreeze || ((hasDisplacement || sweeps) && frameSnapshot.empty())) freezeSource = source;
                 if (hasDisplacement || hasFreeze)
                     referenceProvider = [&](size_t node) -> const Dataset & {
                         const Modifier &m = executable.at(node);
@@ -1519,6 +1590,9 @@ struct App {
                 // through a per-node accumulator owned by the app, keyed by
                 // node id so two unwrap nodes never share state.
                 ModifierFrameState frameState;
+                if (sweeps)
+                    attachTrajectoryAccess(frameState, executable, inputPath, frameSnapshot, freezeSource,
+                                           readBudget, &pipelineCancel, nodeIds, revision);
                 if (std::any_of(executable.begin(), executable.end(), [](const Modifier &m) {
                         return m.op == Op::UnwrapTrajectories;
                     })) {
@@ -1578,9 +1652,13 @@ struct App {
         const auto inputPath = path;
         std::vector<Frame> frameSnapshot = frames;
         const auto readBudget = budget;
+        std::vector<std::string> nodeIds;
+        for (int i = 0; i <= nodeIndex; ++i) nodeIds.push_back(mods[size_t(i)].id);
+        const uint64_t revision = trajectoryRevision;
         inspectorJob = std::async(std::launch::async,
             [this, input = std::move(input), executable = std::move(executable), currentFrame,
-             inputPath, frameSnapshot = std::move(frameSnapshot), readBudget]() mutable {
+             inputPath, frameSnapshot = std::move(frameSnapshot), readBudget,
+             nodeIds = std::move(nodeIds), revision]() mutable {
                 std::map<size_t, Dataset> rawFrameReferences;
                 std::map<size_t, Dataset> freezeReferences;
                 std::function<const Dataset &(size_t)> referenceProvider;
@@ -1589,7 +1667,9 @@ struct App {
                 const bool hasFreeze = std::any_of(executable.begin(), executable.end(),
                     [](const Modifier &m) { return m.op == Op::FreezeProperty; });
                 Dataset freezeSource;
-                if (hasFreeze || (hasDisplacement && frameSnapshot.empty())) freezeSource = input;
+                const bool sweeps = std::any_of(executable.begin(), executable.end(),
+                    [](const Modifier &m) { return readsWholeTrajectory(m.op); });
+                if (hasFreeze || ((hasDisplacement || sweeps) && frameSnapshot.empty())) freezeSource = input;
                 if (hasDisplacement || hasFreeze)
                     referenceProvider = [&](size_t node) -> const Dataset & {
                         const Modifier &m = executable.at(node);
@@ -1626,8 +1706,12 @@ struct App {
                                                     readBudget, nullptr, &inspectorCancel))
                             .first->second;
                     };
+                ModifierFrameState frameState;
+                if (sweeps)
+                    attachTrajectoryAccess(frameState, executable, inputPath, frameSnapshot, freezeSource,
+                                           readBudget, &inspectorCancel, nodeIds, revision);
                 return evaluate(std::move(input), executable, &inspectorCancel,
-                                &inspectorActiveNode, referenceProvider, currentFrame);
+                                &inspectorActiveNode, referenceProvider, currentFrame, frameState);
             });
     }
     void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
@@ -1646,6 +1730,7 @@ struct App {
             pipelineCheckpointNode=SIZE_MAX;
         }
         if (!preserveColorRanges) {
+            forgetTrajectorySweeps();
             for (size_t i = first; i < mods.size(); ++i)
                 if (mods[i].op == Op::ColorCoding && mods[i].colorAllFramesRange && i > first)
                     mods[i].colorAllFramesRange = false;
@@ -1707,6 +1792,13 @@ struct App {
             m.reduceOperation = 3;
         }
         if (op == Op::StructureFactor) { m.value = 0; m.upper = 8; }
+        if (op == Op::TimeSeries || op == Op::TimeAveraging) m.property.clear();
+        if (op == Op::SmoothTrajectory) { m.cspNeighbors = 5; m.adaptive = true; }
+        if (op == Op::DiffusionCoefficient) {
+            m.cspNeighbors = 1; m.value = 1;
+            m.histogramRangeStart = .1; m.histogramRangeEnd = .9;
+        }
+        if (op == Op::FindRings) { m.replicateN[0] = 3; m.replicateN[1] = 12; }
         if (op == Op::DifferenceBetweenFrames) m.property = "Position.X";
         if (op == Op::AtomicStrain) {
             // The neighbor search reaches half a periodic cell, so start inside that.
@@ -3415,6 +3507,7 @@ struct App {
         pipelineCheckpoint.reset();
         pipelineCheckpointNode=SIZE_MAX;
         unwrapAccumulators.clear();
+        if (p != path) forgetTrajectorySweeps();
         inspectorResult.reset();
         inspectorNode = -1;
         inspectorNodeId.clear();
@@ -10583,6 +10676,7 @@ struct App {
                     }
                     if (m.op == Op::SteinhardtOrderParameters) {
                         int neighbors = m.cspNeighbors;
+                        fitNextField("Number of neighbors", true);
                         if (ImGui::InputInt(loc::label("Number of neighbors"), &neighbors)) {
                             checkpoint();
                             m.cspNeighbors = std::clamp(neighbors, 1, 64);
@@ -10606,6 +10700,83 @@ struct App {
                                 found != result.data.globalAttributes.end())
                                 ImGui::Text("%s  %.0f", name, found->second);
                     }
+                    if (m.op == Op::TimeSeries || m.op == Op::TimeAveraging) {
+                        std::set<std::string> choices;
+                        for (const auto &[name, value] : result.data.globalAttributes) choices.insert(name);
+                        if (m.op == Op::TimeAveraging)
+                            for (const auto &name : pipelineInputPropertyChoices(source, mods,
+                                     std::min(modifierGraph.selected, mods.size()), true))
+                                choices.insert(name);
+                        if (ImGui::BeginCombo(loc::label(m.op == Op::TimeSeries ? "Global attribute" : "Input quantity"),
+                                              m.property.empty() ? loc::text("Choose...") : m.property.c_str())) {
+                            for (const auto &name : choices)
+                                if (ImGui::Selectable(name.c_str(), name == m.property)) {
+                                    checkpoint(); m.property = name; update();
+                                }
+                            ImGui::EndCombo();
+                        }
+                        recordUiTestItem(std::string("pipeline.sweep-input.") + m.id, "Input");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        if (m.op == Op::TimeAveraging) {
+                            bool replace = m.adaptive;
+                            if (ui_design::checkbox(loc::label("Replace original values"), &replace)) {
+                                checkpoint(); m.adaptive = replace; update();
+                            }
+                        }
+                        ImGui::TextDisabled(loc::text("Steps through every frame in the background. The result is kept until the pipeline changes."));
+                    }
+                    if (m.op == Op::SmoothTrajectory) {
+                        int window = m.cspNeighbors;
+                        fitNextField("Smoothing window size", true);
+                        if (ImGui::InputInt(loc::label("Smoothing window size"), &window)) {
+                            checkpoint(); m.cspNeighbors = std::clamp(window, 1, 1001); update();
+                        }
+                        recordUiTestItem(std::string("pipeline.smooth-window.") + m.id, "Smoothing window size");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        bool image = m.adaptive;
+                        if (ui_design::checkbox(loc::label("Use minimum image convention"), &image)) {
+                            checkpoint(); m.adaptive = image; update();
+                        }
+                        ImGui::TextDisabled(loc::text("Averages positions only. A window of 1 leaves positions unchanged, because AtomX has no sub-frame playback."));
+                    }
+                    if (m.op == Op::DiffusionCoefficient) {
+                        int stride = m.cspNeighbors;
+                        fitNextField("Origin stride", true);
+                        if (ImGui::InputInt(loc::label("Origin stride"), &stride)) {
+                            checkpoint(); m.cspNeighbors = std::max(stride, 1); update();
+                        }
+                        ImGui::SameLine();referenceHelp("analysis");
+                        float timeStep = m.value;
+                        fitNextField("Time per frame");
+                        if (ImGui::InputFloat(loc::label("Time per frame"), &timeStep, 0, 0, "%.6g") && timeStep > 0) {
+                            checkpoint(); m.value = timeStep; update();
+                        }
+                        double range[2]{m.histogramRangeStart, m.histogramRangeEnd};
+                        fitNextField("Fit window");
+                        if (ImGui::InputScalarN(loc::label("Fit window"), ImGuiDataType_Double, range, 2,
+                                                nullptr, nullptr, "%.3f") &&
+                            range[0] >= 0 && range[1] > range[0] && range[1] <= 1) {
+                            checkpoint(); m.histogramRangeStart = range[0]; m.histogramRangeEnd = range[1]; update();
+                        }
+                        ImGui::TextDisabled(loc::text("The fit window is a fraction of the longest lag time. D is in squared length per time unit, from MSD = 6 D t + b. Positions are unwrapped by the minimum image convention between frames."));
+                        if (const auto found = result.data.globalAttributes.find("Diffusion.coefficient");
+                            found != result.data.globalAttributes.end())
+                            ImGui::Text("D = %.6g", found->second);
+                    }
+                    if (m.op == Op::FindRings) {
+                        int sizes[2]{m.replicateN[0], m.replicateN[1]};
+                        fitNextField("Ring size range", true);
+                        if (ImGui::InputInt2(loc::label("Ring size range"), sizes) &&
+                            sizes[0] >= 3 && sizes[1] >= sizes[0] && sizes[1] <= 36) {
+                            checkpoint(); m.replicateN[0] = sizes[0]; m.replicateN[1] = sizes[1]; update();
+                        }
+                        recordUiTestItem(std::string("pipeline.ring-sizes.") + m.id, "Ring sizes");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        ImGui::TextDisabled(loc::text("Needs bonds. Finds shortest-path rings of up to 36 members. Rings are listed in Data Tables."));
+                        if (const auto found = result.data.globalAttributes.find("FindRings.ring_count");
+                            found != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("Rings: %.0f"), found->second);
+                    }
                     if (m.op == Op::SpatialBinning) {
                         auto edited = m;
                         bool changed = false;
@@ -10618,6 +10789,7 @@ struct App {
                         ImGui::SameLine();referenceHelp("analysis");
                         if (!counting) changed |= colorPropertyCombo("Input property", edited.property, true);
                         int bins[3]{edited.replicateN[0], edited.replicateN[1], edited.replicateN[2]};
+                        fitNextField("Bins along A, B, C");
                         if (ImGui::InputInt3(loc::label("Bins along A, B, C"), bins)) {
                             for (int axis = 0; axis < 3; ++axis) edited.replicateN[axis] = std::clamp(bins[axis], 1, 1000);
                             changed = true;
@@ -10645,13 +10817,13 @@ struct App {
                     if (m.op == Op::StructureFactor) {
                         float kMin = m.value, kMax = m.upper;
                         int bins = m.rdfBins;
-                        bool commit = false;
-                        ImGui::InputFloat(loc::label("Minimum k (1/Å)"), &kMin, 0, 0, "%.3f");
-                        commit |= ImGui::IsItemDeactivatedAfterEdit();
+                        fitNextField("Minimum k (1/Å)", true);
+                        bool commit = ImGui::InputFloat(loc::label("Minimum k (1/Å)"), &kMin, 0, 0, "%.3f");
                         ImGui::SameLine();referenceHelp("analysis");
-                        ImGui::InputFloat(loc::label("Maximum k (1/Å)"), &kMax, 0, 0, "%.3f");
+                        fitNextField("Maximum k (1/Å)");
+                        commit |= ImGui::InputFloat(loc::label("Maximum k (1/Å)"), &kMax, 0, 0, "%.3f");
                         recordUiTestItem(std::string("pipeline.sk-max.") + m.id, "Maximum k");
-                        commit |= ImGui::IsItemDeactivatedAfterEdit();
+                        fitNextField("Bins");
                         if (ImGui::InputInt(loc::label("Bins"), &bins)) commit = true;
                         bool onlySelected = m.cspOnlySelected;
                         if (ui_design::checkbox(loc::label("Use only selected particles"), &onlySelected)) commit = true;
@@ -10707,6 +10879,7 @@ struct App {
                         }
                         ImGui::SameLine();referenceHelp("analysis");
                         int frame = m.displacementRelative ? m.displacementOffset : m.displacementFrame;
+                        fitNextField(m.displacementRelative ? "Frame offset" : "Reference frame");
                         if (ImGui::InputInt(loc::label(m.displacementRelative ? "Frame offset" : "Reference frame"), &frame)) {
                             checkpoint();
                             if (m.displacementRelative) m.displacementOffset = frame;
@@ -10716,11 +10889,10 @@ struct App {
                         recordUiTestItem(std::string("pipeline.reference-frame.") + m.id, "Reference frame");
                         if (m.op == Op::AtomicStrain) {
                             float cutoff = m.value;
-                            ImGui::InputFloat(loc::label("Cutoff radius (Å)"), &cutoff, 0, 0, "%.3f");
+                            fitNextField("Cutoff radius (Å)");
+                            const bool edited = ImGui::InputFloat(loc::label("Cutoff radius (Å)"), &cutoff, 0, 0, "%.3f");
                             recordUiTestItem(std::string("pipeline.strain-cutoff.") + m.id, "Cutoff radius");
-                            if (ImGui::IsItemDeactivatedAfterEdit() && cutoff > 0) {
-                                checkpoint(); m.value = cutoff; update();
-                            }
+                            if (edited && cutoff > 0) { checkpoint(); m.value = cutoff; update(); }
                             ImGui::TextDisabled(loc::text("Green-Lagrangian strain, dimensionless. Particles with too few or coplanar reference neighbors report 0 and are counted as invalid."));
                             if (const auto found = result.data.globalAttributes.find("AtomicStrain.invalid_particle_count");
                                 found != result.data.globalAttributes.end())
@@ -12192,12 +12364,16 @@ struct App {
                 beginCard("Analysis");
                 operation(Op::AtomicStrain,"Compute each particle's local deformation gradient from its reference-frame neighbors; publishes shear and volumetric strain and the non-affine residual.");
                 for (auto name : {"Bader charge integration", "Bond order"}) planned(name);
+                planned("Elastic strain calculation");
+                operation(Op::FindRings,"Find shortest-path rings in the bond topology and tabulate their sizes.");
+                planned("Grain segmentation");
                 operation(Op::BondAngleDistribution,"Build a 0–180 degree histogram from pairs of incident bonds, resolving periodic image shifts.");
                 operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
                 operation(Op::ClusterAnalysis,"Build connected components by a periodic cutoff or existing bond topology; adds per-particle Cluster IDs and a cluster-size table.");
                 operation(Op::DifferenceBetweenFrames,"Subtract a particle property and the global attributes of a reference frame. This is a plain difference with no periodic handling.");
                 operation(Op::CoordinationAnalysis,"Compute periodic neighbor counts and publish the Coordination particle property.");
-                planned("Diffusion coefficient");
+                operation(Op::DiffusionCoefficient,"Compute the windowed mean-squared displacement over the whole trajectory and fit the self-diffusion coefficient.");
+                planned("Dislocation analysis (DXA)");
                 operation(Op::DisplacementVectors,"Match particles against a reference animation frame and publish the Displacement vector and Displacement Magnitude particle properties.");
                 operation(Op::Histogram,"Build a finite-value histogram data table for a particle scalar or position component.");
                 operation(Op::RadialDistribution,"Compute a periodic 3D radial distribution table from the current pipeline data.");
@@ -12206,7 +12382,9 @@ struct App {
                 operation(Op::SpatialBinning,"Reduce a particle property over a 1D, 2D or 3D grid aligned with the simulation cell, as an exportable data table.");
                 planned("Spatial correlation function");
                 operation(Op::StructureFactor,"Compute S(k) by the direct method over the wave vectors of a fully periodic cell.");
-                for (auto name : {"Time averaging", "Time series", "Voronoi analysis"}) planned(name);
+                operation(Op::TimeAveraging,"Average a particle property or global attribute over the whole trajectory.");
+                operation(Op::TimeSeries,"Tabulate a global attribute at every frame of the trajectory.");
+                planned("Voronoi analysis");
                 operation(Op::WignerSeitzAnalysis,"Assign particles to their nearest reference-frame sites to count vacancies and interstitials.");
                 planned("Measure");
                 endCard();
@@ -12223,7 +12401,7 @@ struct App {
                 operation(Op::Rotate,"Rotate positions and cell vectors around an axis (degrees).");
                 operation(Op::Scale,"Scale positions and simulation cell uniformly.");
                 operation(Op::Slice,"Cut the structure at a plane: keep one side, or a slab of adjustable width.");
-                planned("Smooth trajectory");
+                operation(Op::SmoothTrajectory,"Replace positions by their average over a window of frames centered on the current one.");
                 operation(Op::CenterOfMassCorrection,"Remove center-of-mass drift by shifting particles to match a reference frame. Unwrap wrapped trajectories first.");
                 planned("Hide selected");
                 operation(Op::Translate,"Translate particle positions along an axis.");
