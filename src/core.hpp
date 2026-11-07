@@ -794,6 +794,10 @@ enum class Op {
     ,WignerSeitzAnalysis
     ,CenterOfMassCorrection
     ,ShrinkWrapBox
+    ,DifferenceBetweenFrames
+    ,SpatialBinning
+    ,StructureFactor
+    ,IdentifyDiamond
 };
 struct Modifier {
     Op op;
@@ -876,6 +880,12 @@ struct Modifier {
     // Particle types checked in the Select type panel; empty falls back to the
     // legacy single-type field (m.type < 0 selects nothing).
     std::vector<uint32_t> selectedTypes;
+    // Project archives store a fixed field list, so newer modifiers reuse these fields:
+    // displacementFrame/Relative/Offset: reference frame of every reference-based node.
+    // cspNeighbors: Steinhardt neighbor count. replicateN: Spatial binning bins per axis.
+    // cspOnlySelected: "only selected" options, and Select new elements for frame differences.
+    // adaptive: Wigner-Seitz site output, tolerate new elements, 1D binning derivative.
+    // value/upper: Structure factor minimum/maximum k. rdfBins: its histogram bins.
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -940,6 +950,13 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
         case Op::WignerSeitzAnalysis:
             if (modifier.adaptive) scalar.insert("Occupancy");
             else { scalar.insert("Site Index"); scalar.insert("Site Occupancy"); }
+            break;
+        case Op::DifferenceBetweenFrames:
+            if (vector.count(modifier.property)) vector.insert(modifier.property + " (Difference)");
+            else if (!modifier.property.empty()) scalar.insert(modifier.property + " (Difference)");
+            break;
+        case Op::IdentifyDiamond:
+            scalar.insert("Structure Type");
             break;
         default:
             break;
@@ -1036,6 +1053,20 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
     if (modifier.op==Op::CenterOfMassCorrection)
         add(Kind::GlobalAttributes,"Center of mass");
     if (modifier.op==Op::ShrinkWrapBox) add(Kind::Cell,"Simulation cell");
+    if (modifier.op==Op::DifferenceBetweenFrames) {
+        add(Kind::Particles,modifier.property+" (Difference)");
+        add(Kind::GlobalAttributes,"Attribute differences");
+    }
+    if (modifier.op==Op::SpatialBinning) add(Kind::Table,"Spatial binning");
+    if (modifier.op==Op::StructureFactor) {
+        add(Kind::Table,"Structure factor");
+        add(Kind::GlobalAttributes,"Structure factor peak");
+    }
+    if (modifier.op==Op::IdentifyDiamond) {
+        add(Kind::Particles,"Diamond structure types");
+        add(Kind::GlobalAttributes,"Structure counts");
+        add(Kind::Table,"Identify diamond structure");
+    }
     if (modifier.op==Op::ClusterAnalysis) {
         add(Kind::Particles,"Cluster IDs");
         add(Kind::GlobalAttributes,"Cluster statistics");
@@ -2117,6 +2148,10 @@ inline const char *opName(Op op) {
     case Op::WignerSeitzAnalysis: return "Wigner-Seitz defect analysis";
     case Op::CenterOfMassCorrection: return "Center of mass correction";
     case Op::ShrinkWrapBox: return "Shrink-wrap simulation box";
+    case Op::DifferenceBetweenFrames: return "Difference between frames";
+    case Op::SpatialBinning: return "Spatial binning";
+    case Op::StructureFactor: return "Structure factor";
+    case Op::IdentifyDiamond: return "Identify diamond structure";
     default:
         return "Color by type";
     }
@@ -2169,6 +2204,7 @@ struct ModifierExecutionError : std::runtime_error {
         : std::runtime_error(message), nodeIndex(node) {}
 };
 #include "analysis_modifiers.inc"
+#include "analysis_modifiers_fields.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -2912,6 +2948,27 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             }
             if (m.op == Op::ShrinkWrapBox) {
                 shrinkWrapCell(r.data);
+                continue;
+            }
+            if (m.op == Op::SpatialBinning) {
+                r.data.tables.push_back(binParticles(r.data, m.property, m.replicateN, m.reduceOperation,
+                                                     m.cspOnlySelected ? &r.selected : nullptr, m.adaptive, cancel));
+                continue;
+            }
+            if (m.op == Op::StructureFactor) {
+                computeStructureFactor(r.data, m.value, m.upper, m.rdfBins,
+                                       m.cspOnlySelected ? &r.selected : nullptr, cancel);
+                continue;
+            }
+            if (m.op == Op::IdentifyDiamond) {
+                computeDiamondStructure(r.data, m.cspOnlySelected ? &r.selected : nullptr, cancel);
+                continue;
+            }
+            if (m.op == Op::DifferenceBetweenFrames) {
+                if (!referenceProvider)
+                    throw std::runtime_error("Difference between frames has no reference configuration provider");
+                computeFrameDifference(r, referenceProvider(modifierIndex), m.property, m.adaptive,
+                                       m.cspOnlySelected, cancel);
                 continue;
             }
             if (m.op == Op::AtomicStrain || m.op == Op::WignerSeitzAnalysis ||

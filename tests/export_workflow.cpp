@@ -2158,7 +2158,11 @@ int main(int argc,char **argv) {
                      std::tuple{"Atomic strain",Op::AtomicStrain,"Shear Strain"},
                      std::tuple{"Wigner-Seitz defect analysis",Op::WignerSeitzAnalysis,"Site Occupancy"},
                      std::tuple{"Center of mass correction",Op::CenterOfMassCorrection,""},
-                     std::tuple{"Shrink-wrap simulation box",Op::ShrinkWrapBox,""}}) {
+                     std::tuple{"Shrink-wrap simulation box",Op::ShrinkWrapBox,""},
+                     std::tuple{"Difference between frames",Op::DifferenceBetweenFrames,"Position.X (Difference)"},
+                     std::tuple{"Spatial binning",Op::SpatialBinning,""},
+                     std::tuple{"Structure factor",Op::StructureFactor,""},
+                     std::tuple{"Identify diamond structure",Op::IdentifyDiamond,"Structure Type"}}) {
                 strcpy_s(app.modifierSearch,name);
                 click("pipeline.add-modification");
                 frame();

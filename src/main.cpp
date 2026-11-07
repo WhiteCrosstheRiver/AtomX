@@ -596,7 +596,9 @@ static const char *opCategory(Op op) {
                                op == Op::BondLengthDistribution || op == Op::BondAngleDistribution ||
                                op == Op::ScatterPlot || op == Op::SteinhardtOrderParameters ||
                                op == Op::AcklandJonesAnalysis || op == Op::AtomicStrain ||
-                               op == Op::WignerSeitzAnalysis
+                               op == Op::WignerSeitzAnalysis || op == Op::DifferenceBetweenFrames ||
+                               op == Op::SpatialBinning || op == Op::StructureFactor ||
+                               op == Op::IdentifyDiamond
                          ? "Analysis"
                          : "Modification";
 }
@@ -604,7 +606,16 @@ static const char *opCategory(Op op) {
 // Nodes that read a raw reference frame of the loaded trajectory.
 static bool usesReferenceFrame(Op op) {
     return op == Op::DisplacementVectors || op == Op::AtomicStrain ||
-           op == Op::WignerSeitzAnalysis || op == Op::CenterOfMassCorrection;
+           op == Op::WignerSeitzAnalysis || op == Op::CenterOfMassCorrection ||
+           op == Op::DifferenceBetweenFrames;
+}
+// Frame differences need upstream properties, so the reference frame runs the nodes before it.
+static Dataset evaluatePrefixOn(Dataset frame, const std::vector<Modifier> &nodes, size_t node,
+                                std::atomic<bool> *cancel) {
+    const std::vector<Modifier> prefix(nodes.begin(), nodes.begin() + node);
+    const size_t count = frame.atoms.size();
+    PipelineResult input{std::move(frame), std::vector<uint8_t>(count), std::vector<uint8_t>(count, 1)};
+    return evaluateFrom(std::move(input), prefix, 0, cancel).data;
 }
 
 // One executable entry of the Quick command search (Ctrl+P). The single
@@ -633,7 +644,8 @@ static const std::vector<Command> &commandRegistry() {
                       Op::BondLengthDistribution, Op::BondAngleDistribution, Op::DisplacementVectors,
                       Op::SteinhardtOrderParameters, Op::AcklandJonesAnalysis, Op::AtomicStrain,
                       Op::WignerSeitzAnalysis, Op::CenterOfMassCorrection, Op::ShrinkWrapBox,
-                      Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
+                      Op::IdentifyDiamond, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -1486,9 +1498,18 @@ struct App {
                                 .first->second;
                         }
                         // A single structure has no frame index; it is its own frame 0.
-                        if (frameSnapshot.empty()) return freezeSource;
-                        const int frame = resolveDisplacementReferenceFrame(
+                        if (frameSnapshot.empty() && m.op != Op::DifferenceBetweenFrames) return freezeSource;
+                        const int frame = frameSnapshot.empty() ? 0 : resolveDisplacementReferenceFrame(
                             m, currentFrame, int(frameSnapshot.size()));
+                        if (m.op == Op::DifferenceBetweenFrames) {
+                            const auto cached = freezeReferences.find(node);
+                            if (cached != freezeReferences.end()) return cached->second;
+                            return freezeReferences.emplace(node, evaluatePrefixOn(
+                                frameSnapshot.empty() ? freezeSource
+                                    : io::read(inputPath, frameSnapshot.at(size_t(frame)), readBudget,
+                                               nullptr, &pipelineCancel),
+                                executable, node, &pipelineCancel)).first->second;
+                        }
                         return rawFrameReferences
                             .emplace(node, io::read(inputPath, frameSnapshot.at(size_t(frame)),
                                                     readBudget, nullptr, &pipelineCancel))
@@ -1588,9 +1609,18 @@ struct App {
                                 .first->second;
                         }
                         // A single structure has no frame index; it is its own frame 0.
-                        if (frameSnapshot.empty()) return freezeSource;
-                        const int frame = resolveDisplacementReferenceFrame(
+                        if (frameSnapshot.empty() && m.op != Op::DifferenceBetweenFrames) return freezeSource;
+                        const int frame = frameSnapshot.empty() ? 0 : resolveDisplacementReferenceFrame(
                             m, currentFrame, int(frameSnapshot.size()));
+                        if (m.op == Op::DifferenceBetweenFrames) {
+                            const auto cached = freezeReferences.find(node);
+                            if (cached != freezeReferences.end()) return cached->second;
+                            return freezeReferences.emplace(node, evaluatePrefixOn(
+                                frameSnapshot.empty() ? freezeSource
+                                    : io::read(inputPath, frameSnapshot.at(size_t(frame)), readBudget,
+                                               nullptr, &inspectorCancel),
+                                executable, node, &inspectorCancel)).first->second;
+                        }
                         return rawFrameReferences
                             .emplace(node, io::read(inputPath, frameSnapshot.at(size_t(frame)),
                                                     readBudget, nullptr, &inspectorCancel))
@@ -1671,6 +1701,13 @@ struct App {
                               m.sliceNormal[2] * center[2];
         }
         if (op == Op::Scale) m.value = 1;
+        if (op == Op::SpatialBinning) {
+            m.replicateN[0] = 50; m.replicateN[1] = 1; m.replicateN[2] = 1;
+            m.property.clear(); // Counts particles until a property is chosen.
+            m.reduceOperation = 3;
+        }
+        if (op == Op::StructureFactor) { m.value = 0; m.upper = 8; }
+        if (op == Op::DifferenceBetweenFrames) m.property = "Position.X";
         if (op == Op::AtomicStrain) {
             // The neighbor search reaches half a periodic cell, so start inside that.
             double cutoff = 3;
@@ -10569,8 +10606,98 @@ struct App {
                                 found != result.data.globalAttributes.end())
                                 ImGui::Text("%s  %.0f", name, found->second);
                     }
+                    if (m.op == Op::SpatialBinning) {
+                        auto edited = m;
+                        bool changed = false;
+                        bool counting = edited.property.empty();
+                        if (ui_design::checkbox(loc::label("Count particles"), &counting)) {
+                            edited.property = counting ? "" : "Position.X";
+                            changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.binning-count.") + m.id, "Count particles");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        if (!counting) changed |= colorPropertyCombo("Input property", edited.property, true);
+                        int bins[3]{edited.replicateN[0], edited.replicateN[1], edited.replicateN[2]};
+                        if (ImGui::InputInt3(loc::label("Bins along A, B, C"), bins)) {
+                            for (int axis = 0; axis < 3; ++axis) edited.replicateN[axis] = std::clamp(bins[axis], 1, 1000);
+                            changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.binning-bins.") + m.id, "Bins");
+                        int operation = edited.reduceOperation;
+                        if (ImGui::Combo(loc::label("Reduction"), &operation,
+                                         loc::items("Minimum\0Maximum\0Mean\0Sum\0Sum / bin volume\0"))) {
+                            edited.reduceOperation = operation;
+                            changed = true;
+                        }
+                        changed |= ui_design::checkbox(loc::label("Use only selected elements"), &edited.cspOnlySelected);
+                        const int active = int(edited.replicateN[0] > 1) + int(edited.replicateN[1] > 1) + int(edited.replicateN[2] > 1);
+                        if (active != 1) edited.adaptive = false;
+                        ImGui::BeginDisabled(active != 1);
+                        changed |= ui_design::checkbox(loc::label("Compute first derivative"), &edited.adaptive);
+                        ImGui::EndDisabled();
+                        ImGui::TextDisabled(loc::text("Bins follow the cell vectors. Results are in Data Tables, and empty bins report 0."));
+                        if (changed) {
+                            checkpoint();
+                            static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited);
+                            update();
+                        }
+                    }
+                    if (m.op == Op::StructureFactor) {
+                        float kMin = m.value, kMax = m.upper;
+                        int bins = m.rdfBins;
+                        bool commit = false;
+                        ImGui::InputFloat(loc::label("Minimum k (1/Å)"), &kMin, 0, 0, "%.3f");
+                        commit |= ImGui::IsItemDeactivatedAfterEdit();
+                        ImGui::SameLine();referenceHelp("analysis");
+                        ImGui::InputFloat(loc::label("Maximum k (1/Å)"), &kMax, 0, 0, "%.3f");
+                        recordUiTestItem(std::string("pipeline.sk-max.") + m.id, "Maximum k");
+                        commit |= ImGui::IsItemDeactivatedAfterEdit();
+                        if (ImGui::InputInt(loc::label("Bins"), &bins)) commit = true;
+                        bool onlySelected = m.cspOnlySelected;
+                        if (ui_design::checkbox(loc::label("Use only selected particles"), &onlySelected)) commit = true;
+                        if (commit && kMin >= 0 && kMax > kMin) {
+                            checkpoint();
+                            m.value = kMin; m.upper = kMax;
+                            m.rdfBins = std::clamp(bins, 1, 4096);
+                            m.cspOnlySelected = onlySelected;
+                            update();
+                        }
+                        ImGui::TextDisabled(loc::text("Direct method. k includes the factor of 2 pi, and a larger maximum k takes much longer. Needs a fully periodic cell."));
+                        if (const auto found = result.data.globalAttributes.find("StructureFactor.peak_value");
+                            found != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("Peak S(k) %.4g at k = %.4g"), found->second,
+                                                result.data.globalAttributes["StructureFactor.peak_k"]);
+                    }
+                    if (m.op == Op::IdentifyDiamond) {
+                        bool onlySelected = m.cspOnlySelected;
+                        if (ui_design::checkbox(loc::label("Use only selected particles"), &onlySelected)) {
+                            checkpoint(); m.cspOnlySelected = onlySelected; update();
+                        }
+                        ImGui::SameLine();referenceHelp("analysis");
+                        for (const char *name : {"Cubic diamond", "Cubic diamond (1st neighbor)", "Cubic diamond (2nd neighbor)",
+                                                 "Hexagonal diamond", "Hexagonal diamond (1st neighbor)",
+                                                 "Hexagonal diamond (2nd neighbor)", "Other"})
+                            if (const auto found = result.data.globalAttributes.find(std::string("IdentifyDiamond.counts.") + name);
+                                found != result.data.globalAttributes.end())
+                                ImGui::Text("%s  %.0f", name, found->second);
+                    }
+                    if (m.op == Op::DifferenceBetweenFrames) {
+                        auto edited = m;
+                        if (colorPropertyCombo("Input property", edited.property, true)) {
+                            checkpoint(); m.property = edited.property; update();
+                        }
+                        recordUiTestItem(std::string("pipeline.difference-property.") + m.id, "Input property");
+                        bool tolerate = m.adaptive, selectNew = m.cspOnlySelected;
+                        if (ui_design::checkbox(loc::label("Tolerate newly appearing elements"), &tolerate)) {
+                            checkpoint(); m.adaptive = tolerate; update();
+                        }
+                        if (ui_design::checkbox(loc::label("Select newly appearing elements"), &selectNew)) {
+                            checkpoint(); m.cspOnlySelected = selectNew; update();
+                        }
+                        ImGui::TextDisabled(loc::text("A plain subtraction with no periodic handling. Use Displacement vectors for positions."));
+                    }
                     if (m.op == Op::AtomicStrain || m.op == Op::WignerSeitzAnalysis ||
-                        m.op == Op::CenterOfMassCorrection) {
+                        m.op == Op::CenterOfMassCorrection || m.op == Op::DifferenceBetweenFrames) {
                         ImGui::SeparatorText(loc::text("Reference configuration"));
                         bool changed = ImGui::RadioButton(loc::label("Fixed frame"), !m.displacementRelative);
                         if (changed) { checkpoint(); m.displacementRelative = false; update(); }
@@ -12067,7 +12194,8 @@ struct App {
                 for (auto name : {"Bader charge integration", "Bond order"}) planned(name);
                 operation(Op::BondAngleDistribution,"Build a 0–180 degree histogram from pairs of incident bonds, resolving periodic image shifts.");
                 operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
-                operation(Op::ClusterAnalysis,"Build connected components by a periodic cutoff or existing bond topology; adds per-particle Cluster IDs and a cluster-size table."); planned("Difference between frames");
+                operation(Op::ClusterAnalysis,"Build connected components by a periodic cutoff or existing bond topology; adds per-particle Cluster IDs and a cluster-size table.");
+                operation(Op::DifferenceBetweenFrames,"Subtract a particle property and the global attributes of a reference frame. This is a plain difference with no periodic handling.");
                 operation(Op::CoordinationAnalysis,"Compute periodic neighbor counts and publish the Coordination particle property.");
                 planned("Diffusion coefficient");
                 operation(Op::DisplacementVectors,"Match particles against a reference animation frame and publish the Displacement vector and Displacement Magnitude particle properties.");
@@ -12075,7 +12203,10 @@ struct App {
                 operation(Op::RadialDistribution,"Compute a periodic 3D radial distribution table from the current pipeline data.");
                 operation(Op::ReduceProperty,"Reduce a scalar particle property to a global minimum, maximum, mean, or sum.");
                 operation(Op::ScatterPlot,"Plot two upstream particle properties and export the finite data pairs as a table; large inputs are deterministically sampled.");
-                for (auto name : {"Spatial binning", "Spatial correlation function", "Structure factor", "Time averaging", "Time series", "Voronoi analysis"}) planned(name);
+                operation(Op::SpatialBinning,"Reduce a particle property over a 1D, 2D or 3D grid aligned with the simulation cell, as an exportable data table.");
+                planned("Spatial correlation function");
+                operation(Op::StructureFactor,"Compute S(k) by the direct method over the wave vectors of a fully periodic cell.");
+                for (auto name : {"Time averaging", "Time series", "Voronoi analysis"}) planned(name);
                 operation(Op::WignerSeitzAnalysis,"Assign particles to their nearest reference-frame sites to count vacancies and interstitials.");
                 planned("Measure");
                 endCard();
@@ -12102,11 +12233,12 @@ struct App {
                 ImGui::TableNextColumn();
                 beginCard("Structure identification");
                 operation(Op::AcklandJonesAnalysis,"Classify FCC, HCP, BCC and icosahedral environments from the bond-angle distribution of each particle.");
+                operation(Op::IdentifyDiamond,"Identify cubic and hexagonal diamond atoms and their neighbor shells from the second-neighbor environment.");
                 operation(Op::SteinhardtOrderParameters,"Compute the q4 and q6 bond-orientational order parameters of every particle from its nearest neighbors.");
                 operation(Op::CentrosymmetryParameter,"Computes the centrosymmetry parameter to identify atoms in defective crystal environments (stacking faults, surfaces, dislocations).");
                 planned("Chill+");
                 operation(Op::CommonNeighborAnalysis,"Fixed-cutoff Honeycutt–Andersen pair signatures; FCC and BCC are verified against periodic reference crystals. Unsupported or ambiguous motifs remain Other.");
-                for (auto name : {"Identify diamond structure", "Polyhedral template matching", "VoroTop analysis"}) planned(name);
+                for (auto name : {"Polyhedral template matching", "VoroTop analysis"}) planned(name);
                 endCard();
                 beginCard("Visualization");
                 for (auto name : {"Add text labels", "Construct surface mesh", "Coordination polyhedra"}) planned(name);

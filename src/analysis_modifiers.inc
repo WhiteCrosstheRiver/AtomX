@@ -200,34 +200,43 @@ inline void computeAcklandJones(Dataset &data, std::atomic<bool> *cancel) {
 
 // ---- Reference-configuration helpers ------------------------------------------
 
-// For each current particle, the index of the matching reference particle. Equal
-// counts pair by index; otherwise Particle Identifier on both sides decides.
+inline constexpr uint32_t noReferenceParticle = std::numeric_limits<uint32_t>::max();
+// For each current particle, the index of the matching reference particle. Unique
+// Particle Identifiers on both sides decide, because some codes reorder particles
+// between frames; without them equal counts pair by storage order. With allowNew a
+// particle absent from the reference maps to noReferenceParticle instead of failing.
 inline std::vector<uint32_t> matchReferenceParticles(const Dataset &data, const Dataset &reference,
-                                                     std::atomic<bool> *cancel) {
+                                                     std::atomic<bool> *cancel, bool allowNew = false) {
     const size_t count = data.atoms.size(), referenceCount = reference.atoms.size();
     std::vector<uint32_t> mapping(count);
-    if (referenceCount == count) {
+    const auto byOrder = [&] {
         for (size_t i = 0; i < count; ++i) mapping[i] = uint32_t(i);
         return mapping;
-    }
+    };
     const auto referenceIds = reference.scalarProperties.find("Particle Identifier");
     const auto currentIds = data.scalarProperties.find("Particle Identifier");
-    if (referenceIds == reference.scalarProperties.end() ||
-        currentIds == data.scalarProperties.end() ||
-        referenceIds->second.size() != referenceCount || currentIds->second.size() != count)
-        throw std::runtime_error("Particle counts of the reference and current configuration do not match.");
+    const bool haveIdentifiers = referenceIds != reference.scalarProperties.end() &&
+        currentIds != data.scalarProperties.end() &&
+        referenceIds->second.size() == referenceCount && currentIds->second.size() == count;
     std::unordered_map<double, uint32_t> byIdentifier;
-    byIdentifier.reserve(referenceCount * 2);
-    for (size_t i = 0; i < referenceCount; ++i) {
-        if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
-        byIdentifier.emplace(referenceIds->second[i], uint32_t(i));
+    bool unique = haveIdentifiers;
+    if (haveIdentifiers) {
+        byIdentifier.reserve(referenceCount * 2);
+        for (size_t i = 0; i < referenceCount && unique; ++i) {
+            if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+            unique = byIdentifier.emplace(referenceIds->second[i], uint32_t(i)).second;
+        }
+    }
+    if (!unique) {
+        if (referenceCount == count) return byOrder();
+        throw std::runtime_error("Particle counts of the reference and current configuration do not match.");
     }
     for (size_t i = 0; i < count; ++i) {
         if ((i & 65535) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
         const auto found = byIdentifier.find(currentIds->second[i]);
-        if (found == byIdentifier.end())
-            throw std::runtime_error("Particle counts of the reference and current configuration do not match.");
-        mapping[i] = found->second;
+        if (found != byIdentifier.end()) mapping[i] = found->second;
+        else if (allowNew) mapping[i] = noReferenceParticle;
+        else throw std::runtime_error("Particle counts of the reference and current configuration do not match.");
     }
     return mapping;
 }

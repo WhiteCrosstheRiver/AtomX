@@ -509,8 +509,339 @@ static void testPipeline() {
     }
 }
 
+static void testReferenceMatching() {
+    // Regression: equal counts with reordered identifiers must not pair by storage order.
+    Dataset reference = fcc(3);
+    auto &ids = reference.scalarProperties["Particle Identifier"];
+    ids.resize(reference.atoms.size());
+    std::iota(ids.begin(), ids.end(), 1.0);
+    Dataset reordered = reference;
+    std::reverse(reordered.atoms.begin(), reordered.atoms.end());
+    auto &newIds = reordered.scalarProperties["Particle Identifier"];
+    std::reverse(newIds.begin(), newIds.end());
+    computeDisplacements(reordered, reference, Modifier{Op::DisplacementVectors});
+    const auto &moved = reordered.scalarProperties.at("Displacement Magnitude");
+    check(*std::max_element(moved.begin(), moved.end()) < 1e-6, "displacements follow identifiers, not storage order");
+    const auto mapping = matchReferenceParticles(reordered, reference, nullptr);
+    check(mapping.front() == reference.atoms.size() - 1, "the first reordered particle maps to the last reference particle");
+
+    Dataset duplicates = reference;
+    duplicates.scalarProperties["Particle Identifier"].assign(reference.atoms.size(), 7);
+    Dataset copy = duplicates;
+    check(matchReferenceParticles(copy, duplicates, nullptr)[4] == 4, "non-unique identifiers fall back to storage order");
+}
+
+static void testFrameDifference() {
+    Dataset reference = fcc(2);
+    const size_t n = reference.atoms.size();
+    auto &ids = reference.scalarProperties["Particle Identifier"];
+    ids.resize(n);
+    std::iota(ids.begin(), ids.end(), 1.0);
+    reference.scalarProperties["Energy"].assign(n, 1.5);
+    reference.vectorProperties["Velocity"].assign(n, Vec3{1, 2, 3});
+    reference.globalAttributes["Temperature"] = 300;
+    reference.globalAttributes["OnlyHere"] = 1;
+
+    Dataset current = reference;
+    current.scalarProperties["Energy"][2] = 4;
+    current.vectorProperties["Velocity"][1] = {2, 2, 1};
+    current.globalAttributes["Temperature"] = 310;
+    auto scalar = resultOf(current);
+    computeFrameDifference(scalar, reference, "Energy", false, false, nullptr);
+    near(scalar.data.scalarProperties.at("Energy (Difference)")[2], 2.5, 1e-12, "scalar difference");
+    near(scalar.data.scalarProperties.at("Energy (Difference)")[3], 0, 0, "unchanged particle");
+    near(attribute(scalar.data, "Temperature (Difference)"), 10, 1e-12, "global attribute difference");
+
+    auto vector = resultOf(current);
+    computeFrameDifference(vector, reference, "Velocity", false, false, nullptr);
+    const auto &dv = vector.data.vectorProperties.at("Velocity (Difference)")[1];
+    near(dv.x, 1, 1e-6, "vector X"); near(dv.y, 0, 1e-6, "vector Y"); near(dv.z, -2, 1e-6, "vector Z");
+    check(vector.data.propertyComponents.count("Velocity (Difference)") == 1, "the vector output has components");
+
+    auto component = resultOf(current);
+    computeFrameDifference(component, reference, "Velocity.X", false, false, nullptr);
+    near(component.data.scalarProperties.at("Velocity.X (Difference)")[1], 1, 1e-6, "vector component difference");
+
+    // No periodic handling, as the manual states.
+    Dataset wrapped = reference;
+    wrapped.atoms[0].x += float(reference.cell[0]);
+    auto plain = resultOf(wrapped);
+    computeFrameDifference(plain, reference, "Position.X", false, false, nullptr);
+    near(plain.data.scalarProperties.at("Position.X (Difference)")[0], reference.cell[0], 1e-5, "a wrapped jump stays a plain difference");
+
+    // Particles removed since the reference are fine; reordering is matched by identifier.
+    Dataset fewer = current;
+    fewer.atoms.erase(fewer.atoms.begin());
+    for (auto *values : {&fewer.scalarProperties["Particle Identifier"], &fewer.scalarProperties["Energy"]})
+        values->erase(values->begin());
+    fewer.vectorProperties["Velocity"].erase(fewer.vectorProperties["Velocity"].begin());
+    auto removed = resultOf(fewer);
+    computeFrameDifference(removed, reference, "Energy", false, false, nullptr);
+    near(removed.data.scalarProperties.at("Energy (Difference)")[1], 2.5, 1e-12, "removal keeps identifier matching");
+
+    // Particles new since the reference.
+    Dataset grown = current;
+    grown.atoms.push_back({1, 1, 1, 0});
+    grown.scalarProperties["Particle Identifier"].push_back(9999);
+    grown.scalarProperties["Energy"].push_back(50);
+    grown.vectorProperties["Velocity"].push_back({0, 0, 0});
+    auto strict = resultOf(grown);
+    throwsWith([&] { computeFrameDifference(strict, reference, "Energy", false, false, nullptr); },
+               "do not match", "new particles are an error by default");
+    auto tolerant = resultOf(grown);
+    computeFrameDifference(tolerant, reference, "Energy", true, true, nullptr);
+    near(tolerant.data.scalarProperties.at("Energy (Difference)")[n], 0, 0, "a new particle reports 0");
+    near(attribute(tolerant.data, "DifferenceBetweenFrames.new_particles"), 1, 0, "new particles are counted");
+    check(tolerant.selected[n] == 1 && tolerant.selected[0] == 0, "only the new particle is selected");
+
+    auto missing = resultOf(current);
+    throwsWith([&] { computeFrameDifference(missing, reference, "", false, false, nullptr); }, "requires a particle property", "no property");
+    Dataset noEnergy = reference;
+    noEnergy.scalarProperties.erase("Energy");
+    auto noReference = resultOf(current);
+    bool threw = false;
+    try { computeFrameDifference(noReference, noEnergy, "Energy", false, false, nullptr); } catch (const std::exception &) { threw = true; }
+    check(threw, "a property absent from the reference is an error");
+}
+
+static std::vector<std::vector<std::string>> binned(const Dataset &d, const std::string &property, std::array<int, 3> bins,
+                                                    int operation, const std::vector<uint8_t> *selection = nullptr,
+                                                    bool derivative = false) {
+    return binParticles(d, property, bins.data(), operation, selection, derivative, nullptr).rows;
+}
+static void testSpatialBinning() {
+    Dataset d;
+    d.species = {"X"};
+    d.cell = {10, 0, 0, 0, 10, 0, 0, 0, 10};
+    d.pbc = {true, true, true};
+    d.atoms = {{1, 1, 1, 0}, {2, 2, 2, 0}, {7, 1, 1, 0}, {-1, 1, 1, 0}, {16, 1, 1, 0}};
+    d.scalarProperties["T"] = {2, 4, 10, 20, 30};
+    const auto counts = binned(d, "", {2, 1, 1}, 3);
+    check(counts.size() == 2, "two bins give two rows");
+    near(std::stod(counts[0][6]), 2, 0, "the low half holds two particles");
+    near(std::stod(counts[1][6]), 3, 0, "wrapped particles land in the high half");
+    near(std::stod(counts[0][7]), 2, 0, "population column");
+    near(std::stod(counts[0][3]), 2.5, 1e-12, "bin center along the cell vector");
+    near(std::stod(binned(d, "T", {2, 1, 1}, 2)[0][6]), 3, 1e-12, "mean");
+    near(std::stod(binned(d, "T", {2, 1, 1}, 0)[1][6]), 10, 1e-12, "minimum");
+    near(std::stod(binned(d, "T", {2, 1, 1}, 1)[1][6]), 30, 1e-12, "maximum");
+    near(std::stod(binned(d, "T", {2, 1, 1}, 3)[1][6]), 60, 1e-12, "sum");
+    near(std::stod(binned(d, "", {2, 1, 1}, 4)[0][6]), 2.0 / 500, 1e-12, "sum per bin volume is a number density");
+    near(std::stod(binned(d, "", {5, 1, 1}, 2)[2][6]), 0, 0, "an empty bin reports 0");
+    const std::vector<uint8_t> selected{1, 0, 0, 0, 1};
+    near(std::stod(binned(d, "", {2, 1, 1}, 3, &selected)[0][6]), 1, 0, "only selected particles are binned");
+
+    const auto grid = binned(d, "", {2, 2, 2}, 3);
+    check(grid.size() == 8, "3D grids have every bin");
+    double total = 0;
+    for (const auto &row : grid) total += std::stod(row[6]);
+    near(total, 5, 0, "every particle lands in exactly one 3D bin");
+
+    Dataset slab = d;
+    slab.pbc = {false, true, true};
+    double kept = 0;
+    for (const auto &row : binned(slab, "", {4, 1, 1}, 3)) kept += std::stod(row[6]);
+    near(kept, 3, 0, "non-periodic particles outside the cell are not binned");
+
+    // Bins follow sheared cell vectors: the same fractional layout gives the same counts.
+    Dataset sheared = d;
+    const double tilt[3][3]{{1, .5, 0}, {0, 1, 0}, {0, 0, 1}};
+    transform(sheared, tilt);
+    near(std::stod(binned(sheared, "", {2, 1, 1}, 3)[0][6]), 2, 0, "sheared bins follow the cell");
+
+    // The derivative of a linear profile is its slope, away from the periodic seam.
+    Dataset line;
+    line.species = {"X"};
+    line.cell = {10, 0, 0, 0, 10, 0, 0, 0, 10};
+    for (int i = 0; i < 10; ++i) {
+        line.atoms.push_back({i + .5f, 5, 5, 0});
+        line.scalarProperties["V"].push_back(3.0 * (i + .5));
+    }
+    const auto gradient = binned(line, "V", {10, 1, 1}, 2, nullptr, true);
+    near(std::stod(gradient[4][8]), 3, 1e-9, "central-difference derivative");
+    near(std::stod(gradient[0][8]), 3, 1e-9, "one-sided derivative at a non-periodic edge");
+
+    int noBins[3]{0, 1, 1}, tooMany[3]{1000, 1000, 2}, plane[3]{4, 4, 1};
+    throwsWith([&] { binParticles(d, "", noBins, 3, nullptr, false, nullptr); }, "at least one bin", "zero bins");
+    throwsWith([&] { binParticles(d, "", tooMany, 3, nullptr, false, nullptr); }, "1,000,000", "too many bins");
+    throwsWith([&] { binParticles(d, "", plane, 3, nullptr, true, nullptr); }, "1D", "2D derivative");
+    throwsWith([&] { binParticles(d, "", plane, 9, nullptr, false, nullptr); }, "Unknown", "bad operation");
+    bool threw = false;
+    try { binned(d, "Nothing", {2, 1, 1}, 3); } catch (const std::exception &) { threw = true; }
+    check(threw, "an unknown property is an error");
+}
+
+static double structureFactorAt(const Dataset &d, double k) {
+    const auto &rows = d.tables.back().rows;
+    double best = 0, distance = 1e300;
+    for (const auto &row : rows)
+        if (const double gap = std::abs(std::stod(row[0]) - k); gap < distance) { distance = gap; best = std::stod(row[1]); }
+    return best;
+}
+static void testStructureFactor() {
+    constexpr double pi = 3.14159265358979323846, a = 3.6;
+    Dataset d = fcc(4, a);
+    const double n = double(d.atoms.size());
+    computeStructureFactor(d, .5, 6, 400, nullptr, nullptr);
+    near(attribute(d, "StructureFactor.peak_value"), n, n * 1e-4, "an FCC Bragg peak has S = N");
+    near(attribute(d, "StructureFactor.peak_k"), 2 * pi * std::sqrt(3.0) / a, .02, "the first FCC peak is (111)");
+    near(structureFactorAt(d, 2 * pi / a), 0, 1e-3, "the (100) reflection is forbidden in FCC");
+    near(structureFactorAt(d, 4 * pi / a), n, n * 1e-4, "the (200) reflection is allowed");
+
+    Dataset rotated = fcc(4, a);
+    const double c = std::cos(.6), s = std::sin(.6), rotation[3][3]{{c, -s, 0}, {s, c, 0}, {0, 0, 1}};
+    transform(rotated, rotation);
+    computeStructureFactor(rotated, .5, 6, 400, nullptr, nullptr);
+    near(attribute(rotated, "StructureFactor.peak_k"), attribute(d, "StructureFactor.peak_k"), .02, "S(k) ignores rigid rotation");
+
+    // An uncorrelated ideal gas has S(k) = 1 on average.
+    Dataset gas;
+    gas.species = {"X"};
+    gas.cell = {30, 0, 0, 0, 30, 0, 0, 0, 30};
+    gas.pbc = {true, true, true};
+    std::mt19937 random(3);
+    std::uniform_real_distribution<float> uniform(0.f, 30.f);
+    for (int i = 0; i < 1000; ++i) gas.atoms.push_back({uniform(random), uniform(random), uniform(random), 0});
+    computeStructureFactor(gas, .5, 3, 8, nullptr, nullptr);
+    double mean = 0;
+    for (const auto &row : gas.tables.back().rows) mean += std::stod(row[1]);
+    near(mean / double(gas.tables.back().rows.size()), 1, .08, "an ideal gas averages S = 1");
+
+    Dataset half = fcc(4, a);
+    std::vector<uint8_t> selection(half.atoms.size(), 0);
+    for (size_t i = 0; i < selection.size(); i += 4) selection[i] = 1; // One sublattice: simple cubic.
+    computeStructureFactor(half, .5, 6, 400, &selection, nullptr);
+    near(structureFactorAt(half, 2 * pi / a), n / 4, n * 1e-3, "selecting one sublattice allows (100)");
+
+    Dataset slab = fcc(2);
+    slab.pbc[2] = false;
+    throwsWith([&] { computeStructureFactor(slab, 0, 5, 10, nullptr, nullptr); }, "fully periodic", "a slab is rejected");
+    Dataset good = fcc(2);
+    throwsWith([&] { computeStructureFactor(good, 5, 2, 10, nullptr, nullptr); }, "minimum k", "reversed k range");
+    throwsWith([&] { computeStructureFactor(good, 0, 5, 0, nullptr, nullptr); }, "bins", "zero bins");
+    const std::vector<uint8_t> nothing(good.atoms.size(), 0);
+    throwsWith([&] { computeStructureFactor(good, 0, 5, 10, &nothing, nullptr); }, "no particles", "an empty selection");
+    throwsWith([&] { computeStructureFactor(good, 0, 500, 10, nullptr, nullptr); }, "too long", "work is bounded");
+}
+
+static Dataset cubicDiamond(int n, double a = 5.43) {
+    return crystal({{0, 0, 0}, {0, .5, .5}, {.5, 0, .5}, {.5, .5, 0},
+                    {.25, .25, .25}, {.25, .75, .75}, {.75, .25, .75}, {.75, .75, .25}}, {a, a, a}, n);
+}
+static Dataset hexagonalDiamond(int n, double bond = 2.35) {
+    const double a = bond * std::sqrt(8.0 / 3.0), c = bond * 8.0 / 3.0;
+    return crystal({{0, 1. / 3, 1. / 16}, {.5, 1. / 6, 9. / 16}, {0, 1. / 3, 7. / 16}, {.5, 1. / 6, 15. / 16},
+                    {.5, 5. / 6, 1. / 16}, {0, 2. / 3, 9. / 16}, {.5, 5. / 6, 7. / 16}, {0, 2. / 3, 15. / 16}},
+                   {a, a * std::sqrt(3.0), c}, n);
+}
+static std::array<uint64_t, 7> diamondCounts(Dataset &d, const std::vector<uint8_t> *selection = nullptr) {
+    computeDiamondStructure(d, selection, nullptr);
+    std::array<uint64_t, 7> counts{};
+    for (double type : d.scalarProperties.at("Structure Type")) ++counts[size_t(type)];
+    return counts;
+}
+static void testDiamond() {
+    Dataset cubic = cubicDiamond(4);
+    near(double(diamondCounts(cubic)[1]), double(cubic.atoms.size()), 0, "every atom of ideal cubic diamond");
+    Dataset hexagonal = hexagonalDiamond(4);
+    near(double(diamondCounts(hexagonal)[4]), double(hexagonal.atoms.size()), 0, "every atom of ideal hexagonal diamond");
+    Dataset metal = fcc(4);
+    near(double(diamondCounts(metal)[0]), double(metal.atoms.size()), 0, "FCC is not diamond");
+    Dataset body = bcc(5);
+    near(double(diamondCounts(body)[0]), double(body.atoms.size()), 0, "BCC is not diamond");
+
+    // A vacancy: atoms that lose it can no longer be core atoms, and label as shells.
+    Dataset vacancy = cubicDiamond(4);
+    vacancy.atoms.erase(vacancy.atoms.begin() + 100);
+    const auto shells = diamondCounts(vacancy);
+    check(shells[1] > 0 && shells[1] < vacancy.atoms.size(), "a vacancy leaves perfect atoms and defective atoms");
+    check(shells[2] + shells[3] + shells[0] == vacancy.atoms.size() - shells[1],
+          "defective atoms are shell atoms or Other");
+    check(shells[2] > 0, "atoms beside the vacancy are first-neighbor shell atoms");
+    check(shells[4] + shells[5] + shells[6] == 0, "no hexagonal labels appear in a cubic crystal");
+
+    // Thermal noise well below the shell spacing keeps the classification.
+    Dataset thermal = cubicDiamond(4);
+    std::mt19937 random(5);
+    std::normal_distribution<float> noise(0.f, .05f);
+    for (auto &a : thermal.atoms) { a.x += noise(random); a.y += noise(random); a.z += noise(random); }
+    check(diamondCounts(thermal)[1] > .95 * double(thermal.atoms.size()), "thermal cubic diamond stays above 95%");
+
+    // Selecting a diamond sublattice ignores the atoms around it.
+    Dataset mixed = cubicDiamond(4);
+    const size_t base = mixed.atoms.size();
+    std::vector<uint8_t> selection(base, 1);
+    const Dataset interstitials = crystal({{.5, .5, .5}}, {5.43, 5.43, 5.43}, 4);
+    mixed.atoms.insert(mixed.atoms.end(), interstitials.atoms.begin(), interstitials.atoms.end());
+    selection.resize(mixed.atoms.size(), 0);
+    const auto filtered = diamondCounts(mixed, &selection);
+    near(double(filtered[1]), double(base), 0, "selected sublattice is identified");
+    near(double(filtered[0]), double(interstitials.atoms.size()), 0, "unselected atoms are Other");
+
+    Dataset fewAtoms = cubicDiamond(4);
+    fewAtoms.atoms.resize(3);
+    near(double(diamondCounts(fewAtoms)[0]), 3, 0, "too few atoms is Other");
+    Dataset none;
+    computeDiamondStructure(none, nullptr, nullptr);
+    check(none.scalarProperties.at("Structure Type").empty(), "an empty dataset is accepted");
+    Dataset table = cubicDiamond(3);
+    computeDiamondStructure(table, nullptr, nullptr);
+    check(table.tables.back().rows.size() == 7, "a seven-row structure table is published");
+    near(attribute(table, "IdentifyDiamond.counts.Cubic diamond"), double(table.atoms.size()), 0, "structure counts");
+}
+
+static void testBatchTwoPipeline() {
+    Dataset reference = fcc(3);
+    reference.scalarProperties["Energy"].assign(reference.atoms.size(), 1);
+    Dataset current = reference;
+    current.scalarProperties["Energy"].assign(reference.atoms.size(), 3);
+    Modifier difference{Op::DifferenceBetweenFrames};
+    difference.property = "Energy";
+    Modifier select{Op::ExpressionSelect};
+    select.property = "`Energy (Difference)` > 1";
+    Modifier binning{Op::SpatialBinning};
+    binning.property = "Energy (Difference)";
+    binning.replicateN[0] = 3;
+    binning.reduceOperation = 2;
+    binning.cspOnlySelected = true;
+    std::vector<Modifier> stack{difference, select, binning};
+    std::function<const Dataset &(size_t)> provider = [&](size_t) -> const Dataset & { return reference; };
+    auto r = evaluateFrom(resultOf(current), stack, 0, nullptr, nullptr, SIZE_MAX, {}, provider);
+    check(std::count(r.selected.begin(), r.selected.end(), 1) == long(current.atoms.size()),
+          "downstream nodes read the difference");
+    near(std::stod(r.data.tables.back().rows[0][6]), 2, 1e-12, "binning reads the difference");
+
+    Modifier sf{Op::StructureFactor};
+    sf.value = 1; sf.upper = 4;
+    Modifier diamond{Op::IdentifyDiamond};
+    std::vector<Modifier> second{sf, diamond};
+    auto analyzed = evaluateFrom(resultOf(cubicDiamond(2)), second, 0);
+    check(analyzed.data.tables.size() == 2, "both analyses publish tables");
+
+    std::vector<Modifier> needsReference{difference};
+    throwsWith([&] { (void)evaluateFrom(resultOf(current), needsReference, 0); },
+               "no reference configuration provider", "a missing reference is reported");
+    for (Op op : {Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor, Op::IdentifyDiamond}) {
+        check(std::string(opName(op)) != "Color by type", "every new operation has a name");
+        check(!modifierOutputs(Modifier{op}, 0).empty(), std::string(opName(op)) + " declares its outputs");
+    }
+    std::vector<Modifier> schema{difference, Modifier{Op::Histogram}};
+    const auto choices = pipelineInputPropertyChoices(current, schema, 1);
+    check(std::find(choices.begin(), choices.end(), "Energy (Difference)") != choices.end(),
+          "the difference appears in downstream property choices");
+}
+
 static void testCancellation() {
     std::atomic<bool> cancel{true};
+    {
+        Dataset d = fcc(4);
+        const int bins[3]{4, 1, 1};
+        throwsWith([&] { (void)binParticles(d, "", bins, 3, nullptr, false, &cancel); }, "Cancelled", "binning cancels");
+        throwsWith([&] { computeStructureFactor(d, 0, 4, 10, nullptr, &cancel); }, "Cancelled", "S(k) cancels");
+        throwsWith([&] { computeDiamondStructure(d, nullptr, &cancel); }, "Cancelled", "diamond cancels");
+        auto r = resultOf(d);
+        throwsWith([&] { computeFrameDifference(r, d, "Position.X", false, false, &cancel); }, "Cancelled", "difference cancels");
+    }
     Dataset d = fcc(4);
     const Dataset reference = fcc(4);
     throwsWith([&] { computeSteinhardt(d, 12, &cancel); }, "Cancelled", "Steinhardt cancels");
@@ -532,11 +863,18 @@ int main() {
     testCenterOfMass();
     testShrinkWrap();
     testPipeline();
+    testReferenceMatching();
+    testFrameDifference();
+    testSpatialBinning();
+    testStructureFactor();
+    testDiamond();
+    testBatchTwoPipeline();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
         return EXIT_FAILURE;
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
-                 "center of mass, shrink-wrap, pipeline composition, cancellation\n";
+                 "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
+                 "diamond identification, pipeline composition, cancellation\n";
 }

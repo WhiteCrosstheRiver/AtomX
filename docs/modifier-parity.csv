@@ -5,7 +5,7 @@ A03,Analysis,Bond angle distribution,,docs/parity/ovito/,pass,pass,partial,pass,
 A04,Analysis,Bond length distribution,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,From explicit bond topology with image shifts
 A05,Analysis,Bond order,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A06,Analysis,Cluster analysis,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Cutoff or bond mode; 2M/20M atom caps
-A07,Analysis,Difference between frames,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+A07,Analysis,Difference between frames,https://docs.ovito.org/reference/pipelines/modifiers/difference_between_frames.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,One particle property at a time plus global attributes; no data table or voxel inputs
 A08,Analysis,Dislocation analysis (DXA),,docs/parity/ovito/,todo,todo,todo,todo,todo,todo,,,,Only approximate coordination prepass exists outside pipeline
 A09,Analysis,Displacement vectors,,docs/parity/ovito/,pass,pass,partial,pass,pass,partial,N2,12262a9,Absolute/relative reference frames + MIC + cell mapping; external-file source and arrow visual element are documented stubs; reference is raw frame not upstream-modified
 A10,Analysis,Elastic strain calculation,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
@@ -15,9 +15,9 @@ A13,Analysis,Histogram,,docs/parity/ovito/,pass,pass,partial,pass,partial,partia
 A14,Analysis,Radial distribution function (RDF),,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Requires fully periodic 3D cell; no partial type-pair RDF
 A15,Analysis,Reduce property,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,min/max/mean/sum only
 A16,Analysis,Scatter plot,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,250k point cap; no log axes
-A17,Analysis,Spatial binning,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+A17,Analysis,Spatial binning,https://docs.ovito.org/reference/pipelines/modifiers/bin_and_reduce.html,docs/parity/ovito/,pass,partial,pass,partial,pass,partial,,,,Particles only; output is a data table with no voxel grid; 1M bin limit; no dislocation mode
 A18,Analysis,Spatial correlation function,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-A19,Analysis,Structure factor,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+A19,Analysis,Structure factor,https://docs.ovito.org/reference/pipelines/modifiers/structure_factor.html,docs/parity/ovito/,pass,partial,partial,pass,pass,partial,,,,Direct method only and single-threaded with a work limit; no Debye method; no partial or X-ray factors
 A20,Analysis,Time averaging,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A21,Analysis,Time series,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 A22,Analysis,Voronoi analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
@@ -41,7 +41,7 @@ S01,Structure identification,Ackland-Jones analysis,https://docs.ovito.org/refer
 S02,Structure identification,Centrosymmetry parameter,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,N1,a07407d,Histogram panel simpler than OVITO; under-coordinated fallback documented (even>=4 else 0 + counter)
 S03,Structure identification,Chill+,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,Needs water/bond topology model
 S04,Structure identification,Common neighbor analysis,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Fixed cutoff; no adaptive mode; 128-neighbor cap
-S05,Structure identification,Identify diamond structure,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+S05,Structure identification,Identify diamond structure,https://docs.ovito.org/reference/pipelines/modifiers/identify_diamond.html,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,,,,All seven types and Use only selected; verified on ideal and noisy crystals plus one vacancy
 S06,Structure identification,Polyhedral template matching,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 S07,Structure identification,VoroTop analysis,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 Q01,Selection,Clear selection,,docs/parity/ovito/,pass,pass,pass,pass,partial,partial,,,,
