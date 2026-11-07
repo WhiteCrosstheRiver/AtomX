@@ -2170,7 +2170,8 @@ int main(int argc,char **argv) {
                      std::tuple{"Time averaging",Op::TimeAveraging,""},
                      std::tuple{"Smooth trajectory",Op::SmoothTrajectory,""},
                      std::tuple{"Diffusion coefficient",Op::DiffusionCoefficient,""},
-                     std::tuple{"Find rings",Op::FindRings,"Ring Count"}}) {
+                     std::tuple{"Find rings",Op::FindRings,"Ring Count"},
+                     std::tuple{"Voronoi analysis",Op::VoronoiAnalysis,"Atomic Volume"}}) {
                 strcpy_s(app.modifierSearch,name);
                 click("pipeline.add-modification");
                 frame();

@@ -25,6 +25,7 @@
 #include <vector>
 #include <iomanip>
 #include <cwctype>
+#include <mutex>
 
 namespace atomx {
 struct Vec3 {
@@ -803,6 +804,7 @@ enum class Op {
     ,SmoothTrajectory
     ,DiffusionCoefficient
     ,FindRings
+    ,VoronoiAnalysis
 };
 struct Modifier {
     Op op;
@@ -895,6 +897,8 @@ struct Modifier {
     // original with the average, Smooth trajectory minimum image.
     // cspNeighbors: smoothing window, Diffusion origin stride. value: time per frame.
     // histogramRangeStart/End: Diffusion fit window. replicateN[0..1]: ring size range.
+    // Voronoi: value/upper absolute/relative face area threshold, bondLowerCutoff edge
+    // length threshold, overlapUseRadii radical tessellation, adaptive neighbor bonds.
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -972,6 +976,13 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
             break;
         case Op::FindRings:
             scalar.insert("Ring Count");
+            break;
+        case Op::VoronoiAnalysis:
+            // Index components beyond 8 appear only once a cell has such faces.
+            for (const char *name : {"Atomic Volume", "Coordination", "Cavity Radius", "Max Face Order",
+                                     "Voronoi Index.3", "Voronoi Index.4", "Voronoi Index.5", "Voronoi Index.6",
+                                     "Voronoi Index.7", "Voronoi Index.8"})
+                scalar.insert(name);
             break;
         default:
             break;
@@ -1079,6 +1090,12 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
     if (modifier.op==Op::DiffusionCoefficient) {
         add(Kind::Table,"Mean squared displacement");
         add(Kind::GlobalAttributes,"Diffusion coefficient");
+    }
+    if (modifier.op==Op::VoronoiAnalysis) {
+        add(Kind::Particles,"Voronoi volumes, coordination and indices");
+        add(Kind::Table,"Voronoi index histogram");
+        add(Kind::GlobalAttributes,"Voronoi statistics");
+        if (modifier.adaptive) add(Kind::Bonds,"Voronoi neighbor bonds");
     }
     if (modifier.op==Op::FindRings) {
         add(Kind::Table,"Ring size histogram");
@@ -2185,6 +2202,7 @@ inline const char *opName(Op op) {
     case Op::SmoothTrajectory: return "Smooth trajectory";
     case Op::DiffusionCoefficient: return "Diffusion coefficient";
     case Op::FindRings: return "Find rings";
+    case Op::VoronoiAnalysis: return "Voronoi analysis";
     default:
         return "Color by type";
     }
@@ -2239,6 +2257,7 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_modifiers.inc"
 #include "analysis_modifiers_fields.inc"
 #include "analysis_trajectory.inc"
+#include "analysis_voronoi.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -2988,6 +3007,17 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             }
             if (m.op == Op::ShrinkWrapBox) {
                 shrinkWrapCell(r.data);
+                continue;
+            }
+            if (m.op == Op::VoronoiAnalysis) {
+                VoronoiOptions options;
+                options.faceAreaThreshold = m.value;
+                options.relativeAreaThreshold = m.upper;
+                options.edgeLengthThreshold = m.bondLowerCutoff;
+                options.useRadii = m.overlapUseRadii;
+                options.neighborBonds = m.adaptive;
+                options.onlySelected = m.cspOnlySelected;
+                computeVoronoi(r, options, cancel);
                 continue;
             }
             if (m.op == Op::FindRings) {

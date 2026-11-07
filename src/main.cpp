@@ -602,7 +602,7 @@ static const char *opCategory(Op op) {
                                op == Op::SpatialBinning || op == Op::StructureFactor ||
                                op == Op::IdentifyDiamond || op == Op::TimeSeries ||
                                op == Op::TimeAveraging || op == Op::DiffusionCoefficient ||
-                               op == Op::FindRings
+                               op == Op::FindRings || op == Op::VoronoiAnalysis
                          ? "Analysis"
                          : "Modification";
 }
@@ -676,7 +676,7 @@ static const std::vector<Command> &commandRegistry() {
                       Op::WignerSeitzAnalysis, Op::CenterOfMassCorrection, Op::ShrinkWrapBox,
                       Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
                       Op::IdentifyDiamond, Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory,
-                      Op::DiffusionCoefficient, Op::FindRings, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::DiffusionCoefficient, Op::FindRings, Op::VoronoiAnalysis, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -1799,6 +1799,7 @@ struct App {
             m.histogramRangeStart = .1; m.histogramRangeEnd = .9;
         }
         if (op == Op::FindRings) { m.replicateN[0] = 3; m.replicateN[1] = 12; }
+        if (op == Op::VoronoiAnalysis) { m.value = 0; m.upper = 0; m.bondLowerCutoff = 0; m.adaptive = false; }
         if (op == Op::DifferenceBetweenFrames) m.property = "Position.X";
         if (op == Op::AtomicStrain) {
             // The neighbor search reaches half a periodic cell, so start inside that.
@@ -10763,6 +10764,36 @@ struct App {
                             found != result.data.globalAttributes.end())
                             ImGui::Text("D = %.6g", found->second);
                     }
+                    if (m.op == Op::VoronoiAnalysis) {
+                        auto edited = static_cast<const Modifier &>(m);
+                        bool changed = ui_design::checkbox(loc::label("Use particle radii (polydisperse)"), &edited.overlapUseRadii);
+                        ImGui::SameLine();referenceHelp("analysis");
+                        changed |= ui_design::checkbox(loc::label("Use only selected particles"), &edited.cspOnlySelected);
+                        float area = edited.value, relative = edited.upper;
+                        double edge = edited.bondLowerCutoff;
+                        fitNextField("Face area threshold");
+                        if (ImGui::InputFloat(loc::label("Face area threshold"), &area, 0, 0, "%.4g") && area >= 0) {
+                            edited.value = area; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.voronoi-area.") + m.id, "Face area threshold");
+                        fitNextField("Relative face area threshold");
+                        if (ImGui::InputFloat(loc::label("Relative face area threshold"), &relative, 0, 0, "%.4g") &&
+                            relative >= 0 && relative < 1) {
+                            edited.upper = relative; changed = true;
+                        }
+                        fitNextField("Edge length threshold");
+                        if (ImGui::InputDouble(loc::label("Edge length threshold"), &edge, 0, 0, "%.4g") && edge >= 0) {
+                            edited.bondLowerCutoff = edge; changed = true;
+                        }
+                        changed |= ui_design::checkbox(loc::label("Generate neighbor bonds"), &edited.adaptive);
+                        recordUiTestItem(std::string("pipeline.voronoi-bonds.") + m.id, "Generate neighbor bonds");
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = edited; update(); }
+                        ImGui::TextDisabled(loc::text("Volumes are in cubed length units. Polydisperse cells read the Radius particle property. Thresholds drop near-degenerate faces and edges from coordination and indices."));
+                        if (const auto found = result.data.globalAttributes.find("Voronoi.total_volume");
+                            found != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("Total cell volume %.6g · largest face order %.0f"), found->second,
+                                                result.data.globalAttributes["Voronoi.max_face_order"]);
+                    }
                     if (m.op == Op::FindRings) {
                         int sizes[2]{m.replicateN[0], m.replicateN[1]};
                         fitNextField("Ring size range", true);
@@ -12384,7 +12415,7 @@ struct App {
                 operation(Op::StructureFactor,"Compute S(k) by the direct method over the wave vectors of a fully periodic cell.");
                 operation(Op::TimeAveraging,"Average a particle property or global attribute over the whole trajectory.");
                 operation(Op::TimeSeries,"Tabulate a global attribute at every frame of the trajectory.");
-                planned("Voronoi analysis");
+                operation(Op::VoronoiAnalysis,"Compute each particle's Voronoi cell: volume, coordination, cavity radius and Voronoi index, with optional neighbor bonds.");
                 operation(Op::WignerSeitzAnalysis,"Assign particles to their nearest reference-frame sites to count vacancies and interstitials.");
                 planned("Measure");
                 endCard();

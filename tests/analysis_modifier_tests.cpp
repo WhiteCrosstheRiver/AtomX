@@ -1094,8 +1094,180 @@ static void testTrajectoryPipeline() {
     }
 }
 
+static PipelineResult voronoiOf(Dataset d, VoronoiOptions options = {}, std::vector<uint8_t> selection = {}) {
+    auto r = resultOf(std::move(d));
+    if (!selection.empty()) r.selected = std::move(selection);
+    computeVoronoi(r, options, nullptr);
+    return r;
+}
+static bool allNear(const std::vector<double> &values, double expected, double tolerance) {
+    return !values.empty() && std::all_of(values.begin(), values.end(),
+        [&](double v) { return std::abs(v - expected) <= tolerance; });
+}
+static double sumOf(const std::vector<double> &values) { return std::accumulate(values.begin(), values.end(), 0.0); }
+static Dataset randomGas(int count, std::array<bool, 3> pbc, unsigned seed, double size = 20) {
+    Dataset d;
+    d.species = {"X"};
+    d.cell = {size, 0, 0, 0, size, 0, 0, 0, size};
+    d.pbc = pbc;
+    std::mt19937 random(seed);
+    std::uniform_real_distribution<float> place(0.f, float(size));
+    for (int i = 0; i < count; ++i) d.atoms.push_back({place(random), place(random), place(random), 0});
+    return d;
+}
+static void testVoronoi() {
+    // Exact cells of the three cubic lattices.
+    const double a = 3.6;
+    auto f = voronoiOf(fcc(4, a)).data.scalarProperties;
+    check(allNear(f.at("Atomic Volume"), a * a * a / 4, 1e-4), "FCC cells hold a^3/4");
+    check(allNear(f.at("Coordination"), 12, 0), "FCC cells have 12 faces");
+    check(allNear(f.at("Voronoi Index.4"), 12, 0) && allNear(f.at("Voronoi Index.3"), 0, 0),
+          "FCC cells are rhombic dodecahedra <0,12>");
+    check(allNear(f.at("Cavity Radius"), a / 2, 1e-4), "the FCC cavity radius is a/2");
+    check(allNear(f.at("Max Face Order"), 4, 0), "FCC faces are quadrilaterals");
+
+    const double b = 3.0;
+    auto body = voronoiOf(bcc(5, b)).data.scalarProperties;
+    check(allNear(body.at("Atomic Volume"), b * b * b / 2, 1e-4), "BCC cells hold a^3/2");
+    check(allNear(body.at("Coordination"), 14, 0), "BCC cells have 14 faces");
+    check(allNear(body.at("Voronoi Index.4"), 6, 0) && allNear(body.at("Voronoi Index.6"), 8, 0),
+          "BCC cells are truncated octahedra <0,6,0,8>");
+    check(allNear(body.at("Cavity Radius"), b * std::sqrt(5.0) / 4, 1e-4), "the BCC cavity radius is a sqrt(5)/4");
+
+    auto cube = voronoiOf(simpleCubic(5, b)).data.scalarProperties;
+    check(allNear(cube.at("Atomic Volume"), b * b * b, 1e-4), "simple cubic cells are cubes of volume a^3");
+    check(allNear(cube.at("Coordination"), 6, 0) && allNear(cube.at("Voronoi Index.4"), 6, 0), "a cube has six square faces");
+    check(allNear(cube.at("Cavity Radius"), b * std::sqrt(3.0) / 2, 1e-4), "the cube cavity radius is half its diagonal");
+
+    // The cells tile the box, whatever the arrangement.
+    const auto gas = voronoiOf(randomGas(400, {true, true, true}, 21));
+    near(sumOf(gas.data.scalarProperties.at("Atomic Volume")), 8000, 8000 * 1e-6, "random cells tile the periodic box");
+    near(attribute(gas.data, "Voronoi.total_volume"), 8000, 8000 * 1e-6, "total volume attribute");
+    const auto &gasVolumes = gas.data.scalarProperties.at("Atomic Volume");
+    check(*std::min_element(gasVolumes.begin(), gasVolumes.end()) > 0, "every random cell has a volume");
+
+    Dataset tilted = randomGas(300, {true, true, true}, 5, 16);
+    const double shear[3][3]{{1, .35, .2}, {0, 1, .25}, {0, 0, 1}};
+    transform(tilted, shear);
+    near(sumOf(voronoiOf(tilted).data.scalarProperties.at("Atomic Volume")), std::abs(cellDeterminant(tilted.cell)),
+         1e-5 * 4096, "cells tile a triclinic periodic box");
+
+    const auto walled = voronoiOf(randomGas(300, {false, false, false}, 8));
+    near(sumOf(walled.data.scalarProperties.at("Atomic Volume")), 8000, 8000 * 1e-6, "walls close a non-periodic box");
+    const auto slab = voronoiOf(randomGas(300, {true, true, false}, 9));
+    near(sumOf(slab.data.scalarProperties.at("Atomic Volume")), 8000, 8000 * 1e-6, "a slab mixes walls and periodicity");
+
+    // Moving or rotating everything changes nothing.
+    Dataset moved = fcc(4, a);
+    for (auto &atom : moved.atoms) { atom.x += .7f; atom.y -= 1.1f; atom.z += .3f; }
+    check(allNear(voronoiOf(moved).data.scalarProperties.at("Atomic Volume"), a * a * a / 4, 1e-4), "translation invariance");
+    Dataset rotated = fcc(4, a);
+    const double c = std::cos(.4), s = std::sin(.4), rotation[3][3]{{c, -s, 0}, {s, c, 0}, {0, 0, 1}};
+    transform(rotated, rotation);
+    check(allNear(voronoiOf(rotated).data.scalarProperties.at("Coordination"), 12, 0), "rotation invariance");
+
+    // Polydisperse cells: equal radii change nothing; larger particles take more room.
+    Dataset equal = fcc(3, a);
+    equal.scalarProperties["Radius"].assign(equal.atoms.size(), 1.2);
+    VoronoiOptions radical;
+    radical.useRadii = true;
+    check(allNear(voronoiOf(equal, radical).data.scalarProperties.at("Atomic Volume"), a * a * a / 4, 1e-4),
+          "equal radii reproduce the plain tessellation");
+    Dataset mixed = randomGas(300, {true, true, true}, 13);
+    auto &radii = mixed.scalarProperties["Radius"];
+    for (size_t i = 0; i < mixed.atoms.size(); ++i) radii.push_back(i % 2 ? 1.5 : .5);
+    const auto laguerre = voronoiOf(mixed, radical);
+    const auto &laguerreVolumes = laguerre.data.scalarProperties.at("Atomic Volume");
+    near(sumOf(laguerreVolumes), 8000, 8000 * 1e-6, "radical cells still tile the box");
+    double big = 0, small = 0;
+    for (size_t i = 0; i < laguerreVolumes.size(); ++i) (i % 2 ? big : small) += laguerreVolumes[i];
+    check(big > 1.5 * small, "larger particles get larger radical cells");
+    Dataset noRadius = fcc(3);
+    throwsWith([&] { voronoiOf(noRadius, radical); }, "Radius particle property", "radii are required");
+
+    // Use only selected: one sublattice of FCC is simple cubic.
+    Dataset lattice = fcc(4, a);
+    std::vector<uint8_t> sublattice(lattice.atoms.size(), 0);
+    for (size_t i = 0; i < sublattice.size(); i += 4) sublattice[i] = 1;
+    VoronoiOptions selected;
+    selected.onlySelected = true;
+    const auto sc = voronoiOf(lattice, selected, sublattice).data.scalarProperties;
+    near(sc.at("Atomic Volume")[0], a * a * a, 1e-4, "selected sublattice cells");
+    near(sc.at("Coordination")[0], 6, 0, "selected sublattice coordination");
+    near(sc.at("Atomic Volume")[1], 0, 0, "unselected particles report zero");
+
+    // Near-degenerate faces: in BCC the squares are 3.7% of the area, the hexagons 9.7%.
+    VoronoiOptions filtered;
+    filtered.relativeAreaThreshold = .05;
+    check(allNear(voronoiOf(bcc(5, b), filtered).data.scalarProperties.at("Coordination"), 8, 0),
+          "a relative threshold drops the small square faces");
+    VoronoiOptions absolute;
+    absolute.faceAreaThreshold = 1e6;
+    check(allNear(voronoiOf(fcc(3, a), absolute).data.scalarProperties.at("Coordination"), 0, 0), "an absolute threshold");
+    VoronoiOptions edges;
+    edges.edgeLengthThreshold = 1e6;
+    check(allNear(voronoiOf(fcc(3, a), edges).data.scalarProperties.at("Coordination"), 0, 0),
+          "faces with fewer than three long edges are dropped");
+
+    // Neighbor bonds: one per shared face, with correct periodic geometry.
+    VoronoiOptions bonding;
+    bonding.neighborBonds = true;
+    const auto bonded = voronoiOf(fcc(4, a), bonding);
+    check(bonded.data.bonds.size() == bonded.data.atoms.size() * 6, "FCC gives six bonds per atom");
+    bool lengths = true;
+    for (const auto &bond : bonded.data.bonds) {
+        const auto &p = bonded.data.atoms[bond.a], &q = bonded.data.atoms[bond.b];
+        double v[3]{double(q.x) - p.x, double(q.y) - p.y, double(q.z) - p.z};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int xyz = 0; xyz < 3; ++xyz) v[xyz] += bond.image[size_t(axis)] * bonded.data.cell[size_t(axis) * 3 + size_t(xyz)];
+        lengths = lengths && std::abs(std::hypot(v[0], v[1], v[2]) - a / std::sqrt(2.0)) < 1e-4;
+    }
+    check(lengths, "every bond, including periodic ones, spans the nearest-neighbor distance");
+
+    const auto histogram = voronoiOf(fcc(3, a)).data.tables.back();
+    check(histogram.rows.size() == 1 && histogram.rows[0][0] == "<0,12>" &&
+          histogram.rows[0][1] == std::to_string(fcc(3, a).atoms.size()), "the index histogram counts one signature");
+
+    Dataset twin = fcc(3);
+    twin.atoms.push_back(twin.atoms[5]);
+    throwsWith([&] { voronoiOf(twin); }, "share a position", "coincident particles are rejected");
+    // A unit cell smaller than the Voronoi reach is resolved through internal replicas.
+    const auto unit = voronoiOf(fcc(1, a), bonding).data;
+    check(allNear(unit.scalarProperties.at("Atomic Volume"), a * a * a / 4, 1e-4), "a single FCC unit cell");
+    check(allNear(unit.scalarProperties.at("Coordination"), 12, 0), "a single FCC unit cell has 12 faces");
+    check(unit.bonds.size() == 24, "a single unit cell gets six bonds per atom, through periodic images");
+    const auto sc1 = voronoiOf(simpleCubic(1, b)).data.scalarProperties;
+    near(sc1.at("Atomic Volume")[0], b * b * b, 1e-4, "one atom in a periodic cube");
+    near(sc1.at("Coordination")[0], 6, 0, "one atom in a periodic cube has six faces");
+    Dataset outside = randomGas(20, {false, false, false}, 3);
+    outside.atoms[0].x = -5;
+    throwsWith([&] { voronoiOf(outside); }, "outside the simulation cell", "particles must lie inside walls");
+    Dataset noCell = randomGas(10, {false, false, false}, 4);
+    noCell.cell = {};
+    throwsWith([&] { voronoiOf(noCell); }, "valid simulation cell", "a cell is required");
+    VoronoiOptions badThreshold;
+    badThreshold.relativeAreaThreshold = 1;
+    throwsWith([&] { voronoiOf(fcc(2), badThreshold); }, "thresholds", "a relative threshold of 1 is rejected");
+
+    // In a pipeline, downstream nodes read the cells.
+    Modifier cells{Op::VoronoiAnalysis};
+    cells.upper = 0;
+    Modifier pick{Op::ExpressionSelect};
+    pick.property = "Coordination == 14";
+    std::vector<Modifier> stack{cells, pick};
+    const auto evaluated = evaluateFrom(resultOf(bcc(4, b)), stack, 0);
+    check(std::count(evaluated.selected.begin(), evaluated.selected.end(), 1) == long(evaluated.data.atoms.size()),
+          "Expression selection reads the Voronoi coordination");
+    check(std::string(opName(Op::VoronoiAnalysis)) == "Voronoi analysis" &&
+          !modifierOutputs(Modifier{Op::VoronoiAnalysis}, 0).empty(), "Voronoi has a name and outputs");
+}
+
 static void testCancellation() {
     std::atomic<bool> cancel{true};
+    {
+        auto r = resultOf(fcc(3));
+        throwsWith([&] { computeVoronoi(r, {}, &cancel); }, "Cancelled", "Voronoi cancels");
+    }
     {
         Trajectory t = attributeTrajectory({1, 2});
         throwsWith([&] { sweepTimeSeries("Energy", 2, t.evaluator(), &cancel); }, "Cancelled", "time series cancels");
@@ -1147,6 +1319,7 @@ int main() {
     testDiffusion();
     testRings();
     testTrajectoryPipeline();
+    testVoronoi();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
@@ -1154,5 +1327,5 @@ int main() {
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
                  "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
-                 "diamond identification, trajectory sweeps, diffusion, rings, pipeline composition, cancellation\n";
+                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, pipeline composition, cancellation\n";
 }
