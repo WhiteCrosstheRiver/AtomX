@@ -6,6 +6,7 @@
 #include <iostream>
 #include <numeric>
 #include <random>
+#include <map>
 
 using namespace atomx;
 static int failures = 0, checks = 0;
@@ -2045,6 +2046,269 @@ static void testHideSelected() {
     throwsWith([&] { hideSelectedParticles(bad); }, "Selection length", "hide selected checks the selection");
 }
 
+// ---- Common neighbor analysis modes ----------------------------------------------
+static Modifier cnaNode(int mode, float cutoff = 0) {
+    Modifier m{Op::CommonNeighborAnalysis};
+    m.type = mode;
+    m.value = cutoff;
+    return m;
+}
+static double cnaCount(const Dataset &d, const char *name) {
+    return attribute(d, std::string("CommonNeighborAnalysis.counts.") + name);
+}
+static Dataset jittered(Dataset d, double sigma, unsigned seed) {
+    std::mt19937 random(seed);
+    std::normal_distribution<float> noise(0.f, float(sigma));
+    for (auto &atom : d.atoms) { atom.x += noise(random); atom.y += noise(random); atom.z += noise(random); }
+    return d;
+}
+
+static void testCommonNeighborModes() {
+    const auto run = [](const Dataset &d, int mode) { return evaluateFrom(resultOf(d), {cnaNode(mode)}, 0).data; };
+    for (int mode : {1, 2}) {
+        const std::string label = mode == 1 ? "adaptive CNA " : "interval CNA ";
+        const Dataset a = fcc(3), b = hcp(3), c = bcc(3);
+        near(cnaCount(run(a, mode), "FCC"), double(a.atoms.size()), 0, label + "finds ideal fcc");
+        near(cnaCount(run(b, mode), "HCP"), double(b.atoms.size()), 0, label + "finds ideal hcp");
+        near(cnaCount(run(c, mode), "BCC"), double(c.atoms.size()), 0, label + "finds ideal bcc");
+        const auto simple = simpleCubic(3);
+        near(cnaCount(run(simple, mode), "Other"), double(simple.atoms.size()), 0, label + "leaves simple cubic as Other");
+        const auto ico = run(icosahedron(), mode);
+        check(ico.scalarProperties.at("Structure Type")[0] == 4, label + "finds the icosahedral center");
+        // No cutoff: scaling the crystal changes nothing.
+        const Dataset large = fcc(3, 7.2);
+        near(cnaCount(run(large, mode), "FCC"), double(large.atoms.size()), 0, label + "does not depend on the length scale");
+        // A 4-atom periodic cell sees its own images as neighbors.
+        const Dataset tiny = fcc(1);
+        near(cnaCount(run(tiny, mode), "FCC"), 4, 0, label + "works in a very small periodic cell");
+        Dataset few;
+        few.species = {"X"};
+        few.atoms = {{0, 0, 0, 0}, {1, 0, 0, 0}, {0, 1, 0, 0}};
+        near(cnaCount(run(few, mode), "Other"), 3, 0, label + "marks a small cluster as Other");
+        const auto gentle = jittered(fcc(4), .05, 11);
+        near(cnaCount(run(gentle, mode), "FCC"), double(gentle.atoms.size()), 0, label + "tolerates small displacements");
+    }
+    // Stronger noise: testing every threshold cannot recognize fewer atoms than one fixed choice.
+    const auto hot = jittered(fcc(5), .17, 5);
+    const double adaptiveFcc = cnaCount(run(hot, 1), "FCC"), intervalFcc = cnaCount(run(hot, 2), "FCC");
+    check(adaptiveFcc > 0 && intervalFcc > adaptiveFcc,
+          "interval CNA recognizes more of a noisy crystal: " + std::to_string(intervalFcc) + " vs " + std::to_string(adaptiveFcc));
+
+    // Fixed mode keeps its cutoff requirement; variable modes ignore the cutoff field.
+    const Dataset crystal = fcc(3);
+    near(cnaCount(evaluateFrom(resultOf(crystal), {cnaNode(0, 3.0f)}, 0).data, "FCC"), double(crystal.atoms.size()), 0, "fixed CNA is unchanged");
+    throwsWith([&] { (void)evaluateFrom(resultOf(crystal), {cnaNode(0, 0.f)}, 0); }, "Cutoff must be", "fixed CNA needs a cutoff");
+    throwsWith([&] { (void)evaluateFrom(resultOf(crystal), {cnaNode(9)}, 0); }, "Unknown common neighbor", "an unknown mode is rejected");
+
+    // Bond-based mode ignores distances and needs bonds.
+    Modifier bonds{Op::CreateBonds};
+    bonds.value = 3.0f;
+    auto bonded = evaluateFrom(resultOf(crystal), {bonds, cnaNode(3)}, 0).data;
+    near(cnaCount(bonded, "FCC"), double(crystal.atoms.size()), 0, "bond-based CNA finds fcc");
+    const auto table = std::find_if(bonded.tables.begin(), bonded.tables.end(), [](const DataTable &t) { return t.name == "CNA bond signatures"; });
+    check(table != bonded.tables.end() && table->rows[0][0] == "421" && table->rows[0][1] == std::to_string(6 * crystal.atoms.size()),
+          "bond signatures count each bond once");
+    throwsWith([&] { (void)evaluateFrom(resultOf(crystal), {cnaNode(3)}, 0); }, "needs bonds", "bond-based CNA reports missing bonds");
+    Dataset stretched = bonded;
+    for (auto &atom : stretched.atoms) atom.x *= 1.3f;
+    near(cnaCount(evaluateFrom(resultOf(stretched), {cnaNode(3)}, 0).data, "FCC"), double(crystal.atoms.size()), 0, "bond-based CNA does not use positions");
+
+    // Unselected particles are left out of the analysis and reported as Other.
+    PipelineResult partial = resultOf(fcc(3));
+    std::fill(partial.selected.begin(), partial.selected.end(), uint8_t(1));
+    partial.selected[0] = 0;
+    Modifier onlySelected = cnaNode(1);
+    onlySelected.cspOnlySelected = true;
+    const auto selectedResult = evaluateFrom(partial, {onlySelected}, 0).data;
+    const auto &types = selectedResult.scalarProperties.at("Structure Type");
+    check(types[0] == 0, "an unselected particle is Other");
+    near(cnaCount(selectedResult, "Other"), 13, 0, "the twelve neighbors of the removed particle lose their fcc shell");
+
+    // Colors are optional and follow the structure type.
+    near(double(evaluateFrom(resultOf(crystal), {cnaNode(1)}, 0).data.particleColors.size()), 0, 0, "colors are off unless requested");
+    Modifier colored = cnaNode(1);
+    colored.overlapUseRadii = true;
+    const auto paint = evaluateFrom(partial, {colored}, 0).data;
+    check(paint.particleColors.size() == paint.atoms.size() && paint.particleColors[1].x == .4f && paint.particleColors[1].y == 1.f, "fcc particles get the fcc color");
+
+    std::atomic<bool> cancelled{true};
+    throwsWith([&] { (void)evaluateFrom(resultOf(crystal), {cnaNode(2)}, 0, &cancelled); }, "Cancelled", "interval CNA can be cancelled");
+}
+
+// ---- Load trajectory and Combine datasets ------------------------------------------
+static std::map<std::string, std::vector<Dataset>> fakeFiles;
+static void installFakeFiles() {
+    externalFrameReader() = [](const std::string &path, int frame, std::atomic<bool> *) {
+        const auto &frames = fakeFiles.at(path);
+        return ExternalFrame{frames[std::min(size_t(std::max(frame, 0)), frames.size() - 1)], int(frames.size())};
+    };
+}
+static Modifier fileNode(Op op, const char *path) {
+    Modifier m{op};
+    m.property = path;
+    return m;
+}
+
+static void testLoadTrajectory() {
+    installFakeFiles();
+    Dataset topology = fcc(1);
+    topology.scalarProperties["Particle Identifier"] = {10, 20, 30, 40};
+    topology.scalarProperties["Charge"] = {1, 2, 3, 4};
+    topology.species = {"A", "B"};
+    topology.atoms[1].type = 1;
+    topology.bonds.push_back({0, 1, {0, 0, 0}, 1});
+
+    // Frame 1 lists the particles in reverse, moves them, changes the cell and adds a property.
+    Dataset first = topology, second = topology;
+    second.scalarProperties.erase("Charge");
+    second.bonds.clear();
+    second.cell = {9, 0, 0, 0, 9, 0, 0, 0, 9};
+    std::reverse(second.atoms.begin(), second.atoms.end());
+    for (auto &atom : second.atoms) { atom.x += 1; atom.type = 0; }
+    second.scalarProperties["Particle Identifier"] = {40, 30, 20, 10};
+    second.scalarProperties["Energy"] = {-4, -3, -2, -1};
+    second.vectorProperties["Velocity"] = {Vec3{4, 0, 0}, Vec3{3, 0, 0}, Vec3{2, 0, 0}, Vec3{1, 0, 0}};
+    second.globalAttributes["Timestep"] = 500;
+    fakeFiles["traj"] = {first, second};
+
+    const auto at = [&](int frame) {
+        return evaluateFrom(resultOf(topology), {fileNode(Op::LoadTrajectory, "traj")}, 0, nullptr, nullptr, SIZE_MAX, {}, {}, frame).data;
+    };
+    const auto moved = at(1);
+    near(moved.atoms[0].x, topology.atoms[0].x + 1, 1e-6, "positions pair by Particle Identifier");
+    near(moved.scalarProperties.at("Energy")[0], -1, 0, "file properties follow the identifier match");
+    near(moved.vectorProperties.at("Velocity")[0].x, 1, 0, "vector properties follow the identifier match");
+    near(moved.scalarProperties.at("Charge")[3], 4, 0, "topology-only properties stay");
+    check(moved.atoms[1].type == 1 && moved.species.size() == 2, "topology particle types stay");
+    check(moved.bonds.size() == 1, "topology bonds stay");
+    near(moved.cell[0], 9, 0, "the file's simulation cell replaces the old one");
+    near(attribute(moved, "Timestep"), 500, 0, "file attributes are published");
+    near(attribute(moved, "LoadTrajectory.frame_count"), 2, 0, "the node reports the file's frame count");
+    near(at(0).atoms[0].x, topology.atoms[0].x, 1e-6, "frame 0 reads the file's first frame");
+    near(at(7).atoms[0].x, topology.atoms[0].x + 1, 1e-6, "frames past the end use the file's last frame");
+
+    // Without identifiers on both sides, storage order decides.
+    Dataset plain = topology;
+    plain.scalarProperties.erase("Particle Identifier");
+    const auto ordered = evaluateFrom(resultOf(plain), {fileNode(Op::LoadTrajectory, "traj")}, 0, nullptr, nullptr, SIZE_MAX, {}, {}, 1).data;
+    near(ordered.atoms[0].x, second.atoms[0].x, 1e-6, "storage order pairs particles without identifiers");
+
+    Dataset wrong = fcc(2);
+    throwsWith([&] { (void)evaluateFrom(resultOf(wrong), {fileNode(Op::LoadTrajectory, "traj")}, 0); }, "32", "a particle-count mismatch names both counts");
+    Dataset unknown = second;
+    unknown.scalarProperties["Particle Identifier"][0] = 99;
+    fakeFiles["unknown"] = {unknown};
+    throwsWith([&] { (void)evaluateFrom(resultOf(topology), {fileNode(Op::LoadTrajectory, "unknown")}, 0); }, "missing from the file", "an unmatched identifier is reported");
+    Dataset repeated = second;
+    repeated.scalarProperties["Particle Identifier"][1] = 40;
+    fakeFiles["repeated"] = {repeated};
+    throwsWith([&] { (void)evaluateFrom(resultOf(topology), {fileNode(Op::LoadTrajectory, "repeated")}, 0); }, "repeats", "repeated identifiers are reported");
+    Dataset sampled = second;
+    sampled.stride = 2;
+    fakeFiles["sampled"] = {sampled};
+    throwsWith([&] { (void)evaluateFrom(resultOf(topology), {fileNode(Op::LoadTrajectory, "sampled")}, 0); }, "particle limit", "a sampled file is refused");
+
+    // No file chosen: the node does nothing.
+    const auto idle = evaluateFrom(resultOf(topology), {fileNode(Op::LoadTrajectory, "")}, 0).data;
+    check(idle.atoms[0].x == topology.atoms[0].x && !idle.globalAttributes.contains("LoadTrajectory.frame_count"), "an empty path passes data through");
+
+    // A bond crossing the boundary after the move takes the nearest image.
+    Dataset pair;
+    pair.species = {"X"};
+    pair.cell = {10, 0, 0, 0, 10, 0, 0, 0, 10};
+    pair.pbc = {true, true, true};
+    pair.atoms = {{1, 5, 5, 0}, {2, 5, 5, 0}};
+    pair.bonds.push_back({0, 1, {0, 0, 0}, 1});
+    Dataset across = pair;
+    across.bonds.clear();
+    across.atoms[1].x = 9;
+    fakeFiles["across"] = {across};
+    const auto wrapped = evaluateFrom(resultOf(pair), {fileNode(Op::LoadTrajectory, "across")}, 0).data;
+    check(wrapped.bonds[0].image[0] == -1, "bond images are refreshed for the new positions");
+    near(bondVector(wrapped, wrapped.bonds[0])[0], -2, 1e-6, "the refreshed bond has the minimum-image length");
+}
+
+static void testCombineDatasets() {
+    installFakeFiles();
+    Dataset primary = fcc(1);
+    primary.species = {"Cu"};
+    for (auto &atom : primary.atoms) atom.type = 0;
+    primary.scalarProperties["Particle Identifier"] = {5, 6, 7, 8};
+    primary.scalarProperties["Molecule Identifier"] = {1, 1, 2, 2};
+    primary.scalarProperties["Charge"] = {1, 1, 1, 1};
+    primary.bonds.push_back({0, 1, {0, 0, 0}, 1});
+
+    Dataset other;
+    other.species = {"O", "Cu"};
+    other.cell = {50, 0, 0, 0, 50, 0, 0, 0, 50};
+    other.atoms = {{20, 0, 0, 0}, {21, 0, 0, 1}};
+    other.scalarProperties["Particle Identifier"] = {5, 6};
+    other.scalarProperties["Molecule Identifier"] = {1, 2};
+    other.scalarProperties["Mass"] = {16, 63};
+    other.vectorProperties["Velocity"] = {Vec3{1, 2, 3}, Vec3{4, 5, 6}};
+    other.bonds.push_back({0, 1, {0, 0, 1}, 2});
+    fakeFiles["other"] = {other};
+
+    PipelineResult input = resultOf(primary);
+    input.selected[2] = 1;
+    const auto merged = evaluateFrom(input, {fileNode(Op::CombineDatasets, "other")}, 0);
+    const Dataset &d = merged.data;
+    check(d.atoms.size() == 6 && merged.selected.size() == 6 && merged.colorSelected.size() == 6, "particles and selection are extended");
+    check(merged.selected[2] == 1 && merged.selected[4] == 0, "the selection is kept and added particles are unselected");
+    check(d.species.size() == 2 && d.species[1] == "O", "new types are appended and shared names merge");
+    check(d.atoms[4].type == 1 && d.atoms[5].type == 0, "added particle types are remapped by name");
+    const auto &ids = d.scalarProperties.at("Particle Identifier");
+    check(ids[0] == 5 && ids[4] == 9 && ids[5] == 10, "added particles get new unique identifiers");
+    const auto &molecules = d.scalarProperties.at("Molecule Identifier");
+    check(molecules[3] == 2 && molecules[4] == 3 && molecules[5] == 4, "added molecules get new identifiers");
+    check(d.scalarProperties.at("Charge")[4] == 0 && d.scalarProperties.at("Charge")[0] == 1, "properties absent from the file are zero there");
+    check(d.scalarProperties.at("Mass")[0] == 0 && d.scalarProperties.at("Mass")[5] == 63, "properties new in the file are zero on the primary");
+    check(d.vectorProperties.at("Velocity")[0].x == 0 && d.vectorProperties.at("Velocity")[5].z == 6, "vector properties merge the same way");
+    check(d.bonds.size() == 2 && d.bonds[1].a == 4 && d.bonds[1].b == 5 && d.bonds[1].order == 2 && d.bonds[1].image[2] == 1, "added bonds are renumbered and keep order and image");
+    check(d.cell == primary.cell, "the primary simulation cell is kept");
+    near(attribute(d, "CombineDatasets.added_count"), 2, 0, "the added count is published");
+
+    // Identifiers on one side only still end up unique.
+    Dataset noIds = primary;
+    noIds.scalarProperties.erase("Particle Identifier");
+    const auto assigned = evaluateFrom(resultOf(noIds), {fileNode(Op::CombineDatasets, "other")}, 0).data.scalarProperties.at("Particle Identifier");
+    check(assigned[0] == 1 && assigned[3] == 4 && assigned[4] == 5 && assigned[5] == 6, "identifiers are made unique when only the file has them");
+
+    // Colors: missing ones keep the default marker.
+    Dataset painted = primary;
+    painted.particleColors.assign(4, Vec3{1, 0, 0});
+    const auto colored = evaluateFrom(resultOf(painted), {fileNode(Op::CombineDatasets, "other")}, 0).data;
+    check(colored.particleColors.size() == 6 && colored.particleColors[0].x == 1 && colored.particleColors[5].x == -1, "added particles use default colors");
+
+    // An empty dataset takes the file's particles and keeps its own cell.
+    Dataset empty;
+    empty.cell = primary.cell;
+    const auto filled = evaluateFrom(resultOf(empty), {fileNode(Op::CombineDatasets, "other")}, 0).data;
+    check(filled.atoms.size() == 2 && filled.species.size() == 2 && filled.cell == primary.cell, "an empty dataset takes the file's particles");
+
+    // Corresponding frames; a shorter file repeats its last one.
+    Dataset later = other;
+    later.atoms.push_back({22, 0, 0, 0});
+    later.scalarProperties.clear();
+    later.vectorProperties.clear();
+    later.bonds.clear();
+    fakeFiles["frames"] = {other, later};
+    const auto atFrame = [&](int frame) {
+        return evaluateFrom(resultOf(primary), {fileNode(Op::CombineDatasets, "frames")}, 0, nullptr, nullptr, SIZE_MAX, {}, {}, frame).data.atoms.size();
+    };
+    check(atFrame(0) == 6 && atFrame(1) == 7 && atFrame(5) == 7, "matching frames are combined and the last one repeats");
+
+    Dataset badType = other;
+    badType.atoms[0].type = 9;
+    fakeFiles["badType"] = {badType};
+    throwsWith([&] { (void)evaluateFrom(resultOf(primary), {fileNode(Op::CombineDatasets, "badType")}, 0); }, "out of range", "an invalid particle type is reported");
+    Dataset badBond = other;
+    badBond.bonds[0].b = 7;
+    fakeFiles["badBond"] = {badBond};
+    throwsWith([&] { (void)evaluateFrom(resultOf(primary), {fileNode(Op::CombineDatasets, "badBond")}, 0); }, "missing particle", "an invalid bond is reported");
+    check(evaluateFrom(resultOf(primary), {fileNode(Op::CombineDatasets, "")}, 0).data.atoms.size() == 4, "an empty path passes data through");
+}
+
 static void testCancellation() {
     std::atomic<bool> cancel{true};
     {
@@ -2128,6 +2392,9 @@ int main() {
     testGrainSegmentation();
     testElasticStrain();
     testHideSelected();
+    testCommonNeighborModes();
+    testLoadTrajectory();
+    testCombineDatasets();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
@@ -2135,6 +2402,6 @@ int main() {
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
                  "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
-                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, grain segmentation, elastic strain, hide selected, "
+                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, grain segmentation, elastic strain, hide selected, CNA modes, load trajectory, combine datasets, "
                  "pipeline composition, cancellation\n";
 }

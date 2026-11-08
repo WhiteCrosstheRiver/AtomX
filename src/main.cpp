@@ -645,11 +645,11 @@ static Dataset evaluateNodesAtFrame(const std::vector<Modifier> &nodes, size_t n
 }
 // Frame differences need upstream properties, so the reference frame runs the nodes before it.
 static Dataset evaluatePrefixOn(Dataset frame, const std::vector<Modifier> &nodes, size_t node,
-                                std::atomic<bool> *cancel) {
+                                std::atomic<bool> *cancel, int frameIndex = 0) {
     const std::vector<Modifier> prefix(nodes.begin(), nodes.begin() + node);
     const size_t count = frame.atoms.size();
     PipelineResult input{std::move(frame), std::vector<uint8_t>(count), std::vector<uint8_t>(count, 1)};
-    return evaluateFrom(std::move(input), prefix, 0, cancel).data;
+    return evaluateFrom(std::move(input), prefix, 0, cancel, nullptr, SIZE_MAX, {}, {}, frameIndex).data;
 }
 
 // One executable entry of the Quick command search (Ctrl+P). The single
@@ -681,7 +681,7 @@ static const std::vector<Command> &commandRegistry() {
                       Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
                       Op::IdentifyDiamond, Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory,
                       Op::DiffusionCoefficient, Op::FindRings, Op::VoronoiAnalysis, Op::ChillPlus, Op::LocalEntropy,
-                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::GrainSegmentation, Op::ElasticStrain, Op::HideSelected, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::GrainSegmentation, Op::ElasticStrain, Op::HideSelected, Op::LoadTrajectory, Op::CombineDatasets, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -1584,7 +1584,7 @@ struct App {
                                 frameSnapshot.empty() ? freezeSource
                                     : io::read(inputPath, frameSnapshot.at(size_t(frame)), readBudget,
                                                nullptr, &pipelineCancel),
-                                executable, node, &pipelineCancel)).first->second;
+                                executable, node, &pipelineCancel, frame)).first->second;
                         }
                         return rawFrameReferences
                             .emplace(node, io::read(inputPath, frameSnapshot.at(size_t(frame)),
@@ -1704,7 +1704,7 @@ struct App {
                                 frameSnapshot.empty() ? freezeSource
                                     : io::read(inputPath, frameSnapshot.at(size_t(frame)), readBudget,
                                                nullptr, &inspectorCancel),
-                                executable, node, &inspectorCancel)).first->second;
+                                executable, node, &inspectorCancel, frame)).first->second;
                         }
                         return rawFrameReferences
                             .emplace(node, io::read(inputPath, frameSnapshot.at(size_t(frame)),
@@ -1718,6 +1718,29 @@ struct App {
                 return evaluate(std::move(input), executable, &inspectorCancel,
                                 &inspectorActiveNode, referenceProvider, currentFrame, frameState);
             });
+    }
+    // A Load trajectory node on a single-frame source drives the timeline. The extra frames
+    // all point at the source's only frame, so every frame reader keeps working and the node
+    // supplies the motion. A real trajectory never has two frames at one file offset.
+    bool timelineFromLoadedTrajectory() const {
+        return frames.size()>1 && std::all_of(frames.begin(),frames.end(),
+            [&](const Frame &f){return f.offset==frames.front().offset;});
+    }
+    void syncLoadedTrajectoryTimeline() {
+        const auto found=result.data.globalAttributes.find("LoadTrajectory.frame_count");
+        const int count=found==result.data.globalAttributes.end() ? 0 : int(found->second);
+        const bool extended=timelineFromLoadedTrajectory();
+        if (!extended && frames.size()!=1) return;
+        if (count<2) {
+            if (!extended) return;
+            frames.resize(1);
+            if (current!=0) seekFrame(0);
+            return;
+        }
+        if (int(frames.size())==count || path.empty()) return; // Seeking re-reads the source file.
+        const Frame base=frames.front();
+        frames.assign(size_t(count),base);
+        if (current>=count) seekFrame(count-1);
     }
     void update(size_t dirtyFrom = SIZE_MAX, bool preserveColorRanges = false) {
         // Modifier output can reorder/replace bonds even with unchanged atom
@@ -1859,6 +1882,8 @@ struct App {
             m.value = result.data.atoms.size() > 10000 ? 0.f : 3.2f;
             if (result.data.atoms.size() > 10000) m.bondCylinders = false;
         }
+        if (op == Op::CommonNeighborAnalysis) { m.type = 1; m.overlapUseRadii = true; }
+        if (op == Op::LoadTrajectory || op == Op::CombineDatasets) m.property.clear();
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
         if (op == Op::BondLengthDistribution) m.type = 64;
         if (op == Op::BondAngleDistribution) m.type = 90;
@@ -3750,6 +3775,7 @@ struct App {
                 try {
                     auto completed = pipelineJob.get();
                     publishPipeline(std::move(completed.result));
+                    syncLoadedTrajectoryTimeline();
                     if (completed.checkpoint) {
                         pipelineCheckpoint=std::make_shared<PipelineResult>(std::move(*completed.checkpoint));
                         pipelineCheckpointNode=completed.checkpointNode;
@@ -10647,10 +10673,61 @@ struct App {
                             ? loc::text("Connected components follow the input bond topology; selected-only mode assigns ID 0 to other particles.")
                             : loc::text("Connected components follow the periodic minimum-image cutoff. Unselected particles get Cluster ID 0 when selected-only is enabled."));
                     }
+                    if (m.op == Op::LoadTrajectory || m.op == Op::CombineDatasets) {
+                        const bool loads = m.op == Op::LoadTrajectory;
+                        const std::u8string pathText(reinterpret_cast<const char8_t *>(m.property.data()), m.property.size());
+                        const std::string shown = m.property.empty() ? std::string(loc::text("No file selected"))
+                            : [&]{const auto name=std::filesystem::path(pathText).filename().u8string();
+                                  return std::string(reinterpret_cast<const char *>(name.data()),name.size());}();
+                        ImGui::TextUnformatted(shown.c_str());
+                        ImGui::SameLine();referenceHelp("analysis");
+                        if (ImGui::Button(loc::label(loads ? "Pick trajectory file..." : "Pick file to merge..."))) {
+                            const auto chosen=dialog(window,false,fileFilter("Atom structures",L"*.xyz;*.extxyz;*.dump;*.lammpstrj;*.data;*.lmp;*.pdb;*.ent;*.gro;*.cif;*.vasp;*.poscar;*.xsf;*.mol;*.sdf;POSCAR;CONTCAR").c_str(),L"xyz");
+                            if (!chosen.empty()) {
+                                const auto text=chosen.u8string();
+                                checkpoint();
+                                m.property.assign(reinterpret_cast<const char *>(text.data()),text.size());
+                                update();
+                            }
+                        }
+                        recordUiTestItem(std::string("pipeline.external-file.")+m.id,"file");
+                        if (!m.property.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton(loc::label("Clear"))) { checkpoint(); m.property.clear(); update(); }
+                        }
+                        if (loads) {
+                            ImGui::TextDisabled(loc::text("Replaces positions and the simulation cell and adds the file's other particle properties, matching particles by Particle Identifier or else by order. Particle types and bonds stay; the file must hold the same particles."));
+                            if (const auto found=result.data.globalAttributes.find("LoadTrajectory.frame_count");found!=result.data.globalAttributes.end())
+                                ImGui::Text(loc::text("Frames in file %.0f"),found->second);
+                        } else {
+                            ImGui::BeginDisabled();
+                            bool merged=true;
+                            ui_design::checkbox(loc::label("Merge into existing particle system"),&merged);
+                            ImGui::EndDisabled();
+                            ImGui::TextDisabled(loc::text("Appends the file's particles and bonds with new unique identifiers; the simulation cell is kept and is not enlarged. Matching frames are combined; a shorter file repeats its last frame. AtomX has one particle system per dataset, so merging cannot be turned off."));
+                            if (const auto found=result.data.globalAttributes.find("CombineDatasets.added_count");found!=result.data.globalAttributes.end())
+                                ImGui::Text(loc::text("Added particles %.0f"),found->second);
+                        }
+                    }
+                    if (m.op == Op::CommonNeighborAnalysis) {
+                        int mode=std::clamp(m.type,0,3);
+                        fitNextField("Mode", true);
+                        if (ImGui::Combo(loc::label("Mode"),&mode,loc::items("Conventional CNA (fixed cutoff)\0Adaptive CNA (variable cutoff)\0Interval CNA (variable cutoff)\0Bond-based CNA (no cutoff)\0"))) {
+                            checkpoint(); m.type=mode; update();
+                        }
+                        recordUiTestItem(std::string("pipeline.cna-mode.")+m.id,"Mode");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        if (ui_design::checkbox(loc::label("Use only selected particles"),&m.cspOnlySelected)) { checkpoint(); update(); }
+                        if (ui_design::checkbox(loc::label("Color particles by type"),&m.overlapUseRadii)) { checkpoint(); update(); }
+                        ImGui::TextDisabled(m.type==3 ? loc::text("Uses existing bonds regardless of distance. Bond signatures are listed in a table; AtomX has no per-bond CNA property.")
+                            : m.type==2 ? loc::text("Examines every threshold around each particle; slower, more tolerant at high temperature.")
+                            : m.type==1 ? loc::text("A separate cutoff for each particle from its nearest-neighbor distances.")
+                            : loc::text("One cutoff for all particles, in the input length unit. Between shells 1 and 2 for FCC/HCP, 2 and 3 for BCC."));
+                    }
                     if (m.op == Op::CommonNeighborAnalysis ||
                         m.op == Op::CoordinationAnalysis || m.op == Op::ClusterAnalysis ||
                         m.op == Op::RadialDistribution) {
-                        if (!(m.op==Op::ClusterAnalysis && m.clusterByBonds)) {
+                        if (!(m.op==Op::ClusterAnalysis && m.clusterByBonds) && !(m.op==Op::CommonNeighborAnalysis && m.type!=0)) {
                             float value = m.value;
                             if (ImGui::DragFloat(loc::label("Cutoff distance"), &value, .01f, .0001f, 100000.f, "%.5g")) {
                                 checkpoint(); m.value = value; update();
@@ -12350,7 +12427,7 @@ struct App {
                     Dataset data =
                         range ? evaluate(io::read(sourcePath, frameIndex.at(frame),
                                                   uint64_t(atomBudget), nullptr, &exportCancel),
-                                         pipeline)
+                                         pipeline, &exportCancel, frame)
                                     .data
                               : snapshot;
                     if (data.sampled() && !allowPreview)
@@ -12679,12 +12756,13 @@ struct App {
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Modification");
-                operation(Op::AffineTransform,"Apply an invertible 3 x 4 affine matrix to particle positions, simulation-cell vectors and origin."); planned("Combine datasets");
+                operation(Op::AffineTransform,"Apply an invertible 3 x 4 affine matrix to particle positions, simulation-cell vectors and origin."); operation(Op::CombineDatasets,"Append the particles and bonds of a second file to the current dataset; the simulation cell is kept.");
                 operation(Op::ComputeProperty,"Evaluate a scalar expression for every particle and publish the named property.");
                 operation(Op::Delete,"Remove selected particles.");
                 operation(Op::EditCell,"Edit cell origin, vectors and periodic boundaries. Particle coordinates stay fixed unless fractional-coordinate remapping is explicitly enabled."); operation(Op::EditType,"Edit particle type assignments.");
                 operation(Op::FreezeProperty,"Snapshots a particle property at a reference frame and keeps it constant across the trajectory.");
-                for (auto name : {"Load trajectory", "Python script (deferred)"}) planned(name);
+                operation(Op::LoadTrajectory,"Read particle motion and the simulation cell from a trajectory file and apply them to the static topology.");
+                planned("Python script (deferred)");
                 operation(Op::RemoveProperty,"Remove a scalar or vector particle property by name.");
                 operation(Op::Replicate,"Duplicate the structure along the three cell vectors and resize the simulation cell.");
                 operation(Op::Rotate,"Rotate positions and cell vectors around an axis (degrees).");
@@ -12704,7 +12782,7 @@ struct App {
                 operation(Op::SteinhardtOrderParameters,"Compute the q4 and q6 bond-orientational order parameters of every particle from its nearest neighbors.");
                 operation(Op::CentrosymmetryParameter,"Computes the centrosymmetry parameter to identify atoms in defective crystal environments (stacking faults, surfaces, dislocations).");
                 operation(Op::ChillPlus,"Classify water molecules as hexagonal, cubic or interfacial ice, hydrate or interfacial hydrate from the q3 bond correlations of four neighbors.");
-                operation(Op::CommonNeighborAnalysis,"Fixed-cutoff Honeycutt–Andersen pair signatures; FCC and BCC are verified against periodic reference crystals. Unsupported or ambiguous motifs remain Other.");
+                operation(Op::CommonNeighborAnalysis,"Honeycutt–Andersen pair signatures with a fixed, adaptive or interval cutoff, or from existing bonds. FCC, HCP, BCC and icosahedral; anything else stays Other.");
                 operation(Op::PolyhedralTemplateMatching,"Match each particle's neighbors to FCC, HCP, BCC, icosahedral, simple cubic, diamond and graphene templates; publishes structure type, RMSD, interatomic distance, orientation and elastic deformation gradient.");
                 planned("VoroTop analysis");
                 endCard();

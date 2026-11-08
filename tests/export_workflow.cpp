@@ -2279,6 +2279,106 @@ int main(int argc,char **argv) {
                 while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
                 frame();
             }
+            {
+                // Load trajectory on a single-frame source drives the timeline through a real file.
+                const auto savedFrames=app.frames;
+                const auto savedPath=app.path;
+                const auto savedSource=app.source;
+                const int savedCurrent=app.current;
+                if (app.current!=0) { app.seekFrame(0); app.poll(); if(app.job.valid())app.job.wait(); app.poll(); }
+                app.frames.resize(1);
+                const auto trajectoryPath=dir/"motion.xyz";
+                {
+                    std::ofstream out(trajectoryPath);
+                    for (int f=0;f<3;++f) {
+                        out<<app.source.atoms.size()<<"\nframe "<<f<<"\n";
+                        for (const auto &atom:app.source.atoms)
+                            out<<app.source.species.at(atom.type)<<' '<<atom.x+f*.25<<' '<<atom.y<<' '<<atom.z<<"\n";
+                    }
+                }
+                const float firstX=app.source.atoms.at(0).x;
+                strcpy_s(app.modifierSearch,"Load trajectory");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Load trajectory");
+                requireExport(app.mods.size()==1 && app.mods[0].op==Op::LoadTrajectory && app.mods[0].property.empty(),"catalog adds Load trajectory with no file");
+                settlePipeline();
+                app.selectPipeline=true;
+                app.modifierGraph.selected=0;
+                frame();
+                frame();
+                requireExport(app.error.empty() && app.frames.size()==1,"Load trajectory without a file passes data through");
+                const auto text=trajectoryPath.u8string();
+                app.mods[0].property.assign(reinterpret_cast<const char *>(text.data()),text.size());
+                app.update(0);
+                settlePipeline();
+                frame();
+                if (app.path.empty())
+                    requireExport(app.error.empty() && app.frames.size()==1,"a structure with no source file keeps its single frame");
+                app.path=trajectoryPath; app.frames=io::index(trajectoryPath); app.frames.resize(1); // Seeking re-reads the source file.
+                app.update(0);
+                settlePipeline();
+                frame();
+                requireExport(app.error.empty() && app.frames.size()==3,("the timeline takes the trajectory's frames: "+app.error).c_str());
+                app.seekFrame(2);
+                for (int wait=0;wait<12 && (app.busy || app.pipelineBusy || app.pendingFrame>=0);++wait) { app.poll(); if(app.busy && app.job.valid())app.job.wait(); app.poll(); settlePipeline(); }
+                frame();
+                requireExport(app.current==2 && std::abs(app.result.data.atoms.at(0).x-(firstX+.5f))<1e-3f,"a later frame shows the trajectory's positions");
+                app.modifierGraph.erase(0);
+                app.update(0);
+                settlePipeline();
+                for (int wait=0;wait<12 && (app.busy || app.pipelineBusy || app.pendingFrame>=0);++wait) { app.poll(); if(app.busy && app.job.valid())app.job.wait(); app.poll(); settlePipeline(); }
+                frame();
+                requireExport(app.frames.size()==1 && app.current==0,"removing the node restores the single-frame timeline");
+
+                // Combine datasets through the same file reader.
+                strcpy_s(app.modifierSearch,"Combine datasets");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Combine datasets");
+                requireExport(app.mods.size()==1 && app.mods[0].op==Op::CombineDatasets,"catalog adds Combine datasets");
+                settlePipeline();
+                app.selectPipeline=true;
+                app.modifierGraph.selected=0;
+                frame();
+                app.mods[0].property.assign(reinterpret_cast<const char *>(text.data()),text.size());
+                app.update(0);
+                settlePipeline();
+                frame();
+                frame();
+                requireExport(app.error.empty() && app.result.data.atoms.size()==2*app.source.atoms.size(),("Combine datasets appends the file's particles: "+app.error).c_str());
+                while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
+                frame();
+
+                // Common neighbor analysis defaults to the adaptive mode and draws each mode's panel.
+                strcpy_s(app.modifierSearch,"Common neighbor analysis");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Common neighbor analysis");
+                requireExport(app.mods.size()==1 && app.mods[0].type==1 && app.mods[0].overlapUseRadii,"CNA starts in adaptive mode with colors");
+                settlePipeline();
+                app.selectPipeline=true;
+                app.modifierGraph.selected=0;
+                frame();
+                requireExport(app.error.empty() && app.result.data.scalarProperties.contains("Structure Type") && !app.result.data.particleColors.empty(),("adaptive CNA runs from the catalog: "+app.error).c_str());
+                app.mods[0].type=2;
+                app.update(0);
+                settlePipeline();
+                frame();
+                requireExport(app.error.empty(),("interval CNA runs: "+app.error).c_str());
+                while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
+                frame();
+                app.frames=savedFrames;
+                app.path=savedPath;
+                app.source=savedSource;
+                app.update(0);
+                settlePipeline();
+                if (savedCurrent>0 && size_t(savedCurrent)<app.frames.size() && !app.path.empty()) {
+                    app.seekFrame(savedCurrent);
+                    for (int wait=0;wait<12 && (app.busy || app.pipelineBusy || app.pendingFrame>=0);++wait) { app.poll(); if(app.busy && app.job.valid())app.job.wait(); app.poll(); settlePipeline(); }
+                }
+                frame();
+            }
             strcpy_s(app.modifierSearch,"Radial distribution function (RDF)");
             click("pipeline.add-modification");
             frame(); // Allow the newly opened popup to settle before using its recorded item rectangles.

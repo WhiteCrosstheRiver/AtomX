@@ -1111,4 +1111,36 @@ inline void write(const std::filesystem::path &path, Format fmt, const Dataset &
     if (!out)
         throw std::runtime_error("Failed writing export file");
 }
+// Reads one frame of a file named by a pipeline node. The frame index of each file is cached
+// by size and modification time so stepping through a long trajectory does not rescan it.
+inline ExternalFrame readExternalFrameFromFile(const std::string &utf8Path, int frame, std::atomic<bool> *cancel) {
+    const std::filesystem::path file{std::u8string(reinterpret_cast<const char8_t *>(utf8Path.data()), utf8Path.size())};
+    std::error_code error;
+    const auto bytes = std::filesystem::file_size(file, error);
+    if (error) throw std::runtime_error("Cannot open " + utf8Path);
+    const auto stamp = std::filesystem::last_write_time(file, error);
+    if (error) throw std::runtime_error("Cannot open " + utf8Path);
+    struct Indexed {
+        uintmax_t bytes;
+        std::filesystem::file_time_type stamp;
+        std::shared_ptr<const std::vector<Frame>> frames;
+    };
+    static std::mutex mutex;
+    static std::map<std::string, Indexed> cache;
+    std::shared_ptr<const std::vector<Frame>> frames;
+    {
+        std::lock_guard lock(mutex);
+        const auto found = cache.find(utf8Path);
+        if (found != cache.end() && found->second.bytes == bytes && found->second.stamp == stamp) frames = found->second.frames;
+        else {
+            frames = std::make_shared<const std::vector<Frame>>(index(file, nullptr, cancel));
+            if (cache.size() >= 16) cache.clear();
+            cache[utf8Path] = Indexed{bytes, stamp, frames};
+        }
+    }
+    if (frames->empty()) throw std::runtime_error("No frames found in " + utf8Path);
+    const size_t chosen = std::min(size_t(std::max(frame, 0)), frames->size() - 1);
+    return ExternalFrame{read(file, (*frames)[chosen], externalParticleLimit, nullptr, cancel), int(frames->size())};
+}
+inline const bool externalFrameReaderInstalled = (externalFrameReader() = readExternalFrameFromFile, true);
 } // namespace atomx::io

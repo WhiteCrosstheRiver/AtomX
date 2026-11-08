@@ -29,6 +29,8 @@
 #include <complex>
 #include <thread>
 #include <queue>
+#include <bit>
+#include <numeric>
 
 namespace atomx {
 struct Vec3 {
@@ -816,6 +818,8 @@ enum class Op {
     ,GrainSegmentation
     ,ElasticStrain
     ,HideSelected
+    ,LoadTrajectory
+    ,CombineDatasets
 };
 struct Modifier {
     Op op;
@@ -919,6 +923,9 @@ struct Modifier {
     // PTM: value RMSD cutoff, expandNeighbors structure bit mask (bit type-1), adaptive
     // RMSD output, overlapUseRadii interatomic distance, clusterByBonds orientation,
     // clusterSortBySize elastic deformation gradient, cspOnlySelected.
+    // Common neighbor analysis: type mode (0 fixed, 1 adaptive, 2 interval, 3 bond-based),
+    // value cutoff, cspOnlySelected, overlapUseRadii color by type.
+    // Load trajectory and Combine datasets: property is the UTF-8 file path (empty passes through).
     // Grain segmentation: type algorithm (0 automatic, 1 manual graph clustering, 2 MST),
     // value log merge threshold, rdfBins minimum grain size, adaptive adopt orphans,
     // clusterByBonds handle stacking faults, overlapUseRadii color particles by grain.
@@ -2009,22 +2016,18 @@ struct CNAResult {
     std::map<std::tuple<int,int,int>, uint64_t> bondSignatureCounts;
 };
 
-inline CNAResult analyzeCommonNeighbors(const Dataset &d, double cutoff,
-                                        std::atomic<bool> *cancel = nullptr) {
-    validateNeighborAnalysisInput(d);
-    std::vector<std::vector<uint32_t>> adjacency(d.atoms.size());
-    forEachNeighborPair(d, cutoff, [&](uint32_t a, uint32_t b, double) {
-        adjacency[a].push_back(b); adjacency[b].push_back(a);
-    }, cancel);
+// Classifies every particle from a neighbor graph (cutoff pairs or explicit bonds).
+inline CNAResult classifyCommonNeighborAdjacency(std::vector<std::vector<uint32_t>> adjacency,
+                                                 std::atomic<bool> *cancel = nullptr) {
     for (auto &neighbors : adjacency) {
         std::sort(neighbors.begin(), neighbors.end());
         neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
         if (neighbors.size() > 128)
             throw std::runtime_error("CNA cutoff produced more than 128 neighbors per atom");
     }
-    CNAResult result; result.structure.resize(d.atoms.size());
+    CNAResult result; result.structure.resize(adjacency.size());
     result.counts = {{"Other",0},{"FCC",0},{"HCP",0},{"BCC",0},{"Icosahedral",0}};
-    for (uint32_t center=0; center<d.atoms.size(); ++center) {
+    for (uint32_t center=0; center<adjacency.size(); ++center) {
         if (cancel && *cancel) throw std::runtime_error("Cancelled");
         std::map<std::tuple<int,int,int>,uint32_t> signatures;
         const auto &neighbors = adjacency[center];
@@ -2072,6 +2075,15 @@ inline CNAResult analyzeCommonNeighbors(const Dataset &d, double cutoff,
         ++result.counts[id==1?"FCC":id==2?"HCP":id==3?"BCC":id==4?"Icosahedral":"Other"];
     }
     return result;
+}
+inline CNAResult analyzeCommonNeighbors(const Dataset &d, double cutoff,
+                                        std::atomic<bool> *cancel = nullptr) {
+    validateNeighborAnalysisInput(d);
+    std::vector<std::vector<uint32_t>> adjacency(d.atoms.size());
+    forEachNeighborPair(d, cutoff, [&](uint32_t a, uint32_t b, double) {
+        adjacency[a].push_back(b); adjacency[b].push_back(a);
+    }, cancel);
+    return classifyCommonNeighborAdjacency(std::move(adjacency), cancel);
 }
 
 // Kelchner–Plimpton–Hamilton centrosymmetry parameter (OVITO S02). For every
@@ -2309,6 +2321,8 @@ inline const char *opName(Op op) {
     case Op::GrainSegmentation: return "Grain segmentation";
     case Op::ElasticStrain: return "Elastic strain calculation";
     case Op::HideSelected: return "Hide selected";
+    case Op::LoadTrajectory: return "Load trajectory";
+    case Op::CombineDatasets: return "Combine datasets";
     default:
         return "Color by type";
     }
@@ -2368,6 +2382,8 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_correlation.inc"
 #include "analysis_ptm.inc"
 #include "analysis_grains.inc"
+#include "analysis_cna.inc"
+#include "analysis_external.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -2688,7 +2704,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 throw std::runtime_error("Particle type is out of range");
             if (m.op == Op::SelectRange && m.upper < m.value)
                 throw std::runtime_error("Upper bound must be at least the lower bound");
-            if ((m.op == Op::CommonNeighborAnalysis || (m.op == Op::CreateBonds && !m.bondTypeCutoffsEnabled) ||
+            if (((m.op == Op::CommonNeighborAnalysis && m.type == 0) || (m.op == Op::CreateBonds && !m.bondTypeCutoffsEnabled) ||
                  m.op == Op::CoordinationAnalysis || (m.op == Op::ClusterAnalysis && !m.clusterByBonds) ||
                 m.op == Op::RadialDistribution) &&
                 (!(m.value > 0) || !std::isfinite(m.value)))
@@ -3165,6 +3181,19 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             }
             if (m.op == Op::HideSelected) {
                 hideSelectedParticles(r);
+                continue;
+            }
+            if (m.op == Op::LoadTrajectory || m.op == Op::CombineDatasets) {
+                if (m.property.empty()) continue; // No file chosen yet: the node passes data through.
+                if (!externalFrameReader()) throw std::runtime_error("This build cannot read external files");
+                const ExternalFrame external = externalFrameReader()(m.property, currentFrame, cancel);
+                if (m.op == Op::LoadTrajectory) {
+                    applyLoadedTrajectory(r.data, external.data, cancel);
+                    auto &frames = r.data.globalAttributes["LoadTrajectory.frame_count"];
+                    frames = std::max(frames, double(external.frameCount));
+                } else {
+                    combineDatasets(r, external.data, cancel);
+                }
                 continue;
             }
             if (m.op == Op::GrainSegmentation) {
@@ -3734,24 +3763,12 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     r.data.globalAttributes["CreateBonds.num_bonds"] =
                         double(r.data.bonds.size());
                 } else {
-                    auto cna = analyzeCommonNeighbors(r.data, m.value, cancel);
-                    std::vector<double> structure(cna.structure.begin(), cna.structure.end());
-                    r.data.scalarProperties["Structure Type"] = std::move(structure);
-                    for (const auto &[name, count] : cna.counts)
-                        r.data.globalAttributes["CommonNeighborAnalysis.counts." + name] = double(count);
-                    DataTable table;
-                    table.name = "Structure analysis results";
-                    table.columns = {"Structure", "Count", "Fraction", "Id"};
-                    const std::array<std::pair<const char *, uint8_t>, 5> kinds{{
-                        {"Other",uint8_t(0)}, {"FCC",uint8_t(1)}, {"HCP",uint8_t(2)},
-                        {"BCC",uint8_t(3)}, {"Icosahedral",uint8_t(4)}}};
-                    for (const auto &[name, id] : kinds) {
-                        const auto count = cna.counts.at(name);
-                        table.rows.push_back({name, std::to_string(count),
-                            r.data.atoms.empty() ? "0" : std::to_string(double(count) / r.data.atoms.size()),
-                            std::to_string(id)});
-                    }
-                    r.data.tables.push_back(std::move(table));
+                    if (m.type < 0 || m.type > 3) throw std::runtime_error("Unknown common neighbor analysis mode");
+                    CnaOptions options;
+                    options.mode = CnaMode(m.type);
+                    options.cutoff = m.value;
+                    options.colorByType = m.overlapUseRadii;
+                    computeCommonNeighborAnalysis(r.data, options, m.cspOnlySelected ? &r.selected : nullptr, cancel);
                 }
                 continue;
             }
@@ -3938,12 +3955,12 @@ inline std::pair<double, double> colorRangeAcrossFrames(
     return {lo, hi};
 }
 inline PipelineResult evaluate(const Dataset &source, const PipelineGraph &graph,
-                               std::atomic<bool> *cancel = nullptr) {
+                               std::atomic<bool> *cancel = nullptr, int currentFrame = 0) {
     std::vector<Modifier> executable;
     executable.reserve(graph.nodes.size());
     for (const auto &node : graph.nodes)
         executable.push_back(static_cast<const Modifier &>(node));
-    return evaluate(source, executable, cancel);
+    return evaluate(source, executable, cancel, nullptr, {}, currentFrame);
 }
 inline PipelineResult evaluateNodes(const Dataset &source, const std::vector<ModifierNode> &nodes,
                                     std::atomic<bool> *cancel = nullptr) {
