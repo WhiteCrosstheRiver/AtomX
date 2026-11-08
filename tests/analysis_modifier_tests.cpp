@@ -2309,6 +2309,104 @@ static void testCombineDatasets() {
     check(evaluateFrom(resultOf(primary), {fileNode(Op::CombineDatasets, "")}, 0).data.atoms.size() == 4, "an empty path passes data through");
 }
 
+// ---- Measure and partial RDF -------------------------------------------------------
+static Modifier measureNode(const char *path, bool periodic = true) {
+    Modifier m{Op::Measure};
+    m.property = path;
+    m.adaptive = periodic;
+    return m;
+}
+
+static void testMeasure() {
+    Dataset d;
+    d.species = {"X"};
+    d.cell = {10, 0, 0, 0, 10, 0, 0, 0, 10};
+    d.pbc = {true, true, true};
+    d.atoms = {{1, 1, 1, 0}, {4, 1, 1, 0}, {4, 5, 1, 0}, {9, 1, 1, 0}};
+
+    // A 3-4-5 right triangle, closed.
+    auto closed = evaluateFrom(resultOf(d), {measureNode("1 2 3 1", false)}, 0).data;
+    near(attribute(closed, "Measurements.TotalDistance"), 12, 1e-5, "closed path length");
+    near(attribute(closed, "Measurements.Area"), 6, 1e-5, "closed path area");
+    const auto &rows = tableNamed(closed, "Measurements").rows;
+    check(rows.size() == 4 && rows[0][7].empty() && rows[0][8].empty(), "the first row has no segment or angle");
+    near(std::stod(rows[1][7]), 3, 1e-5, "first segment length");
+    near(std::stod(rows[2][7]), 4, 1e-5, "second segment length");
+    near(std::stod(rows[1][8]), 90, 1e-4, "interior angle at the right-angle vertex");
+    near(std::stod(rows[3][7]), 5, 1e-5, "closing segment length");
+    near(std::stod(rows[3][8]), std::atan2(4.0, 3.0) * 180 / 3.14159265358979323846, 1e-4, "the last row holds the start-point angle");
+
+    // An open path has no area and no end angles.
+    auto open = evaluateFrom(resultOf(d), {measureNode("1, 2 3", false)}, 0).data;
+    check(!open.globalAttributes.contains("Measurements.Area"), "an open path has no area");
+    const auto &openRows = tableNamed(open, "Measurements").rows;
+    check(openRows.size() == 3 && openRows[2][8].empty() && !openRows[2][7].empty(), "the last open row has a segment and no angle");
+
+    // Across the periodic boundary.
+    near(attribute(evaluateFrom(resultOf(d), {measureNode("1 4", true)}, 0).data, "Measurements.TotalDistance"), 2, 1e-5, "minimum image connects across the boundary");
+    near(attribute(evaluateFrom(resultOf(d), {measureNode("1 4", false)}, 0).data, "Measurements.TotalDistance"), 8, 1e-5, "the direct distance without periodic boundaries");
+
+    // Identifiers take priority over list positions.
+    Dataset ids = d;
+    ids.scalarProperties["Particle Identifier"] = {40, 30, 20, 10};
+    near(attribute(evaluateFrom(resultOf(ids), {measureNode("40 30", false)}, 0).data, "Measurements.TotalDistance"), 3, 1e-5, "particles are found by identifier");
+    throwsWith([&] { (void)evaluateFrom(resultOf(ids), {measureNode("1 30", false)}, 0); }, "identifier 1", "an unknown identifier is reported");
+
+    throwsWith([&] { (void)evaluateFrom(resultOf(d), {measureNode("1", false)}, 0); }, "at least two", "one point is rejected");
+    throwsWith([&] { (void)evaluateFrom(resultOf(d), {measureNode("1 9", false)}, 0); }, "number 9", "a particle number out of range is reported");
+    throwsWith([&] { (void)evaluateFrom(resultOf(d), {measureNode("1 x", false)}, 0); }, "not a particle", "text that is not a number is reported");
+    const auto repeated = evaluateFrom(resultOf(d), {measureNode("1 1 2", false)}, 0).data;
+    check(tableNamed(repeated, "Measurements").rows[1][8].empty(), "a zero-length segment has no angle");
+    check(!evaluateFrom(resultOf(d), {measureNode("", false)}, 0).data.globalAttributes.contains("Measurements.TotalDistance"), "an empty path passes data through");
+
+    // A loop that goes around the periodic cell: area uses connected corners only.
+    Dataset square = d;
+    square.atoms = {{9, 9, 1, 0}, {1, 9, 1, 0}, {1, 1, 1, 0}, {9, 1, 1, 0}};
+    near(attribute(evaluateFrom(resultOf(square), {measureNode("1 2 3 4 1", true)}, 0).data, "Measurements.Area"), 4, 1e-5, "a closed path across the boundary keeps its true area");
+}
+
+static void testPartialRdf() {
+    // A rock-salt arrangement of two types.
+    Dataset d = simpleCubic(6, 2.0);
+    d.species = {"Na", "Cl"};
+    for (size_t i = 0; i < d.atoms.size(); ++i) {
+        const int ix = int(std::lround(d.atoms[i].x / 2)), iy = int(std::lround(d.atoms[i].y / 2)), iz = int(std::lround(d.atoms[i].z / 2));
+        d.atoms[i].type = uint32_t((ix + iy + iz) % 2);
+    }
+    Modifier rdf{Op::RadialDistribution};
+    rdf.value = 5.5f;
+    rdf.rdfBins = 55;
+    rdf.clusterByBonds = true;
+    const auto out = evaluateFrom(resultOf(d), {rdf}, 0).data;
+    const auto &partial = tableNamed(out, "Partial radial distribution functions");
+    const auto &total = tableNamed(out, "Radial distribution function");
+    check(partial.columns.size() == 4 && partial.columns[1] == "Na-Na" && partial.columns[2] == "Na-Cl" && partial.columns[3] == "Cl-Cl", "partial columns are named by type pair");
+    // Nearest neighbors at 2.0 are unlike; second neighbors at 2.83 are like.
+    const auto peak = [&](double radius, size_t column) { return std::stod(partial.rows[size_t(radius / .1)][column]); };
+    check(peak(2.0, 2) > 0 && peak(2.0, 1) == 0 && peak(2.0, 3) == 0, "the first shell holds only unlike pairs");
+    check(peak(2.83, 2) == 0 && peak(2.83, 1) > 0 && peak(2.83, 3) > 0, "the second shell holds only like pairs");
+    bool sumMatches = partial.rows.size() == total.rows.size();
+    for (size_t row = 0; sumMatches && row < partial.rows.size(); ++row) {
+        // Equal concentrations: g = (g_aa + 2 g_ab + g_bb) / 4.
+        const double sum = (std::stod(partial.rows[row][1]) + 2 * std::stod(partial.rows[row][2]) + std::stod(partial.rows[row][3])) / 4;
+        sumMatches = std::abs(sum - std::stod(total.rows[row][2])) < 1e-4 * std::max(1.0, sum);
+    }
+    check(sumMatches, "the weighted partial RDFs add up to the total RDF");
+
+    Modifier plain = rdf;
+    plain.clusterByBonds = false;
+    const auto noPartial = evaluateFrom(resultOf(d), {plain}, 0).data;
+    check(std::none_of(noPartial.tables.begin(), noPartial.tables.end(), [](const DataTable &t) { return t.name == "Partial radial distribution functions"; }), "partial RDFs are optional");
+
+    // Only selected: unselected types disappear from the table.
+    PipelineResult partialInput = resultOf(d);
+    for (size_t i = 0; i < d.atoms.size(); ++i) partialInput.selected[i] = d.atoms[i].type == 0 ? 1 : 0;
+    Modifier selectedOnly = rdf;
+    selectedOnly.neighborOnlySelected = true;
+    const auto chosen = evaluateFrom(partialInput, {selectedOnly}, 0).data;
+    check(tableNamed(chosen, "Partial radial distribution functions").columns.size() == 2, "only selected particle types get columns");
+}
+
 static void testCancellation() {
     std::atomic<bool> cancel{true};
     {
@@ -2395,6 +2493,8 @@ int main() {
     testCommonNeighborModes();
     testLoadTrajectory();
     testCombineDatasets();
+    testMeasure();
+    testPartialRdf();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
@@ -2402,6 +2502,6 @@ int main() {
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
                  "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
-                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, grain segmentation, elastic strain, hide selected, CNA modes, load trajectory, combine datasets, "
+                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, grain segmentation, elastic strain, hide selected, CNA modes, load trajectory, combine datasets, measure, partial RDF, "
                  "pipeline composition, cancellation\n";
 }

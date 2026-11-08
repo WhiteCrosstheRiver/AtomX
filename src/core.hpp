@@ -30,6 +30,7 @@
 #include <thread>
 #include <queue>
 #include <bit>
+#include <charconv>
 #include <numeric>
 
 namespace atomx {
@@ -820,6 +821,7 @@ enum class Op {
     ,HideSelected
     ,LoadTrajectory
     ,CombineDatasets
+    ,Measure
 };
 struct Modifier {
     Op op;
@@ -926,6 +928,8 @@ struct Modifier {
     // Common neighbor analysis: type mode (0 fixed, 1 adaptive, 2 interval, 3 bond-based),
     // value cutoff, cspOnlySelected, overlapUseRadii color by type.
     // Load trajectory and Combine datasets: property is the UTF-8 file path (empty passes through).
+    // Measure: property is the particle path text (empty passes through), adaptive minimum image.
+    // Radial distribution: clusterByBonds adds the partial RDF table.
     // Grain segmentation: type algorithm (0 automatic, 1 manual graph clustering, 2 MST),
     // value log merge threshold, rdfBins minimum grain size, adaptive adopt orphans,
     // clusterByBonds handle stacking faults, overlapUseRadii color particles by grain.
@@ -1185,6 +1189,10 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Table,"PTM RMSD histogram");
     }
     if (modifier.op==Op::HideSelected) add(Kind::Particles,"Hidden");
+    if (modifier.op==Op::Measure) {
+        add(Kind::GlobalAttributes,"Measurements.TotalDistance");
+        add(Kind::Table,"Measurements");
+    }
     if (modifier.op==Op::GrainSegmentation) {
         add(Kind::Particles,"Grain");
         add(Kind::GlobalAttributes,"Grain count and merge threshold");
@@ -2323,6 +2331,7 @@ inline const char *opName(Op op) {
     case Op::HideSelected: return "Hide selected";
     case Op::LoadTrajectory: return "Load trajectory";
     case Op::CombineDatasets: return "Combine datasets";
+    case Op::Measure: return "Measure";
     default:
         return "Color by type";
     }
@@ -2384,6 +2393,7 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_grains.inc"
 #include "analysis_cna.inc"
 #include "analysis_external.inc"
+#include "analysis_measure.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -3183,6 +3193,10 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 hideSelectedParticles(r);
                 continue;
             }
+            if (m.op == Op::Measure) {
+                computeMeasure(r.data, m.property, m.adaptive, cancel);
+                continue;
+            }
             if (m.op == Op::LoadTrajectory || m.op == Op::CombineDatasets) {
                 if (m.property.empty()) continue; // No file chosen yet: the node passes data through.
                 if (!externalFrameReader()) throw std::runtime_error("This build cannot read external files");
@@ -3384,6 +3398,8 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     }
                     r.data.globalAttributes["RadialDistribution.cutoff"] = m.value;
                     r.data.tables.push_back(std::move(table));
+                    if (m.clusterByBonds)
+                        computePartialRdf(r.data, m.value, size_t(m.rdfBins), analysisSelection, cancel);
                 }
                 continue;
             }

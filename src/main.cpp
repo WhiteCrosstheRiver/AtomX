@@ -21,6 +21,7 @@
 #include "lj.hpp"
 #include "references.hpp"
 #include "desktop.hpp"
+#include "modifier_templates.hpp"
 #include "imgui.h"
 #include "imgui_guard.hpp"
 #include "imgui_internal.h" // GetCurrentWindow / ImGuiLayoutType for the title-strip menu row
@@ -606,7 +607,7 @@ static const char *opCategory(Op op) {
                                op == Op::ChillPlus || op == Op::LocalEntropy ||
                                op == Op::IdentifyFccPlanarFaults || op == Op::SpatialCorrelation ||
                                op == Op::PolyhedralTemplateMatching || op == Op::GrainSegmentation ||
-                               op == Op::ElasticStrain
+                               op == Op::ElasticStrain || op == Op::Measure
                          ? "Analysis"
                          : "Modification";
 }
@@ -681,7 +682,7 @@ static const std::vector<Command> &commandRegistry() {
                       Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
                       Op::IdentifyDiamond, Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory,
                       Op::DiffusionCoefficient, Op::FindRings, Op::VoronoiAnalysis, Op::ChillPlus, Op::LocalEntropy,
-                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::GrainSegmentation, Op::ElasticStrain, Op::HideSelected, Op::LoadTrajectory, Op::CombineDatasets, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::GrainSegmentation, Op::ElasticStrain, Op::HideSelected, Op::LoadTrajectory, Op::CombineDatasets, Op::Measure, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -1884,6 +1885,7 @@ struct App {
         }
         if (op == Op::CommonNeighborAnalysis) { m.type = 1; m.overlapUseRadii = true; }
         if (op == Op::LoadTrajectory || op == Op::CombineDatasets) m.property.clear();
+        if (op == Op::Measure) { m.property.clear(); m.adaptive = true; }
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
         if (op == Op::BondLengthDistribution) m.type = 64;
         if (op == Op::BondAngleDistribution) m.type = 90;
@@ -2344,6 +2346,102 @@ struct App {
             d.tables.push_back(std::move(parameters));
         });
         ljGeneration=pipelineGeneration;ljMessage="已写入 LJ energy / LJ force 属性；可撤销";
+    }
+    // Modifier templates: named parameter presets stored outside any project.
+    bool showModifierTemplates=false, modifierTemplatesLoaded=false;
+    std::vector<templates::Template> modifierTemplates;
+    std::filesystem::path modifierTemplatesFile=templates::defaultPath();
+    char modifierTemplateName[templates::nameLimit+1]{};
+    void ensureModifierTemplates() {
+        if (modifierTemplatesLoaded) return;
+        modifierTemplatesLoaded=true;
+        try { modifierTemplates=templates::load(modifierTemplatesFile); }
+        catch (const std::exception &e) { error=e.what(); }
+    }
+    void persistModifierTemplates() {
+        try { templates::save(modifierTemplatesFile,modifierTemplates); }
+        catch (const std::exception &e) { error=e.what(); }
+    }
+    bool saveModifierTemplate(const std::string &name) {
+        ensureModifierTemplates();
+        if (!templates::validName(name)) { error="Enter a template name of 1 to 128 characters"; return false; }
+        if (mods.empty()) { error="The pipeline has no modifiers to save"; return false; }
+        auto found=std::find_if(modifierTemplates.begin(),modifierTemplates.end(),[&](const auto &t){return t.name==name;});
+        if (found==modifierTemplates.end()) {
+            if (modifierTemplates.size()>=templates::templateLimit) { error="The template list is full"; return false; }
+            found=modifierTemplates.insert(modifierTemplates.end(),templates::Template{name,{}});
+        }
+        found->nodes=mods;
+        persistModifierTemplates();
+        return true;
+    }
+    void applyModifierTemplate(size_t index) {
+        ensureModifierTemplates();
+        if (index>=modifierTemplates.size()) return;
+        checkpoint();
+        for (const auto &node:modifierTemplates[index].nodes)
+            modifierGraph.insert(makeNode(static_cast<const Modifier &>(node)));
+        update();
+        status=loc::format("Added %s",modifierTemplates[index].name.c_str());
+    }
+    void modifierTemplatesDialog() {
+        if (!showModifierTemplates) return;
+        ensureModifierTemplates();
+        ImGui::SetNextWindowSize({U(460),U(420)},ImGuiCond_Appearing);
+        if (ImGui::Begin(loc::label("Modifier templates##modifier-templates"),&showModifierTemplates,ImGuiWindowFlags_NoCollapse)) {
+            ImGui::SetNextItemWidth(U(240));
+            ImGui::InputText("##template-name",modifierTemplateName,sizeof(modifierTemplateName));
+            recordUiTestItem("templates.name");
+            ImGui::SameLine();
+            if (ImGui::Button(loc::label("Save pipeline as template"))) saveModifierTemplate(modifierTemplateName);
+            recordUiTestItem("templates.save");
+            ImGui::SameLine();referenceHelp("analysis");
+            ImGui::TextDisabled(loc::text("A template stores every node of the current pipeline with its parameters, including any file paths. Saving under an existing name replaces it."));
+            if (ImGui::Button(loc::label("Import..."))) {
+                const auto chosen=dialog(window,false,fileFilter("AtomX modifier templates",L"*.atomx-templates").c_str(),L"atomx-templates");
+                if (!chosen.empty()) try {
+                    for (auto &entry:templates::load(chosen)) {
+                        auto found=std::find_if(modifierTemplates.begin(),modifierTemplates.end(),[&](const auto &t){return t.name==entry.name;});
+                        if (found!=modifierTemplates.end()) found->nodes=std::move(entry.nodes);
+                        else if (modifierTemplates.size()<templates::templateLimit) modifierTemplates.push_back(std::move(entry));
+                    }
+                    persistModifierTemplates();
+                } catch (const std::exception &e) { error=e.what(); }
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(modifierTemplates.empty());
+            if (ImGui::Button(loc::label("Export..."))) {
+                const auto chosen=dialog(window,true,fileFilter("AtomX modifier templates",L"*.atomx-templates").c_str(),L"atomx-templates");
+                if (!chosen.empty()) try { templates::save(chosen,modifierTemplates); }
+                catch (const std::exception &e) { error=e.what(); }
+            }
+            ImGui::EndDisabled();
+            ImGui::Separator();
+            int removeIndex=-1;
+            for (int index=0;index<int(modifierTemplates.size());++index) {
+                auto &entry=modifierTemplates[size_t(index)];
+                ImGui::PushID(index);
+                ImGui::Text("%s (%zu)",entry.name.c_str(),entry.nodes.size());
+                ImGui::SameLine();
+                if (ImGui::SmallButton(loc::label("Apply"))) applyModifierTemplate(size_t(index));
+                recordUiTestItem("templates.apply."+entry.name);
+                ImGui::SameLine();
+                const bool renamable=templates::validName(modifierTemplateName) &&
+                    std::none_of(modifierTemplates.begin(),modifierTemplates.end(),[&](const auto &t){return t.name==modifierTemplateName;});
+                ImGui::BeginDisabled(!renamable);
+                if (ImGui::SmallButton(loc::label("Rename to entered name"))) { entry.name=modifierTemplateName; persistModifierTemplates(); }
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (ImGui::SmallButton(loc::label("Delete"))) removeIndex=index;
+                recordUiTestItem("templates.delete."+entry.name);
+                ImGui::PopID();
+            }
+            if (removeIndex>=0) {
+                modifierTemplates.erase(modifierTemplates.begin()+removeIndex);
+                persistModifierTemplates();
+            }
+        }
+        ImGui::End();
     }
     void ljDialog() {
         if(!showLJ)return;
@@ -10673,6 +10771,32 @@ struct App {
                             ? loc::text("Connected components follow the input bond topology; selected-only mode assigns ID 0 to other particles.")
                             : loc::text("Connected components follow the periodic minimum-image cutoff. Unselected particles get Cluster ID 0 when selected-only is enabled."));
                     }
+                    if (m.op == Op::Measure) {
+                        char pathText[1024]{};
+                        strncpy_s(pathText,m.property.c_str(),_TRUNCATE);
+                        fitNextField("Particles", true);
+                        ImGui::InputText(loc::label("Particles"),pathText,sizeof(pathText));
+                        if (ImGui::IsItemDeactivatedAfterEdit()) { checkpoint(); m.property=pathText; update(); }
+                        recordUiTestItem(std::string("pipeline.measure-path.")+m.id,"Particles");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        if (ImGui::Button(loc::label("Use current selection"))) {
+                            std::string text;
+                            const auto ids=result.data.scalarProperties.find("Particle Identifier");
+                            const bool useIds=ids!=result.data.scalarProperties.end() && ids->second.size()==result.data.atoms.size();
+                            for (size_t i=0;i<result.selected.size() && i<result.data.atoms.size();++i)
+                                if (result.selected[i]) {
+                                    if (!text.empty()) text.push_back(' ');
+                                    text+=std::to_string(useIds ? int64_t(ids->second[i]) : int64_t(i+1));
+                                }
+                            checkpoint(); m.property=std::move(text); update();
+                        }
+                        if (ui_design::checkbox(loc::label("Account for periodic boundary conditions"),&m.adaptive)) { checkpoint(); update(); }
+                        ImGui::TextDisabled(loc::text("List particles along the path, by Particle Identifier or else by position starting at 1. End on the first particle to close the path and measure its area. Lengths are in the input unit and angles in degrees. Viewport picking is not available yet."));
+                        if (const auto found=result.data.globalAttributes.find("Measurements.TotalDistance");found!=result.data.globalAttributes.end())
+                            ImGui::Text(loc::text("Total distance %.6g"),found->second);
+                        if (const auto found=result.data.globalAttributes.find("Measurements.Area");found!=result.data.globalAttributes.end())
+                            ImGui::Text(loc::text("Enclosed area %.6g"),found->second);
+                    }
                     if (m.op == Op::LoadTrajectory || m.op == Op::CombineDatasets) {
                         const bool loads = m.op == Op::LoadTrajectory;
                         const std::u8string pathText(reinterpret_cast<const char8_t *>(m.property.data()), m.property.size());
@@ -10743,6 +10867,8 @@ struct App {
                             checkpoint(); m.rdfBins=std::clamp(bins,1,4096); update();
                         }
                         recordUiTestItem(std::string("pipeline.rdf-bins.")+m.id,"RDF histogram bins");
+                        if (ui_design::checkbox(loc::label("Compute partial RDFs"),&m.clusterByBonds)) { checkpoint(); update(); }
+                        ImGui::SameLine();referenceHelp("analysis");
                     }
                     if (m.op==Op::RadialDistribution || m.op==Op::CoordinationAnalysis) {
                         bool onlySelected=m.neighborOnlySelected;
@@ -12752,7 +12878,7 @@ struct App {
                 operation(Op::TimeSeries,"Tabulate a global attribute at every frame of the trajectory.");
                 operation(Op::VoronoiAnalysis,"Compute each particle's Voronoi cell: volume, coordination, cavity radius and Voronoi index, with optional neighbor bonds.");
                 operation(Op::WignerSeitzAnalysis,"Assign particles to their nearest reference-frame sites to count vacancies and interstitials.");
-                planned("Measure");
+                operation(Op::Measure,"Measure segment lengths, angles and the enclosed area along a path of particles, across periodic boundaries.");
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Modification");
@@ -12792,7 +12918,18 @@ struct App {
                 for (auto name : {"Create isosurface", "Generate trajectory lines"}) planned(name);
                 endCard();
                 beginCard("Modifier templates");
-                planned("Manage templates...");
+                ensureModifierTemplates();
+                for (size_t index=0;index<modifierTemplates.size();++index) {
+                    const auto &entry=modifierTemplates[index];
+                    if (!matches(entry.name.c_str())) continue;
+                    const std::string label=entry.name+"##template"+std::to_string(index);
+                    if (ImGui::Selectable(label.c_str())) { applyModifierTemplate(index); ImGui::CloseCurrentPopup(); }
+                    recordUiTestItem("catalog.template."+entry.name);
+                }
+                if (matches("Manage templates...")) {
+                    if (ImGui::Selectable(loc::label("Manage templates..."))) { showModifierTemplates=true; ImGui::CloseCurrentPopup(); }
+                    recordUiTestItem("catalog.manage-templates");
+                }
                 endCard();
                 ImGui::TableNextColumn();
                 beginCard("Selection");
@@ -13152,7 +13289,7 @@ struct App {
         }
         statusStrip(w, h);
         creationDialogs();
-        ljDialog();
+        ljDialog();modifierTemplatesDialog();
         fragmentBrowser();
         chemistryDialog();
         atomPropertiesDialog();

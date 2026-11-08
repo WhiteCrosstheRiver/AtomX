@@ -13,16 +13,16 @@ inline ExternalFrameReader &externalFrameReader() {
 inline constexpr size_t externalParticleLimit = 20000000;
 
 namespace external_detail {
-// Bond images follow the new positions: each bond takes the minimum-image convention.
-inline void refreshBondImages(Dataset &data) {
-    if (data.bonds.empty() || !std::any_of(data.pbc.begin(), data.pbc.end(), [](bool p) { return p; })) return;
+// Gives each pair the periodic image nearest its first particle (minimum-image convention).
+inline void assignMinimumImages(const Dataset &data, std::vector<Bond> &bonds) {
+    if (bonds.empty() || !std::any_of(data.pbc.begin(), data.pbc.end(), [](bool p) { return p; })) return;
     const auto &c = data.cell;
     const double m00 = c[4] * c[8] - c[7] * c[5], m01 = c[6] * c[5] - c[3] * c[8], m02 = c[3] * c[7] - c[6] * c[4];
     const double det = c[0] * m00 + c[1] * m01 + c[2] * m02;
     if (!(std::abs(det) > 0) || !std::isfinite(det)) return;
     const double m10 = c[7] * c[2] - c[1] * c[8], m11 = c[0] * c[8] - c[6] * c[2], m12 = c[6] * c[1] - c[0] * c[7];
     const double m20 = c[1] * c[5] - c[4] * c[2], m21 = c[3] * c[2] - c[0] * c[5], m22 = c[0] * c[4] - c[3] * c[1];
-    for (Bond &bond : data.bonds) {
+    for (Bond &bond : bonds) {
         if (bond.a >= data.atoms.size() || bond.b >= data.atoms.size())
             throw std::runtime_error("Bond references a particle outside the dataset");
         const Atom &a = data.atoms[bond.a], &b = data.atoms[bond.b];
@@ -90,7 +90,7 @@ inline void applyLoadedTrajectory(Dataset &data, const Dataset &trajectory, std:
     data.cell = trajectory.cell;
     data.origin = trajectory.origin;
     data.pbc = trajectory.pbc;
-    external_detail::refreshBondImages(data);
+    external_detail::assignMinimumImages(data, data.bonds);
     data.bounds();
 }
 

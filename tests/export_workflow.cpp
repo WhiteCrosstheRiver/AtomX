@@ -2379,6 +2379,55 @@ int main(int argc,char **argv) {
                 }
                 frame();
             }
+            {
+                // Modifier templates use a private file, never the user's own template list.
+                const auto templateFile=dir/"templates.atomx-templates";
+                app.modifierTemplatesFile=templateFile;
+                app.modifierTemplates.clear();
+                app.modifierTemplatesLoaded=false;
+                strcpy_s(app.modifierSearch,"Measure");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Measure");
+                requireExport(app.mods.size()==1 && app.mods[0].op==Op::Measure && app.mods[0].property.empty() && app.mods[0].adaptive,"catalog adds Measure");
+                settlePipeline();
+                app.selectPipeline=true;
+                app.modifierGraph.selected=0;
+                frame();
+                requireExport(app.error.empty(),"Measure without a path passes data through");
+                requireExport(app.saveModifierTemplate("Measure preset") && std::filesystem::exists(templateFile),"a pipeline saves as a template");
+                app.modifierTemplates.clear();
+                app.modifierTemplatesLoaded=false;
+                app.ensureModifierTemplates();
+                requireExport(app.modifierTemplates.size()==1 && app.modifierTemplates[0].name=="Measure preset" && app.modifierTemplates[0].nodes.size()==1,"templates reload from the file");
+                app.showModifierTemplates=true;
+                frame();
+                frame();
+                requireExport(app.uiTestItems.contains("templates.save") && app.uiTestItems.contains("templates.apply.Measure preset"),"the template window lists the template");
+                click("templates.apply.Measure preset");
+                frame();
+                requireExport(app.mods.size()==2 && app.mods[1].op==Op::Measure && app.mods[1].id!=app.mods[0].id,"applying a template appends new nodes");
+                settlePipeline();
+                click("templates.delete.Measure preset");
+                frame();
+                app.modifierTemplates.clear();
+                app.modifierTemplatesLoaded=false;
+                app.ensureModifierTemplates();
+                requireExport(app.modifierTemplates.empty(),"deleting a template persists");
+                {
+                    std::ofstream damaged(templateFile,std::ios::binary);
+                    damaged<<"not a template";
+                }
+                bool rejected=false;
+                try { (void)templates::load(templateFile); } catch (const std::exception &) { rejected=true; }
+                requireExport(rejected,"a damaged template file is reported");
+                app.showModifierTemplates=false;
+                frame();
+                while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
+                frame();
+                app.undo.clear(); // Later steps count undo entries from a clean history.
+                app.redo.clear();
+            }
             strcpy_s(app.modifierSearch,"Radial distribution function (RDF)");
             click("pipeline.add-modification");
             frame(); // Allow the newly opened popup to settle before using its recorded item rectangles.
