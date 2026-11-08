@@ -815,6 +815,7 @@ enum class Op {
     ,PolyhedralTemplateMatching
     ,GrainSegmentation
     ,ElasticStrain
+    ,HideSelected
 };
 struct Modifier {
     Op op;
@@ -1021,6 +1022,9 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
         case Op::GrainSegmentation:
             scalar.insert("Grain");
             break;
+        case Op::HideSelected:
+            scalar.insert("Hidden");
+            break;
         case Op::ElasticStrain:
             scalar.insert("Structure Type");
             scalar.insert("Volumetric Strain");
@@ -1173,6 +1177,7 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Table,"Polyhedral template matching");
         add(Kind::Table,"PTM RMSD histogram");
     }
+    if (modifier.op==Op::HideSelected) add(Kind::Particles,"Hidden");
     if (modifier.op==Op::GrainSegmentation) {
         add(Kind::Particles,"Grain");
         add(Kind::GlobalAttributes,"Grain count and merge threshold");
@@ -2303,6 +2308,7 @@ inline const char *opName(Op op) {
     case Op::PolyhedralTemplateMatching: return "Polyhedral template matching";
     case Op::GrainSegmentation: return "Grain segmentation";
     case Op::ElasticStrain: return "Elastic strain calculation";
+    case Op::HideSelected: return "Hide selected";
     default:
         return "Color by type";
     }
@@ -3155,6 +3161,10 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 options.outputOrientation = m.clusterByBonds;
                 options.outputDeformationGradient = m.clusterSortBySize;
                 computePolyhedralTemplateMatching(r.data, options, m.cspOnlySelected ? &r.selected : nullptr, cancel);
+                continue;
+            }
+            if (m.op == Op::HideSelected) {
+                hideSelectedParticles(r);
                 continue;
             }
             if (m.op == Op::GrainSegmentation) {

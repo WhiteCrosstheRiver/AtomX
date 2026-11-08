@@ -681,7 +681,7 @@ static const std::vector<Command> &commandRegistry() {
                       Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
                       Op::IdentifyDiamond, Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory,
                       Op::DiffusionCoefficient, Op::FindRings, Op::VoronoiAnalysis, Op::ChillPlus, Op::LocalEntropy,
-                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::GrainSegmentation, Op::ElasticStrain, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::GrainSegmentation, Op::ElasticStrain, Op::HideSelected, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -6138,11 +6138,21 @@ struct App {
         const auto type=source.atoms[size_t(index)].type;
         return type>=gpu.styles.size() || gpu.styles[type].visual[2]>.5f;
     }
+    std::vector<uint8_t> pipelineHidden;
     void uploadCreationDisplay(const Dataset &data,const std::vector<uint8_t> &selected,
                                const std::vector<uint8_t> &colorSelected) {
         static const std::vector<uint8_t> empty;
+        // Outside creation mode the pipeline's Hidden particle property (Hide selected or
+        // Compute property) keeps particles and their bonds out of the rendered scene.
+        pipelineHidden.clear();
+        if (!creationMode)
+            if (const auto found=data.scalarProperties.find("Hidden");
+                found!=data.scalarProperties.end() && found->second.size()==data.atoms.size()) {
+                pipelineHidden.resize(data.atoms.size());
+                for (size_t i=0;i<data.atoms.size();++i) pipelineHidden[i]=found->second[i]!=0 ? 1 : 0;
+            }
         gpu.upload(data,selected,colorSelected,
-            creationMode && data.atoms.size()==source.atoms.size()?creationDisplay.hidden:empty,
+            creationMode && data.atoms.size()==source.atoms.size()?creationDisplay.hidden:pipelineHidden,
             creationMode && data.atoms.size()==source.atoms.size()?&creationDisplay:nullptr);
     }
     void queueCreationLabelFont() {
@@ -10864,6 +10874,14 @@ struct App {
                                 found != result.data.globalAttributes.end() && (type == 0 || ((m.expandNeighbors >> (type - 1)) & 1)))
                                 ImGui::Text("%s  %.0f", loc::text(ptmTypeNames[type]), found->second);
                     }
+                    if (m.op == Op::HideSelected) {
+                        ImGui::TextUnformatted(loc::text("Operate on: particles"));
+                        ImGui::SameLine();referenceHelp("analysis");
+                        ImGui::TextDisabled(loc::text("Selected particles get Hidden = 1 and the selection is cleared. Hidden particles and their bonds are not drawn but stay in the dataset, data tables and exports. Bonds cannot be hidden on their own."));
+                        if (const auto found = result.data.globalAttributes.find("HideSelected.hidden_count");
+                            found != result.data.globalAttributes.end())
+                            ImGui::Text(loc::text("Hidden particles %.0f"), found->second);
+                    }
                     if (m.op == Op::GrainSegmentation) {
                         auto edited = static_cast<const Modifier &>(m);
                         bool changed = false;
@@ -12674,7 +12692,7 @@ struct App {
                 operation(Op::Slice,"Cut the structure at a plane: keep one side, or a slab of adjustable width.");
                 operation(Op::SmoothTrajectory,"Replace positions by their average over a window of frames centered on the current one.");
                 operation(Op::CenterOfMassCorrection,"Remove center-of-mass drift by shifting particles to match a reference frame. Unwrap wrapped trajectories first.");
-                planned("Hide selected");
+                operation(Op::HideSelected,"Hide selected particles and their bonds in the viewports and rendered images without deleting them; sets the Hidden property and clears the selection.");
                 operation(Op::Translate,"Translate particle positions along an axis.");
                 operation(Op::UnwrapTrajectories,"Continuously unwraps particle positions across periodic boundaries using per-frame minimum-image steps.");
                 operation(Op::Wrap,"Wrap positions into orthogonal or triclinic periodic cells, including partially periodic cells.");

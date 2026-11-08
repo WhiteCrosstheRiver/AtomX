@@ -1487,16 +1487,25 @@ static void testPlanarFaults() {
     const auto thin = faultCounts(three);
     check(thin[4] == 3 * faultAtomsPerLayer && thin[3] == faultAtomsPerLayer && thin[2] == 0,
           "three adjacent hcp-like layers are multi-layer, next to a separate twin");
-    // In hcp the six 422 bonds are the basal ones.
+    // PTM's hcp correspondence: template points 1-6 are the basal neighbors and 7-9, 10-12
+    // the layers on opposite sides.
     const Dataset h = hcp(3);
-    const auto lists = nearestNeighborVectors(h, 12);
-    const auto env = hcpEnvironment(lists[0]);
-    check(env.hcp, "an ideal hcp atom is hcp-like");
-    bool basal = env.hcp;
-    for (uint32_t index : env.inPlane)
-        for (const auto &neighbor : lists[0])
-            if (neighbor.index == index && std::abs(neighbor.vector[2]) > 1e-3) basal = false;
-    check(basal, "422 bonds lie in the basal plane");
+    const auto lists = nearestNeighborsWithImages(h, 12, nullptr);
+    const auto env = ptmClassify(lists, 0, PtmOptions{});
+    check(env.type == PtmType::HCP, "an ideal hcp atom is hcp-like");
+    bool basal = env.type == PtmType::HCP;
+    for (size_t point = 1; point <= 12 && basal; ++point) {
+        const double z = lists[0][size_t(env.mapping[point]) - 1].vector[2];
+        basal = point <= 6 ? std::abs(z) < 1e-3 : std::abs(z) > .5;
+    }
+    double sides = 0;
+    for (size_t point = 7; point <= 9; ++point) sides += lists[0][size_t(env.mapping[point]) - 1].vector[2];
+    for (size_t point = 10; point <= 12; ++point) sides -= lists[0][size_t(env.mapping[point]) - 1].vector[2];
+    check(basal && std::abs(sides) > 1, "basal neighbors lie in the plane and the two layers on opposite sides");
+    // A reduced periodic cell (one stacking period of 6 layers) still has full neighbor shells.
+    Dataset period = stackedLayers("ABCACB");
+    const auto periodic = faultCounts(period);
+    check(periodic[3] == 2 * faultAtomsPerLayer, "a 6-layer periodic cell with two twins: " + std::to_string(periodic[3]));
     // A small random displacement keeps the classification.
     Dataset shaken = stackedLayers("ABCABCABABCABC");
     std::mt19937 random(9);
@@ -2005,6 +2014,37 @@ static void testElasticStrain() {
     Dataset big = fcc(4);
     throwsWith([&] { computeElasticStrain(big, {}, &cancel); }, "Cancelled", "elastic strain cancels");
 }
+// ---- Hide selected ---------------------------------------------------------------
+static void testHideSelected() {
+    PipelineResult r = resultOf(fcc(2));
+    r.selected[0] = r.selected[3] = 1;
+    r.data.scalarProperties["Hidden"] = std::vector<double>(r.data.atoms.size(), 0.0);
+    r.data.scalarProperties["Hidden"][5] = 2; // Hidden upstream by Compute property.
+    hideSelectedParticles(r);
+    const auto &hidden = r.data.scalarProperties.at("Hidden");
+    check(hidden[0] == 1 && hidden[3] == 1 && hidden[5] == 2 && hidden[1] == 0, "selected particles become hidden, earlier ones stay");
+    check(std::count(r.selected.begin(), r.selected.end(), 1) == 0, "hide selected clears the selection");
+    near(attribute(r.data, "HideSelected.hidden_count"), 3, 0, "hidden particle count");
+    check(r.data.atoms.size() == 32, "hidden particles stay in the dataset");
+    // Through the pipeline: Delete selected after hiding deletes nothing.
+    Modifier select{Op::ExpressionSelect};
+    select.property = "Position.X < 1";
+    std::vector<Modifier> stack{select, Modifier{Op::HideSelected}, Modifier{Op::Delete}};
+    const auto out = evaluateFrom(resultOf(fcc(2)), stack, 0);
+    const auto &h = out.data.scalarProperties.at("Hidden");
+    check(out.data.atoms.size() == 32 && std::count(h.begin(), h.end(), 1.0) == 8,
+          "hidden particles are kept and a later Delete selected sees no selection");
+    // Hidden flows through property-aware nodes like any particle property.
+    Modifier again{Op::ExpressionSelect};
+    again.property = "Hidden > 0";
+    std::vector<Modifier> reselect{select, Modifier{Op::HideSelected}, again};
+    const auto picked = evaluateFrom(resultOf(fcc(2)), reselect, 0);
+    check(std::count(picked.selected.begin(), picked.selected.end(), 1) == 8, "Hidden can be selected downstream");
+    PipelineResult bad = resultOf(fcc(1));
+    bad.selected.pop_back();
+    throwsWith([&] { hideSelectedParticles(bad); }, "Selection length", "hide selected checks the selection");
+}
+
 static void testCancellation() {
     std::atomic<bool> cancel{true};
     {
@@ -2087,6 +2127,7 @@ int main() {
     testPtm();
     testGrainSegmentation();
     testElasticStrain();
+    testHideSelected();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
@@ -2094,6 +2135,6 @@ int main() {
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
                  "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
-                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, grain segmentation, elastic strain, "
+                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, grain segmentation, elastic strain, hide selected, "
                  "pipeline composition, cancellation\n";
 }

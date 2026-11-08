@@ -2177,7 +2177,8 @@ int main(int argc,char **argv) {
                      std::tuple{"Identify fcc planar faults",Op::IdentifyFccPlanarFaults,"Planar Fault Type"},
                      std::tuple{"Spatial correlation function",Op::SpatialCorrelation,""},
                      std::tuple{"Polyhedral template matching",Op::PolyhedralTemplateMatching,"Structure Type"},
-                     std::tuple{"Elastic strain calculation",Op::ElasticStrain,"Volumetric Strain"}}) {
+                     std::tuple{"Elastic strain calculation",Op::ElasticStrain,"Volumetric Strain"},
+                     std::tuple{"Hide selected",Op::HideSelected,"Hidden"}}) {
                 strcpy_s(app.modifierSearch,name);
                 click("pipeline.add-modification");
                 frame();

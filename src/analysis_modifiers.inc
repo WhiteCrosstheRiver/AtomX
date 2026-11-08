@@ -431,6 +431,25 @@ inline void computeWignerSeitz(PipelineResult &r, const Dataset &reference, bool
     data.tables.push_back(std::move(table));
 }
 
+// ---- Hide selected -------------------------------------------------------------
+// Sets Hidden = 1 on selected particles (already hidden ones stay hidden) and clears the
+// selection, as OVITO's Hide selected modifier does. Hidden particles stay in the dataset
+// for downstream nodes and export; only rendering skips them and their bonds.
+inline void hideSelectedParticles(PipelineResult &r) {
+    const size_t n = r.data.atoms.size();
+    if (r.selected.size() != n) throw std::runtime_error("Selection length does not match particle count");
+    auto &hidden = r.data.scalarProperties["Hidden"];
+    if (hidden.size() != n) hidden.assign(n, 0.0);
+    size_t count = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (r.selected[i]) hidden[i] = 1;
+        else if (!std::isfinite(hidden[i])) hidden[i] = 0;
+        count += hidden[i] != 0;
+        r.selected[i] = 0;
+    }
+    r.data.globalAttributes["HideSelected.hidden_count"] = double(count);
+}
+
 // ---- Center of mass correction and shrink-wrap ---------------------------------
 
 inline std::array<double, 3> centerOfMass(const Dataset &data, const std::vector<uint8_t> *selection) {

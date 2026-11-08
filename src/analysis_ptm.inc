@@ -427,6 +427,9 @@ struct PtmEnvironmentResult {
     double interatomicDistance = 0;
     ptm_detail::Quat orientation{0, 0, 0, 0};
     std::array<double, 9> deformation{};
+    // Template point -> position in the observed list (0 = center, k = k-th nearest neighbor
+    // for the single-shell templates); hcp points 1-6 are basal, 7-9 and 10-12 the two sides.
+    std::array<int8_t, 17> mapping{};
 };
 
 // Nearest-neighbor lists that stay complete in periodic cells too small for the search
@@ -519,6 +522,7 @@ inline PtmEnvironmentResult ptmClassify(const NeighborVectorLists &lists, size_t
     result.rmsd = best.rmsd;
     if (options.rmsdCutoff > 0 && best.rmsd > options.rmsdCutoff) return result;
     result.type = PtmType(bestTemplate->type);
+    result.mapping = best.mapping;
     result.interatomicDistance = bestTemplate->nearestDistance / best.scale;
     Quat applied{1, 0, 0, 0};
     result.orientation = fundamentalZone(best.rotation, *bestTemplate->lattice, &applied);
@@ -681,4 +685,80 @@ inline void computePolyhedralTemplateMatching(Dataset &data, const PtmOptions &o
         histogram.rows.push_back({formatDataNumber((double(b) + .5) * width), std::to_string(binned[b])});
     data.tables.push_back(std::move(histogram));
     data.globalAttributes["PolyhedralTemplateMatching.rmsd_cutoff"] = options.rmsdCutoff;
+}
+
+// hcp-like environments from PTM (FCC/HCP/BCC templates, RMSD cutoff 0.1): the hcp
+// template's points 1-6 are the basal neighbors, 7-9 and 10-12 the two opposite layers.
+inline void computeFccPlanarFaults(Dataset &data, std::atomic<bool> *cancel) {
+    PtmOptions options;
+    NeighborVectorLists lists;
+    const auto results = ptmAnalyze(data, options, cancel, &lists);
+    const size_t count = data.atoms.size();
+    std::vector<HcpEnvironment> env(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (results[i].type != PtmType::HCP) continue;
+        auto &e = env[i];
+        const auto neighbor = [&](size_t point) -> const NeighborVector & {
+            return lists[i][size_t(results[i].mapping[point]) - 1];
+        };
+        double inPlaneDistance = 0;
+        for (size_t k = 0; k < 6; ++k) {
+            e.inPlane[k] = neighbor(k + 1).index;
+            inPlaneDistance += std::sqrt(neighbor(k + 1).distanceSquared) / 6;
+        }
+        for (size_t k = 0; k < 3; ++k) {
+            e.above[k] = neighbor(k + 7).index;
+            e.below[k] = neighbor(k + 10).index;
+        }
+        e.basalArea = std::sqrt(3.0) / 2 * inPlaneDistance * inPlaneDistance;
+        e.hcp = true;
+    }
+    const auto hcpCount = [&](const auto &indices) {
+        int n = 0;
+        for (uint32_t index : indices) n += env[index].hcp ? 1 : 0;
+        return n;
+    };
+    std::vector<uint8_t> kind(count, uint8_t(PlanarFaultType::NonHcp));
+    for (size_t i = 0; i < count; ++i) {
+        if (!env[i].hcp) continue;
+        const int above = hcpCount(env[i].above), below = hcpCount(env[i].below), inPlane = hcpCount(env[i].inPlane);
+        PlanarFaultType type = PlanarFaultType::Other;
+        if (above == 0 && below == 0) type = inPlane > 0 ? PlanarFaultType::TwinBoundary : PlanarFaultType::Other;
+        else if ((above == 3 && below == 0) || (above == 0 && below == 3)) type = PlanarFaultType::IntrinsicStackingFault;
+        else if (above == 3 && below == 3) type = PlanarFaultType::MultiLayer;
+        kind[i] = uint8_t(type);
+    }
+    // The outer layers of a fault three or more layers thick border a multi-layer atom.
+    const auto first = kind;
+    for (size_t i = 0; i < count; ++i) {
+        if (first[i] != uint8_t(PlanarFaultType::IntrinsicStackingFault)) continue;
+        for (const auto *side : {&env[i].above, &env[i].below})
+            for (uint32_t index : *side)
+                if (first[index] == uint8_t(PlanarFaultType::MultiLayer)) kind[i] = uint8_t(PlanarFaultType::MultiLayer);
+    }
+    std::vector<double> property(count);
+    std::vector<uint64_t> counts(5, 0);
+    std::array<double, 5> area{};
+    for (size_t i = 0; i < count; ++i) {
+        property[i] = kind[i];
+        ++counts[kind[i]];
+        area[kind[i]] += env[i].basalArea;
+    }
+    // Each fault is two hcp-like layers thick for an ISF and one for a twin boundary.
+    const double isfArea = area[2] / 2, twinArea = area[3];
+    data.scalarProperties["Planar Fault Type"] = std::move(property);
+    static constexpr const char *names[5]{"Non-hcp", "Indeterminate hcp-like", "Intrinsic stacking fault",
+                                          "Coherent twin boundary", "Multi-layer stacking fault"};
+    DataTable table;
+    table.name = "Planar faults";
+    table.columns = {"Type", "Atom Count", "Estimated Area", "Id"};
+    for (size_t id = 0; id < 5; ++id) {
+        data.globalAttributes[std::string("PlanarFaults.counts.") + names[id]] = double(counts[id]);
+        const double estimated = id == 2 ? isfArea : id == 3 ? twinArea : 0.0;
+        table.rows.push_back({names[id], std::to_string(counts[id]), id == 2 || id == 3 ? formatDataNumber(estimated) : "",
+                              std::to_string(id)});
+    }
+    data.globalAttributes["PlanarFaults.area.Intrinsic stacking fault"] = isfArea;
+    data.globalAttributes["PlanarFaults.area.Coherent twin boundary"] = twinArea;
+    data.tables.push_back(std::move(table));
 }
