@@ -1777,6 +1777,234 @@ static void testPtm() {
           !evaluated.data.scalarProperties.count("RMSD"), "the PTM node maps its fields");
 }
 
+
+// ---- Grain segmentation ----------------------------------------------------------
+// An fcc matrix with a spherical grain rotated by `angle` degrees about z.
+static Dataset sphereGrain(double angle, int n = 10, double a = 3.6, double radius = 10) {
+    Dataset d = fcc(n, a);
+    const double L = n * a, c = L / 2, t = angle * 3.14159265358979323846 / 180;
+    std::vector<Atom> kept;
+    for (const auto &atom : d.atoms)
+        if (std::hypot(atom.x - c, atom.y - c, atom.z - c) >= radius) kept.push_back(atom);
+    const size_t matrix = kept.size();
+    const std::array<std::array<double, 3>, 4> basis{{{0, 0, 0}, {0, .5, .5}, {.5, 0, .5}, {.5, .5, 0}}};
+    const int reach = int(radius / a) + 2;
+    for (int z = -reach; z <= reach; ++z)
+        for (int y = -reach; y <= reach; ++y)
+            for (int x = -reach; x <= reach; ++x)
+                for (const auto &b : basis) {
+                    const double px = (x + b[0]) * a, py = (y + b[1]) * a, pz = (z + b[2]) * a;
+                    if (std::hypot(px, py, pz) >= radius) continue;
+                    const double rx = std::cos(t) * px - std::sin(t) * py, ry = std::sin(t) * px + std::cos(t) * py;
+                    bool clash = false;
+                    for (size_t i = 0; i < matrix && !clash; ++i)
+                        clash = std::hypot(kept[i].x - (c + rx), kept[i].y - (c + ry), kept[i].z - (c + pz)) < 1.6;
+                    if (!clash) kept.push_back({float(c + rx), float(c + ry), float(c + pz), 0});
+                }
+    d.atoms = std::move(kept);
+    return d;
+}
+static Dataset grainsOf(Dataset d, GrainSegmentationOptions options = {}, int structures = ptmDefaultStructures) {
+    PtmOptions ptm;
+    ptm.structures = structures;
+    ptm.outputOrientation = true;
+    computePolyhedralTemplateMatching(d, ptm, nullptr, nullptr);
+    computeGrainSegmentation(d, options, nullptr);
+    return d;
+}
+static size_t grainCount(const Dataset &d) { return size_t(attribute(d, "GrainSegmentation.grain_count")); }
+static size_t unassigned(const Dataset &d) {
+    const auto &g = d.scalarProperties.at("Grain");
+    return size_t(std::count(g.begin(), g.end(), -1.0));
+}
+static void testGrainSegmentation() {
+    // A perfect crystal is one grain that wraps through the periodic cell.
+    const Dataset single = grainsOf(fcc(6));
+    check(grainCount(single) == 1 && unassigned(single) == 0, "a perfect crystal is one grain");
+    const auto &grains = tableNamed(single, "grains");
+    check(grains.rows.size() == 1 && grains.rows[0][1] == std::to_string(single.atoms.size()) && grains.rows[0][3] == "FCC",
+          "the grain table lists the whole crystal as FCC");
+    if (!grains.rows.empty()) {
+        check(grains.rows[0][8] == "nan", "a grain connected to its own periodic image has no defined center");
+        near(std::abs(std::stod(grains.rows[0][7])), 1, 1e-6, "the mean orientation of an unrotated crystal is the identity");
+    }
+    check(single.particleColors.size() == single.atoms.size() && single.particleColors[0].x >= 0,
+          "particles are colored by grain");
+
+    // A rotated spherical grain inside a matrix: two grains with every algorithm.
+    const Dataset sphere = sphereGrain(25);
+    for (int algorithm = 0; algorithm < 3; ++algorithm) {
+        GrainSegmentationOptions options;
+        options.algorithm = GrainAlgorithm(algorithm);
+        options.logThreshold = algorithm == 2 ? std::log(5.0) : 12;
+        const Dataset g = grainsOf(sphere, options);
+        check(grainCount(g) == 2, "a rotated sphere is a second grain, algorithm " + std::to_string(algorithm) + ": " +
+                                      std::to_string(grainCount(g)));
+        check(unassigned(g) == 0, "orphan adoption assigns every atom, algorithm " + std::to_string(algorithm));
+        const auto &table = tableNamed(g, "grains");
+        if (table.rows.size() == 2) {
+            const double inner = std::stod(table.rows[1][1]);
+            check(inner > 250 && inner < 450, "the sphere grain has about 360 atoms: " + table.rows[1][1]);
+            const double cx = std::stod(table.rows[1][8]), cy = std::stod(table.rows[1][9]), cz = std::stod(table.rows[1][10]);
+            near(std::hypot(cx - 18, cy - 18, cz - 18), 0, .5, "the sphere grain is centered");
+            near(std::stod(table.rows[1][11]), 10, 1.5, "the sphere grain radius");
+            near(std::stod(table.rows[1][12]), std::sqrt(.6) * 10, 1, "the sphere radius of gyration");
+            // Misorientation of the mean orientations: 25 degrees about z.
+            const ptm_detail::Quat q0{std::stod(table.rows[0][7]), std::stod(table.rows[0][4]), std::stod(table.rows[0][5]), std::stod(table.rows[0][6])};
+            const ptm_detail::Quat q1{std::stod(table.rows[1][7]), std::stod(table.rows[1][4]), std::stod(table.rows[1][5]), std::stod(table.rows[1][6])};
+            near(grain_detail::misorientation(q0, q1, ptm_detail::library().cubic), 25, .5, "grain misorientation");
+        }
+        const auto &merge = tableNamed(g, "grains-merge");
+        check(merge.columns.size() == 2 && merge.rows.size() > 100, "the merge sequence is published");
+    }
+    // Without adoption the grain-boundary atoms stay unassigned; a huge minimum dissolves all.
+    GrainSegmentationOptions strict;
+    strict.adoptOrphans = false;
+    const Dataset bare = grainsOf(sphere, strict);
+    check(unassigned(bare) > 0 && grainCount(bare) == 2, "without adoption boundary atoms have no grain");
+    strict.minGrainSize = 100000;
+    const Dataset none = grainsOf(sphere, strict);
+    check(grainCount(none) == 0 && unassigned(none) == sphere.atoms.size(), "grains below the minimum size dissolve");
+    // A low manual threshold splits the matrix into many fragments.
+    GrainSegmentationOptions low;
+    low.algorithm = GrainAlgorithm::GraphClusteringManual;
+    low.logThreshold = -6;
+    low.minGrainSize = 5;
+    check(grainCount(grainsOf(sphere, low)) > 2, "a low merge threshold over-segments");
+
+    // Stacking faults: the hcp layers of an ISF belong to the surrounding fcc grain, while
+    // twin boundaries separate the twins.
+    GrainSegmentationOptions small;
+    small.minGrainSize = 20;
+    const Dataset isf = grainsOf(stackedLayers("ABCABCABABCABC"), small);
+    check(grainCount(isf) == 1 && unassigned(isf) == 0, "an intrinsic stacking fault stays inside one grain: " +
+                                                            std::to_string(grainCount(isf)));
+    small.handleStackingFaults = false;
+    const Dataset split = grainsOf(stackedLayers("ABCABCABABCABC"), small);
+    check(grainCount(split) == 2 && tableNamed(split, "grains").rows.size() == 2 && tableNamed(split, "grains").rows[1][3] == "HCP",
+          "without stacking-fault handling the hcp layers form their own phase");
+    small.handleStackingFaults = true;
+    const Dataset twin = grainsOf(stackedLayers("ABCABCACBACB"), small);
+    check(grainCount(twin) == 2 && unassigned(twin) == 0, "twin boundaries separate two twin grains: " +
+                                                              std::to_string(grainCount(twin)));
+    if (tableNamed(twin, "grains").rows.size() == 2) {
+        const auto &t = tableNamed(twin, "grains").rows;
+        const ptm_detail::Quat q0{std::stod(t[0][7]), std::stod(t[0][4]), std::stod(t[0][5]), std::stod(t[0][6])};
+        const ptm_detail::Quat q1{std::stod(t[1][7]), std::stod(t[1][4]), std::stod(t[1][5]), std::stod(t[1][6])};
+        near(grain_detail::misorientation(q0, q1, ptm_detail::library().cubic), 60, .5, "twins are 60 degrees apart");
+    }
+    // The cubic-to-hexagonal frame maps the fcc (111) neighbors onto the hcp basal ones.
+    {
+        const auto &lib = ptm_detail::library();
+        const auto m = ptm_detail::matrixOf(grain_detail::conjugate(grain_detail::cubicToHexagonal(false)));
+        size_t matched = 0;
+        for (const auto &h : lib.templates[2].points) {
+            if (std::abs(h[2]) > 1e-9 || ptm_detail::norm(h) < .5) continue;
+            for (const auto &f : lib.templates[1].points) {
+                const auto r = ptm_detail::rotateBy(m, h);
+                if (ptm_detail::norm({r[0] - f[0], r[1] - f[1], r[2] - f[2]}) < 1e-9) ++matched;
+            }
+        }
+        check(matched == 6, "the six basal hcp neighbors are fcc (111) neighbors");
+    }
+    // Errors and cancellation.
+    Dataset plain = fcc(3);
+    throwsWith([&] { computeGrainSegmentation(plain, {}, nullptr); }, "Polyhedral template matching", "grains need PTM");
+    Dataset ready = ptmRun(fcc(4));
+    std::atomic<bool> cancel{true};
+    throwsWith([&] { computeGrainSegmentation(ready, {}, &cancel); }, "Cancelled", "grain segmentation cancels");
+}
+
+// ---- Elastic strain --------------------------------------------------------------
+static Dataset elasticOf(Dataset d, ElasticLattice lattice, double a0, bool pushForward = true, double ratio = std::sqrt(8.0 / 3.0)) {
+    ElasticStrainOptions options;
+    options.lattice = lattice;
+    options.latticeConstant = a0;
+    options.axialRatio = ratio;
+    options.pushForward = pushForward;
+    options.outputDeformationGradient = true;
+    computeElasticStrain(d, options, nullptr);
+    return d;
+}
+static double maxAbs(const Dataset &d, const std::string &name) {
+    double m = 0;
+    for (double v : d.scalarProperties.at(name)) m = std::max(m, std::abs(v));
+    return m;
+}
+static double maxStrain(const Dataset &d) {
+    double m = 0;
+    for (const char *c : {"XX", "YY", "ZZ", "XY", "XZ", "YZ"}) m = std::max(m, maxAbs(d, std::string("Elastic Strain.") + c));
+    return m;
+}
+static double meanOf(const Dataset &d, const std::string &name) {
+    const auto &v = d.scalarProperties.at(name);
+    double s = 0;
+    for (double x : v) s += x;
+    return v.empty() ? 0 : s / double(v.size());
+}
+static void testElasticStrain() {
+    // Ideal crystals at their lattice constant carry no strain.
+    struct Case { Dataset d; ElasticLattice lattice; double a0; int code; const char *what; };
+    std::vector<Case> cases;
+    cases.push_back({fcc(4, 3.6), ElasticLattice::FCC, 3.6, 1, "fcc"});
+    cases.push_back({bcc(4, 3.0), ElasticLattice::BCC, 3.0, 3, "bcc"});
+    cases.push_back({hcp(4, 3.0), ElasticLattice::HCP, 3.0, 2, "hcp"});
+    cases.push_back({cubicDiamond(3, 5.43), ElasticLattice::CubicDiamond, 5.43, 4, "cubic diamond"});
+    cases.push_back({hexagonalDiamond(3, 2.35), ElasticLattice::HexagonalDiamond, 2.35 * std::sqrt(8.0 / 3.0), 5, "hexagonal diamond"});
+    for (auto &c : cases) {
+        const Dataset e = elasticOf(c.d, c.lattice, c.a0);
+        const auto &code = e.scalarProperties.at("Structure Type");
+        check(std::all_of(code.begin(), code.end(), [&](double v) { return v == c.code; }),
+              std::string("ideal ") + c.what + " has structure code " + std::to_string(c.code));
+        near(maxStrain(e), 0, 1e-5, std::string("ideal ") + c.what + " is unstrained");
+        near(e.scalarProperties.at("Elastic Deformation Gradient.XX")[0], 1, 1e-5, std::string(c.what) + " F is the identity");
+    }
+    // Uniform dilation by 1%: Euler-Almansi (1 - 1/s^2)/2 and Green-Lagrange (s^2 - 1)/2.
+    Dataset dilated = fcc(4, 3.6 * 1.01);
+    near(meanOf(elasticOf(dilated, ElasticLattice::FCC, 3.6), "Volumetric Strain"), (1 - 1 / (1.01 * 1.01)) / 2, 1e-5,
+         "dilation, spatial frame");
+    near(meanOf(elasticOf(dilated, ElasticLattice::FCC, 3.6, false), "Volumetric Strain"), (1.01 * 1.01 - 1) / 2, 1e-5,
+         "dilation, material frame");
+    // A wrong lattice constant reads as a uniform strain.
+    near(meanOf(elasticOf(fcc(4, 3.6), ElasticLattice::FCC, 3.5, false), "Volumetric Strain"),
+         (std::pow(3.6 / 3.5, 2) - 1) / 2, 1e-5, "lattice constant mismatch");
+    // Uniaxial stretch of a rotated crystal: the spatial-frame strain is along x only.
+    Dataset rotated = fcc(4, 3.6);
+    const double t = 30 * 3.14159265358979323846 / 180;
+    const double rotation[3][3]{{std::cos(t), -std::sin(t), 0}, {std::sin(t), std::cos(t), 0}, {0, 0, 1}};
+    const double stretch[3][3]{{1.02, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    transform(rotated, rotation);
+    transform(rotated, stretch);
+    const Dataset s = elasticOf(rotated, ElasticLattice::FCC, 3.6);
+    near(meanOf(s, "Elastic Strain.XX"), (1 - 1 / (1.02 * 1.02)) / 2, 1e-5, "uniaxial strain XX");
+    near(maxAbs(s, "Elastic Strain.YY"), 0, 1e-5, "uniaxial strain YY");
+    near(maxAbs(s, "Elastic Strain.XY"), 0, 1e-5, "uniaxial strain XY");
+    near(meanOf(s, "Volumetric Strain"), (1 - 1 / (1.02 * 1.02)) / 6, 1e-5, "uniaxial volumetric strain");
+    // Green-Lagrange of the same crystal: the material-frame trace is (1.02^2 - 1) / 2.
+    const Dataset g = elasticOf(rotated, ElasticLattice::FCC, 3.6, false);
+    near(3 * meanOf(g, "Volumetric Strain"), (1.02 * 1.02 - 1) / 2, 1e-5, "material-frame trace");
+    // hcp with c/a = 1.6 is unstrained only when the ratio is given.
+    Dataset squat = crystal({{0, 0, 0}, {.5, .5, 0}, {.5, 1.0 / 6, .5}, {0, 2.0 / 3, .5}}, {3.0, 3.0 * std::sqrt(3.0), 3.0 * 1.6}, 4);
+    near(maxStrain(elasticOf(squat, ElasticLattice::HCP, 3.0, true, 1.6)), 0, 1e-5, "hcp at its own c/a is unstrained");
+    near(meanOf(elasticOf(squat, ElasticLattice::HCP, 3.0, true), "Elastic Strain.ZZ"),
+         (1 - std::pow(std::sqrt(8.0 / 3.0) / 1.6, 2)) / 2, 1e-4, "hcp c/a mismatch is a ZZ strain");
+    // hcp-like stacking-fault atoms in fcc are crystalline (code 2) and unstrained.
+    const Dataset fault = elasticOf(stackedLayers("ABCABCABABCABC"), ElasticLattice::FCC, faultBond * std::sqrt(2.0));
+    const auto &codes = fault.scalarProperties.at("Structure Type");
+    check(size_t(std::count(codes.begin(), codes.end(), 2.0)) == 2 * faultAtomsPerLayer, "stacking-fault atoms are hcp");
+    near(maxStrain(fault), 0, 1e-5, "a stacking fault is not elastic strain");
+    // The wrong lattice leaves atoms as Other with zero strain.
+    const Dataset wrong = elasticOf(bcc(4), ElasticLattice::FCC, 3.0);
+    check(attribute(wrong, "ElasticStrain.counts.Other") == double(wrong.atoms.size()) && maxStrain(wrong) == 0,
+          "atoms of another lattice are Other");
+    Dataset bad = fcc(3);
+    ElasticStrainOptions invalid;
+    invalid.latticeConstant = 0;
+    throwsWith([&] { computeElasticStrain(bad, invalid, nullptr); }, "lattice constant", "elastic strain needs a0");
+    std::atomic<bool> cancel{true};
+    Dataset big = fcc(4);
+    throwsWith([&] { computeElasticStrain(big, {}, &cancel); }, "Cancelled", "elastic strain cancels");
+}
 static void testCancellation() {
     std::atomic<bool> cancel{true};
     {
@@ -1857,6 +2085,8 @@ int main() {
     testPlanarFaults();
     testSpatialCorrelation();
     testPtm();
+    testGrainSegmentation();
+    testElasticStrain();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
@@ -1864,6 +2094,6 @@ int main() {
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
                  "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
-                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, "
+                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, grain segmentation, elastic strain, "
                  "pipeline composition, cancellation\n";
 }

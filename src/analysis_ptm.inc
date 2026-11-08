@@ -574,19 +574,16 @@ inline PtmEnvironmentResult ptmClassify(const NeighborVectorLists &lists, size_t
     return result;
 }
 
-inline void computePolyhedralTemplateMatching(Dataset &data, const PtmOptions &options,
-                                              const std::vector<uint8_t> *selection, std::atomic<bool> *cancel) {
-    if (!(options.rmsdCutoff >= 0) || !std::isfinite(options.rmsdCutoff))
-        throw std::runtime_error("PTM needs a non-negative RMSD cutoff");
-    if ((options.structures & 0xff) == 0) throw std::runtime_error("PTM needs at least one structure type");
-    Dataset subset;
-    std::vector<uint32_t> original;
-    const Dataset &input = selectedSubset(data, selection, subset, original);
-    size_t needed = 0;
+// Classifies every particle of a dataset on worker threads; cancellation is polled per block.
+inline std::vector<PtmEnvironmentResult> ptmAnalyze(const Dataset &input, const PtmOptions &options,
+                                                    std::atomic<bool> *cancel,
+                                                    NeighborVectorLists *neighborsOut = nullptr,
+                                                    size_t minimumNeighbors = 0) {
+    size_t needed = minimumNeighbors;
     for (size_t type = 1; type <= 8; ++type)
         if (options.structures & (1 << (type - 1)))
             needed = std::max(needed, ptm_detail::library().templates[type].inner);
-    const auto lists = nearestNeighborsWithImages(input, needed, cancel);
+    auto lists = nearestNeighborsWithImages(input, needed, cancel);
     const size_t count = lists.size();
     std::vector<PtmEnvironmentResult> results(count);
     std::atomic<size_t> next{0};
@@ -607,6 +604,20 @@ inline void computePolyhedralTemplateMatching(Dataset &data, const PtmOptions &o
         for (auto &thread : pool) thread.join();
     }
     if (stopped || (cancel && *cancel)) throw std::runtime_error("Cancelled");
+    if (neighborsOut) *neighborsOut = std::move(lists);
+    return results;
+}
+
+inline void computePolyhedralTemplateMatching(Dataset &data, const PtmOptions &options,
+                                              const std::vector<uint8_t> *selection, std::atomic<bool> *cancel) {
+    if (!(options.rmsdCutoff >= 0) || !std::isfinite(options.rmsdCutoff))
+        throw std::runtime_error("PTM needs a non-negative RMSD cutoff");
+    if ((options.structures & 0xff) == 0) throw std::runtime_error("PTM needs at least one structure type");
+    Dataset subset;
+    std::vector<uint32_t> original;
+    const Dataset &input = selectedSubset(data, selection, subset, original);
+    const auto results = ptmAnalyze(input, options, cancel);
+    const size_t count = results.size();
 
     const size_t total = data.atoms.size();
     const auto at = [&](size_t i) { return selection ? original[i] : i; };

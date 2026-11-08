@@ -2176,7 +2176,8 @@ int main(int argc,char **argv) {
                      std::tuple{"Calculate local entropy",Op::LocalEntropy,"Entropy"},
                      std::tuple{"Identify fcc planar faults",Op::IdentifyFccPlanarFaults,"Planar Fault Type"},
                      std::tuple{"Spatial correlation function",Op::SpatialCorrelation,""},
-                     std::tuple{"Polyhedral template matching",Op::PolyhedralTemplateMatching,"Structure Type"}}) {
+                     std::tuple{"Polyhedral template matching",Op::PolyhedralTemplateMatching,"Structure Type"},
+                     std::tuple{"Elastic strain calculation",Op::ElasticStrain,"Volumetric Strain"}}) {
                 strcpy_s(app.modifierSearch,name);
                 click("pipeline.add-modification");
                 frame();
@@ -2220,6 +2221,61 @@ int main(int argc,char **argv) {
                 app.modifierGraph.erase(0);
                 app.update(0);
                 settlePipeline();
+                frame();
+            }
+            {
+                // Grain segmentation reads PTM orientations: alone it reports the missing input,
+                // after a PTM node with orientation output it publishes Grain IDs.
+                strcpy_s(app.modifierSearch,"Grain segmentation");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Grain segmentation");
+                requireExport(app.mods.size()==1 && app.mods[0].op==Op::GrainSegmentation,"catalog adds Grain segmentation");
+                settlePipeline();
+                frame();
+                requireExport(app.error.find("Polyhedral template matching")!=std::string::npos,
+                              ("Grain segmentation without PTM names its input: "+app.error).c_str());
+                app.modifierGraph.erase(0);
+                app.update(0);
+                settlePipeline();
+                // An evaluation still in flight can publish the error again after OK, so settle
+                // and dismiss until the dialog stays closed, as a user would.
+                for (int round=0; round<4; ++round) {
+                    settlePipeline();
+                    for (int wait=0; wait<6 && ImGui::GetCurrentContext()->OpenPopupStack.size()==0; ++wait) frame();
+                    if (ImGui::GetCurrentContext()->OpenPopupStack.size()==0) break;
+                    for (int wait=0; wait<6 && !app.uiTestItems.contains("error.ok"); ++wait) frame();
+                    click("error.ok");
+                    frame();
+                    frame();
+                }
+                requireExport(app.error.empty() && ImGui::GetCurrentContext()->OpenPopupStack.size()==0,
+                              "the error dialog closes with OK");
+                strcpy_s(app.modifierSearch,"Polyhedral template matching");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Polyhedral template matching");
+                requireExport(app.mods.size()==1,"catalog adds PTM before grains");
+                app.mods[0].clusterByBonds=true; // Output lattice orientations.
+                app.update(0);
+                settlePipeline();
+                strcpy_s(app.modifierSearch,"Grain segmentation");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Grain segmentation");
+                requireExport(app.mods.size()==2,"catalog adds Grain segmentation after PTM");
+                settlePipeline();
+                frame();
+                requireExport(app.error.empty() && app.result.data.scalarProperties.contains("Grain"),
+                              ("Grain segmentation runs after PTM: "+app.error).c_str());
+                app.selectPipeline=true;
+                for (size_t k=0;k<app.mods.size();++k)
+                    if (app.mods[k].op==Op::GrainSegmentation) app.modifierGraph.selected=int(k);
+                frame();
+                frame();
+                requireExport(app.error.empty(),"Grain segmentation panel draws");
+                // Downstream node first, so grains never run without PTM.
+                while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
                 frame();
             }
             strcpy_s(app.modifierSearch,"Radial distribution function (RDF)");

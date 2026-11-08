@@ -605,7 +605,8 @@ static const char *opCategory(Op op) {
                                op == Op::FindRings || op == Op::VoronoiAnalysis ||
                                op == Op::ChillPlus || op == Op::LocalEntropy ||
                                op == Op::IdentifyFccPlanarFaults || op == Op::SpatialCorrelation ||
-                               op == Op::PolyhedralTemplateMatching
+                               op == Op::PolyhedralTemplateMatching || op == Op::GrainSegmentation ||
+                               op == Op::ElasticStrain
                          ? "Analysis"
                          : "Modification";
 }
@@ -680,7 +681,7 @@ static const std::vector<Command> &commandRegistry() {
                       Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
                       Op::IdentifyDiamond, Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory,
                       Op::DiffusionCoefficient, Op::FindRings, Op::VoronoiAnalysis, Op::ChillPlus, Op::LocalEntropy,
-                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::GrainSegmentation, Op::ElasticStrain, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -1808,6 +1809,13 @@ struct App {
         if (op == Op::PolyhedralTemplateMatching) {
             m.value = .1f; m.expandNeighbors = ptmDefaultStructures; m.adaptive = false;
             m.overlapUseRadii = false; m.clusterByBonds = false; m.clusterSortBySize = false;
+        }
+        if (op == Op::GrainSegmentation) {
+            m.type = 0; m.value = 0; m.rdfBins = 100; m.adaptive = true; m.clusterByBonds = true; m.overlapUseRadii = true;
+        }
+        if (op == Op::ElasticStrain) {
+            m.type = 0; m.value = 1; m.upper = float(std::sqrt(8.0 / 3.0));
+            m.clusterByBonds = true; m.adaptive = false; m.overlapUseRadii = true;
         }
         if (op == Op::LocalEntropy) { m.value = 5; m.upper = .2f; m.overlapUseRadii = false; m.adaptive = false; m.histogramRangeStart = 5; }
         if (op == Op::SpatialCorrelation) {
@@ -10856,6 +10864,75 @@ struct App {
                                 found != result.data.globalAttributes.end() && (type == 0 || ((m.expandNeighbors >> (type - 1)) & 1)))
                                 ImGui::Text("%s  %.0f", loc::text(ptmTypeNames[type]), found->second);
                     }
+                    if (m.op == Op::GrainSegmentation) {
+                        auto edited = static_cast<const Modifier &>(m);
+                        bool changed = false;
+                        int algorithm = std::clamp(edited.type, 0, 2);
+                        fitNextField("Algorithm", true);
+                        if (ImGui::Combo(loc::label("Algorithm"), &algorithm,
+                                         loc::items("Graph clustering (automatic)\0Graph clustering (manual)\0Minimum spanning tree\0"))) {
+                            edited.type = algorithm; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.grain-algorithm.") + m.id, "Algorithm");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        ImGui::BeginDisabled(edited.type == 0);
+                        float threshold = edited.value;
+                        fitNextField("Log merge threshold", true);
+                        if (ImGui::InputFloat(loc::label("Log merge threshold"), &threshold, 0, 0, "%.3f") && std::isfinite(threshold)) {
+                            edited.value = threshold; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.grain-threshold.") + m.id, "Log merge threshold");
+                        ImGui::EndDisabled();
+                        int minimum = edited.rdfBins;
+                        fitNextField("Minimum grain size", true);
+                        if (ImGui::InputInt(loc::label("Minimum grain size"), &minimum, 0, 0) && minimum >= 1) {
+                            edited.rdfBins = minimum; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.grain-minimum.") + m.id, "Minimum grain size");
+                        changed |= ui_design::checkbox(loc::label("Adopt orphan atoms"), &edited.adaptive);
+                        changed |= ui_design::checkbox(loc::label("Handle coherent interfaces/stacking faults"), &edited.clusterByBonds);
+                        changed |= ui_design::checkbox(loc::label("Color particles by grain"), &edited.overlapUseRadii);
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = edited; update(); }
+                        ImGui::TextDisabled(loc::text("Needs Polyhedral template matching upstream with lattice orientations. Atoms merge while the natural log of the merge distance is below the threshold; for the spanning tree the distance is the misorientation in degrees. Threshold values are not calibrated against OVITO."));
+                        if (const auto found = result.data.globalAttributes.find("GrainSegmentation.grain_count");
+                            found != result.data.globalAttributes.end())
+                            ImGui::Text(loc::text("Grains %.0f, merge threshold %.4g"), found->second,
+                                        result.data.globalAttributes["GrainSegmentation.merge_threshold"]);
+                    }
+                    if (m.op == Op::ElasticStrain) {
+                        auto edited = static_cast<const Modifier &>(m);
+                        bool changed = false;
+                        int lattice = std::clamp(edited.type, 0, 4);
+                        fitNextField("Crystal structure", true);
+                        if (ImGui::Combo(loc::label("Crystal structure"), &lattice,
+                                         loc::items("FCC\0HCP\0BCC\0Cubic diamond\0Hexagonal diamond\0"))) {
+                            edited.type = lattice; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.elastic-lattice.") + m.id, "Crystal structure");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        float constant = edited.value;
+                        fitNextField("Lattice constant", true);
+                        if (ImGui::InputFloat(loc::label("Lattice constant"), &constant, 0, 0, "%.5f") && constant > 0) {
+                            edited.value = constant; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.elastic-constant.") + m.id, "Lattice constant");
+                        ImGui::BeginDisabled(edited.type != 1 && edited.type != 4);
+                        float ratio = edited.upper;
+                        fitNextField("c/a ratio", true);
+                        if (ImGui::InputFloat(loc::label("c/a ratio"), &ratio, 0, 0, "%.5f") && ratio > 0) {
+                            edited.upper = ratio; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.elastic-ratio.") + m.id, "c/a ratio");
+                        ImGui::EndDisabled();
+                        changed |= ui_design::checkbox(loc::label("Output strain tensors"), &edited.clusterByBonds);
+                        changed |= ui_design::checkbox(loc::label("Strain tensor in spatial frame (push-forward)"), &edited.overlapUseRadii);
+                        changed |= ui_design::checkbox(loc::label("Output deformation gradient tensors"), &edited.adaptive);
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = edited; update(); }
+                        ImGui::TextDisabled(loc::text("Lattice constant in length units of the dataset. Structures are identified with PTM (RMSD cutoff 0.1); each atom's elastic deformation gradient is a least-squares fit to its ideal neighbor vectors. Strains are dimensionless; no Cluster property is computed."));
+                        if (const auto found = result.data.globalAttributes.find("ElasticStrain.mean_volumetric_strain");
+                            found != result.data.globalAttributes.end())
+                            ImGui::Text(loc::text("Mean volumetric strain %.6g"), found->second);
+                    }
                     if (m.op == Op::ChillPlus) {
                         float cutoff = m.value;
                         fitNextField("Cutoff distance", true);
@@ -12558,9 +12635,9 @@ struct App {
                 beginCard("Analysis");
                 operation(Op::AtomicStrain,"Compute each particle's local deformation gradient from its reference-frame neighbors; publishes shear and volumetric strain and the non-affine residual.");
                 for (auto name : {"Bader charge integration", "Bond order"}) planned(name);
-                planned("Elastic strain calculation");
+                operation(Op::ElasticStrain,"Identify the crystal with PTM and compute each atom's elastic deformation gradient against the ideal lattice; publishes elastic strain tensors and volumetric strain.");
                 operation(Op::FindRings,"Find shortest-path rings in the bond topology and tabulate their sizes.");
-                planned("Grain segmentation");
+                operation(Op::GrainSegmentation,"Cluster PTM lattice orientations into grains by node pair sampling or a minimum spanning tree; publishes Grain IDs, a grain table and the merge sequence.");
                 operation(Op::BondAngleDistribution,"Build a 0–180 degree histogram from pairs of incident bonds, resolving periodic image shifts.");
                 operation(Op::BondLengthDistribution,"Build a bond-length histogram from current explicit topology, resolving periodic image shifts.");
                 operation(Op::ClusterAnalysis,"Build connected components by a periodic cutoff or existing bond topology; adds per-particle Cluster IDs and a cluster-size table.");
@@ -13074,7 +13151,9 @@ struct App {
             const float okWidth = U(120);
             ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
                                           ImGui::GetContentRegionAvail().x - okWidth + ImGui::GetStyle().ItemSpacing.x));
-            if (ImGui::Button(loc::label("OK"), {okWidth, 0})) {
+            const bool acknowledged = ImGui::Button(loc::label("OK"), {okWidth, 0});
+            recordUiTestItem("error.ok");
+            if (acknowledged) {
                 error.clear();
                 ImGui::CloseCurrentPopup();
             }

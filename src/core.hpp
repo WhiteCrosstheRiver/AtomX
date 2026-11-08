@@ -28,6 +28,7 @@
 #include <mutex>
 #include <complex>
 #include <thread>
+#include <queue>
 
 namespace atomx {
 struct Vec3 {
@@ -812,6 +813,8 @@ enum class Op {
     ,IdentifyFccPlanarFaults
     ,SpatialCorrelation
     ,PolyhedralTemplateMatching
+    ,GrainSegmentation
+    ,ElasticStrain
 };
 struct Modifier {
     Op op;
@@ -915,6 +918,12 @@ struct Modifier {
     // PTM: value RMSD cutoff, expandNeighbors structure bit mask (bit type-1), adaptive
     // RMSD output, overlapUseRadii interatomic distance, clusterByBonds orientation,
     // clusterSortBySize elastic deformation gradient, cspOnlySelected.
+    // Grain segmentation: type algorithm (0 automatic, 1 manual graph clustering, 2 MST),
+    // value log merge threshold, rdfBins minimum grain size, adaptive adopt orphans,
+    // clusterByBonds handle stacking faults, overlapUseRadii color particles by grain.
+    // Elastic strain: type lattice (0 FCC, 1 HCP, 2 BCC, 3 cubic, 4 hexagonal diamond),
+    // value lattice constant, upper c/a, clusterByBonds strain tensors, adaptive deformation
+    // gradients, overlapUseRadii push forward (Euler-Almansi).
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -1008,6 +1017,18 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
             break;
         case Op::IdentifyFccPlanarFaults:
             scalar.insert("Planar Fault Type");
+            break;
+        case Op::GrainSegmentation:
+            scalar.insert("Grain");
+            break;
+        case Op::ElasticStrain:
+            scalar.insert("Structure Type");
+            scalar.insert("Volumetric Strain");
+            if (modifier.clusterByBonds)
+                for (const char *c : {"XX", "YY", "ZZ", "XY", "XZ", "YZ"}) scalar.insert(std::string("Elastic Strain.") + c);
+            if (modifier.adaptive)
+                for (const char *c : {"XX", "XY", "XZ", "YX", "YY", "YZ", "ZX", "ZY", "ZZ"})
+                    scalar.insert(std::string("Elastic Deformation Gradient.") + c);
             break;
         case Op::PolyhedralTemplateMatching:
             scalar.insert("Structure Type");
@@ -1151,6 +1172,17 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::GlobalAttributes,"Structure counts");
         add(Kind::Table,"Polyhedral template matching");
         add(Kind::Table,"PTM RMSD histogram");
+    }
+    if (modifier.op==Op::GrainSegmentation) {
+        add(Kind::Particles,"Grain");
+        add(Kind::GlobalAttributes,"Grain count and merge threshold");
+        add(Kind::Table,"grains");
+        add(Kind::Table,"grains-merge");
+    }
+    if (modifier.op==Op::ElasticStrain) {
+        add(Kind::Particles,"Elastic strain and structure types");
+        add(Kind::GlobalAttributes,"Structure counts and mean volumetric strain");
+        add(Kind::Table,"Elastic strain structures");
     }
     if (modifier.op==Op::SpatialCorrelation) {
         add(Kind::Table,"Spatial correlation (real space)");
@@ -2269,6 +2301,8 @@ inline const char *opName(Op op) {
     case Op::IdentifyFccPlanarFaults: return "Identify fcc planar faults";
     case Op::SpatialCorrelation: return "Spatial correlation function";
     case Op::PolyhedralTemplateMatching: return "Polyhedral template matching";
+    case Op::GrainSegmentation: return "Grain segmentation";
+    case Op::ElasticStrain: return "Elastic strain calculation";
     default:
         return "Color by type";
     }
@@ -2327,6 +2361,7 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_structure.inc"
 #include "analysis_correlation.inc"
 #include "analysis_ptm.inc"
+#include "analysis_grains.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -3120,6 +3155,31 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 options.outputOrientation = m.clusterByBonds;
                 options.outputDeformationGradient = m.clusterSortBySize;
                 computePolyhedralTemplateMatching(r.data, options, m.cspOnlySelected ? &r.selected : nullptr, cancel);
+                continue;
+            }
+            if (m.op == Op::GrainSegmentation) {
+                GrainSegmentationOptions options;
+                if (m.type < 0 || m.type > 2) throw std::runtime_error("Unknown grain segmentation algorithm");
+                options.algorithm = GrainAlgorithm(m.type);
+                options.logThreshold = m.value;
+                if (m.rdfBins < 1) throw std::runtime_error("Minimum grain size must be at least 1");
+                options.minGrainSize = size_t(m.rdfBins);
+                options.adoptOrphans = m.adaptive;
+                options.handleStackingFaults = m.clusterByBonds;
+                options.colorParticles = m.overlapUseRadii;
+                computeGrainSegmentation(r.data, options, cancel);
+                continue;
+            }
+            if (m.op == Op::ElasticStrain) {
+                ElasticStrainOptions options;
+                if (m.type < 0 || m.type > 4) throw std::runtime_error("Unknown elastic strain lattice");
+                options.lattice = ElasticLattice(m.type);
+                options.latticeConstant = m.value;
+                options.axialRatio = m.upper;
+                options.outputStrain = m.clusterByBonds;
+                options.outputDeformationGradient = m.adaptive;
+                options.pushForward = m.overlapUseRadii;
+                computeElasticStrain(r.data, options, cancel);
                 continue;
             }
             if (m.op == Op::SpatialCorrelation) {

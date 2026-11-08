@@ -55,9 +55,9 @@
 | A07 | Difference between frames | 以稳定 ID 对齐两帧并输出指定属性差值与缺失 ID 诊断。 |
 | A08 | Dislocation analysis (DXA) | 真正的晶格判定、Burgers 回路/矢量、位错线网络、缺陷网格与长度/类型统计；不得沿用 `dxaApproximate` 名称冒充。 |
 | A09 | Displacement vectors | 参考帧、周期展开后的位移属性和可单独控制的箭头对象。 |
-| A10 | Elastic strain calculation | 参考晶格、局部拟合和弹性应变张量，非晶/失败点明确标记。 |
+| A10 | Elastic strain calculation | 已实现（2026-11-07）：PTM 识别晶格与堆垛伙伴相，逐原子拟合弹性变形梯度，输出 Euler-Almansi/Green-Lagrange 应变与体应变；无 Cluster 属性。 |
 | A11 | Find rings | 基于键图的环搜索、尺寸分布、环对象/表；定义重复环去重。 |
-| A12 | Grain segmentation | 局部结构/取向、晶粒聚类、晶粒 ID/取向/大小表。 |
+| A12 | Grain segmentation | 已实现（2026-11-07）：基于 PTM 取向的节点对采样（自动/手动阈值）与最小生成树聚类、孤儿原子收养、堆垛层错与孪晶处理、grains 表与 grains-merge 序列。 |
 | A13 | Histogram | 任意数值粒子/键属性、分量、过滤、箱数与频数表。 |
 | A14 | Radial distribution function (RDF) | 全量邻居统计、体积/PBC 归一化及类型对的 g(r) 表。 |
 | A15 | Reduce property | 对选定对象/属性执行 min/max/mean/sum 等聚合并发布全局属性。 |
@@ -209,4 +209,5 @@
 - **2026-11-07：Voronoi analysis。** 以邻居平分面逐次裁剪凸多面体构造每个粒子的 Voronoi 胞，支持三斜周期、非周期边界墙、径向（Laguerre）胞、面积与棱长阈值、近邻键与仅选中粒子。FCC/BCC/简单立方的胞体积、面数与指数与精确值一致，随机、三斜、带墙、平板及多分散体系的胞体积之和等于盒体积。尚无 Voronoi 多面体网格输出。
 - **2026-11-07：第五批。** 实现 Chill+（q3 键关联，冰 Ih/Ic、水合物及界面类型）、Calculate local entropy（按 OVITO 公开脚本的 Piaggi–Parrinello 对熵指纹，含局部密度与邻居平均）、Identify fcc planar faults（以内置自适应 CNA 代替 PTM 识别类 hcp 原子，区分本征层错、孪晶界和多层层错并估算面积）、Spatial correlation function（网格 FFT 的实空间/倒空间径向平均、直接近邻求和、值/差相关及 RDF/协方差归一化）。理想冰、层错堆垛、岩盐电荷关联与理想气体参考均通过；限制见台账。
 - **2026-11-07：Polyhedral template matching。** 实现 FCC、HCP、BCC、ICO、SC、立方/六方金刚石与石墨烯八种模板，RMSD 截断、RMSD/原子间距/取向四元数/弹性变形梯度输出与仅选中粒子。RMSD、尺度与原子间距采用 PTM 参考库（MIT）的定义，模板与 OVITO 参考模板一致；对应关系由 AtomX 自有的旋转搜索加双射分配求得，而非凸包图匹配。理想晶体 RMSD 为零、原子间距精确、旋转晶体的取向等于施加的旋转、位移中心原子的 RMSD 与解析式一致。尚未实现有序类型。
+- **2026-11-07：Grain segmentation 与 Elastic strain calculation。** 晶粒分割读取上游 PTM 的结构类型与取向，以失配角构建近邻图，提供节点对采样（Bonald 等，边权 exp(-θ²/3)、最近邻链合并）与最小生成树两种层次聚类，自动阈值为 AtomX 自定的稳健离群判据（未与 OVITO 数值校准）；层错 hcp 原子并入周围 fcc 晶粒，孪晶界核心原子交由收养分配。弹性应变以 PTM 识别所选晶格及其堆垛伙伴相（RMSD 截断 0.1），按 a0 与 c/a 换算理想近邻矢量，逐原子最小二乘拟合 F，输出应变张量、体应变与变形梯度；与 OVITO 的 DXA 簇图方法不同，缺陷处数值可能有差异。10.7 万原子双晶：晶粒分割 1.3–1.8 s，弹性应变 0.9 s。
 - **后续工作：** 完成节点级缓存与共享数据策略、完整鼠标交互回归、显示范围/选择适配、剩余基础分析与修改器；补充 OVITO 官方渐变色参考值和 Intel GPU 对照。DXA/PTM/Voronoi 等高复杂模块仍属于单独的后续里程碑。
