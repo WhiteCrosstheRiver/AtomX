@@ -2175,7 +2175,8 @@ int main(int argc,char **argv) {
                      std::tuple{"Chill+",Op::ChillPlus,"Structure Type"},
                      std::tuple{"Calculate local entropy",Op::LocalEntropy,"Entropy"},
                      std::tuple{"Identify fcc planar faults",Op::IdentifyFccPlanarFaults,"Planar Fault Type"},
-                     std::tuple{"Spatial correlation function",Op::SpatialCorrelation,""}}) {
+                     std::tuple{"Spatial correlation function",Op::SpatialCorrelation,""},
+                     std::tuple{"Polyhedral template matching",Op::PolyhedralTemplateMatching,"Structure Type"}}) {
                 strcpy_s(app.modifierSearch,name);
                 click("pipeline.add-modification");
                 frame();

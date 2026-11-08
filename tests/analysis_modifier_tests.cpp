@@ -1644,8 +1644,146 @@ static void testSpatialCorrelation() {
               std::string("named with outputs: ") + opName(op));
 }
 
+// ---- Polyhedral template matching ------------------------------------------------
+static constexpr int ptmAll = 0xff;
+static Dataset ptmRun(Dataset d, int structures = ptmDefaultStructures, double cutoff = 0.1, bool everything = true,
+                      const std::vector<uint8_t> *selection = nullptr) {
+    PtmOptions options;
+    options.structures = structures;
+    options.rmsdCutoff = cutoff;
+    options.outputRmsd = options.outputInteratomicDistance = options.outputOrientation =
+        options.outputDeformationGradient = everything;
+    computePolyhedralTemplateMatching(d, options, selection, nullptr);
+    return d;
+}
+static size_t countType(const Dataset &d, PtmType type) {
+    const auto &s = d.scalarProperties.at("Structure Type");
+    return size_t(std::count(s.begin(), s.end(), double(type)));
+}
+static Dataset graphene(int nx, int ny, double bond = 1.42) {
+    Dataset d;
+    d.species = {"C"};
+    const double w = bond * std::sqrt(3.0);
+    d.cell = {w * nx, 0, 0, 0, 3 * bond * ny, 0, 0, 0, 20};
+    d.pbc = {true, true, false};
+    for (int y = 0; y < ny; ++y)
+        for (int x = 0; x < nx; ++x)
+            for (const auto &[px, py] : {std::pair{0.0, 0.0}, std::pair{0.0, bond}, std::pair{w / 2, 1.5 * bond},
+                                        std::pair{w / 2, 2.5 * bond}})
+                d.atoms.push_back({float(x * w + px), float(y * 3 * bond + py), 10.f, 0});
+    return d;
+}
+static void testPtm() {
+    // Every ideal structure is found with zero RMSD and its nearest-neighbor distance.
+    const double a = 3.6;
+    const Dataset f = ptmRun(fcc(4, a));
+    check(countType(f, PtmType::FCC) == f.atoms.size(), "ideal fcc is FCC");
+    check(allNear(f.scalarProperties.at("RMSD"), 0, 1e-6), "ideal fcc has zero RMSD");
+    check(allNear(f.scalarProperties.at("Interatomic Distance"), a / std::sqrt(2.0), 1e-5), "fcc interatomic distance a/sqrt2");
+    near(attribute(f, "PolyhedralTemplateMatching.counts.FCC"), double(f.atoms.size()), 0, "FCC count attribute");
+    const Dataset h = ptmRun(hcp(3, 3.0));
+    check(countType(h, PtmType::HCP) == h.atoms.size(), "ideal hcp is HCP on both lattice sites");
+    check(allNear(h.scalarProperties.at("Interatomic Distance"), 3.0, 1e-5), "hcp interatomic distance a");
+    const Dataset b = ptmRun(bcc(4, 3.0));
+    check(countType(b, PtmType::BCC) == b.atoms.size(), "ideal bcc is BCC");
+    check(allNear(b.scalarProperties.at("Interatomic Distance"), 3.0 * std::sqrt(3.0) / 2, 1e-5), "bcc distance a sqrt3/2");
+    const Dataset sc = ptmRun(simpleCubic(5, 3.0), ptmAll);
+    check(countType(sc, PtmType::SC) == sc.atoms.size(), "ideal simple cubic is SC");
+    const Dataset ico = ptmRun(icosahedron(), ptmAll);
+    check(ico.scalarProperties.at("Structure Type")[0] == double(PtmType::ICO), "an icosahedron center is ICO");
+    const Dataset dc = ptmRun(cubicDiamond(3), ptmAll);
+    check(countType(dc, PtmType::CubicDiamond) == dc.atoms.size(), "ideal cubic diamond");
+    check(allNear(dc.scalarProperties.at("Interatomic Distance"), 5.43 * std::sqrt(3.0) / 4, 1e-4), "diamond bond length");
+    const Dataset dh = ptmRun(hexagonalDiamond(3), ptmAll);
+    check(countType(dh, PtmType::HexagonalDiamond) == dh.atoms.size(), "ideal hexagonal diamond");
+    const Dataset g = ptmRun(graphene(6, 4), ptmAll);
+    check(countType(g, PtmType::Graphene) == g.atoms.size(), "ideal graphene");
+    check(allNear(g.scalarProperties.at("Interatomic Distance"), 1.42, 1e-4), "graphene bond length");
+    // Disabled structures are not reported.
+    check(countType(ptmRun(bcc(4)), PtmType::BCC) == 128 && countType(ptmRun(bcc(4), 1), PtmType::Other) == 128,
+          "only the enabled structure types are assigned");
+    // Orientation: identity for the template frame, the same on both hcp sites, and the
+    // applied rotation for a rotated crystal.
+    check(allNear(f.scalarProperties.at("Orientation.W"), 1, 1e-6) && allNear(f.scalarProperties.at("Orientation.X"), 0, 1e-6),
+          "an unrotated fcc crystal has the identity orientation");
+    check(allNear(h.scalarProperties.at("Orientation.W"), 1, 1e-6), "both hcp sites share the crystal orientation");
+    Dataset rotated = fcc(4, a);
+    const double angle = 20 * 3.14159265358979323846 / 180, n = std::sqrt(14.0);
+    const double qw = std::cos(angle / 2), qx = std::sin(angle / 2) / n, qy = 2 * qx, qz = 3 * qx;
+    const double R[3][3]{{1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qw * qz), 2 * (qx * qz + qw * qy)},
+                         {2 * (qx * qy + qw * qz), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qw * qx)},
+                         {2 * (qx * qz - qw * qy), 2 * (qy * qz + qw * qx), 1 - 2 * (qx * qx + qy * qy)}};
+    transform(rotated, R);
+    const Dataset turned = ptmRun(rotated);
+    check(countType(turned, PtmType::FCC) == turned.atoms.size(), "a rotated crystal is still FCC");
+    check(allNear(turned.scalarProperties.at("Orientation.W"), qw, 1e-5) &&
+          allNear(turned.scalarProperties.at("Orientation.X"), qx, 1e-5) &&
+          allNear(turned.scalarProperties.at("Orientation.Y"), qy, 1e-5) &&
+          allNear(turned.scalarProperties.at("Orientation.Z"), qz, 1e-5),
+          "the orientation is the applied rotation: w=" + std::to_string(turned.scalarProperties.at("Orientation.W")[0]));
+    check(allNear(turned.scalarProperties.at("Elastic Deformation Gradient.XY"), R[0][1], 1e-5) &&
+          allNear(turned.scalarProperties.at("Elastic Deformation Gradient.ZX"), R[2][0], 1e-5),
+          "an unstrained rotated crystal has the rotation as its deformation gradient");
+    // A uniaxial stretch: the deformation gradient keeps the 1.01 : 1 : 1 ratio.
+    Dataset stretched = fcc(4, a);
+    const double stretch[3][3]{{1.01, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    transform(stretched, stretch);
+    const Dataset strained = ptmRun(stretched);
+    const auto &fxx = strained.scalarProperties.at("Elastic Deformation Gradient.XX");
+    const auto &fyy = strained.scalarProperties.at("Elastic Deformation Gradient.YY");
+    near(fxx[0] / fyy[0], 1.01, 1e-5, "the elastic deformation gradient carries the stretch");
+    near(strained.scalarProperties.at("Elastic Deformation Gradient.XY")[0], 0, 1e-5, "no shear from a stretch");
+    // RMSD in closed form: moving a center by d (in nearest-neighbor units) against its
+    // fixed fcc shell gives RMSD^2 = (12/13) (d^2/13) / (1 + d^2/13).
+    Dataset moved = fcc(4, a);
+    const double d = 0.1, nn = a / std::sqrt(2.0);
+    moved.atoms[0].x += float(d * nn);
+    const double expected = std::sqrt(12.0 / 13 * (d * d / 13) / (1 + d * d / 13));
+    near(ptmRun(moved).scalarProperties.at("RMSD")[0], expected, 2e-4, "RMSD of a displaced center");
+    // Thermal noise: a cutoff of 0.1 keeps the crystal, a tiny one rejects it.
+    Dataset noisy = fcc(5, a);
+    std::mt19937 random(4);
+    std::normal_distribution<float> jitter(0, float(.03 * nn));
+    for (auto &atom : noisy.atoms) { atom.x += jitter(random); atom.y += jitter(random); atom.z += jitter(random); }
+    const Dataset warm = ptmRun(noisy);
+    check(countType(warm, PtmType::FCC) > warm.atoms.size() * 95 / 100,
+          "3% thermal noise stays FCC: " + std::to_string(countType(warm, PtmType::FCC)));
+    const Dataset strict = ptmRun(noisy, ptmDefaultStructures, 1e-4);
+    check(countType(strict, PtmType::Other) == strict.atoms.size(), "a tiny RMSD cutoff rejects noisy atoms");
+    check(std::all_of(strict.scalarProperties.at("RMSD").begin(), strict.scalarProperties.at("RMSD").end(),
+                      [](double v) { return v > 0; }), "rejected atoms keep their RMSD");
+    check(countType(ptmRun(noisy, ptmDefaultStructures, 0), PtmType::FCC) == noisy.atoms.size(), "cutoff 0 disables the cutoff");
+    // Random positions are mostly not crystalline.
+    const Dataset gas = ptmRun(randomGas(500, {true, true, true}, 8, 18));
+    check(countType(gas, PtmType::Other) > 400, "random positions are mostly Other");
+    // Small periodic cells, selections, tables.
+    check(countType(ptmRun(fcc(1, a)), PtmType::FCC) == 4, "a single fcc unit cell uses its periodic images");
+    std::vector<uint8_t> half(256, 0);
+    for (size_t i = 0; i < 128; ++i) half[i] = 1;
+    const Dataset partial = ptmRun(fcc(4, a), ptmDefaultStructures, 0.1, false, &half);
+    check(countType(partial, PtmType::Other) >= 128, "unselected particles are Other");
+    check(!partial.scalarProperties.count("RMSD"), "optional outputs stay off unless requested");
+    check(tableNamed(f, "Polyhedral template matching").rows.size() == 9 && tableNamed(f, "PTM RMSD histogram").rows.size() == 100,
+          "PTM publishes the structure and RMSD tables");
+    throwsWith([&] { ptmRun(fcc(2), 0); }, "at least one structure", "PTM needs a structure type");
+    // Through the pipeline with the panel's field mapping.
+    Modifier ptm{Op::PolyhedralTemplateMatching};
+    ptm.value = .1f;
+    ptm.expandNeighbors = ptmDefaultStructures;
+    ptm.clusterByBonds = true;
+    std::vector<Modifier> stack{ptm};
+    const auto evaluated = evaluateFrom(resultOf(bcc(4)), stack, 0);
+    check(countType(evaluated.data, PtmType::BCC) == 128 && evaluated.data.scalarProperties.count("Orientation.W") &&
+          !evaluated.data.scalarProperties.count("RMSD"), "the PTM node maps its fields");
+}
+
 static void testCancellation() {
     std::atomic<bool> cancel{true};
+    {
+        Dataset d = fcc(12);
+        throwsWith([&] { computePolyhedralTemplateMatching(d, {}, nullptr, &cancel); }, "Cancelled", "PTM cancels");
+        check(!d.scalarProperties.count("Structure Type"), "cancelled PTM publishes nothing");
+    }
     {
         Dataset d = cubicIce(2);
         throwsWith([&] { computeChillPlus(d, 3.5, nullptr, &cancel); }, "Cancelled", "Chill+ cancels");
@@ -1718,6 +1856,7 @@ int main() {
     testLocalEntropy();
     testPlanarFaults();
     testSpatialCorrelation();
+    testPtm();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
@@ -1725,6 +1864,6 @@ int main() {
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
                  "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
-                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, "
+                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, PTM, "
                  "pipeline composition, cancellation\n";
 }

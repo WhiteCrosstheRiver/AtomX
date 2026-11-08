@@ -604,7 +604,8 @@ static const char *opCategory(Op op) {
                                op == Op::TimeAveraging || op == Op::DiffusionCoefficient ||
                                op == Op::FindRings || op == Op::VoronoiAnalysis ||
                                op == Op::ChillPlus || op == Op::LocalEntropy ||
-                               op == Op::IdentifyFccPlanarFaults || op == Op::SpatialCorrelation
+                               op == Op::IdentifyFccPlanarFaults || op == Op::SpatialCorrelation ||
+                               op == Op::PolyhedralTemplateMatching
                          ? "Analysis"
                          : "Modification";
 }
@@ -679,7 +680,7 @@ static const std::vector<Command> &commandRegistry() {
                       Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
                       Op::IdentifyDiamond, Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory,
                       Op::DiffusionCoefficient, Op::FindRings, Op::VoronoiAnalysis, Op::ChillPlus, Op::LocalEntropy,
-                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::PolyhedralTemplateMatching, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -1804,6 +1805,10 @@ struct App {
         if (op == Op::FindRings) { m.replicateN[0] = 3; m.replicateN[1] = 12; }
         if (op == Op::VoronoiAnalysis) { m.value = 0; m.upper = 0; m.bondLowerCutoff = 0; m.adaptive = false; }
         if (op == Op::ChillPlus) m.value = 3.5f;
+        if (op == Op::PolyhedralTemplateMatching) {
+            m.value = .1f; m.expandNeighbors = ptmDefaultStructures; m.adaptive = false;
+            m.overlapUseRadii = false; m.clusterByBonds = false; m.clusterSortBySize = false;
+        }
         if (op == Op::LocalEntropy) { m.value = 5; m.upper = .2f; m.overlapUseRadii = false; m.adaptive = false; m.histogramRangeStart = 5; }
         if (op == Op::SpatialCorrelation) {
             m.property.clear(); m.scatterYProperty.clear(); // Constant 1 until chosen.
@@ -10818,6 +10823,39 @@ struct App {
                             ImGui::TextDisabled(loc::text("Total cell volume %.6g · largest face order %.0f"), found->second,
                                                 result.data.globalAttributes["Voronoi.max_face_order"]);
                     }
+                    if (m.op == Op::PolyhedralTemplateMatching) {
+                        auto edited = static_cast<const Modifier &>(m);
+                        bool changed = false;
+                        float cutoff = edited.value;
+                        fitNextField("RMSD cutoff", true);
+                        if (ImGui::InputFloat(loc::label("RMSD cutoff"), &cutoff, 0, 0, "%.3f") && cutoff >= 0) {
+                            edited.value = cutoff; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.ptm-cutoff.") + m.id, "RMSD cutoff");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        ImGui::TextUnformatted(loc::text("Structure types to identify"));
+                        for (size_t type = 1; type <= 8; ++type) {
+                            bool enabled = (edited.expandNeighbors >> (type - 1)) & 1;
+                            if (ui_design::checkbox(loc::label(ptmTypeNames[type]), &enabled)) {
+                                edited.expandNeighbors = enabled ? edited.expandNeighbors | (1 << (type - 1))
+                                                                 : edited.expandNeighbors & ~(1 << (type - 1));
+                                changed = true;
+                            }
+                            if (type % 2 == 1 && type < 8) ImGui::SameLine(ImGui::GetContentRegionAvail().x * .5f);
+                        }
+                        recordUiTestItem(std::string("pipeline.ptm-types.") + m.id, "Structure types");
+                        changed |= ui_design::checkbox(loc::label("Output RMSD"), &edited.adaptive);
+                        changed |= ui_design::checkbox(loc::label("Output interatomic distance"), &edited.overlapUseRadii);
+                        changed |= ui_design::checkbox(loc::label("Output lattice orientation"), &edited.clusterByBonds);
+                        changed |= ui_design::checkbox(loc::label("Output elastic deformation gradient"), &edited.clusterSortBySize);
+                        changed |= ui_design::checkbox(loc::label("Use only selected particles"), &edited.cspOnlySelected);
+                        if (changed && (edited.expandNeighbors & 0xff)) { checkpoint(); static_cast<Modifier &>(m) = edited; update(); }
+                        ImGui::TextDisabled(loc::text("RMSD is dimensionless; 0 disables the cutoff. Orientations are quaternions (x, y, z, w) relative to the OVITO reference templates. Ordering types are not computed."));
+                        for (size_t type = 0; type <= 8; ++type)
+                            if (const auto found = result.data.globalAttributes.find(std::string("PolyhedralTemplateMatching.counts.") + ptmTypeNames[type]);
+                                found != result.data.globalAttributes.end() && (type == 0 || ((m.expandNeighbors >> (type - 1)) & 1)))
+                                ImGui::Text("%s  %.0f", loc::text(ptmTypeNames[type]), found->second);
+                    }
                     if (m.op == Op::ChillPlus) {
                         float cutoff = m.value;
                         fitNextField("Cutoff distance", true);
@@ -12572,7 +12610,8 @@ struct App {
                 operation(Op::CentrosymmetryParameter,"Computes the centrosymmetry parameter to identify atoms in defective crystal environments (stacking faults, surfaces, dislocations).");
                 operation(Op::ChillPlus,"Classify water molecules as hexagonal, cubic or interfacial ice, hydrate or interfacial hydrate from the q3 bond correlations of four neighbors.");
                 operation(Op::CommonNeighborAnalysis,"Fixed-cutoff Honeycutt–Andersen pair signatures; FCC and BCC are verified against periodic reference crystals. Unsupported or ambiguous motifs remain Other.");
-                for (auto name : {"Polyhedral template matching", "VoroTop analysis"}) planned(name);
+                operation(Op::PolyhedralTemplateMatching,"Match each particle's neighbors to FCC, HCP, BCC, icosahedral, simple cubic, diamond and graphene templates; publishes structure type, RMSD, interatomic distance, orientation and elastic deformation gradient.");
+                planned("VoroTop analysis");
                 endCard();
                 beginCard("Visualization");
                 for (auto name : {"Add text labels", "Construct surface mesh", "Coordination polyhedra"}) planned(name);

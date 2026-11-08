@@ -27,6 +27,7 @@
 #include <cwctype>
 #include <mutex>
 #include <complex>
+#include <thread>
 
 namespace atomx {
 struct Vec3 {
@@ -810,6 +811,7 @@ enum class Op {
     ,LocalEntropy
     ,IdentifyFccPlanarFaults
     ,SpatialCorrelation
+    ,PolyhedralTemplateMatching
 };
 struct Modifier {
     Op op;
@@ -910,6 +912,9 @@ struct Modifier {
     // spacing, adaptive window, clusterByBonds direct sum, upper its cutoff, rdfBins its
     // bins, reduceOperation 1 difference plot, clusterSortBySize normalize by RDF,
     // clusterOnlySelected normalize by covariance.
+    // PTM: value RMSD cutoff, expandNeighbors structure bit mask (bit type-1), adaptive
+    // RMSD output, overlapUseRadii interatomic distance, clusterByBonds orientation,
+    // clusterSortBySize elastic deformation gradient, cspOnlySelected.
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -1003,6 +1008,16 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
             break;
         case Op::IdentifyFccPlanarFaults:
             scalar.insert("Planar Fault Type");
+            break;
+        case Op::PolyhedralTemplateMatching:
+            scalar.insert("Structure Type");
+            if (modifier.adaptive) scalar.insert("RMSD");
+            if (modifier.overlapUseRadii) scalar.insert("Interatomic Distance");
+            if (modifier.clusterByBonds)
+                for (const char *name : {"Orientation.X", "Orientation.Y", "Orientation.Z", "Orientation.W"}) scalar.insert(name);
+            if (modifier.clusterSortBySize)
+                for (const char *c : {"XX", "XY", "XZ", "YX", "YY", "YZ", "ZX", "ZY", "ZZ"})
+                    scalar.insert(std::string("Elastic Deformation Gradient.") + c);
             break;
         default:
             break;
@@ -1130,6 +1145,12 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Particles,"Planar Fault Type");
         add(Kind::GlobalAttributes,"Planar fault counts and areas");
         add(Kind::Table,"Planar faults");
+    }
+    if (modifier.op==Op::PolyhedralTemplateMatching) {
+        add(Kind::Particles,"PTM structure types");
+        add(Kind::GlobalAttributes,"Structure counts");
+        add(Kind::Table,"Polyhedral template matching");
+        add(Kind::Table,"PTM RMSD histogram");
     }
     if (modifier.op==Op::SpatialCorrelation) {
         add(Kind::Table,"Spatial correlation (real space)");
@@ -2247,6 +2268,7 @@ inline const char *opName(Op op) {
     case Op::LocalEntropy: return "Calculate local entropy";
     case Op::IdentifyFccPlanarFaults: return "Identify fcc planar faults";
     case Op::SpatialCorrelation: return "Spatial correlation function";
+    case Op::PolyhedralTemplateMatching: return "Polyhedral template matching";
     default:
         return "Color by type";
     }
@@ -2304,6 +2326,7 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_voronoi.inc"
 #include "analysis_structure.inc"
 #include "analysis_correlation.inc"
+#include "analysis_ptm.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -3086,6 +3109,17 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             }
             if (m.op == Op::IdentifyFccPlanarFaults) {
                 computeFccPlanarFaults(r.data, cancel);
+                continue;
+            }
+            if (m.op == Op::PolyhedralTemplateMatching) {
+                PtmOptions options;
+                options.rmsdCutoff = m.value;
+                options.structures = m.expandNeighbors;
+                options.outputRmsd = m.adaptive;
+                options.outputInteratomicDistance = m.overlapUseRadii;
+                options.outputOrientation = m.clusterByBonds;
+                options.outputDeformationGradient = m.clusterSortBySize;
+                computePolyhedralTemplateMatching(r.data, options, m.cspOnlySelected ? &r.selected : nullptr, cancel);
                 continue;
             }
             if (m.op == Op::SpatialCorrelation) {
