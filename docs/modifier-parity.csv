@@ -16,7 +16,7 @@ A14,Analysis,Radial distribution function (RDF),,docs/parity/ovito/,pass,pass,pa
 A15,Analysis,Reduce property,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,min/max/mean/sum only
 A16,Analysis,Scatter plot,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,250k point cap; no log axes
 A17,Analysis,Spatial binning,https://docs.ovito.org/reference/pipelines/modifiers/bin_and_reduce.html,docs/parity/ovito/,pass,partial,pass,partial,pass,partial,,,,Particles only; output is a data table with no voxel grid; 1M bin limit; no dislocation mode
-A18,Analysis,Spatial correlation function,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+A18,Analysis,Spatial correlation function,https://docs.ovito.org/reference/pipelines/modifiers/correlation_function.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,FFT real/reciprocal radial averages up to half the cell plus direct neighbor sum and RDF; value/difference plots with RDF and covariance normalization in a Normalized column; empty property means constant 1; plain DFT so grids are bounded (about 20 s worst case); non-periodic axes zero-padded; no plot widget beyond Data Tables
 A19,Analysis,Structure factor,https://docs.ovito.org/reference/pipelines/modifiers/structure_factor.html,docs/parity/ovito/,pass,partial,partial,pass,pass,partial,,,,Direct method only and single-threaded with a work limit; no Debye method; no partial or X-ray factors
 A20,Analysis,Time averaging,https://docs.ovito.org/reference/pipelines/modifiers/time_averaging.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,One particle property or attribute; no data table or cell averaging; whole frame range only
 A21,Analysis,Time series,https://docs.ovito.org/reference/pipelines/modifiers/time_series.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,One attribute against frame number; no custom time axis; no plot view yet
@@ -40,7 +40,7 @@ M14,Modification,Unwrap trajectories,,docs/parity/ovito/,pass,pass,pass,pass,pas
 M15,Modification,Wrap at periodic boundaries,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Partial PBC axes handled
 S01,Structure identification,Ackland-Jones analysis,https://docs.ovito.org/reference/pipelines/modifiers/bond_angle_analysis.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Verified on ideal and noisy crystals; no Only selected option yet
 S02,Structure identification,Centrosymmetry parameter,,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,N1,a07407d,Histogram panel simpler than OVITO; under-coordinated fallback documented (even>=4 else 0 + counter)
-S03,Structure identification,Chill+,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,Needs water/bond topology model
+S03,Structure identification,Chill+,https://docs.ovito.org/reference/pipelines/modifiers/chill_plus.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,q3 bond correlation within a cutoff (default 3.5); exactly four neighbors required; type ids 0-5 as OVITO; counts table and attributes; only selected; no per-type colors yet
 S04,Structure identification,Common neighbor analysis,,docs/parity/ovito/,pass,pass,partial,pass,partial,partial,,,,Fixed cutoff; no adaptive mode; 128-neighbor cap
 S05,Structure identification,Identify diamond structure,https://docs.ovito.org/reference/pipelines/modifiers/identify_diamond.html,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,,,,All seven types and Use only selected; verified on ideal and noisy crystals plus one vacancy
 S06,Structure identification,Polyhedral template matching,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
@@ -59,8 +59,8 @@ V04,Visualization,Create isosurface,,docs/parity/ovito/,partial,todo,todo,todo,t
 V05,Visualization,Coordination polyhedra,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 V06,Visualization,Generate trajectory lines,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 P01,Python modifiers,Assign shared visual element,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-P02,Python modifiers,Calculate local entropy,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
-P03,Python modifiers,Identify fcc planar faults,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
+P02,Python modifiers,Calculate local entropy,https://docs.ovito.org/reference/pipelines/modifiers/calculate_local_entropy.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,Native port of the published OVITO script grid (cutoff 5, sigma 0.2, trapezoid on int(rc/sigma)+1 points); local density and neighbor averaging; averaging uses the LAMMPS (s_i+sum s_j)/(N_i+1); single component; needs a cell volume
+P03,Python modifiers,Identify fcc planar faults,https://docs.ovito.org/reference/pipelines/modifiers/identify_fcc_planar_faults.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,hcp-like atoms from built-in adaptive CNA instead of PTM; ISF/twin/multi-layer/indeterminate by out-of-plane hcp neighbor counts; estimated ISF and twin areas; no per-type colors yet; may differ from OVITO near partial dislocations
 P04,Python modifiers,Render LAMMPS regions,,docs/parity/ovito/,partial,todo,todo,todo,todo,todo,,,,
 P05,Python modifiers,Shrink-wrap simulation box,https://docs.ovito.org/reference/pipelines/modifiers/shrink_wrap_box.html,docs/parity/ovito/,pass,pass,pass,pass,pass,partial,,,,Native C++; periodic flags kept; flat axes get extent 1
 S08,Structure identification,Steinhardt order parameters,https://docs.ovito.org/reference/pipelines/modifiers/steinhardt_parameters.html,docs/parity/ovito/,pass,partial,pass,pass,pass,partial,,,,q4 and q6 only from N nearest neighbors; no w_l or neighbor-averaged variants

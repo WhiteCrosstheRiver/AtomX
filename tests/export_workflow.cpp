@@ -2171,7 +2171,11 @@ int main(int argc,char **argv) {
                      std::tuple{"Smooth trajectory",Op::SmoothTrajectory,""},
                      std::tuple{"Diffusion coefficient",Op::DiffusionCoefficient,""},
                      std::tuple{"Find rings",Op::FindRings,"Ring Count"},
-                     std::tuple{"Voronoi analysis",Op::VoronoiAnalysis,"Atomic Volume"}}) {
+                     std::tuple{"Voronoi analysis",Op::VoronoiAnalysis,"Atomic Volume"},
+                     std::tuple{"Chill+",Op::ChillPlus,"Structure Type"},
+                     std::tuple{"Calculate local entropy",Op::LocalEntropy,"Entropy"},
+                     std::tuple{"Identify fcc planar faults",Op::IdentifyFccPlanarFaults,"Planar Fault Type"},
+                     std::tuple{"Spatial correlation function",Op::SpatialCorrelation,""}}) {
                 strcpy_s(app.modifierSearch,name);
                 click("pipeline.add-modification");
                 frame();

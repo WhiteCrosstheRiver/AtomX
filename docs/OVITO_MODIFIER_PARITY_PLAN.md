@@ -207,4 +207,5 @@
 - **2026-11-06：第二批。** 实现 Difference between frames、Spatial binning、Structure factor（直接法）、Identify diamond structure。修复参考帧匹配：存在唯一 Particle Identifier 时优先按 ID 配对，粒子数相同也不再按存储顺序，避免 LAMMPS 重排导致位移错误。限制见台账。
 - **2026-11-06：第三批。** 新增全轨迹求值通道：节点可在任意帧取得其前序管线输出，全轨迹结果按节点缓存，切帧复用，编辑管线时失效。实现 Time series、Time averaging、Smooth trajectory、Diffusion coefficient、Find rings，并将此前目录中遗漏的 DXA、Elastic strain、Grain segmentation 列为 PLANNED。限制见台账。
 - **2026-11-07：Voronoi analysis。** 以邻居平分面逐次裁剪凸多面体构造每个粒子的 Voronoi 胞，支持三斜周期、非周期边界墙、径向（Laguerre）胞、面积与棱长阈值、近邻键与仅选中粒子。FCC/BCC/简单立方的胞体积、面数与指数与精确值一致，随机、三斜、带墙、平板及多分散体系的胞体积之和等于盒体积。尚无 Voronoi 多面体网格输出。
+- **2026-11-07：第五批。** 实现 Chill+（q3 键关联，冰 Ih/Ic、水合物及界面类型）、Calculate local entropy（按 OVITO 公开脚本的 Piaggi–Parrinello 对熵指纹，含局部密度与邻居平均）、Identify fcc planar faults（以内置自适应 CNA 代替 PTM 识别类 hcp 原子，区分本征层错、孪晶界和多层层错并估算面积）、Spatial correlation function（网格 FFT 的实空间/倒空间径向平均、直接近邻求和、值/差相关及 RDF/协方差归一化）。理想冰、层错堆垛、岩盐电荷关联与理想气体参考均通过；限制见台账。
 - **后续工作：** 完成节点级缓存与共享数据策略、完整鼠标交互回归、显示范围/选择适配、剩余基础分析与修改器；补充 OVITO 官方渐变色参考值和 Intel GPU 对照。DXA/PTM/Voronoi 等高复杂模块仍属于单独的后续里程碑。

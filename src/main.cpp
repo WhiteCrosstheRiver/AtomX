@@ -602,7 +602,9 @@ static const char *opCategory(Op op) {
                                op == Op::SpatialBinning || op == Op::StructureFactor ||
                                op == Op::IdentifyDiamond || op == Op::TimeSeries ||
                                op == Op::TimeAveraging || op == Op::DiffusionCoefficient ||
-                               op == Op::FindRings || op == Op::VoronoiAnalysis
+                               op == Op::FindRings || op == Op::VoronoiAnalysis ||
+                               op == Op::ChillPlus || op == Op::LocalEntropy ||
+                               op == Op::IdentifyFccPlanarFaults || op == Op::SpatialCorrelation
                          ? "Analysis"
                          : "Modification";
 }
@@ -676,7 +678,8 @@ static const std::vector<Command> &commandRegistry() {
                       Op::WignerSeitzAnalysis, Op::CenterOfMassCorrection, Op::ShrinkWrapBox,
                       Op::DifferenceBetweenFrames, Op::SpatialBinning, Op::StructureFactor,
                       Op::IdentifyDiamond, Op::TimeSeries, Op::TimeAveraging, Op::SmoothTrajectory,
-                      Op::DiffusionCoefficient, Op::FindRings, Op::VoronoiAnalysis, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
+                      Op::DiffusionCoefficient, Op::FindRings, Op::VoronoiAnalysis, Op::ChillPlus, Op::LocalEntropy,
+                      Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation, Op::SelectType, Op::SelectRange, Op::ExpressionSelect, Op::SelectOverlapping,
                       Op::ExpandSelection, Op::ManualSelection, Op::Invert, Op::Clear,
                       Op::ColorCoding, Op::ColorType, Op::AssignColor})
             list.push_back({CommandAction::Modifier, opCategory(op), opName(op), op});
@@ -1800,6 +1803,13 @@ struct App {
         }
         if (op == Op::FindRings) { m.replicateN[0] = 3; m.replicateN[1] = 12; }
         if (op == Op::VoronoiAnalysis) { m.value = 0; m.upper = 0; m.bondLowerCutoff = 0; m.adaptive = false; }
+        if (op == Op::ChillPlus) m.value = 3.5f;
+        if (op == Op::LocalEntropy) { m.value = 5; m.upper = .2f; m.overlapUseRadii = false; m.adaptive = false; m.histogramRangeStart = 5; }
+        if (op == Op::SpatialCorrelation) {
+            m.property.clear(); m.scatterYProperty.clear(); // Constant 1 until chosen.
+            m.value = 3; m.adaptive = true; m.clusterByBonds = false; m.upper = 5; m.rdfBins = 50;
+            m.reduceOperation = 0; m.clusterSortBySize = false; m.clusterOnlySelected = false;
+        }
         if (op == Op::DifferenceBetweenFrames) m.property = "Position.X";
         if (op == Op::AtomicStrain) {
             // The neighbor search reaches half a periodic cell, so start inside that.
@@ -1920,6 +1930,20 @@ struct App {
             ImGui::EndCombo();
         }
         return changed;
+    }
+    // Property combo whose empty value stands for the constant 1 (Spatial correlation).
+    bool constantOrPropertyCombo(const char *label, std::string &property) {
+        const auto choices = pipelineInputPropertyChoices(
+            source, mods, std::min(modifierGraph.selected, mods.size()), true);
+        const char *constant = loc::text("Constant 1");
+        bool picked = false;
+        if (ImGui::BeginCombo(loc::label(label), property.empty() ? constant : property.c_str())) {
+            if (ImGui::Selectable(constant, property.empty())) { property.clear(); picked = true; }
+            for (const auto &name : choices)
+                if (ImGui::Selectable(name.c_str(), name == property)) { property = name; picked = true; }
+            ImGui::EndCombo();
+        }
+        return picked;
     }
     bool structureEditIsLatest = false;
     std::string tabTitle() const {
@@ -10794,6 +10818,107 @@ struct App {
                             ImGui::TextDisabled(loc::text("Total cell volume %.6g · largest face order %.0f"), found->second,
                                                 result.data.globalAttributes["Voronoi.max_face_order"]);
                     }
+                    if (m.op == Op::ChillPlus) {
+                        float cutoff = m.value;
+                        fitNextField("Cutoff distance", true);
+                        if (ImGui::InputFloat(loc::label("Cutoff distance"), &cutoff, 0, 0, "%.3f") && cutoff > 0) {
+                            checkpoint(); m.value = cutoff; update();
+                        }
+                        recordUiTestItem(std::string("pipeline.chill-cutoff.") + m.id, "Cutoff distance");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        bool onlySelected = m.cspOnlySelected;
+                        if (ui_design::checkbox(loc::label("Use only selected particles"), &onlySelected)) {
+                            checkpoint(); m.cspOnlySelected = onlySelected; update();
+                        }
+                        ImGui::TextDisabled(loc::text("Use oxygen atoms or coarse-grained water beads only. Particles need exactly four neighbors within the cutoff to be classified."));
+                        for (const char *name : {"Hexagonal ice", "Cubic ice", "Interfacial ice", "Hydrate", "Interfacial hydrate", "Other"})
+                            if (const auto found = result.data.globalAttributes.find(std::string("ChillPlus.counts.") + name);
+                                found != result.data.globalAttributes.end())
+                                ImGui::Text("%s  %.0f", loc::text(name), found->second);
+                    }
+                    if (m.op == Op::LocalEntropy) {
+                        auto edited = static_cast<const Modifier &>(m);
+                        bool changed = false;
+                        float cutoff = edited.value, sigma = edited.upper;
+                        fitNextField("Cutoff distance", true);
+                        if (ImGui::InputFloat(loc::label("Cutoff distance"), &cutoff, 0, 0, "%.3f") && cutoff > 0) {
+                            edited.value = cutoff; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.entropy-cutoff.") + m.id, "Cutoff distance");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        fitNextField("Sigma");
+                        if (ImGui::InputFloat(loc::label("Sigma"), &sigma, 0, 0, "%.3f") && sigma > 0) {
+                            edited.upper = sigma; changed = true;
+                        }
+                        changed |= ui_design::checkbox(loc::label("Use local density"), &edited.overlapUseRadii);
+                        changed |= ui_design::checkbox(loc::label("Compute average"), &edited.adaptive);
+                        ImGui::BeginDisabled(!edited.adaptive);
+                        double averageCutoff = edited.histogramRangeStart;
+                        fitNextField("Average cutoff");
+                        if (ImGui::InputDouble(loc::label("Average cutoff"), &averageCutoff, 0, 0, "%.3f") && averageCutoff > 0) {
+                            edited.histogramRangeStart = averageCutoff; changed = true;
+                        }
+                        ImGui::EndDisabled();
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = edited; update(); }
+                        ImGui::TextDisabled(loc::text("Entropy is in units of k_B and always negative; lower means more ordered. Assumes one component and uses the cell volume for the density."));
+                        if (const auto found = result.data.globalAttributes.find("LocalEntropy.mean");
+                            found != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("Mean entropy %.4f"), found->second);
+                    }
+                    if (m.op == Op::IdentifyFccPlanarFaults) {
+                        ImGui::TextDisabled(loc::text("Finds hcp-like atoms by adaptive common neighbor analysis, then sorts them by how many hcp-like layers are stacked together. No parameters."));
+                        ImGui::SameLine();referenceHelp("analysis");
+                        for (const char *name : {"Intrinsic stacking fault", "Coherent twin boundary", "Multi-layer stacking fault",
+                                                 "Indeterminate hcp-like", "Non-hcp"})
+                            if (const auto found = result.data.globalAttributes.find(std::string("PlanarFaults.counts.") + name);
+                                found != result.data.globalAttributes.end())
+                                ImGui::Text("%s  %.0f", loc::text(name), found->second);
+                        if (const auto found = result.data.globalAttributes.find("PlanarFaults.area.Intrinsic stacking fault");
+                            found != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("Stacking fault area %.4g · twin boundary area %.4g"), found->second,
+                                                result.data.globalAttributes["PlanarFaults.area.Coherent twin boundary"]);
+                    }
+                    if (m.op == Op::SpatialCorrelation) {
+                        auto edited = static_cast<const Modifier &>(m);
+                        bool changed = false;
+                        changed |= constantOrPropertyCombo("First property", edited.property);
+                        recordUiTestItem(std::string("pipeline.correlation-first.") + m.id, "First property");
+                        ImGui::SameLine();referenceHelp("analysis");
+                        changed |= constantOrPropertyCombo("Second property", edited.scatterYProperty);
+                        float spacing = edited.value;
+                        fitNextField("FFT grid spacing");
+                        if (ImGui::InputFloat(loc::label("FFT grid spacing"), &spacing, 0, 0, "%.3f") && spacing > 0) {
+                            edited.value = spacing; changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.correlation-spacing.") + m.id, "FFT grid spacing");
+                        changed |= ui_design::checkbox(loc::label("Apply window function to non-periodic directions"), &edited.adaptive);
+                        changed |= ui_design::checkbox(loc::label("Direct summation"), &edited.clusterByBonds);
+                        ImGui::BeginDisabled(!edited.clusterByBonds);
+                        float cutoff = edited.upper;
+                        int bins = edited.rdfBins;
+                        fitNextField("Neighbor cutoff radius");
+                        if (ImGui::InputFloat(loc::label("Neighbor cutoff radius"), &cutoff, 0, 0, "%.3f") && cutoff > 0) {
+                            edited.upper = cutoff; changed = true;
+                        }
+                        fitNextField("Number of neighbor bins");
+                        if (ImGui::InputInt(loc::label("Number of neighbor bins"), &bins) && bins >= 1 && bins <= 100000) {
+                            edited.rdfBins = bins; changed = true;
+                        }
+                        ImGui::EndDisabled();
+                        int plot = edited.reduceOperation == 1 ? 1 : 0;
+                        if (ImGui::Combo(loc::label("Type of plot"), &plot, loc::items("Value correlation\0Difference correlation\0"))) {
+                            edited.reduceOperation = plot; changed = true;
+                        }
+                        changed |= ui_design::checkbox(loc::label("Normalize by RDF"), &edited.clusterSortBySize);
+                        changed |= ui_design::checkbox(loc::label("Normalize by covariance"), &edited.clusterOnlySelected);
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = edited; update(); }
+                        ImGui::TextDisabled(loc::text("Constant 1 for both gives the RDF and S(k). The FFT result reaches half the cell width; the Normalized column applies the plot options. Results are in Data Tables."));
+                        if (const auto found = result.data.globalAttributes.find("CorrelationFunction.mean1");
+                            found != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("Means %.4g, %.4g · <P1 P2> %.4g"), found->second,
+                                                result.data.globalAttributes["CorrelationFunction.mean2"],
+                                                result.data.globalAttributes["CorrelationFunction.covariance"]);
+                    }
                     if (m.op == Op::FindRings) {
                         int sizes[2]{m.replicateN[0], m.replicateN[1]};
                         fitNextField("Ring size range", true);
@@ -12411,7 +12536,7 @@ struct App {
                 operation(Op::ReduceProperty,"Reduce a scalar particle property to a global minimum, maximum, mean, or sum.");
                 operation(Op::ScatterPlot,"Plot two upstream particle properties and export the finite data pairs as a table; large inputs are deterministically sampled.");
                 operation(Op::SpatialBinning,"Reduce a particle property over a 1D, 2D or 3D grid aligned with the simulation cell, as an exportable data table.");
-                planned("Spatial correlation function");
+                operation(Op::SpatialCorrelation,"Correlate two particle properties by FFT over a grid, radially averaged in real and reciprocal space, with an optional direct neighbor sum.");
                 operation(Op::StructureFactor,"Compute S(k) by the direct method over the wave vectors of a fully periodic cell.");
                 operation(Op::TimeAveraging,"Average a particle property or global attribute over the whole trajectory.");
                 operation(Op::TimeSeries,"Tabulate a global attribute at every frame of the trajectory.");
@@ -12445,7 +12570,7 @@ struct App {
                 operation(Op::IdentifyDiamond,"Identify cubic and hexagonal diamond atoms and their neighbor shells from the second-neighbor environment.");
                 operation(Op::SteinhardtOrderParameters,"Compute the q4 and q6 bond-orientational order parameters of every particle from its nearest neighbors.");
                 operation(Op::CentrosymmetryParameter,"Computes the centrosymmetry parameter to identify atoms in defective crystal environments (stacking faults, surfaces, dislocations).");
-                planned("Chill+");
+                operation(Op::ChillPlus,"Classify water molecules as hexagonal, cubic or interfacial ice, hydrate or interfacial hydrate from the q3 bond correlations of four neighbors.");
                 operation(Op::CommonNeighborAnalysis,"Fixed-cutoff Honeycutt–Andersen pair signatures; FCC and BCC are verified against periodic reference crystals. Unsupported or ambiguous motifs remain Other.");
                 for (auto name : {"Polyhedral template matching", "VoroTop analysis"}) planned(name);
                 endCard();
@@ -12469,7 +12594,9 @@ struct App {
                 operation(Op::SelectType,"Select particles of one or more checked particle types.");
                 endCard();
                 beginCard("Python modifiers");
-                for (auto name : {"Assign shared visual element", "Calculate local entropy", "Identify fcc planar faults", "Render LAMMPS regions"}) planned(name);
+                for (auto name : {"Assign shared visual element", "Render LAMMPS regions"}) planned(name);
+                operation(Op::LocalEntropy,"Compute the Piaggi-Parrinello pair-entropy fingerprint of each particle from its smoothed local g(r), optionally averaged over neighbors.");
+                operation(Op::IdentifyFccPlanarFaults,"Classify hcp-like atoms of an fcc crystal as intrinsic stacking faults, twin boundaries or multi-layer faults, and estimate the fault areas.");
                 operation(Op::ShrinkWrapBox,"Replace the simulation cell with the axis-aligned bounding box of the particle centers.");
                 endCard();
                 beginCard("Coloring");

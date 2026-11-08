@@ -1262,8 +1262,402 @@ static void testVoronoi() {
           !modifierOutputs(Modifier{Op::VoronoiAnalysis}, 0).empty(), "Voronoi has a name and outputs");
 }
 
+// ---- Chill+ ---------------------------------------------------------------------
+// Ice oxygens sit on the diamond (Ic) and lonsdaleite (Ih) lattices; 2.76 A O-O bonds.
+static constexpr double iceBond = 2.76;
+static Dataset cubicIce(int n) { return cubicDiamond(n, iceBond * 4 / std::sqrt(3.0)); }
+static Dataset hexagonalIce(int n) { return hexagonalDiamond(n, iceBond); }
+static std::array<uint64_t, 6> chillCounts(Dataset d, double cutoff = 3.5, const std::vector<uint8_t> *selection = nullptr) {
+    computeChillPlus(d, cutoff, selection, nullptr);
+    std::array<uint64_t, 6> counts{};
+    for (double type : d.scalarProperties.at("Structure Type")) ++counts[size_t(type)];
+    return counts;
+}
+static void testChillPlus() {
+    const auto ic = chillCounts(cubicIce(2));
+    check(ic[2] == 64, "every cubic ice oxygen is cubic ice: " + std::to_string(ic[2]));
+    const auto ih = chillCounts(hexagonalIce(2));
+    check(ih[1] == 64, "every hexagonal ice oxygen is hexagonal ice: " + std::to_string(ih[1]));
+    // Staggered bonds of an ideal tetrahedral network correlate at exactly -1.
+    const Dataset diamond = cubicIce(2);
+    const auto lists = neighborVectorLists(diamond, 3.5);
+    double worst = 0;
+    for (const auto &neighbor : lists[0])
+        worst = std::max(worst, std::abs(q3Correlation(bondOrderQ3(lists[0]), bondOrderQ3(lists[neighbor.index])) + 1));
+    near(worst, 0, 1e-5, "ideal staggered bonds have c = -1");
+    // In ice Ih the bond along c is eclipsed; the other three are staggered.
+    const Dataset lonsdaleite = hexagonalIce(2);
+    const auto hexLists = neighborVectorLists(lonsdaleite, 3.5);
+    int eclipsed = 0, staggered = 0;
+    for (const auto &neighbor : hexLists[0]) {
+        const double c = q3Correlation(bondOrderQ3(hexLists[0]), bondOrderQ3(hexLists[neighbor.index]));
+        if (c > -0.35 && c < 0.25) {
+            ++eclipsed;
+            check(std::abs(neighbor.vector[2]) > 2.7, "the eclipsed bond runs along c");
+        } else if (c < -0.8) ++staggered;
+    }
+    check(eclipsed == 1 && staggered == 3, "ice Ih has one eclipsed and three staggered bonds");
+    // The classification table of Nguyen & Molinero (2015).
+    check(chillPlusClassify(4, 4, 0) == ChillPlusType::Hydrate, "four eclipsed bonds: hydrate");
+    check(chillPlusClassify(4, 3, 1) == ChillPlusType::InterfacialHydrate, "three eclipsed bonds: interfacial hydrate");
+    check(chillPlusClassify(4, 0, 4) == ChillPlusType::CubicIce, "four staggered bonds: cubic ice");
+    check(chillPlusClassify(4, 1, 3) == ChillPlusType::HexagonalIce, "three staggered, one eclipsed: hexagonal ice");
+    check(chillPlusClassify(4, 0, 3) == ChillPlusType::InterfacialIce, "three staggered alone: interfacial ice");
+    check(chillPlusClassify(4, 1, 2) == ChillPlusType::InterfacialIce, "two staggered: interfacial ice");
+    check(chillPlusClassify(4, 2, 1) == ChillPlusType::Other, "two eclipsed, one staggered: other");
+    check(chillPlusClassify(3, 0, 3) == ChillPlusType::Other && chillPlusClassify(5, 0, 4) == ChillPlusType::Other,
+          "only four-coordinated particles are classified");
+    // Rotating the whole crystal changes nothing.
+    Dataset rotated = cubicIce(2);
+    const double t = .7, f[3][3]{{std::cos(t), -std::sin(t), 0}, {std::sin(t) * .6, std::cos(t) * .6, -.8},
+                                 {std::sin(t) * .8, std::cos(t) * .8, .6}};
+    transform(rotated, f);
+    check(chillCounts(rotated)[2] == 64, "cubic ice is recognized at any orientation");
+    check(chillCounts(cubicIce(1))[2] == 8, "a unit cell narrower than twice the cutoff uses its periodic images");
+    // Too short a cutoff leaves no bonds; liquid-like disorder is mostly other.
+    check(chillCounts(cubicIce(2), 2.0)[0] == 64, "no neighbors within the cutoff gives other");
+    const auto gas = chillCounts(randomGas(400, {true, true, true}, 11, 22.6));
+    check(gas[0] > 300, "random positions are mostly other: " + std::to_string(gas[0]));
+    std::vector<uint8_t> half(64, 0);
+    for (size_t i = 0; i < 32; ++i) half[i] = 1;
+    const auto selected = chillCounts(cubicIce(2), 3.5, &half);
+    check(selected[0] >= 32, "unselected particles are other");
+    Dataset counted = cubicIce(2);
+    computeChillPlus(counted, 3.5, nullptr, nullptr);
+    near(attribute(counted, "ChillPlus.counts.Cubic ice"), 64, 0, "cubic ice count attribute");
+    check(!counted.tables.empty() && counted.tables.back().name == "Chill+" && counted.tables.back().rows.size() == 6,
+          "Chill+ publishes its count table");
+    throwsWith([&] { chillCounts(cubicIce(2), 0); }, "positive cutoff", "Chill+ rejects a zero cutoff");
+}
+
+// ---- Local entropy ----------------------------------------------------------------
+// The formula of Piaggi & Parrinello evaluated from a list of neighbor distances,
+// independently of the AtomX neighbor search.
+static double pairEntropy(const std::vector<std::pair<double, int>> &shells, double rho, double cutoff, double sigma,
+                          double densityForG) {
+    const double pi = 3.14159265358979323846;
+    const int bins = int(cutoff / sigma) + 1;
+    double integral = 0, previous = 0, previousR = 0;
+    for (int k = 0; k < bins; ++k) {
+        const double r = cutoff * k / (bins - 1);
+        const double rr = k ? r : cutoff / (bins - 1); // r = 0 uses the next point's normalization.
+        double g = 0;
+        for (const auto &[distance, count] : shells)
+            if (distance < cutoff) g += count * std::exp(-(r - distance) * (r - distance) / (2 * sigma * sigma));
+        g /= 4 * pi * densityForG * rr * rr * std::sqrt(2 * pi * sigma * sigma);
+        const double integrand = g >= 1e-10 ? (g * std::log(g) - g + 1) * r * r : r * r;
+        if (k) integral += .5 * (integrand + previous) * (r - previousR);
+        previous = integrand;
+        previousR = r;
+    }
+    return -2 * pi * rho * integral;
+}
+static void testLocalEntropy() {
+    const double a = 3.6;
+    Dataset crystalFcc = fcc(4, a);
+    LocalEntropyOptions options;
+    computeLocalEntropy(crystalFcc, options, nullptr);
+    const auto &s = crystalFcc.scalarProperties.at("Entropy");
+    const double rho = 4 / (a * a * a);
+    // fcc shells: 12 at a/sqrt2, 6 at a, 24 at a sqrt(3/2), 12 at a sqrt2 (beyond 5).
+    const std::vector<std::pair<double, int>> shells{{a / std::sqrt(2.0), 12}, {a, 6}, {a * std::sqrt(1.5), 24},
+                                                     {a * std::sqrt(2.0), 12}};
+    const double expected = pairEntropy(shells, rho, 5, .2, rho);
+    check(allNear(s, expected, 1e-6 * std::abs(expected)), "fcc entropy matches the formula: " + std::to_string(s[0]) +
+          " vs " + std::to_string(expected));
+    check(expected < 0, "crystal entropy is negative");
+    near(attribute(crystalFcc, "LocalEntropy.mean"), expected, 1e-6 * std::abs(expected), "mean entropy attribute");
+    Dataset smallCell = fcc(1, a);
+    LocalEntropyOptions smallAverage;
+    smallAverage.average = true;
+    computeLocalEntropy(smallCell, smallAverage, nullptr);
+    check(allNear(smallCell.scalarProperties.at("Entropy"), expected, 1e-6 * std::abs(expected)),
+          "a single fcc unit cell gives the bulk entropy through its images");
+    // With local density, rho counts the 42 neighbors inside the cutoff sphere.
+    Dataset local = fcc(4, a);
+    options.useLocalDensity = true;
+    computeLocalEntropy(local, options, nullptr);
+    const double localRho = 42 / (4.0 / 3 * 3.14159265358979323846 * 125);
+    const double expectedLocal = pairEntropy(shells, localRho, 5, .2, localRho);
+    near(local.scalarProperties.at("Entropy")[7], expectedLocal, 1e-6 * std::abs(expectedLocal), "local-density entropy");
+    // Disorder raises the entropy toward zero; wider smoothing does too.
+    Dataset gas = randomGas(1500, {true, true, true}, 5, 25);
+    computeLocalEntropy(gas, {}, nullptr);
+    check(attribute(gas, "LocalEntropy.mean") > expected + 1, "random positions are less ordered than fcc");
+    Dataset smooth = fcc(4, a);
+    LocalEntropyOptions wide;
+    wide.sigma = .4;
+    computeLocalEntropy(smooth, wide, nullptr);
+    check(smooth.scalarProperties.at("Entropy")[0] > expected, "wider Gaussians give a less negative fingerprint");
+    // Averaging: (s_i + sum s_j) / (N_i + 1) over neighbors, checked by brute force on a vacancy.
+    Dataset vacancy = fcc(4, a);
+    vacancy.atoms.erase(vacancy.atoms.begin() + 21);
+    Dataset plain = vacancy;
+    computeLocalEntropy(plain, {}, nullptr);
+    const auto &raw = plain.scalarProperties.at("Entropy");
+    LocalEntropyOptions averaged;
+    averaged.average = true;
+    averaged.averageCutoff = 3.0;
+    computeLocalEntropy(vacancy, averaged, nullptr);
+    const double box = 4 * a;
+    double worst = 0;
+    for (size_t i = 0; i < vacancy.atoms.size(); ++i) {
+        double sum = raw[i];
+        int n = 0;
+        for (size_t j = 0; j < vacancy.atoms.size(); ++j) {
+            if (i == j) continue;
+            double d2 = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                double dx = double(coordinate(vacancy.atoms[j], axis)) - coordinate(vacancy.atoms[i], axis);
+                dx -= box * std::round(dx / box);
+                d2 += dx * dx;
+            }
+            if (d2 < 9) { sum += raw[j]; ++n; }
+        }
+        worst = std::max(worst, std::abs(vacancy.scalarProperties.at("Entropy")[i] - sum / (n + 1)));
+    }
+    near(worst, 0, 1e-9, "neighbor averaging matches the brute-force mean");
+    LocalEntropyOptions bad;
+    bad.sigma = 6;
+    throwsWith([&] { Dataset d = fcc(4); computeLocalEntropy(d, bad, nullptr); }, "sigma", "sigma must be below the cutoff");
+    throwsWith([&] { Dataset d = fcc(4); d.cell = {}; d.pbc = {false, false, false}; computeLocalEntropy(d, {}, nullptr); },
+               "simulation cell", "entropy needs a cell for the density");
+}
+
+// ---- fcc planar faults -----------------------------------------------------------
+// Close-packed layers in the order of `stacking` (A, B, C), periodic along z.
+static constexpr double faultBond = 2.55;
+static constexpr int faultAtomsPerLayer = 48;
+static Dataset stackedLayers(const std::string &stacking) {
+    const double d = faultBond, h = d * std::sqrt(2.0 / 3.0), rowY = d * std::sqrt(3.0);
+    Dataset data;
+    data.species = {"Cu"};
+    data.pbc = {true, true, true};
+    data.cell = {6 * d, 0, 0, 0, 4 * rowY, 0, 0, 0, h * double(stacking.size())};
+    for (size_t layer = 0; layer < stacking.size(); ++layer) {
+        const int shift = stacking[layer] - 'A';
+        const double ox = shift * d / 2, oy = shift * rowY / 6;
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 6; ++x)
+                for (int site = 0; site < 2; ++site) {
+                    double px = ox + (x + .5 * site) * d, py = oy + (y + .5 * site) * rowY;
+                    px -= std::floor(px / data.cell[0]) * data.cell[0];
+                    py -= std::floor(py / data.cell[4]) * data.cell[4];
+                    data.atoms.push_back({float(px), float(py), float((double(layer) + .25) * h), 0});
+                }
+    }
+    return data;
+}
+static std::array<uint64_t, 5> faultCounts(Dataset &d) {
+    computeFccPlanarFaults(d, nullptr);
+    std::array<uint64_t, 5> counts{};
+    for (double type : d.scalarProperties.at("Planar Fault Type")) ++counts[size_t(type)];
+    return counts;
+}
+static void testPlanarFaults() {
+    const double layerArea = faultAtomsPerLayer * std::sqrt(3.0) / 2 * faultBond * faultBond;
+    Dataset perfect = stackedLayers("ABCABCABCABC");
+    check(faultCounts(perfect)[0] == perfect.atoms.size(), "perfect fcc has no hcp-like atoms");
+    // Two twin boundaries, each a single hcp-like layer (layers 0 and 6).
+    Dataset twin = stackedLayers("ABCABCACBACB");
+    const auto twins = faultCounts(twin);
+    check(twins[3] == 2 * faultAtomsPerLayer && twins[0] == 10 * faultAtomsPerLayer,
+          "twin boundaries are single hcp-like layers: " + std::to_string(twins[3]));
+    near(attribute(twin, "PlanarFaults.area.Coherent twin boundary"), 2 * layerArea, 1e-3 * layerArea, "twin area");
+    check(twin.scalarProperties.at("Planar Fault Type")[0] == 3 &&
+          twin.scalarProperties.at("Planar Fault Type")[size_t(6 * faultAtomsPerLayer)] == 3,
+          "the mirror layers carry the twin type");
+    // An intrinsic stacking fault: two adjacent hcp-like layers (7 and 8).
+    Dataset isf = stackedLayers("ABCABCABABCABC");
+    const auto faults = faultCounts(isf);
+    check(faults[2] == 2 * faultAtomsPerLayer && faults[3] == 0 && faults[4] == 0,
+          "an ISF is two hcp-like layers: " + std::to_string(faults[2]));
+    near(attribute(isf, "PlanarFaults.area.Intrinsic stacking fault"), layerArea, 1e-3 * layerArea,
+         "ISF area counts the fault once");
+    const auto &table = isf.tables.back();
+    check(table.name == "Planar faults" && table.rows.size() == 5 && table.rows[2][1] == std::to_string(2 * faultAtomsPerLayer),
+          "the planar fault table lists atom counts");
+    // Four stacked hcp-like layers (7 to 10): every one is multi-layer.
+    Dataset multi = stackedLayers("ABCABCABABABCABC");
+    const auto many = faultCounts(multi);
+    check(many[4] == 4 * faultAtomsPerLayer && many[2] == 0, "thick faults are multi-layer: " + std::to_string(many[4]));
+    // Three layers (6 to 8) is the thinnest multi-layer fault. Periodic stacking needs an
+    // even number of hcp-like layers, so layer 0 closes the cycle as a twin boundary.
+    Dataset three = stackedLayers("ABCABCACACBACB");
+    const auto thin = faultCounts(three);
+    check(thin[4] == 3 * faultAtomsPerLayer && thin[3] == faultAtomsPerLayer && thin[2] == 0,
+          "three adjacent hcp-like layers are multi-layer, next to a separate twin");
+    // In hcp the six 422 bonds are the basal ones.
+    const Dataset h = hcp(3);
+    const auto lists = nearestNeighborVectors(h, 12);
+    const auto env = hcpEnvironment(lists[0]);
+    check(env.hcp, "an ideal hcp atom is hcp-like");
+    bool basal = env.hcp;
+    for (uint32_t index : env.inPlane)
+        for (const auto &neighbor : lists[0])
+            if (neighbor.index == index && std::abs(neighbor.vector[2]) > 1e-3) basal = false;
+    check(basal, "422 bonds lie in the basal plane");
+    // A small random displacement keeps the classification.
+    Dataset shaken = stackedLayers("ABCABCABABCABC");
+    std::mt19937 random(9);
+    std::normal_distribution<float> jitter(0, .03f);
+    for (auto &atom : shaken.atoms) { atom.x += jitter(random); atom.y += jitter(random); atom.z += jitter(random); }
+    check(faultCounts(shaken)[2] == 2 * faultAtomsPerLayer, "thermal noise keeps the ISF");
+}
+
+// ---- Spatial correlation ---------------------------------------------------------
+static const DataTable &tableNamed(const Dataset &d, const std::string &name) {
+    for (const auto &table : d.tables) if (table.name == name) return table;
+    static const DataTable empty;
+    check(false, "missing table " + name);
+    return empty;
+}
+static std::vector<double> column(const DataTable &table, size_t index) {
+    std::vector<double> values;
+    for (const auto &row : table.rows) values.push_back(std::stod(row.at(index)));
+    return values;
+}
+static void testSpatialCorrelation() {
+    // One particle at the center of every grid cell: the density is uniform, so C(r) = 1
+    // everywhere and C(k) = 0 for every k != 0.
+    Dataset lattice = simpleCubic(6, 3.0);
+    for (auto &atom : lattice.atoms) { atom.x += 1.5f; atom.y += 1.5f; atom.z += 1.5f; }
+    computeSpatialCorrelation(lattice, {}, nullptr);
+    const auto real = column(tableNamed(lattice, "Spatial correlation (real space)"), 1);
+    check(!real.empty() && allNear(real, 1, 1e-9), "a uniform grid density correlates to 1");
+    const auto reciprocal = column(tableNamed(lattice, "Spatial correlation (reciprocal space)"), 1);
+    check(!reciprocal.empty() && allNear(reciprocal, 0, 1e-9), "a uniform grid density has no k != 0 structure");
+
+    // Rock salt with charges +-1: the neighbor sum normalized by the RDF alternates
+    // -1, +1, -1 over the first three shells.
+    const double a = 5.64;
+    Dataset salt = crystal({{0, 0, 0}, {0, .5, .5}, {.5, 0, .5}, {.5, .5, 0},
+                            {.5, 0, 0}, {0, .5, 0}, {0, 0, .5}, {.5, .5, .5}}, {a, a, a}, 3);
+    std::vector<double> charge(salt.atoms.size());
+    for (size_t i = 0; i < charge.size(); ++i) charge[i] = i % 8 < 4 ? 1 : -1;
+    salt.scalarProperties["Charge"] = charge;
+    CorrelationOptions options;
+    options.property1 = options.property2 = "Charge";
+    options.directSummation = true;
+    options.normalizeByRdf = true;
+    Dataset value = salt;
+    computeSpatialCorrelation(value, options, nullptr);
+    const auto &direct = tableNamed(value, "Spatial correlation (neighbor sum)");
+    check(direct.rows.size() == 50, "50 neighbor bins by default");
+    const auto normalized = column(direct, 3), rdf = column(direct, 2);
+    const auto binOf = [](double r) { return size_t(r / 0.1); };
+    near(normalized[binOf(a / 2)], -1, 1e-12, "first shell: unlike charges");
+    near(normalized[binOf(a / std::sqrt(2.0))], 1, 1e-12, "second shell: like charges");
+    near(normalized[binOf(a * std::sqrt(3.0) / 2)], -1, 1e-12, "third shell: unlike charges");
+    const double rho = 8 / (a * a * a), step = .1, r1 = binOf(a / 2) * step;
+    near(rdf[binOf(a / 2)], 6 / (rho * 4.0 / 3 * 3.14159265358979323846 * (std::pow(r1 + step, 3) - std::pow(r1, 3))),
+         1e-5, "the RDF counts six first neighbors in their shell");
+    near(attribute(value, "CorrelationFunction.mean1"), 0, 1e-12, "mean charge is zero");
+    near(attribute(value, "CorrelationFunction.covariance"), 1, 1e-12, "<P1 P2> is one");
+    Dataset unitSalt = crystal({{0, 0, 0}, {0, .5, .5}, {.5, 0, .5}, {.5, .5, 0},
+                                {.5, 0, 0}, {0, .5, 0}, {0, 0, .5}, {.5, .5, .5}}, {a, a, a}, 1);
+    unitSalt.scalarProperties["Charge"] = std::vector<double>{1, 1, 1, 1, -1, -1, -1, -1};
+    computeSpatialCorrelation(unitSalt, options, nullptr);
+    const auto unitNormalized = column(tableNamed(unitSalt, "Spatial correlation (neighbor sum)"), 3);
+    near(unitNormalized[binOf(a / 2)], -1, 1e-12, "the neighbor sum sees images of a small cell");
+    near(column(tableNamed(unitSalt, "Spatial correlation (neighbor sum)"), 2)[binOf(a / 2)], rdf[binOf(a / 2)],
+         1e-5 * rdf[binOf(a / 2)], "a unit cell gives the bulk RDF");
+    options.differenceCorrelation = true;
+    Dataset difference = salt;
+    computeSpatialCorrelation(difference, options, nullptr);
+    near(column(tableNamed(difference, "Spatial correlation (neighbor sum)"), 3)[binOf(a / 2)], 2, 1e-12,
+         "difference correlation (<P1^2> + <P2^2>)/2 - C");
+    options.differenceCorrelation = false;
+    options.normalizeByRdf = false;
+    options.normalizeByCovariance = true;
+    Dataset covariance = salt;
+    computeSpatialCorrelation(covariance, options, nullptr);
+    const auto byCovariance = tableNamed(covariance, "Spatial correlation (neighbor sum)");
+    near(column(byCovariance, 3)[binOf(a / 2)], column(byCovariance, 1)[binOf(a / 2)], 1e-12,
+         "covariance normalization with zero means and unit variance changes nothing");
+
+    // Ideal-gas positions: g(r) and S(k) both tend to 1.
+    Dataset gas = randomGas(6000, {true, true, true}, 21, 24);
+    CorrelationOptions gasOptions;
+    gasOptions.directSummation = true;
+    gasOptions.gridSpacing = 2;
+    computeSpatialCorrelation(gas, gasOptions, nullptr);
+    const auto gasDirect = column(tableNamed(gas, "Spatial correlation (neighbor sum)"), 2);
+    near(std::accumulate(gasDirect.begin() + 20, gasDirect.end(), 0.0) / double(gasDirect.size() - 20), 1, .02,
+         "ideal-gas RDF from the neighbor sum");
+    const auto gasReal = column(tableNamed(gas, "Spatial correlation (real space)"), 1);
+    near(std::accumulate(gasReal.begin() + 1, gasReal.end(), 0.0) / double(gasReal.size() - 1), 1, .03,
+         "ideal-gas C(r) from the FFT");
+    const auto gasK = column(tableNamed(gas, "Spatial correlation (reciprocal space)"), 1);
+    near(std::accumulate(gasK.begin(), gasK.end(), 0.0) / double(gasK.size()), 1, .1, "ideal-gas S(k) from the FFT");
+    // Without periodicity the padding and window are divided out again.
+    Dataset open = randomGas(6000, {false, false, false}, 22, 24);
+    computeSpatialCorrelation(open, gasOptions, nullptr);
+    const auto openReal = column(tableNamed(open, "Spatial correlation (real space)"), 1);
+    near(std::accumulate(openReal.begin() + 1, openReal.end(), 0.0) / double(openReal.size() - 1), 1, .05,
+         "windowed non-periodic C(r)");
+    CorrelationOptions noWindow = gasOptions;
+    noWindow.applyWindow = false;
+    Dataset openPlain = randomGas(6000, {false, false, false}, 22, 24);
+    computeSpatialCorrelation(openPlain, noWindow, nullptr);
+    const auto plainReal = column(tableNamed(openPlain, "Spatial correlation (real space)"), 1);
+    near(std::accumulate(plainReal.begin() + 1, plainReal.end(), 0.0) / double(plainReal.size() - 1), 1, .05,
+         "zero-padded non-periodic C(r)");
+
+    CorrelationOptions bad;
+    bad.gridSpacing = 0;
+    throwsWith([&] { Dataset d = fcc(3); computeSpatialCorrelation(d, bad, nullptr); }, "grid spacing", "spacing must be positive");
+    CorrelationOptions missing;
+    missing.property1 = "Nope";
+    throwsWith([&] { Dataset d = fcc(3); computeSpatialCorrelation(d, missing, nullptr); }, "Unknown particle property",
+               "unknown property");
+    CorrelationOptions fine;
+    fine.gridSpacing = 0.001;
+    throwsWith([&] { Dataset d = fcc(3); computeSpatialCorrelation(d, fine, nullptr); }, "too fine", "grid size is bounded");
+
+    // Through the pipeline, with the panel's field mapping.
+    Modifier correlate{Op::SpatialCorrelation};
+    correlate.property = "Charge";
+    correlate.scatterYProperty = "Charge";
+    correlate.value = 3;
+    correlate.adaptive = true;
+    correlate.clusterByBonds = true;
+    correlate.upper = 5;
+    correlate.rdfBins = 50;
+    correlate.reduceOperation = 0;
+    correlate.clusterSortBySize = true;
+    std::vector<Modifier> stack{correlate};
+    const auto evaluated = evaluateFrom(resultOf(salt), stack, 0);
+    near(column(tableNamed(evaluated.data, "Spatial correlation (neighbor sum)"), 3)[binOf(a / 2)], -1, 1e-12,
+         "the pipeline node maps its fields");
+    Modifier chill{Op::ChillPlus};
+    chill.value = 3.5f;
+    Modifier entropy{Op::LocalEntropy};
+    entropy.value = 5; entropy.upper = .2f; entropy.histogramRangeStart = 5;
+    Modifier faults{Op::IdentifyFccPlanarFaults};
+    std::vector<Modifier> structure{chill, entropy, faults};
+    const auto all = evaluateFrom(resultOf(stackedLayers("ABCABCABABCABC")), structure, 0);
+    check(all.data.scalarProperties.count("Structure Type") && all.data.scalarProperties.count("Entropy") &&
+          all.data.scalarProperties.count("Planar Fault Type"), "the structure nodes chain in a pipeline");
+    for (Op op : {Op::ChillPlus, Op::LocalEntropy, Op::IdentifyFccPlanarFaults, Op::SpatialCorrelation})
+        check(!modifierOutputs(Modifier{op}, 0).empty() && std::string(opName(op)) != "Color by type",
+              std::string("named with outputs: ") + opName(op));
+}
+
 static void testCancellation() {
     std::atomic<bool> cancel{true};
+    {
+        Dataset d = cubicIce(2);
+        throwsWith([&] { computeChillPlus(d, 3.5, nullptr, &cancel); }, "Cancelled", "Chill+ cancels");
+        Dataset e = fcc(4);
+        throwsWith([&] { computeLocalEntropy(e, {}, &cancel); }, "Cancelled", "local entropy cancels");
+        Dataset f = stackedLayers("ABCABCABABCABC");
+        throwsWith([&] { computeFccPlanarFaults(f, &cancel); }, "Cancelled", "planar faults cancel");
+        Dataset g = fcc(4);
+        throwsWith([&] { computeSpatialCorrelation(g, {}, &cancel); }, "Cancelled", "spatial correlation cancels");
+        check(!d.scalarProperties.count("Structure Type") && !e.scalarProperties.count("Entropy") &&
+              g.tables.empty(), "cancelled structure analyses publish nothing");
+    }
     {
         auto r = resultOf(fcc(3));
         throwsWith([&] { computeVoronoi(r, {}, &cancel); }, "Cancelled", "Voronoi cancels");
@@ -1320,6 +1714,10 @@ int main() {
     testRings();
     testTrajectoryPipeline();
     testVoronoi();
+    testChillPlus();
+    testLocalEntropy();
+    testPlanarFaults();
+    testSpatialCorrelation();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
@@ -1327,5 +1725,6 @@ int main() {
     }
     std::cout << "PASS: " << checks << " checks: Steinhardt, Ackland-Jones, atomic strain, Wigner-Seitz, "
                  "center of mass, shrink-wrap, frame differences, spatial binning, structure factor, "
-                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, pipeline composition, cancellation\n";
+                 "diamond identification, trajectory sweeps, diffusion, rings, Voronoi, Chill+, local entropy, planar faults, spatial correlation, "
+                 "pipeline composition, cancellation\n";
 }

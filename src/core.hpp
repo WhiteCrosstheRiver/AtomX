@@ -26,6 +26,7 @@
 #include <iomanip>
 #include <cwctype>
 #include <mutex>
+#include <complex>
 
 namespace atomx {
 struct Vec3 {
@@ -805,6 +806,10 @@ enum class Op {
     ,DiffusionCoefficient
     ,FindRings
     ,VoronoiAnalysis
+    ,ChillPlus
+    ,LocalEntropy
+    ,IdentifyFccPlanarFaults
+    ,SpatialCorrelation
 };
 struct Modifier {
     Op op;
@@ -899,6 +904,12 @@ struct Modifier {
     // histogramRangeStart/End: Diffusion fit window. replicateN[0..1]: ring size range.
     // Voronoi: value/upper absolute/relative face area threshold, bondLowerCutoff edge
     // length threshold, overlapUseRadii radical tessellation, adaptive neighbor bonds.
+    // Chill+: value cutoff, cspOnlySelected. Local entropy: value cutoff, upper sigma,
+    // overlapUseRadii local density, adaptive average, histogramRangeStart its cutoff.
+    // Spatial correlation: property/scatterYProperty P1/P2 (empty = 1), value grid
+    // spacing, adaptive window, clusterByBonds direct sum, upper its cutoff, rdfBins its
+    // bins, reduceOperation 1 difference plot, clusterSortBySize normalize by RDF,
+    // clusterOnlySelected normalize by covariance.
 };
 // Returns properties visible at a node's input without evaluating particle
 // operations. This is the schema counterpart to evaluatePrefix(): particle
@@ -983,6 +994,15 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
                                      "Voronoi Index.3", "Voronoi Index.4", "Voronoi Index.5", "Voronoi Index.6",
                                      "Voronoi Index.7", "Voronoi Index.8"})
                 scalar.insert(name);
+            break;
+        case Op::ChillPlus:
+            scalar.insert("Structure Type");
+            break;
+        case Op::LocalEntropy:
+            scalar.insert("Entropy");
+            break;
+        case Op::IdentifyFccPlanarFaults:
+            scalar.insert("Planar Fault Type");
             break;
         default:
             break;
@@ -1096,6 +1116,26 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Table,"Voronoi index histogram");
         add(Kind::GlobalAttributes,"Voronoi statistics");
         if (modifier.adaptive) add(Kind::Bonds,"Voronoi neighbor bonds");
+    }
+    if (modifier.op==Op::ChillPlus) {
+        add(Kind::Particles,"Chill+ structure types");
+        add(Kind::GlobalAttributes,"Structure counts");
+        add(Kind::Table,"Chill+");
+    }
+    if (modifier.op==Op::LocalEntropy) {
+        add(Kind::Particles,"Entropy");
+        add(Kind::GlobalAttributes,"Mean local entropy");
+    }
+    if (modifier.op==Op::IdentifyFccPlanarFaults) {
+        add(Kind::Particles,"Planar Fault Type");
+        add(Kind::GlobalAttributes,"Planar fault counts and areas");
+        add(Kind::Table,"Planar faults");
+    }
+    if (modifier.op==Op::SpatialCorrelation) {
+        add(Kind::Table,"Spatial correlation (real space)");
+        add(Kind::Table,"Spatial correlation (reciprocal space)");
+        if (modifier.clusterByBonds) add(Kind::Table,"Spatial correlation (neighbor sum)");
+        add(Kind::GlobalAttributes,"Correlation means and covariance");
     }
     if (modifier.op==Op::FindRings) {
         add(Kind::Table,"Ring size histogram");
@@ -2203,6 +2243,10 @@ inline const char *opName(Op op) {
     case Op::DiffusionCoefficient: return "Diffusion coefficient";
     case Op::FindRings: return "Find rings";
     case Op::VoronoiAnalysis: return "Voronoi analysis";
+    case Op::ChillPlus: return "Chill+";
+    case Op::LocalEntropy: return "Calculate local entropy";
+    case Op::IdentifyFccPlanarFaults: return "Identify fcc planar faults";
+    case Op::SpatialCorrelation: return "Spatial correlation function";
     default:
         return "Color by type";
     }
@@ -2258,6 +2302,8 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_modifiers_fields.inc"
 #include "analysis_trajectory.inc"
 #include "analysis_voronoi.inc"
+#include "analysis_structure.inc"
+#include "analysis_correlation.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -3022,6 +3068,39 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             }
             if (m.op == Op::FindRings) {
                 computeRings(r.data, m.replicateN[0], m.replicateN[1], cancel);
+                continue;
+            }
+            if (m.op == Op::ChillPlus) {
+                computeChillPlus(r.data, m.value, m.cspOnlySelected ? &r.selected : nullptr, cancel);
+                continue;
+            }
+            if (m.op == Op::LocalEntropy) {
+                LocalEntropyOptions options;
+                options.cutoff = m.value;
+                options.sigma = m.upper;
+                options.useLocalDensity = m.overlapUseRadii;
+                options.average = m.adaptive;
+                options.averageCutoff = m.histogramRangeStart;
+                computeLocalEntropy(r.data, options, cancel);
+                continue;
+            }
+            if (m.op == Op::IdentifyFccPlanarFaults) {
+                computeFccPlanarFaults(r.data, cancel);
+                continue;
+            }
+            if (m.op == Op::SpatialCorrelation) {
+                CorrelationOptions options;
+                options.property1 = m.property;
+                options.property2 = m.scatterYProperty;
+                options.gridSpacing = m.value;
+                options.applyWindow = m.adaptive;
+                options.directSummation = m.clusterByBonds;
+                options.neighborCutoff = m.upper;
+                options.neighborBins = m.rdfBins;
+                options.differenceCorrelation = m.reduceOperation == 1;
+                options.normalizeByRdf = m.clusterSortBySize;
+                options.normalizeByCovariance = m.clusterOnlySelected;
+                computeSpatialCorrelation(r.data, options, cancel);
                 continue;
             }
             if (m.op == Op::TimeSeries || m.op == Op::TimeAveraging || m.op == Op::SmoothTrajectory ||
