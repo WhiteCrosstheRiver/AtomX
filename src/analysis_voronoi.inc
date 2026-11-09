@@ -112,7 +112,8 @@ inline double polygonArea(const std::vector<Point> &polygon) {
 }
 } // namespace voronoi_detail
 
-inline void computeVoronoi(PipelineResult &r, const VoronoiOptions &options, std::atomic<bool> *cancel) {
+inline void computeVoronoi(PipelineResult &r, const VoronoiOptions &options, std::atomic<bool> *cancel,
+                          std::vector<voronoi_detail::Cell> *cellsOut = nullptr) {
     using namespace voronoi_detail;
     Dataset &data = r.data;
     if (data.sampled()) throw std::runtime_error("Voronoi analysis requires complete, unsampled particle data");
@@ -299,6 +300,7 @@ inline void computeVoronoi(PipelineResult &r, const VoronoiOptions &options, std
         throw std::runtime_error("Voronoi analysis could not close every cell");
     break;
     }
+    if (cellsOut) { *cellsOut = std::move(cells); return; } // Only the geometry was asked for.
     // Results refer to the original particles; replica neighbors map back by index.
     const Dataset &d = source;
     const auto inverse = cellInverse(source.cell);

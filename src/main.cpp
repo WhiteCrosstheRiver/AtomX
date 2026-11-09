@@ -607,10 +607,12 @@ static const char *opCategory(Op op) {
                                op == Op::ChillPlus || op == Op::LocalEntropy ||
                                op == Op::IdentifyFccPlanarFaults || op == Op::SpatialCorrelation ||
                                op == Op::PolyhedralTemplateMatching || op == Op::GrainSegmentation ||
-                               op == Op::ElasticStrain || op == Op::Measure
+                               op == Op::ElasticStrain || op == Op::Measure ||
+                               op == Op::VoroTopAnalysis || op == Op::BaderChargeIntegration || op == Op::DislocationAnalysis
                          ? "Analysis"
                          : op == Op::GenerateTrajectoryLines || op == Op::CoordinationPolyhedra ||
-                                   op == Op::TextLabels || op == Op::CreateIsosurface || op == Op::ConstructSurfaceMesh
+                                   op == Op::TextLabels || op == Op::CreateIsosurface || op == Op::ConstructSurfaceMesh ||
+                                   op == Op::AmbientOcclusion || op == Op::RenderLammpsRegions
                                ? "Visualization"
                                : "Modification";
 }
@@ -1895,7 +1897,7 @@ struct App {
             if (result.data.atoms.size() > 10000) m.bondCylinders = false;
         }
         if (op == Op::CommonNeighborAnalysis) { m.type = 1; m.overlapUseRadii = true; }
-        if (op == Op::LoadTrajectory || op == Op::CombineDatasets) m.property.clear();
+        if (op == Op::LoadTrajectory || op == Op::CombineDatasets || op == Op::VoroTopAnalysis || op == Op::BaderChargeIntegration) m.property.clear();
         if (op == Op::Measure) { m.property.clear(); m.adaptive = true; }
         if (op == Op::GenerateTrajectoryLines) {
             m.property.clear(); m.adaptive = true; m.cspOnlySelected = false; m.clusterByBonds = false;
@@ -1903,6 +1905,11 @@ struct App {
             m.overlapUseRadii = false; m.histogramSelectRange = false; m.replicateN[0] = 0; m.replicateN[1] = 0;
         }
         if (op == Op::CoordinationPolyhedra) { m.value = .3f; m.adaptive = true; m.bondColor = {.12f, .12f, .14f, 1.f}; }
+        if (op == Op::DislocationAnalysis) { m.type = 0; m.cspNeighbors = 14; m.rdfBins = 9; m.replicateN[0] = 4; m.value = 2.f; m.bondWidth = 3.f; }
+        if (op == Op::AmbientOcclusion) { m.value = .7f; m.cspNeighbors = 40; m.rdfBins = 512; }
+        if (op == Op::RenderLammpsRegions) {
+            m.property = "region 1 sphere 0 0 0 5"; m.adaptive = false; m.bondWidth = .5f; m.bondColor = {.45f, .68f, .88f, 1.f};
+        }
         if (op == Op::TextLabels) {
             m.property = "Particle Type"; m.outputProperty = "%.6g"; m.bondWidth = 13.f;
             m.bondColor = {1.f, 1.f, 1.f, 1.f}; m.replicateN[0] = 0; m.replicateN[1] = 0;
@@ -11754,6 +11761,104 @@ struct App {
                             ImGui::TextDisabled(loc::text("%.0f polyhedra, %.0f particles skipped."), count->second, skipped->second);
                         if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
                     }
+                    if (m.op == Op::DislocationAnalysis) {
+                        auto edited = m;
+                        bool changed = false;
+                        fitNextField("Input crystal type", true);
+                        changed |= ImGui::Combo(loc::label("Input crystal type"), &edited.type, loc::items("FCC\0BCC\0"));
+                        recordUiTestItem(std::string("pipeline.dxa-crystal.")+m.id,"Input crystal type");
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        ImGui::TextDisabled(loc::text("Finds perfect dislocations only. Partials and stacking faults are treated as defect regions; use a larger circuit length for dissociated cores."));
+                        fitNextField("Trial circuit length");
+                        changed |= ImGui::SliderInt(loc::label("Trial circuit length"), &edited.cspNeighbors, 3, 64);
+                        fitNextField("Circuit stretchability");
+                        changed |= ImGui::SliderInt(loc::label("Circuit stretchability"), &edited.rdfBins, 0, 64);
+                        changed |= ui_design::checkbox(loc::label("Use only selected particles"), &edited.cspOnlySelected);
+                        fitNextField("Line smoothing");
+                        changed |= ImGui::SliderInt(loc::label("Line smoothing"), &edited.replicateN[0], 0, 30);
+                        fitNextField("Line coarsening");
+                        changed |= ImGui::SliderFloat(loc::label("Line coarsening"), &edited.value, 0.f, 10.f, "%.1f");
+                        fitNextField("Line width (px)");
+                        changed |= ImGui::SliderFloat(loc::label("Line width (px)"), &edited.bondWidth, 1.f, 10.f, "%.1f");
+                        const auto &attributes = result.data.globalAttributes;
+                        const auto lines = attributes.find("DislocationAnalysis.lines");
+                        const auto total = attributes.find("DislocationAnalysis.total_line_length");
+                        if (lines != attributes.end() && total != attributes.end())
+                            ImGui::TextDisabled(loc::text("%.0f dislocations, total length %.6g (input length units)."), lines->second, total->second);
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
+                    }
+                    if (m.op == Op::VoroTopAnalysis || m.op == Op::BaderChargeIntegration) {
+                        const bool bader = m.op == Op::BaderChargeIntegration;
+                        const std::u8string pathText(reinterpret_cast<const char8_t *>(m.property.data()), m.property.size());
+                        const std::string shown = m.property.empty() ? std::string(loc::text(bader ? "Using the input voxel grid" : "No filter selected"))
+                            : [&]{const auto name=std::filesystem::path(pathText).filename().u8string();
+                                  return std::string(reinterpret_cast<const char *>(name.data()),name.size());}();
+                        ImGui::TextUnformatted(shown.c_str());
+                        ImGui::SameLine();referenceHelp("analysis");
+                        if (ImGui::Button(loc::label(bader ? "Pick charge density file..." : "Pick filter file..."))) {
+                            const auto chosen=dialog(window,false,bader?fileFilter("Charge density",L"CHGCAR*;PARCHG*;AECCAR*;*.vasp;*.cube;*.cub").c_str():fileFilter("VoroTop filter",L"*.filter;*.txt").c_str(),bader?L"cube":L"filter");
+                            if (!chosen.empty()) {
+                                const auto text=chosen.u8string();
+                                checkpoint();
+                                m.property.assign(reinterpret_cast<const char *>(text.data()),text.size());
+                                update();
+                            }
+                        }
+                        recordUiTestItem(std::string("pipeline.external-file.")+m.id,"file");
+                        if (!m.property.empty()) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton(loc::label("Clear"))) { checkpoint(); m.property.clear(); update(); }
+                        }
+                        const auto &attributes = result.data.globalAttributes;
+                        if (bader) {
+                            ImGui::TextDisabled(loc::text("A plain CHGCAR holds valence charge only, so per-atom values need an all-electron density or a core correction."));
+                            const auto regions = attributes.find("Bader.regions");
+                            const auto integrated = attributes.find("Bader.integrated_density");
+                            if (regions != attributes.end() && integrated != attributes.end())
+                                ImGui::TextDisabled(loc::text("%.0f regions, integrated density %.6g."), regions->second, integrated->second);
+                        } else {
+                            ImGui::TextDisabled(loc::text("Filters come from vorotop.org. Particles with no match get type 0, and so do cells bounded by a non-periodic wall."));
+                            const auto other = attributes.find("VoroTop.counts.OTHER");
+                            if (other != attributes.end()) ImGui::TextDisabled(loc::text("%.0f particles match no type in the filter."), other->second);
+                        }
+                    }
+                    if (m.op == Op::AmbientOcclusion) {
+                        auto edited = m;
+                        bool changed = false;
+                        float percent = edited.value * 100.f;
+                        fitNextField("Shading intensity (%)", true);
+                        if (ImGui::SliderFloat(loc::label("Shading intensity (%)"), &percent, 0.f, 100.f, "%.0f")) { edited.value = percent / 100.f; changed = true; }
+                        recordUiTestItem(std::string("pipeline.ambient-intensity.")+m.id,"Shading intensity");
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        fitNextField("Number of exposure samples");
+                        changed |= ImGui::SliderInt(loc::label("Number of exposure samples"), &edited.cspNeighbors, 1, 256);
+                        fitNextField("Render buffer resolution");
+                        changed |= ImGui::SliderInt(loc::label("Render buffer resolution"), &edited.rdfBins, 64, 2048);
+                        ImGui::TextDisabled(loc::text("Put this node last. Few samples leave cast-shadow artifacts; raise the resolution if particles are smaller than a pixel."));
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
+                    }
+                    if (m.op == Op::RenderLammpsRegions) {
+                        auto edited = m;
+                        bool changed = false;
+                        ImGui::TextUnformatted(loc::text("LAMMPS region commands"));
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        char text[8192];
+                        snprintf(text, sizeof(text), "%s", edited.property.c_str());
+                        if (ImGui::InputTextMultiline("##lammps-regions", text, sizeof(text), ImVec2(-1.f, U(120)))) { edited.property = text; changed = true; }
+                        recordUiTestItem(std::string("pipeline.lammps-regions.")+m.id);
+                        ImGui::TextDisabled(loc::text("block, cone, cylinder, ellipsoid, plane, prism, sphere with side, open, rotate and move. Box units; numbers only, no variables."));
+                        changed |= ui_design::checkbox(loc::label("Select particles inside the regions"), &edited.adaptive);
+                        changed |= ImGui::ColorEdit3(loc::label("Surface color"), edited.bondColor.data());
+                        float percent = edited.bondWidth * 100.f;
+                        fitNextField("Transparency (%)");
+                        if (ImGui::SliderFloat(loc::label("Transparency (%)"), &percent, 0.f, 100.f, "%.0f")) { edited.bondWidth = percent / 100.f; changed = true; }
+                        const auto count = result.data.globalAttributes.find("RenderLammpsRegions.count");
+                        if (count != result.data.globalAttributes.end()) ImGui::TextDisabled(loc::text("%.0f regions."), count->second);
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
+                    }
                     if (m.op == Op::TextLabels) {
                         auto edited = m;
                         bool changed = false;
@@ -13160,7 +13265,8 @@ struct App {
                 ImGui::TableNextColumn();
                 beginCard("Analysis");
                 operation(Op::AtomicStrain,"Compute each particle's local deformation gradient from its reference-frame neighbors; publishes shear and volumetric strain and the non-affine residual.");
-                for (auto name : {"Bader charge integration", "Bond order"}) planned(name);
+                operation(Op::BaderChargeIntegration,"Divide a charge density from a CHGCAR or cube file into Bader regions with the weight method, and integrate it per region and per atom.");
+                planned("Bond order");
                 operation(Op::ElasticStrain,"Identify the crystal with PTM and compute each atom's elastic deformation gradient against the ideal lattice; publishes elastic strain tensors and volumetric strain.");
                 operation(Op::FindRings,"Find shortest-path rings in the bond topology and tabulate their sizes.");
                 operation(Op::GrainSegmentation,"Cluster PTM lattice orientations into grains by node pair sampling or a minimum spanning tree; publishes Grain IDs, a grain table and the merge sequence.");
@@ -13170,7 +13276,7 @@ struct App {
                 operation(Op::DifferenceBetweenFrames,"Subtract a particle property and the global attributes of a reference frame. This is a plain difference with no periodic handling.");
                 operation(Op::CoordinationAnalysis,"Compute periodic neighbor counts and publish the Coordination particle property.");
                 operation(Op::DiffusionCoefficient,"Compute the windowed mean-squared displacement over the whole trajectory and fit the self-diffusion coefficient.");
-                planned("Dislocation analysis (DXA)");
+                operation(Op::DislocationAnalysis,"Find perfect dislocations in FCC or BCC crystals with Burgers circuits on an interface mesh, and draw them as lines with their Burgers vectors.");
                 operation(Op::DisplacementVectors,"Match particles against a reference animation frame and publish the Displacement vector and Displacement Magnitude particle properties.");
                 operation(Op::Histogram,"Build a finite-value histogram data table for a particle scalar or position component.");
                 operation(Op::RadialDistribution,"Compute a periodic 3D radial distribution table from the current pipeline data.");
@@ -13215,7 +13321,7 @@ struct App {
                 operation(Op::ChillPlus,"Classify water molecules as hexagonal, cubic or interfacial ice, hydrate or interfacial hydrate from the q3 bond correlations of four neighbors.");
                 operation(Op::CommonNeighborAnalysis,"Honeycutt–Andersen pair signatures with a fixed, adaptive or interval cutoff, or from existing bonds. FCC, HCP, BCC and icosahedral; anything else stays Other.");
                 operation(Op::PolyhedralTemplateMatching,"Match each particle's neighbors to FCC, HCP, BCC, icosahedral, simple cubic, diamond and graphene templates; publishes structure type, RMSD, interatomic distance, orientation and elastic deformation gradient.");
-                planned("VoroTop analysis");
+                operation(Op::VoroTopAnalysis,"Identify structures by matching the topology of each Voronoi cell, as a Weinberg vector, against a filter file.");
                 endCard();
                 beginCard("Visualization");
                 operation(Op::TextLabels,"Write a property of every particle, or of the selected ones, as text at its position, with a printf-style format.");
@@ -13251,13 +13357,14 @@ struct App {
                 operation(Op::SelectType,"Select particles of one or more checked particle types.");
                 endCard();
                 beginCard("Python modifiers");
-                for (auto name : {"Assign shared visual element", "Render LAMMPS regions"}) planned(name);
+                planned("Assign shared visual element");
+                operation(Op::RenderLammpsRegions,"Draw the regions of LAMMPS region commands as surfaces, and optionally select the particles inside them.");
                 operation(Op::LocalEntropy,"Compute the Piaggi-Parrinello pair-entropy fingerprint of each particle from its smoothed local g(r), optionally averaged over neighbors.");
                 operation(Op::IdentifyFccPlanarFaults,"Classify hcp-like atoms of an fcc crystal as intrinsic stacking faults, twin boundaries or multi-layer faults, and estimate the fault areas.");
                 operation(Op::ShrinkWrapBox,"Replace the simulation cell with the axis-aligned bounding box of the particle centers.");
                 endCard();
                 beginCard("Coloring");
-                planned("Ambient occlusion");
+                operation(Op::AmbientOcclusion,"Darken particles by how much they are hidden from light arriving evenly from all directions.");
                 operation(Op::AssignColor,"Assign a solid color to the selected particles; if there is no selection, apply it to all particles.");
                 operation(Op::ColorType,"Use the particle-type color palette.");
                 operation(Op::ColorCoding,"Map a particle property to a color gradient.");

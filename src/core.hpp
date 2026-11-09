@@ -163,6 +163,20 @@ struct SurfaceMeshStyle {
     std::array<float, 3> color{.45f, .68f, .88f};
     float alpha = 1;
 };
+// A dislocation as an unwrapped polyline. Burgers vectors follow the FS/RH sign; burgers is in
+// the Cartesian frame and burgersLattice in units of a/2 of the cluster's crystal frame.
+struct DislocationLine {
+    std::vector<std::array<double, 3>> points;
+    std::array<double, 3> burgers{};
+    std::array<int, 3> burgersLattice{};
+    std::string burgersText, familyName;
+    double length = 0;
+    int family = 0, cluster = 0;
+};
+struct DislocationSet {
+    std::vector<DislocationLine> lines;
+    float width = 3;
+};
 // One label per listed particle, in pixels at the viewport's interface scale.
 struct TextLabelSet {
     std::vector<uint32_t> atoms;
@@ -202,6 +216,7 @@ struct Dataset {
     std::shared_ptr<const VoxelGrid> voxelGrid;
     std::vector<SurfaceMeshStyle> surfaces;
     std::vector<TextLabelSet> textLabels;
+    std::shared_ptr<const DislocationSet> dislocations;
     BondStyle bondStyle;
     std::vector<Vec3> particleColors;
     bool sampled() const {
@@ -910,6 +925,11 @@ enum class Op {
     ,TextLabels
     ,CreateIsosurface
     ,ConstructSurfaceMesh
+    ,AmbientOcclusion
+    ,RenderLammpsRegions
+    ,VoroTopAnalysis
+    ,BaderChargeIntegration
+    ,DislocationAnalysis
 };
 struct Modifier {
     Op op;
@@ -1028,6 +1048,13 @@ struct Modifier {
     // Add text labels: property, outputProperty format, cspOnlySelected, bondWidth font size,
     // bondColor color, replicateN[0..1] pixel offset.
     // Create isosurface: value iso-level, cspNeighbors smoothing, bondColor color, bondWidth transparency.
+    // Dislocation analysis: type crystal (0 FCC, 1 BCC), cspNeighbors trial circuit length, rdfBins
+    // stretchability, replicateN[0] line smoothing, value line coarsening, cspOnlySelected, bondWidth line width.
+    // VoroTop analysis: property path of the filter file (UTF-8, empty passes through).
+    // Bader charge integration: property path of a CHGCAR or cube file (empty uses the input grid).
+    // Ambient occlusion: value intensity (0 to 1), cspNeighbors samples, rdfBins buffer resolution.
+    // Render LAMMPS regions: property command text, adaptive select particles inside, bondColor
+    // color, bondWidth transparency.
     // Construct surface mesh: type method (0 alpha shape, 1 Gaussian density), value probe radius,
     // cspNeighbors smoothing, adaptive select surface particles, rdfBins resolution, upper iso
     // value, histogramRangeStart radius scaling, cspOnlySelected, bondColor color, bondWidth transparency.
@@ -1084,6 +1111,20 @@ inline std::vector<std::string> pipelineInputPropertyChoices(
         case Op::DisplacementVectors:
             scalar.insert("Displacement Magnitude");
             vector.insert("Displacement");
+            break;
+        case Op::AmbientOcclusion:
+            scalar.insert("Ambient Occlusion");
+            break;
+        case Op::VoroTopAnalysis:
+            scalar.insert("Structure Type");
+            break;
+        case Op::DislocationAnalysis:
+            scalar.insert("Structure Type");
+            scalar.insert("Cluster");
+            break;
+        case Op::BaderChargeIntegration:
+            scalar.insert("Integrated Density");
+            scalar.insert("Integrated Volume");
             break;
         case Op::SteinhardtOrderParameters:
             scalar.insert("q4");
@@ -1214,6 +1255,26 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::GlobalAttributes,"Polyhedron counts");
     }
     if (modifier.op==Op::TextLabels) add(Kind::Labels,"Text labels");
+    if (modifier.op==Op::AmbientOcclusion) add(Kind::Particles,"Ambient Occlusion");
+    if (modifier.op==Op::DislocationAnalysis) {
+        add(Kind::Dislocations,"Dislocation lines");
+        add(Kind::Table,"Dislocations");
+        add(Kind::Particles,"Structure types and clusters");
+        add(Kind::GlobalAttributes,"Dislocation lengths");
+    }
+    if (modifier.op==Op::VoroTopAnalysis) {
+        add(Kind::Particles,"VoroTop structure types");
+        add(Kind::GlobalAttributes,"VoroTop counts");
+    }
+    if (modifier.op==Op::BaderChargeIntegration) {
+        add(Kind::VoxelGrid,"Charge density");
+        add(Kind::Table,"Bader charge integration");
+        add(Kind::Particles,"Integrated density and volume");
+    }
+    if (modifier.op==Op::RenderLammpsRegions) {
+        add(Kind::Surface,"LAMMPS regions");
+        if (modifier.adaptive) add(Kind::Particles,"Particles in regions");
+    }
     if (modifier.op==Op::CreateIsosurface) {
         add(Kind::Surface,"Isosurface");
         add(Kind::GlobalAttributes,"Isosurface area and volume");
@@ -2458,6 +2519,11 @@ inline const char *opName(Op op) {
     case Op::GenerateTrajectoryLines: return "Generate trajectory lines";
     case Op::CoordinationPolyhedra: return "Coordination polyhedra";
     case Op::TextLabels: return "Add text labels";
+    case Op::AmbientOcclusion: return "Ambient occlusion";
+    case Op::VoroTopAnalysis: return "VoroTop analysis";
+    case Op::DislocationAnalysis: return "Dislocation analysis (DXA)";
+    case Op::BaderChargeIntegration: return "Bader charge integration";
+    case Op::RenderLammpsRegions: return "Render LAMMPS regions";
     case Op::CreateIsosurface: return "Create isosurface";
     case Op::ConstructSurfaceMesh: return "Construct surface mesh";
     default:
@@ -2497,6 +2563,8 @@ inline bool pipelineResultWithinCacheBudget(const PipelineResult &result,
         if (!add(sizeof(name)+name.size(),1) || !add(values.size(),sizeof(double))) return false;
     if (!add(data.polyhedra.corners.size(),sizeof(Bond)) || !add(data.polyhedra.edges.size(),sizeof(Bond))) return false;
     if (data.voxelGrid && !add(data.voxelGrid->values.size(),sizeof(double))) return false;
+    if (data.dislocations) for (const auto &line:data.dislocations->lines)
+        if (!add(line.points.size(),sizeof(std::array<double,3>))) return false;
     for (const auto &surface:data.surfaces)
         if (surface.mesh && !add(surface.mesh->positions.size()*2,sizeof(std::array<float,3>))) return false;
     for (const auto &labels:data.textLabels) {
@@ -2573,6 +2641,9 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_measure.inc"
 #include "analysis_scene.inc"
 #include "analysis_surface.inc"
+#include "analysis_regions.inc"
+#include "analysis_bader.inc"
+#include "analysis_dxa.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -3413,6 +3484,32 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 options.offsetX = float(m.replicateN[0]);
                 options.offsetY = float(m.replicateN[1]);
                 computeTextLabels(r.data, r.selected, options, cancel);
+                continue;
+            }
+            if (m.op == Op::DislocationAnalysis) {
+                dxa_detail::Options options;
+                options.crystal = m.type;
+                options.trialLength = m.cspNeighbors;
+                options.stretchability = m.rdfBins;
+                options.smoothing = m.replicateN[0];
+                options.coarsening = m.value;
+                options.onlySelected = m.cspOnlySelected;
+                options.width = m.bondWidth;
+                computeDislocationAnalysis(r, options, cancel);
+                continue;
+            }
+            if (m.op == Op::VoroTopAnalysis || m.op == Op::BaderChargeIntegration) {
+                const std::u8string pathText(reinterpret_cast<const char8_t *>(m.property.data()), m.property.size());
+                if (m.op == Op::VoroTopAnalysis) computeVoroTop(r, std::filesystem::path(pathText), cancel);
+                else computeBaderCharges(r.data, std::filesystem::path(pathText), cancel);
+                continue;
+            }
+            if (m.op == Op::AmbientOcclusion) {
+                computeAmbientOcclusion(r.data, m.value, m.cspNeighbors, m.rdfBins, cancel);
+                continue;
+            }
+            if (m.op == Op::RenderLammpsRegions) {
+                computeLammpsRegions(r.data, r.selected, m.property, m.adaptive, {m.bondColor[0], m.bondColor[1], m.bondColor[2]}, m.bondWidth, cancel);
                 continue;
             }
             if (m.op == Op::CreateIsosurface) {

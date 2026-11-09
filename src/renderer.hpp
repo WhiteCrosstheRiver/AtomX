@@ -78,6 +78,8 @@ class Renderer {
         ComPtr<ID3D11ShaderResourceView> propertyView;
         ComPtr<ID3D11Buffer> colorBuffer;
         ComPtr<ID3D11ShaderResourceView> colorView;
+        ComPtr<ID3D11Buffer> darkeningBuffer;
+        ComPtr<ID3D11ShaderResourceView> darkeningView;
         UINT count;
     };
     struct Constants {
@@ -124,7 +126,7 @@ class Renderer {
     ComPtr<ID3D11Buffer> sceneLineBuffer, polyhedronBuffer, polyhedronConstants, surfaceBuffer;
     struct SurfaceDraw { UINT first, count; float alpha; };
     std::vector<SurfaceDraw> surfaceDraws;
-    UINT surfaceVertexCount = 0;
+    UINT surfaceVertexCount = 0, dislocationVertexFirst = 0, dislocationVertexCount = 0;
     bool surfacesOverBudget = false;
     ComPtr<ID3D11VertexShader> polyhedronVS;
     ComPtr<ID3D11PixelShader> polyhedronPS;
@@ -158,6 +160,7 @@ class Renderer {
     UINT trajectoryLineVertices() const { return trajectoryVertexCount; }
     UINT polyhedronVertices() const { return polyhedronVertexCount; }
     UINT surfaceVertices() const { return surfaceVertexCount; }
+    UINT dislocationVertices() const { return dislocationVertexCount; }
     bool surfacesTruncated() const { return surfacesOverBudget; }
     bool trajectoryLinesTruncated() const { return trajectorySegmentsTruncated; }
     bool bondsOmittedForPerformance() const { return bondDisplayOmitted; }
@@ -321,6 +324,7 @@ struct Triangle {float4 a;float4 b;float4 c;};StructuredBuffer<Triangle> mesh:re
 StructuredBuffer<float> propertyValues:register(t3);
 StructuredBuffer<float3> particleColors:register(t4);
 StructuredBuffer<float3> gradientColors:register(t5);
+StructuredBuffer<float> particleDarkening:register(t6); // Unbound reads as 0, no darkening.
 struct V {
  float4 pos:SV_POSITION;float2 uv:TEXCOORD0;float3 center:TEXCOORD1;
  nointerpolation uint type:TEXCOORD2;nointerpolation float3 world:TEXCOORD3;
@@ -328,6 +332,7 @@ struct V {
  nointerpolation float4 color:TEXCOORD6;float3 plane:TEXCOORD7;
  nointerpolation float mappedValue:TEXCOORD8;
  nointerpolation float3 overrideColor:TEXCOORD9;
+ nointerpolation float shade:TEXCOORD10;
 };
 V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
  float2 q[6]={float2(-1,-1),float2(-1,1),float2(1,-1),float2(1,-1),float2(-1,1),float2(1,1)};
@@ -335,6 +340,7 @@ V vertex(uint id:SV_VertexID,uint instance:SV_InstanceID) {
  if(a.type&0x20000000) { V hidden=(V)0;hidden.pos=float4(2,2,2,1);return hidden; }
  Style s=styles[a.type&0x03ffffff];V o;
  o.overrideColor=colors[1].w>.5?particleColors[instance]:float3(-1,-1,-1);
+ o.shade=1-particleDarkening[instance];
  o.center=mul(float4(a.pos,1),view).xyz;o.world=a.pos;o.uv=q[id];o.type=a.type;
  float rad=(s.visual.x>0?s.visual.x:s.visual.w>0?s.visual.w:radius)*colors[2].w;float kind=s.visual.y<0?shape:s.visual.y;
  uint preset=(a.type>>26)&7;
@@ -409,7 +415,7 @@ P pixel(V i) {
  if(colorMode>0.5 && (!selectedOnlyMode || (i.type&0x40000000))) { float value = colorMode>2.5 ? i.mappedValue : colorAxis<0.5 ? i.world.x : colorAxis<1.5 ? i.world.y : i.world.z; float u; if(value<=colorMin)u=0;else if(value>=colorMax)u=1;else if(colorMin<0&&colorMax>0){float scale=max(-colorMin,colorMax);float negative=colorMin/scale,positive=colorMax/scale;float zero=abs(negative)/(abs(negative)+positive);u=value<0?zero*(1+value/-colorMin):zero+(1-zero)*(value/colorMax);}else{float span=colorMax-colorMin;u=abs(span)<1e-12?(value>=colorMax?1:0):(value-colorMin)/span;} u=saturate(u); if(colorDiscrete>0.5) u=min(floor(u*12),11)/11; float p=u*(256-1); uint lo=(uint)floor(p); uint hi=min(lo+1,255); uint gradient=(uint)clamp(colorGradient,0,9); base=lerp(gradientColors[gradient*256+lo],gradientColors[gradient*256+hi],frac(p)); }
  float diffuse=max(0,dot(n,normalize(float3(-.45,.65,1))));float rim=pow(1-sqrt(max(0,1-r)),3);
  float spec=pow(max(0,dot(n,normalize(float3(-.22,.32,1)))),36);
- o.color=float4(base*(.28+.72*diffuse)+spec*.3+rim*.045,1);return o;}
+ o.color=float4((base*(.28+.72*diffuse)+spec*.3+rim*.045)*i.shade,1);return o;}
 )";
         ComPtr<ID3DBlob> v, p, err;
         auto hr = D3DCompile(shader, strlen(shader), nullptr, nullptr, nullptr, "vertex", "vs_5_0",
@@ -618,6 +624,9 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         if (!bondDisplayOmitted && d.bondStyle.visible)
             bondVertices.reserve(d.bonds.size() * 4);
         const bool particleOverride = d.particleColors.size() == d.atoms.size();
+        const std::vector<double> *ambientBrightness = nullptr;
+        if (const auto found = d.scalarProperties.find("Ambient Occlusion"); found != d.scalarProperties.end() && found->second.size() == d.atoms.size())
+            ambientBrightness = &found->second;
         const bool creationColors=display && display->hasColors() &&
             (display->defaultColor.kind!=atomx::creation::ColorKind::Element || !display->colors.empty() || particleOverride);
         std::optional<atomx::creation::ColorResolver> creationColor;
@@ -685,7 +694,17 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             sceneLines.push_back({toFloat3(a),{c[0],c[1],c[2]},0,scenePreset});
             sceneLines.push_back({toFloat3(b),{c[0],c[1],c[2]},0,scenePreset});
         });
-        trajectoryVertexCount=UINT(sceneLines.size());
+        // Dislocations share this buffer. Colors: Other red; first, second and third family
+        // green, blue and yellow.
+        const std::array<DirectX::XMFLOAT3,4> familyColors{DirectX::XMFLOAT3{.92f,.26f,.24f},{.30f,.82f,.36f},{.27f,.55f,.98f},{.96f,.82f,.25f}};
+        dislocationVertexFirst=UINT(sceneLines.size());
+        atomx::forEachDislocationSegment(d,atomx::dislocationSegmentLimit,[&](const auto &a,const auto &b,const atomx::DislocationLine &line) {
+            const auto &c=familyColors[size_t(std::clamp(line.family,0,3))];
+            sceneLines.push_back({toFloat3(a),c,0,scenePreset});
+            sceneLines.push_back({toFloat3(b),c,0,scenePreset});
+        });
+        dislocationVertexCount=UINT(sceneLines.size())-dislocationVertexFirst;
+        trajectoryVertexCount=dislocationVertexFirst;
         const auto &mesh=d.polyhedra;
         const auto centerShown=[&](const atomx::Bond &c){return c.a<d.atoms.size() && !(c.a<hidden.size() && hidden[c.a]);};
         polyhedronVertices.reserve(mesh.corners.size());
@@ -709,7 +728,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                 sceneLines.push_back({toFloat3(b),color,0,scenePreset});
             }
         }
-        edgeVertexCount=UINT(sceneLines.size())-trajectoryVertexCount;
+        edgeVertexCount=UINT(sceneLines.size())-trajectoryVertexCount-dislocationVertexCount;
         polyhedronAlpha=mesh.alpha;
         sceneLineBuffer.Reset();
         if(!sceneLines.empty()) {
@@ -813,6 +832,18 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                 check(device->CreateBuffer(&colorDesc,&colorData,&c.colorBuffer),"Particle color buffer");
                 sv.Buffer.NumElements=c.count;
                 check(device->CreateShaderResourceView(c.colorBuffer.Get(),&sv,&c.colorView),"Particle color view");
+            }
+            if (ambientBrightness) {
+                std::vector<float> darkening(c.count);
+                for (size_t j = 0; j < darkening.size(); ++j)
+                    darkening[j] = float(std::clamp(1.0 - (*ambientBrightness)[start + j], 0.0, 1.0));
+                D3D11_BUFFER_DESC shadeDesc{}; shadeDesc.ByteWidth = UINT(darkening.size() * sizeof(float));
+                shadeDesc.Usage = D3D11_USAGE_IMMUTABLE; shadeDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                shadeDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; shadeDesc.StructureByteStride = sizeof(float);
+                D3D11_SUBRESOURCE_DATA shadeData{darkening.data(), 0, 0};
+                check(device->CreateBuffer(&shadeDesc, &shadeData, &c.darkeningBuffer), "Particle shading buffer");
+                sv.Buffer.NumElements = c.count;
+                check(device->CreateShaderResourceView(c.darkeningBuffer.Get(), &sv, &c.darkeningView), "Particle shading view");
             }
             next.push_back(std::move(c));
         }
@@ -1010,6 +1041,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                 context->VSSetShaderResources(0, 1, ch.srv.GetAddressOf());
                 context->VSSetShaderResources(3, 1, ch.propertyView.GetAddressOf());
                 context->VSSetShaderResources(4, 1, ch.colorView.GetAddressOf());
+                context->VSSetShaderResources(6, 1, ch.darkeningView.GetAddressOf());
                 context->DrawInstanced(6, ch.count, 0, 0);
             }
         if (visible && d.bondStyle.visible && bondBuffer && bondVertexCount) {
@@ -1068,7 +1100,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                 context->Draw(count,first);
             };
             drawLines(d.trajectoryLines.width,trajectoryVertexCount,0);
-            drawLines(1.f,edgeVertexCount,trajectoryVertexCount);
+            drawLines(d.dislocations?d.dislocations->width:3.f,dislocationVertexCount,dislocationVertexFirst);
+            drawLines(1.f,edgeVertexCount,trajectoryVertexCount+dislocationVertexCount);
             context->GSSetShader(nullptr,nullptr,0);
         }
         if (visible && surfaceBuffer) {
@@ -1162,6 +1195,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         context->VSSetShaderResources(1, 1, &empty);
         context->VSSetShaderResources(3, 1, &empty);
         context->VSSetShaderResources(4, 1, &empty);
+        context->VSSetShaderResources(6, 1, &empty);
         context->PSSetShaderResources(2, 1, &empty);
         context->OMSetRenderTargets(0, nullptr, nullptr);
     }

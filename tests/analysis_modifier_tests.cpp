@@ -3050,6 +3050,460 @@ static void testTextLabels() {
     check(both.textLabels.size() == 2 && both.textLabels[0].size == 20 && both.textLabels[1].size == 9, "several label nodes keep their own style");
 }
 
+static void testAmbientOcclusion() {
+    Modifier node{Op::AmbientOcclusion};
+    node.value = 1;
+    node.cspNeighbors = 64;
+    node.rdfBins = 256;
+    Dataset cube = openCubeLattice(5, 2);
+    const auto shaded = evaluateSurface(cube, {node});
+    const auto &values = shaded.scalarProperties.at("Ambient Occlusion");
+    check(values.size() == 125, "one value per particle");
+    size_t corner = 0, center = 0;
+    double lowest = 2, highest = -1;
+    for (size_t i = 0; i < cube.atoms.size(); ++i) {
+        const auto &a = cube.atoms[i];
+        if (a.x == 0 && a.y == 0 && a.z == 0) corner = i;
+        if (a.x == 4 && a.y == 4 && a.z == 4) center = i;
+        lowest = std::min(lowest, values[i]);
+        highest = std::max(highest, values[i]);
+    }
+    near(highest, 1, 1e-12, "the best-lit particle keeps its color");
+    check(lowest >= 0, "brightness stays in range");
+    check(values[corner] > .9, "a corner particle is well lit: " + std::to_string(values[corner]));
+    check(values[center] < values[corner] * .1, "a buried particle is dark: " + std::to_string(values[center]));
+    Modifier soft = node;
+    soft.value = .25f;
+    const auto softer = evaluateSurface(cube, {soft}).scalarProperties.at("Ambient Occlusion");
+    near(softer[center], 1 - .25 + .25 * values[center], 1e-9, "intensity scales the shading linearly");
+    Modifier off = node;
+    off.value = 0;
+    const auto unshaded = evaluateSurface(cube, {off}).scalarProperties.at("Ambient Occlusion");
+    check(std::all_of(unshaded.begin(), unshaded.end(), [](double v) { return v == 1; }), "zero intensity changes nothing");
+    Dataset single;
+    single.species = {"X"};
+    single.atoms.push_back({1, 2, 3, 0});
+    single.sourceCount = 1;
+    single.bounds();
+    near(evaluateSurface(single, {node}).scalarProperties.at("Ambient Occlusion")[0], 1, 1e-12, "a lone particle is fully lit");
+    Modifier bad = node;
+    bad.cspNeighbors = 0;
+    throwsWith([&] { evaluateSurface(cube, {bad}); }, "exposure samples", "sample count is validated");
+    bad = node;
+    bad.rdfBins = 4096;
+    throwsWith([&] { evaluateSurface(cube, {bad}); }, "resolution", "buffer resolution is bounded");
+    std::atomic<bool> cancelled{true};
+    throwsWith([&] { computeAmbientOcclusion(cube, 1, 8, 64, &cancelled); }, "Cancelled", "ambient occlusion honors cancellation");
+    // Delete keeps the values with their particles, since they are an ordinary property.
+    PipelineResult source;
+    source.data = cube;
+    source.selected.assign(cube.atoms.size(), 0);
+    source.colorSelected.assign(cube.atoms.size(), 0);
+    source.selected[corner] = 1;
+    Modifier remove{Op::Delete};
+    check(evaluateFrom(source, std::vector<Modifier>{node, remove}, 0).data.scalarProperties.at("Ambient Occlusion").size() == 124, "shading follows Delete");
+}
+
+static double meshArea(const SurfaceMeshData &mesh) {
+    double area = 0;
+    for (size_t k = 0; k + 2 < mesh.positions.size(); k += 3) {
+        const auto a = mesh.positions[k], b = mesh.positions[k + 1], c = mesh.positions[k + 2];
+        const surface_detail::P3 u{double(b[0]) - a[0], double(b[1]) - a[1], double(b[2]) - a[2]}, v{double(c[0]) - a[0], double(c[1]) - a[1], double(c[2]) - a[2]};
+        const auto n = surface_detail::cross(u, v);
+        area += .5 * std::sqrt(surface_detail::dot(n, n));
+    }
+    return area;
+}
+static void testLammpsRegions() {
+    const double pi = std::acos(-1.0);
+    Dataset d;
+    d.species = {"X"};
+    d.cell = {20, 0, 0, 0, 20, 0, 0, 0, 20};
+    d.atoms = {{10, 10, 10, 0}, {1, 1, 1, 0}, {10, 10, 19, 0}, {3, 10, 10, 0}};
+    d.sourceCount = 4;
+    d.bounds();
+    const auto run = [&](const std::string &commands, bool select = true) {
+        Modifier node{Op::RenderLammpsRegions};
+        node.property = commands;
+        node.adaptive = select;
+        PipelineResult source;
+        source.data = d;
+        source.selected.assign(4, 0);
+        source.colorSelected.assign(4, 0);
+        return evaluateFrom(source, std::vector<Modifier>{node}, 0);
+    };
+    const auto marks = [&](const PipelineResult &r) { return std::vector<uint8_t>(r.selected.begin(), r.selected.end()); };
+    near(meshArea(*run("region 1 block 2 6 2 8 2 12").data.surfaces.at(0).mesh), 2 * (4 * 6 + 4 * 10 + 6 * 10), 1e-3, "block area");
+    near(meshArea(*run("region 1 sphere 5 5 5 3").data.surfaces.at(0).mesh), 4 * pi * 9, .4, "sphere area");
+    near(meshArea(*run("region 1 cylinder z 5 5 2 0 10").data.surfaces.at(0).mesh), 2 * pi * 2 * 10 + 2 * pi * 4, .3, "cylinder area");
+    near(meshArea(*run("region 1 cylinder z 5 5 2 0 10 open 1 open 2").data.surfaces.at(0).mesh), 2 * pi * 2 * 10, .3, "open removes the cylinder caps");
+    near(meshArea(*run("region 1 block 0 1 0 1 0 1 open 6").data.surfaces.at(0).mesh), 5, 1e-6, "open removes one block face");
+    near(meshArea(*run("region 1 cone z 5 5 3 0 0 4").data.surfaces.at(0).mesh), pi * 3 * 5 + pi * 9, .3, "cone area with slant height 5");
+    near(meshArea(*run("region 1 plane 10 10 10 0 0 1").data.surfaces.at(0).mesh), 400, 1e-2, "a plane is clipped to the box");
+    near(meshArea(*run("region 1 block INF INF EDGE EDGE 4 6").data.surfaces.at(0).mesh), 2 * 400 + 4 * 20 * 2, 1e-3, "INF and EDGE draw up to the box");
+    near(meshArea(*run("region 1 prism 0 4 0 4 0 4 2 0 0").data.surfaces.at(0).mesh), 2 * 16 + 2 * 16 + 2 * 4 * std::hypot(2.0, 4.0), 1e-3, "prism area");
+    near(meshArea(*run("region 1 block 0 2 0 2 0 2 rotate 0.7 1 1 1 1 2 3").data.surfaces.at(0).mesh), 24, 1e-3, "rotation preserves area");
+    check((marks(run("region 1 sphere 10 10 10 2")) == std::vector<uint8_t>{1, 0, 0, 0}), "sphere selects inside");
+    check((marks(run("region 1 sphere 10 10 10 2 side out")) == std::vector<uint8_t>{0, 1, 1, 1}), "side out inverts");
+    check((marks(run("region 1 sphere 3 10 10 0.5\nregion 2 block 0 2 0 2 0 2")) == std::vector<uint8_t>{0, 1, 0, 1}), "two regions select their union");
+    check((marks(run("region 1 sphere 10 10 10 9 side in")) == std::vector<uint8_t>{1, 0, 1, 1}), "a boundary point counts as inside");
+    check((marks(run("region 1 block INF INF INF INF 18 INF")) == std::vector<uint8_t>{0, 0, 1, 0}), "INF bounds select");
+    check((marks(run("region 1 cylinder x 10 10 1 INF INF")) == std::vector<uint8_t>{1, 0, 0, 1}), "a cylinder along x uses y and z as its center");
+    check((marks(run("region 1 cylinder y 3 10 1 0 20")) == std::vector<uint8_t>{0, 0, 0, 1}), "a cylinder along y uses x and z as its center");
+    check((marks(run("region 1 sphere 0 10 10 1 move 3 NULL NULL")) == std::vector<uint8_t>{0, 0, 0, 1}), "move shifts the region");
+    // A quarter turn about z through (10, 10, 0) takes x = 3 to y = 3; the sphere at (10, 3, 10) comes to (17, 10, 10).
+    check((marks(run("region 1 sphere 10 3 10 1 rotate 1.5707963267948966 10 10 0 0 0 1")) == std::vector<uint8_t>{0, 0, 0, 0}), "rotation moves the region away");
+    check((marks(run("region 1 sphere 10 17 10 1 rotate 1.5707963267948966 10 10 0 0 0 1")) == std::vector<uint8_t>{0, 0, 0, 1}), "rotation is right-handed about the axis");
+    check((marks(run("region 1 cone z 10 10 0 4 0 20")) == std::vector<uint8_t>{1, 0, 1, 0}), "cone radius grows toward its upper end");
+    check((marks(run("region 1 prism 0 4 0 4 0 4 2 0 0")) == std::vector<uint8_t>{0, 1, 0, 0}), "prism selection");
+    check((marks(run("region 1 prism 2 6 8 12 8 12 2 0 0")) == std::vector<uint8_t>{0, 0, 0, 1}), "prism tilt shifts x with y");
+    check((marks(run("region 1 plane 2 0 0 -1 0 0")) == std::vector<uint8_t>{0, 1, 0, 0}), "a plane keeps the side its normal points to");
+    check((marks(run("region 1 ellipsoid 10 10 10 1 1 9.5")) == std::vector<uint8_t>{1, 0, 1, 0}), "ellipsoid axes");
+    check(run("region 1 sphere 1 1 1 1 &\n  side out\n# a comment\n\nregion 2 sphere 2 2 2 1").data.surfaces.size() == 2, "continuation lines and comments");
+    check(run("region 1 sphere 1 1 1 1", false).selected == std::vector<uint8_t>(4, 0), "without the option nothing is selected");
+    near(attribute(run("region a sphere 1 1 1 1\nregion b sphere 2 2 2 1").data, "RenderLammpsRegions.count"), 2, 0, "region count");
+    check(run("").data.surfaces.empty(), "no commands give no surfaces");
+    throwsWith([&] { run("region 1 sphere v_x 0 0 1"); }, "variables", "variables are refused");
+    throwsWith([&] { run("region 1 union 2 a b"); }, "Unsupported region style", "unknown styles are refused");
+    throwsWith([&] { run("region 1 sphere 0 0 0"); }, "Too few", "missing arguments are refused");
+    throwsWith([&] { run("region 1 sphere 0 0 0 1 units lattice"); }, "units box", "lattice units are refused");
+    throwsWith([&] { run("region 1 sphere 0 0 0 1 wiggle"); }, "Unsupported region keyword", "unknown keywords are refused");
+    throwsWith([&] { run("region 1 sphere 0 0 0 -1"); }, "positive", "a negative radius is refused");
+    throwsWith([&] { run("fix 1 all nve"); }, "region commands", "other commands are refused");
+    throwsWith([&] { run("region 1 block 0 1 0 1 0 1 open 9"); }, "face number", "face numbers are bounded");
+    throwsWith([&] { run("region 1 sphere INF 0 0 1"); }, "INF", "INF is only for bounds");
+    throwsWith([&] { run("region 1 plane 0 0 0 0 0 0"); }, "normal", "the plane normal must be nonzero");
+}
+
+static void testVoroTop() {
+    using namespace vorotop_detail;
+    // Tetrahedron: every face a triangle. The canonical vector is worked out by hand from Weinberg's rules.
+    Graph tetra;
+    check(buildGraph({{0, 1, 2}, {0, 3, 1}, {1, 3, 2}, {2, 3, 0}}, 4, tetra), "the tetrahedron is closed");
+    check(weinbergVector(tetra) == std::vector<int>{1, 2, 3, 1, 3, 4, 1, 4, 2, 4, 3, 2, 1}, "tetrahedron Weinberg vector");
+    // Cube: 8 vertices, 12 edges, vector length 2E+1, independent of vertex numbering.
+    const std::vector<std::vector<int>> cubeFaces{{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+    Graph cube;
+    check(buildGraph(cubeFaces, 8, cube), "the cube is closed");
+    const auto cubeCode = weinbergVector(cube);
+    check(cubeCode.size() == 25, "a cube walk uses each edge twice");
+    auto renumbered = cubeFaces;
+    const std::array<int, 8> relabel{5, 2, 7, 0, 3, 6, 1, 4};
+    for (auto &face : renumbered) for (int &v : face) v = relabel[size_t(v)];
+    Graph other;
+    check(buildGraph(renumbered, 8, other) && weinbergVector(other) == cubeCode, "the vector does not depend on vertex numbering");
+    Graph open;
+    check(!buildGraph({{0, 1, 2}}, 3, open), "an open surface is rejected");
+
+    std::istringstream good("# comment\n*\t1\tFCC\n*\t2\tOther thing\n1\t(1,2,3)\n2\t(1,2,3,4)\n");
+    const auto filter = parseFilter(good);
+    check(filter.names.at(2) == "Other thing" && filter.types.at({1, 2, 3}) == 1 && filter.types.size() == 2, "filter parsing");
+    for (const char *bad : {"1\t(1,2)\n", "*\tx\n", "*\t1\tA\n1\t(1,2\n", "*\t1\tA\n1\t1,2)\n", "# only\n"}) {
+        std::istringstream in(bad);
+        throwsWith([&] { parseFilter(in); }, "VoroTop filter", std::string("bad filter refused: ") + bad);
+    }
+    // A simple cubic crystal has one cubic cell per particle, so a one-entry filter names them all.
+    Dataset sc;
+    sc.species = {"X"};
+    sc.cell = {12, 0, 0, 0, 12, 0, 0, 0, 12};
+    sc.pbc = {true, true, true};
+    for (int z = 0; z < 4; ++z) for (int y = 0; y < 4; ++y) for (int x = 0; x < 4; ++x)
+        sc.atoms.push_back({float(x * 3 + .5), float(y * 3 + .5), float(z * 3 + .5), 0});
+    sc.sourceCount = sc.atoms.size();
+    sc.bounds();
+    const auto path = std::filesystem::temp_directory_path() / "atomx-test-sc.filter";
+    {
+        std::ofstream file(path);
+        file << "*\t1\tCube\n1\t(";
+        for (size_t k = 0; k < cubeCode.size(); ++k) file << (k ? "," : "") << cubeCode[k];
+        file << ")\n";
+    }
+    Modifier node{Op::VoroTopAnalysis};
+    node.property = path.string();
+    const auto matched = evaluateSurface(sc, {node});
+    const auto &types = matched.scalarProperties.at("Structure Type");
+    check(std::all_of(types.begin(), types.end(), [](double t) { return t == 1; }), "every simple cubic cell matches");
+    near(attribute(matched, "VoroTop.counts.Cube"), 64, 0, "VoroTop counts");
+    near(attribute(matched, "VoroTop.counts.OTHER"), 0, 0, "no unmatched particles");
+    // Remove one particle: its six neighbors change shape and fall out of the filter.
+    Dataset vacancy = sc;
+    vacancy.atoms.erase(vacancy.atoms.begin());
+    vacancy.sourceCount = vacancy.atoms.size();
+    near(attribute(evaluateSurface(vacancy, {node}), "VoroTop.counts.OTHER"), 6, 0, "the neighbors of a vacancy do not match");
+    // Without periodicity the outer cells touch walls and are left unidentified.
+    Dataset walled = sc;
+    walled.pbc = {false, false, false};
+    near(attribute(evaluateSurface(walled, {node}), "VoroTop.counts.Cube"), 8, 0, "cells bounded by a wall are not matched");
+    node.property.clear();
+    check(!evaluateSurface(sc, {node}).scalarProperties.contains("Structure Type"), "without a filter the node passes through");
+    node.property = (std::filesystem::temp_directory_path() / "atomx-no-such.filter").string();
+    throwsWith([&] { evaluateSurface(sc, {node}); }, "Cannot open", "a missing filter is an error");
+    std::filesystem::remove(path);
+}
+
+static void testBader() {
+    const double pi = std::acos(-1.0);
+    using surface_detail::P3;
+    // Two equal Gaussians on a periodic grid: each basin holds half, at the known volumes.
+    Dataset d;
+    d.species = {"X"};
+    const double box = 12;
+    d.cell = {box, 0, 0, 0, box, 0, 0, 0, box};
+    d.pbc = {true, true, true};
+    d.atoms = {{3, 6, 6, 0}, {9, 6, 6, 0}};
+    d.sourceCount = 2;
+    d.bounds();
+    auto periodicDistance = [&](double a, double b) { double t = a - b; t -= box * std::round(t / box); return t; };
+    auto make = [&](int n, double second) {
+        auto grid = std::make_shared<VoxelGrid>();
+        grid->name = "Charge density";
+        grid->size = {n, n, n};
+        grid->periodic = {true, true, true};
+        const double h = box / n;
+        grid->step = {h, 0, 0, 0, h, 0, 0, 0, h};
+        for (int z = 0; z < n; ++z) for (int y = 0; y < n; ++y) for (int x = 0; x < n; ++x) {
+            double value = 0;
+            const double px = x * h, py = y * h, pz = z * h;
+            const auto bump = [&](double cx, double weight) {
+                const double a = periodicDistance(px, cx), b = periodicDistance(py, 6), c = periodicDistance(pz, 6);
+                value += weight * std::exp(-(a * a + b * b + c * c) / 2) / std::pow(2 * pi, 1.5);
+            };
+            bump(3, 1);
+            bump(9, second);
+            grid->values.push_back(value);
+        }
+        bader_detail::finishGrid(*grid);
+        return grid;
+    };
+    Dataset equal = d;
+    equal.voxelGrid = make(48, 1);
+    Modifier node{Op::BaderChargeIntegration};
+    node.property.clear();
+    const auto even = evaluateSurface(equal, {node});
+    near(attribute(even, "Bader.integrated_density"), 2, 1e-3, "total charge is conserved");
+    near(attribute(even, "Bader.integrated_volume"), box * box * box, 1e-6, "basins fill the cell");
+    near(even.scalarProperties.at("Integrated Density")[0], 1, 1e-2, "first Gaussian holds its unit charge");
+    near(even.scalarProperties.at("Integrated Density")[1], 1, 1e-2, "second Gaussian holds its unit charge");
+    near(even.scalarProperties.at("Integrated Volume")[0], box * box * box / 2, box * box * box * .02, "the mirror plane halves the cell");
+    Dataset uneven = d;
+    uneven.voxelGrid = make(48, 3);
+    const auto heavy = evaluateSurface(uneven, {node});
+    near(heavy.scalarProperties.at("Integrated Density")[0], 1, .02, "a weak Gaussian keeps its charge");
+    near(heavy.scalarProperties.at("Integrated Density")[1], 3, .02, "a strong Gaussian keeps its charge");
+    const DataTable *table = nullptr;
+    for (const auto &t : heavy.tables) if (t.name == "Bader charge integration") table = &t;
+    check(table && table->rows.size() == 2 && table->columns.size() == 8, "one table row per region");
+
+    // A sheared grid spans the same cell: the stencil and volumes adapt and charge is conserved.
+    {
+        const std::array<P3, 3> step{P3{1, 0, 0}, P3{.5, 1, 0}, P3{0, 0, 1}};
+        const auto stencil = bader_detail::gridStencil(step);
+        check(stencil.size() >= 8 && stencil.size() <= 14, "the stencil of a sheared lattice has 8 to 14 neighbors: " + std::to_string(stencil.size()));
+        const auto cubic = bader_detail::gridStencil({P3{1, 0, 0}, P3{0, 1, 0}, P3{0, 0, 1}});
+        check(cubic.size() == 6, "a cubic lattice has six facets");
+        near(cubic[0].conductance, 1, 1e-9, "unit facet over unit distance");
+    }
+    // File readers: VASP stores density x volume, x fastest; cube stores z fastest in bohr.
+    const auto directory = std::filesystem::temp_directory_path();
+    const auto chgcar = directory / "atomx-test-CHGCAR";
+    Dataset two;
+    two.species = {"X"};
+    two.cell = {4, 0, 0, 0, 4, 0, 0, 0, 4};
+    two.pbc = {true, true, true};
+    two.atoms = {{1, 2, 2, 0}};
+    two.sourceCount = 1;
+    two.bounds();
+    {
+        std::ofstream file(chgcar);
+        file << "test\n1.0\n4 0 0\n0 4 0\n0 0 4\nX\n1\nDirect\n0.25 0.5 0.5\n\n2 2 2\n";
+        for (int i = 1; i <= 8; ++i) file << i * 64 << ' ';
+        file << "\naugmentation occupancies 1 1\n";
+    }
+    node.property = chgcar.string();
+    const auto fromVasp = evaluateSurface(two, {node});
+    check(fromVasp.voxelGrid && fromVasp.voxelGrid->size == std::array<int, 3>{2, 2, 2}, "CHGCAR grid size");
+    near(fromVasp.voxelGrid->values[1], 2, 1e-12, "CHGCAR density is value / volume, x fastest");
+    near(fromVasp.voxelGrid->step[0], 2, 1e-12, "CHGCAR step");
+    near(attribute(fromVasp, "Bader.integrated_density"), 288, 1e-9, "CHGCAR charge is the sum over grid points of density x voxel volume");
+    Dataset wrongCell = two;
+    wrongCell.cell[0] = 5;
+    throwsWith([&] { evaluateSurface(wrongCell, {node}); }, "does not match", "a CHGCAR for another cell is refused");
+    const auto cube = directory / "atomx-test.cube";
+    {
+        std::ofstream file(cube);
+        const double b = 0.529177210903;
+        file << "comment\ncomment\n1 0 0 0\n2 " << 2 / b << " 0 0\n1 0 " << 4 / b << " 0\n2 0 0 " << 2 / b << "\n1 1 0 0 0\n";
+        file << "1 2\n3 4\n";
+    }
+    Dataset slab = two;
+    slab.pbc = {false, false, false};
+    node.property = cube.string();
+    const auto fromCube = evaluateSurface(slab, {node});
+    const double perCubicBohrToAngstrom = 1 / std::pow(0.529177210903, 3);
+    check(fromCube.voxelGrid && fromCube.voxelGrid->size == std::array<int, 3>{2, 1, 2}, "cube grid size");
+    near(fromCube.voxelGrid->values[1], 3 * perCubicBohrToAngstrom, 1e-6, "cube order: x slowest, z fastest");
+    near(fromCube.voxelGrid->values[2], 2 * perCubicBohrToAngstrom, 1e-6, "cube order for z");
+    near(fromCube.voxelGrid->step[0], 2, 1e-4, "cube steps convert from bohr");
+    for (const auto &[text, what] : std::vector<std::pair<std::string, std::string>>{{"test\n1.0\n4 0 0\n0 4 0\n0 0 4\nX\n1\nDirect\n0 0 0\n\n2 2 2\n1 2 3\n", "ends early"}}) {
+        { std::ofstream file(chgcar); file << text; }
+        node.property = chgcar.string();
+        throwsWith([&] { evaluateSurface(two, {node}); }, what, "a truncated CHGCAR is refused");
+    }
+    node.property = (directory / "atomx-no-such-CHGCAR").string();
+    throwsWith([&] { evaluateSurface(two, {node}); }, "Cannot open", "a missing density file is an error");
+    node.property.clear();
+    throwsWith([&] { evaluateSurface(two, {node}); }, "voxel grid", "no density at all is an error");
+    std::filesystem::remove(chgcar);
+    std::filesystem::remove(cube);
+    std::atomic<bool> cancelled{true};
+    Dataset cancelData = d;
+    cancelData.voxelGrid = make(16, 1);
+    throwsWith([&] { computeBaderCharges(cancelData, {}, &cancelled); }, "Cancelled", "Bader integration honors cancellation");
+}
+
+// A Volterra screw dislocation along z through (x0, y0) in a cylinder, periodic along z.
+static Dataset screwCrystal(int crystalType, double a, double radius, int periods, double sign) {
+    const double pi = std::acos(-1.0);
+    using surface_detail::P3;
+    using surface_detail::mul;
+    using surface_detail::add;
+    using surface_detail::dot;
+    Dataset d;
+    d.species = {"X"};
+    // Crystal axes in the sample frame, as rows: x, y, z.
+    std::array<P3, 3> frame;
+    double burgers, period;
+    std::vector<P3> basis;
+    if (crystalType == 0) {
+        const double s6 = std::sqrt(6.0), s3 = std::sqrt(3.0), s2 = std::sqrt(2.0);
+        frame = {P3{1 / s6, 1 / s6, -2 / s6}, P3{1 / s3, 1 / s3, 1 / s3}, P3{1 / s2, -1 / s2, 0}};
+        burgers = a / s2;
+        period = a / s2;
+        basis = {{0, 0, 0}, {0, .5, .5}, {.5, 0, .5}, {.5, .5, 0}};
+    } else {
+        const double s6 = std::sqrt(6.0), s3 = std::sqrt(3.0), s2 = std::sqrt(2.0);
+        frame = {P3{1 / s2, -1 / s2, 0}, P3{1 / s6, 1 / s6, -2 / s6}, P3{1 / s3, 1 / s3, 1 / s3}};
+        burgers = a * s3 / 2;
+        period = a * s3 / 2;
+        basis = {{0, 0, 0}, {.5, .5, .5}};
+    }
+    const double length = period * periods, box = 2 * radius + 40;
+    d.cell = {box, 0, 0, 0, box, 0, 0, 0, length};
+    d.pbc = {false, false, true};
+    const double x0 = box / 2 + .37 * a, y0 = box / 2 + .21 * a;
+    const int range = int((radius + length) / a * 2) + 4;
+    for (int i = -range; i <= range; ++i) for (int j = -range; j <= range; ++j) for (int k = -range; k <= range; ++k) for (const P3 &b : basis) {
+        const P3 cube{(i + b[0]) * a, (j + b[1]) * a, (k + b[2]) * a};
+        const double x = dot(frame[0], cube), y = dot(frame[1], cube), z = dot(frame[2], cube);
+        if (x * x + y * y > radius * radius || z < -1e-6 || z >= length - 1e-6) continue;
+        const double px = x + box / 2, py = y + box / 2;
+        double pz = z + sign * burgers * std::atan2(py - y0, px - x0) / (2 * pi);
+        pz -= length * std::floor(pz / length);
+        d.atoms.push_back({float(px), float(py), float(pz), 0});
+    }
+    d.sourceCount = d.atoms.size();
+    d.bounds();
+    return d;
+}
+static void testDislocationAnalysis() {
+    const auto makeNode = [](int crystal) {
+        Modifier node{Op::DislocationAnalysis};
+        node.type = crystal;
+        node.cspNeighbors = 14;
+        node.rdfBins = 9;
+        node.replicateN[0] = 4;
+        node.value = 2;
+        return node;
+    };
+    const struct { int crystal; double a; int periods; const char *family; } cases[]{{0, 4.05, 10, "1/2<110>"}, {1, 3.16, 12, "1/2<111>"}};
+    for (const auto &c : cases) {
+        const std::string label = c.crystal == 0 ? "FCC screw" : "BCC screw";
+        const double burgers = c.crystal == 0 ? c.a / std::sqrt(2.0) : c.a * std::sqrt(3.0) / 2;
+        const double boxLength = burgers * c.periods;
+        for (const double sign : {1.0, -1.0}) {
+            const auto data = screwCrystal(c.crystal, c.a, 8 * c.a, c.periods, sign);
+            const auto out = evaluateSurface(data, {makeNode(c.crystal)});
+            check(bool(out.dislocations), label + ": lines are published");
+            if (!out.dislocations) continue;
+            check(out.dislocations->lines.size() == 1, label + ": one line, found " + std::to_string(out.dislocations->lines.size()));
+            if (out.dislocations->lines.empty()) continue;
+            const auto &line = out.dislocations->lines[0];
+            check(line.familyName == c.family, label + ": family " + line.familyName + " " + line.burgersText);
+            near(std::sqrt(line.burgers[0] * line.burgers[0] + line.burgers[1] * line.burgers[1] + line.burgers[2] * line.burgers[2]), burgers, burgers * .02, label + ": Burgers magnitude");
+            near(std::abs(line.burgers[2]), burgers, burgers * .02, label + ": the Burgers vector lies along the screw axis");
+            near(line.length, boxLength, boxLength * .2, label + ": the line spans the periodic length");
+            // Sign: u_z = +b theta / 2 pi about +z gives b parallel to the line (FS/RH).
+            const double along = line.points.back()[2] - line.points.front()[2];
+            check(along * line.burgers[2] * sign > 0, label + ": Burgers sign against the line sense, sign " + std::to_string(sign));
+            near(attribute(out, "DislocationAnalysis.lines"), 1, 0, label + ": attribute count");
+            check(out.scalarProperties.contains("Cluster"), label + ": cluster property");
+        }
+        // The same cylinder without the dislocation has none, despite its free surface.
+        const auto perfect = evaluateSurface(screwCrystal(c.crystal, c.a, 8 * c.a, c.periods, 0), {makeNode(c.crystal)});
+        check(perfect.dislocations && perfect.dislocations->lines.empty(), label + ": a perfect crystal has no dislocations");
+        near(attribute(perfect, "DislocationAnalysis.total_line_length"), 0, 0, label + ": no line length in a perfect crystal");
+    }
+    // Thermal-like noise: still one line with the same Burgers vector, and none without one.
+    {
+        std::mt19937 random(11);
+        const double a = 4.05;
+        std::normal_distribution<double> noise(0, .02 * a);
+        const auto shaken = [&](Dataset d) {
+            for (auto &atom : d.atoms) { atom.x += float(noise(random)); atom.y += float(noise(random)); atom.z += float(noise(random)); }
+            for (auto &atom : d.atoms) atom = wrapAtomInCell(d, atom);
+            return d;
+        };
+        const auto noisy = evaluateSurface(shaken(screwCrystal(0, a, 8 * a, 10, 1)), {makeNode(0)});
+        check(noisy.dislocations && noisy.dislocations->lines.size() == 1, "noise: the line is still found once");
+        if (noisy.dislocations && noisy.dislocations->lines.size() == 1)
+            check(noisy.dislocations->lines[0].familyName == "1/2<110>", "noise: the family is unchanged");
+        const auto quiet = evaluateSurface(shaken(screwCrystal(0, a, 8 * a, 10, 0)), {makeNode(0)});
+        check(quiet.dislocations && quiet.dislocations->lines.empty(), "noise: no false dislocations in a perfect crystal");
+    }
+    // A dipole: two lines of opposite character at known places in one crystal.
+    {
+        const double a = 4.05, pi = std::acos(-1.0), burgers = a / std::sqrt(2.0);
+        Dataset dipole = screwCrystal(0, a, 11 * a, 10, 0);
+        const double middle = dipole.cell[0] / 2, length = dipole.cell[8];
+        const double firstX = middle - 5.13 * a, secondX = middle + 4.87 * a, y = middle + .21 * a;
+        for (auto &atom : dipole.atoms) {
+            double z = atom.z + burgers * (std::atan2(atom.y - y, atom.x - firstX) - std::atan2(atom.y - y, atom.x - secondX)) / (2 * pi);
+            z -= length * std::floor(z / length);
+            atom.z = float(z);
+        }
+        const auto out = evaluateSurface(dipole, {makeNode(0)});
+        check(out.dislocations && out.dislocations->lines.size() == 2, "dipole: two lines, found " + std::to_string(out.dislocations ? out.dislocations->lines.size() : 0));
+        if (out.dislocations && out.dislocations->lines.size() == 2) {
+            std::array<double, 2> signs{}, xs{};
+            for (size_t k = 0; k < 2; ++k) {
+                const auto &line = out.dislocations->lines[k];
+                signs[k] = (line.points.back()[2] - line.points.front()[2]) * line.burgers[2];
+                double sum = 0;
+                for (const auto &p : line.points) sum += p[0];
+                xs[k] = sum / double(line.points.size());
+            }
+            check(signs[0] * signs[1] < 0, "dipole: the two lines have opposite Burgers sign against their sense");
+            if (xs[0] > xs[1]) { std::swap(xs[0], xs[1]); std::swap(signs[0], signs[1]); }
+            near(xs[0], firstX, a, "dipole: first line position");
+            near(xs[1], secondX, a, "dipole: second line position");
+            check(signs[0] > 0, "dipole: the line with +b theta has b along its sense");
+        }
+    }
+    // Wrong crystal: everything is unidentified, so no lines and no crash.
+    const auto wrong = evaluateSurface(screwCrystal(0, 4.05, 6 * 4.05, 8, 1), {makeNode(1)});
+    check(wrong.dislocations && wrong.dislocations->lines.empty(), "the wrong crystal type finds nothing");
+    Modifier bad = makeNode(0);
+    bad.cspNeighbors = 1;
+    throwsWith([&] { evaluateSurface(screwCrystal(0, 4.05, 5 * 4.05, 6, 0), {bad}); }, "trial circuit", "circuit length is validated");
+    std::atomic<bool> cancelled{true};
+    PipelineResult source;
+    source.data = screwCrystal(0, 4.05, 5 * 4.05, 6, 1);
+    source.selected.assign(source.data.atoms.size(), 0);
+    source.colorSelected.assign(source.data.atoms.size(), 0);
+    dxa_detail::Options options;
+    throwsWith([&] { computeDislocationAnalysis(source, options, &cancelled); }, "Cancelled", "dislocation analysis honors cancellation");
+}
+
 static void testCoordinationPolyhedra() {
     Modifier node{Op::CoordinationPolyhedra};
     node.value = .3f;
@@ -3289,6 +3743,11 @@ int main() {
     testGaussianSurface();
     testIsosurface();
     testTextLabels();
+    testAmbientOcclusion();
+    testLammpsRegions();
+    testVoroTop();
+    testBader();
+    testDislocationAnalysis();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";
