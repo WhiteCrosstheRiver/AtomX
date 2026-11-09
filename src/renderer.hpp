@@ -89,6 +89,14 @@ class Renderer {
         float padding[3]{};
         DirectX::XMFLOAT4 styleParams{};
     };
+    struct PolyhedronVertex { DirectX::XMFLOAT3 position, normal, color; };
+    struct PolyhedronConstants {
+        DirectX::XMFLOAT4X4 viewProjection;
+        DirectX::XMFLOAT3 toViewer{0,0,1};
+        float facing = 0;
+        float alpha = 1;
+        float padding[3]{};
+    };
     struct PlaneConstants {
         DirectX::XMFLOAT4X4 viewProjection;
         DirectX::XMFLOAT4 color;
@@ -107,6 +115,13 @@ class Renderer {
     ComPtr<ID3D11Buffer> meshBuffer;
     ComPtr<ID3D11ShaderResourceView> meshView;
     ComPtr<ID3D11Buffer> bondBuffer, bondConstants;
+    ComPtr<ID3D11Buffer> sceneLineBuffer, polyhedronBuffer, polyhedronConstants;
+    ComPtr<ID3D11VertexShader> polyhedronVS;
+    ComPtr<ID3D11PixelShader> polyhedronPS;
+    ComPtr<ID3D11InputLayout> polyhedronLayout;
+    UINT trajectoryVertexCount = 0, edgeVertexCount = 0, polyhedronVertexCount = 0;
+    float polyhedronAlpha = 1;
+    bool trajectorySegmentsTruncated = false;
     ComPtr<ID3D11Buffer> gradientBuffer;
     ComPtr<ID3D11ShaderResourceView> gradientView;
     ComPtr<ID3D11VertexShader> bondVS;
@@ -130,6 +145,9 @@ class Renderer {
 
   public:
     bool bondsUploaded() const { return bondVertexCount != 0; }
+    UINT trajectoryLineVertices() const { return trajectoryVertexCount; }
+    UINT polyhedronVertices() const { return polyhedronVertexCount; }
+    bool trajectoryLinesTruncated() const { return trajectorySegmentsTruncated; }
     bool bondsOmittedForPerformance() const { return bondDisplayOmitted; }
     size_t renderedBondLaneCount() const { return bondLaneCount; }
     uint64_t dataUploadRevision() const { return uploadRevision; }
@@ -472,6 +490,33 @@ float4 bondPixel(O i):SV_TARGET {
         check(device->CreateInputLayout(bondElements,4,bondV->GetBufferPointer(),bondV->GetBufferSize(),&bondLayout), "Bond vertex layout");
         D3D11_BUFFER_DESC bondCb{}; bondCb.ByteWidth=sizeof(BondConstants); bondCb.Usage=D3D11_USAGE_DEFAULT; bondCb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         check(device->CreateBuffer(&bondCb,nullptr,&bondConstants), "Bond camera constants");
+        const char *polyhedronShader = R"(
+cbuffer PolyhedronCamera : register(b0) { row_major float4x4 polyViewProjection; float3 toViewer; float facing; float polyAlpha; float3 polyPadding; };
+struct PolyhedronIn { float3 position:POSITION; float3 normal:NORMAL; float3 color:COLOR; };
+struct PolyhedronOut { float4 position:SV_POSITION; float3 normal:NORMAL; float3 color:COLOR; };
+PolyhedronOut polyhedronVertex(PolyhedronIn i) {
+ PolyhedronOut o; o.position=mul(float4(i.position,1),polyViewProjection); o.normal=i.normal; o.color=i.color; return o;
+}
+float4 polyhedronPixel(PolyhedronOut i):SV_TARGET {
+ float3 n=normalize(i.normal);
+ if(facing!=0 && dot(n,toViewer)*facing<0) discard;
+ float diffuse=abs(dot(n,normalize(float3(-.32,.48,.82))));
+ return float4(i.color*(.55+.45*diffuse),polyAlpha);
+}
+)";
+        ComPtr<ID3DBlob> polyhedronV, polyhedronP;
+        check(D3DCompile(polyhedronShader, strlen(polyhedronShader), nullptr, nullptr, nullptr, "polyhedronVertex", "vs_5_0",
+                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &polyhedronV, &err), "Polyhedron vertex shader");
+        check(D3DCompile(polyhedronShader, strlen(polyhedronShader), nullptr, nullptr, nullptr, "polyhedronPixel", "ps_5_0",
+                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &polyhedronP, &err), "Polyhedron pixel shader");
+        check(device->CreateVertexShader(polyhedronV->GetBufferPointer(), polyhedronV->GetBufferSize(), nullptr, &polyhedronVS), "Polyhedron vertex shader");
+        check(device->CreatePixelShader(polyhedronP->GetBufferPointer(), polyhedronP->GetBufferSize(), nullptr, &polyhedronPS), "Polyhedron pixel shader");
+        D3D11_INPUT_ELEMENT_DESC polyhedronElements[]={{"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+                                                       {"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
+                                                       {"COLOR",0,DXGI_FORMAT_R32G32B32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0}};
+        check(device->CreateInputLayout(polyhedronElements,3,polyhedronV->GetBufferPointer(),polyhedronV->GetBufferSize(),&polyhedronLayout), "Polyhedron vertex layout");
+        D3D11_BUFFER_DESC polyhedronCb{}; polyhedronCb.ByteWidth=sizeof(PolyhedronConstants); polyhedronCb.Usage=D3D11_USAGE_DEFAULT; polyhedronCb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        check(device->CreateBuffer(&polyhedronCb,nullptr,&polyhedronConstants), "Polyhedron constants");
         const char *planeShader = R"(
 cbuffer SlicePlaneCamera : register(b0) { row_major float4x4 viewProjection; float4 color; };
 struct SlicePlaneInput { float3 position:POSITION; };
@@ -615,6 +660,56 @@ float4 slicePlanePixel():SV_TARGET { return color; }
                     append(middle,segment.p2,colorB,presetAt(bond.b));
                 }
             }
+        }
+        // Trajectory lines and polyhedron edges share one buffer and the bond line shader:
+        // preset 1.1 selects a single screen-space strand in the vertex's own color.
+        std::vector<BondVertex> sceneLines;
+        std::vector<PolyhedronVertex> polyhedronVertices;
+        const float scenePreset=1.1f;
+        const auto toFloat3=[](const std::array<double,3> &p){return DirectX::XMFLOAT3{float(p[0]),float(p[1]),float(p[2])};};
+        trajectorySegmentsTruncated=!atomx::forEachTrajectorySegment(d,3000000,[&](const auto &a,const auto &b,float u) {
+            std::array<float,3> c=d.trajectoryLines.color;
+            if(u>=0) c=sampleColorGradient(d.trajectoryLines.gradient,u);
+            sceneLines.push_back({toFloat3(a),{c[0],c[1],c[2]},0,scenePreset});
+            sceneLines.push_back({toFloat3(b),{c[0],c[1],c[2]},0,scenePreset});
+        });
+        trajectoryVertexCount=UINT(sceneLines.size());
+        const auto &mesh=d.polyhedra;
+        const auto centerShown=[&](const atomx::Bond &c){return c.a<d.atoms.size() && !(c.a<hidden.size() && hidden[c.a]);};
+        polyhedronVertices.reserve(mesh.corners.size());
+        for(size_t k=0;k+2<mesh.corners.size();k+=3) {
+            if(!centerShown(mesh.corners[k])) continue;
+            std::array<double,3> p[3];
+            if(!atomx::polyhedronCorner(d,mesh.corners[k],p[0]) || !atomx::polyhedronCorner(d,mesh.corners[k+1],p[1]) ||
+               !atomx::polyhedronCorner(d,mesh.corners[k+2],p[2])) continue;
+            const std::array<double,3> u{p[1][0]-p[0][0],p[1][1]-p[0][1],p[1][2]-p[0][2]},v{p[2][0]-p[0][0],p[2][1]-p[0][1],p[2][2]-p[0][2]};
+            const DirectX::XMFLOAT3 normal{float(u[1]*v[2]-u[2]*v[1]),float(u[2]*v[0]-u[0]*v[2]),float(u[0]*v[1]-u[1]*v[0])};
+            const auto color=atomColor(mesh.corners[k].a);
+            for(const auto &point:p) polyhedronVertices.push_back({toFloat3(point),normal,color});
+        }
+        if(mesh.showEdges) {
+            const DirectX::XMFLOAT3 color{mesh.edgeColor[0],mesh.edgeColor[1],mesh.edgeColor[2]};
+            for(size_t k=0;k+1<mesh.edges.size();k+=2) {
+                if(!centerShown(mesh.edges[k])) continue;
+                std::array<double,3> a,b;
+                if(!atomx::polyhedronCorner(d,mesh.edges[k],a) || !atomx::polyhedronCorner(d,mesh.edges[k+1],b)) continue;
+                sceneLines.push_back({toFloat3(a),color,0,scenePreset});
+                sceneLines.push_back({toFloat3(b),color,0,scenePreset});
+            }
+        }
+        edgeVertexCount=UINT(sceneLines.size())-trajectoryVertexCount;
+        polyhedronAlpha=mesh.alpha;
+        sceneLineBuffer.Reset();
+        if(!sceneLines.empty()) {
+            D3D11_BUFFER_DESC desc{}; desc.ByteWidth=UINT(sceneLines.size()*sizeof(BondVertex)); desc.Usage=D3D11_USAGE_IMMUTABLE; desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA initial{sceneLines.data(),0,0};
+            check(device->CreateBuffer(&desc,&initial,&sceneLineBuffer),"Scene line buffer");
+        }
+        polyhedronBuffer.Reset(); polyhedronVertexCount=UINT(polyhedronVertices.size());
+        if(!polyhedronVertices.empty()) {
+            D3D11_BUFFER_DESC desc{}; desc.ByteWidth=UINT(polyhedronVertices.size()*sizeof(PolyhedronVertex)); desc.Usage=D3D11_USAGE_IMMUTABLE; desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA initial{polyhedronVertices.data(),0,0};
+            check(device->CreateBuffer(&desc,&initial,&polyhedronBuffer),"Polyhedron buffer");
         }
         bondBuffer.Reset(); bondVertexCount=UINT(bondVertices.size());
         if (!bondVertices.empty()) {
@@ -914,6 +1009,70 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             context->RSSetState(raster.Get());
             context->Draw(bondVertexCount,0);
             context->GSSetShader(nullptr,nullptr,0);
+        }
+        if (visible && sceneLineBuffer) {
+            BondConstants lineCamera;
+            DirectX::XMStoreFloat4x4(&lineCamera.viewProjection, view * proj);
+            lineCamera.viewport={float(t.w),float(t.h)};
+            lineCamera.radius=0;
+            lineCamera.color={1,1,1,1};
+            lineCamera.colorByType=1;
+            UINT stride=sizeof(BondVertex), offset=0;
+            ID3D11Buffer *buffer=sceneLineBuffer.Get();
+            context->IASetInputLayout(bondLayout.Get());
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+            context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
+            context->VSSetShader(bondVS.Get(),nullptr,0);
+            context->PSSetShader(bondPS.Get(),nullptr,0);
+            context->GSSetShader(bondGS.Get(),nullptr,0);
+            context->VSSetConstantBuffers(0,1,bondConstants.GetAddressOf());
+            context->GSSetConstantBuffers(0,1,bondConstants.GetAddressOf());
+            context->PSSetConstantBuffers(0,1,bondConstants.GetAddressOf());
+            context->RSSetState(raster.Get());
+            const auto drawLines=[&](float width,UINT count,UINT first) {
+                if(!count) return;
+                lineCamera.width=width;
+                lineCamera.styleParams={0,0,width,0};
+                context->UpdateSubresource(bondConstants.Get(),0,nullptr,&lineCamera,0,0);
+                context->Draw(count,first);
+            };
+            drawLines(d.trajectoryLines.width,trajectoryVertexCount,0);
+            drawLines(1.f,edgeVertexCount,trajectoryVertexCount);
+            context->GSSetShader(nullptr,nullptr,0);
+        }
+        if (visible && polyhedronBuffer) {
+            PolyhedronConstants camera;
+            DirectX::XMStoreFloat4x4(&camera.viewProjection, view * proj);
+            // The view looks along -z, so view-space +z points back at the viewer.
+            DirectX::XMStoreFloat3(&camera.toViewer,DirectX::XMVector3Normalize(DirectX::XMVector3TransformNormal(
+                DirectX::XMVectorSet(0,0,1,0),DirectX::XMMatrixInverse(nullptr,view))));
+            camera.alpha=polyhedronAlpha;
+            UINT stride=sizeof(PolyhedronVertex), offset=0;
+            ID3D11Buffer *buffer=polyhedronBuffer.Get();
+            context->IASetInputLayout(polyhedronLayout.Get());
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
+            context->VSSetShader(polyhedronVS.Get(),nullptr,0);
+            context->PSSetShader(polyhedronPS.Get(),nullptr,0);
+            context->GSSetShader(nullptr,nullptr,0);
+            context->VSSetConstantBuffers(0,1,polyhedronConstants.GetAddressOf());
+            context->PSSetConstantBuffers(0,1,polyhedronConstants.GetAddressOf());
+            context->RSSetState(raster.Get());
+            const auto drawFaces=[&](float facing) {
+                camera.facing=facing;
+                context->UpdateSubresource(polyhedronConstants.Get(),0,nullptr,&camera,0,0);
+                context->Draw(polyhedronVertexCount,0);
+            };
+            if(polyhedronAlpha>=.999f) drawFaces(0);
+            else {
+                // Far faces first, so a single convex polyhedron blends correctly.
+                context->OMSetDepthStencilState(planeDepth.Get(),0);
+                context->OMSetBlendState(planeBlend.Get(),nullptr,~0u);
+                drawFaces(-1);
+                drawFaces(1);
+                context->OMSetBlendState(nullptr,nullptr,~0u);
+                context->OMSetDepthStencilState(depthState.Get(),0);
+            }
         }
         if (planeBuffer && planeVertexCount >= 3) {
             PlaneConstants planeCamera;

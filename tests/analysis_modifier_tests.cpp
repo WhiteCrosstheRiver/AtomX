@@ -2365,6 +2365,380 @@ static void testMeasure() {
     near(attribute(evaluateFrom(resultOf(square), {measureNode("1 2 3 4 1", true)}, 0).data, "Measurements.Area"), 4, 1e-5, "a closed path across the boundary keeps its true area");
 }
 
+// ---- Per-bond properties -----------------------------------------------------------
+static size_t bondRowsWith(const Dataset &d, int common, int bonds, int chain) {
+    size_t found = 0;
+    const auto &a = d.bondProperties.at("CNA indices.1"), &b = d.bondProperties.at("CNA indices.2"), &c = d.bondProperties.at("CNA indices.3");
+    for (size_t i = 0; i < d.bonds.size(); ++i) found += a[i] == common && b[i] == bonds && c[i] == chain;
+    return found;
+}
+static Dataset taggedChain() {
+    Dataset d;
+    d.species = {"X"};
+    d.cell = {100, 0, 0, 0, 100, 0, 0, 0, 100};
+    d.atoms = {{0, 0, 0, 0}, {2, 0, 0, 0}, {4, 0, 0, 0}, {6, 0, 0, 0}};
+    d.bonds = {{0, 1, {}, 1}, {1, 2, {}, 1}, {2, 3, {}, 1}};
+    d.bondProperties["Tag"] = {10, 20, 30};
+    d.bounds();
+    return d;
+}
+static void testBondProperties() {
+    Modifier createFcc{Op::CreateBonds};
+    createFcc.value = 3.0f;
+    const auto fccBonds = evaluateFrom(resultOf(fcc(3)), {createFcc, cnaNode(3)}, 0).data;
+    check(fccBonds.bondProperties.size() == 3 && fccBonds.bonds.size() == 6 * fccBonds.atoms.size(), "bond-based CNA publishes three columns");
+    near(double(bondRowsWith(fccBonds, 4, 2, 1)), double(fccBonds.bonds.size()), 0, "every fcc bond is 421");
+
+    Modifier createWide{Op::CreateBonds};
+    createWide.value = 3.5f;
+    // Four repeats: bond-based matching is by particle, so a cell only three bonds long
+    // would turn a particle and its images along that axis into a false common neighbor.
+    const auto hcpBonds = evaluateFrom(resultOf(hcp(4)), {createWide, cnaNode(3)}, 0).data;
+    near(double(bondRowsWith(hcpBonds, 4, 2, 1)), double(3 * hcpBonds.atoms.size()), 0, "half of the hcp bonds are 421");
+    near(double(bondRowsWith(hcpBonds, 4, 2, 2)), double(3 * hcpBonds.atoms.size()), 0, "half of the hcp bonds are 422");
+    const auto hcpTable = std::find_if(hcpBonds.tables.begin(), hcpBonds.tables.end(), [](const DataTable &t) { return t.name == "CNA bond signatures"; });
+    check(hcpTable != hcpBonds.tables.end() && hcpTable->rows[1][1] == std::to_string(bondRowsWith(hcpBonds, 4, 2, 2)), "the per-bond values agree with the signature table");
+
+    const auto bccBonds = evaluateFrom(resultOf(bcc(4)), {createWide, cnaNode(3)}, 0).data;
+    near(double(bondRowsWith(bccBonds, 4, 4, 4)), double(3 * bccBonds.atoms.size()), 0, "second-shell bcc bonds are 444");
+    near(double(bondRowsWith(bccBonds, 6, 6, 6)), double(4 * bccBonds.atoms.size()), 0, "first-shell bcc bonds are 666");
+
+    // Seven particles, all bonded: every pair has 5 common neighbors with 10 bonds among them.
+    Dataset clique;
+    clique.species = {"X"};
+    clique.cell = {100, 0, 0, 0, 100, 0, 0, 0, 100};
+    for (int i = 0; i < 7; ++i) clique.atoms.push_back({float(i), 0, 0, 0});
+    for (uint32_t i = 0; i < 7; ++i)
+        for (uint32_t j = i + 1; j < 7; ++j) clique.bonds.push_back({i, j, {}, 1});
+    near(double(bondRowsWith(evaluateFrom(resultOf(clique), {cnaNode(3)}, 0).data, 5, 10, -1)), 21, 0, "the chain index is -1 above six common bonds");
+
+    PipelineResult partial = resultOf(fcc(3));
+    std::fill(partial.selected.begin(), partial.selected.end(), uint8_t(1));
+    partial.selected[0] = 0;
+    Modifier onlySelected = cnaNode(3);
+    onlySelected.cspOnlySelected = true;
+    const auto partialBonds = evaluateFrom(partial, {createFcc, onlySelected}, 0).data;
+    near(double(bondRowsWith(partialBonds, 0, 0, 0)), 12, 0, "bonds of an excluded particle get 0 0 0");
+
+    // Columns follow their bonds through every node that rewrites the bond list.
+    PipelineResult withoutSecond = resultOf(taggedChain());
+    std::fill(withoutSecond.selected.begin(), withoutSecond.selected.end(), uint8_t(0));
+    withoutSecond.selected[1] = 1;
+    const auto deleted = evaluateFrom(withoutSecond, {Modifier{Op::Delete}}, 0).data;
+    check(deleted.bonds.size() == 1 && deleted.bondProperties.at("Tag") == std::vector<double>{30}, "Delete keeps the values of surviving bonds");
+    Modifier replicate{Op::Replicate};
+    replicate.replicateN[0] = 2;
+    check(evaluateFrom(resultOf(taggedChain()), {replicate}, 0).data.bondProperties.at("Tag") == std::vector<double>{10, 20, 30, 10, 20, 30}, "Replicate repeats the values");
+    Modifier sameBonds{Op::CreateBonds};
+    sameBonds.value = 2.5f;
+    sameBonds.discardExistingBonds = false;
+    check(evaluateFrom(resultOf(taggedChain()), {sameBonds}, 0).data.bondProperties.at("Tag") == std::vector<double>{10, 20, 30}, "duplicates found by Create bonds do not disturb the values");
+    Modifier moreBonds = sameBonds;
+    moreBonds.value = 4.5f;
+    check(evaluateFrom(resultOf(taggedChain()), {moreBonds}, 0).data.bondProperties.at("Tag") == std::vector<double>{10, 20, 30, 0, 0}, "new bonds get 0");
+    Modifier replaceBonds = moreBonds;
+    replaceBonds.discardExistingBonds = true;
+    check(evaluateFrom(resultOf(taggedChain()), {replaceBonds}, 0).data.bondProperties.empty(), "discarding the bonds removes their properties");
+    installFakeFiles();
+    Dataset extra;
+    extra.species = {"X"};
+    extra.cell = {50, 0, 0, 0, 50, 0, 0, 0, 50};
+    extra.atoms = {{20, 0, 0, 0}, {22, 0, 0, 0}};
+    extra.bonds = {{0, 1, {}, 1}};
+    fakeFiles["bonded"] = {extra};
+    Modifier combine{Op::CombineDatasets};
+    combine.property = "bonded";
+    check(evaluateFrom(resultOf(taggedChain()), {combine}, 0).data.bondProperties.at("Tag") == std::vector<double>{10, 20, 30, 0}, "bonds from a combined file get 0");
+    PipelineResult stale = resultOf(taggedChain());
+    stale.data.bonds.pop_back();
+    check(evaluateFrom(stale, {}, 0).data.bondProperties.empty(), "a column that no longer matches the bonds is dropped");
+
+    // Histogram and Reduce property.
+    Modifier lengths{Op::Histogram};
+    lengths.type = 4;
+    lengths.clusterByBonds = true;
+    lengths.property = "Length";
+    const auto lengthResult = evaluateFrom(resultOf(fcc(3)), {createFcc, lengths}, 0).data;
+    near(lengthResult.globalAttributes.at("Histogram.samples"), double(6 * lengthResult.atoms.size()), 0, "Histogram counts every bond");
+    check(tableNamed(lengthResult, "Histogram: Bond.Length").rows.size() == 4, "the table names the bond property");
+    Modifier chains = lengths;
+    chains.type = 2;
+    chains.property = "CNA indices.3";
+    const auto chainResult = evaluateFrom(resultOf(bcc(4)), {createWide, cnaNode(3), chains}, 0).data;
+    const DataTable &chainTable = tableNamed(chainResult, "Histogram: Bond.CNA indices.3");
+    check(chainTable.rows[0][1] == std::to_string(3 * chainResult.atoms.size()) && chainTable.rows[1][1] == std::to_string(4 * chainResult.atoms.size()),
+          "Histogram reads a stored bond property");
+    PipelineResult threeSelected = resultOf(taggedChain());
+    std::fill(threeSelected.selected.begin(), threeSelected.selected.end(), uint8_t(1));
+    threeSelected.selected[3] = 0;
+    Modifier selectedOnly = lengths;
+    selectedOnly.histogramSelectedOnly = true;
+    near(evaluateFrom(threeSelected, {selectedOnly}, 0).data.globalAttributes.at("Histogram.samples"), 2, 0, "a selected bond needs both particles selected");
+    Modifier rangeOnBonds = lengths;
+    rangeOnBonds.histogramSelectRange = true;
+    rangeOnBonds.histogramRangeStart = 0;
+    rangeOnBonds.histogramRangeEnd = 1;
+    throwsWith([&] { (void)evaluateFrom(resultOf(taggedChain()), {rangeOnBonds}, 0); }, "particles only", "value-range selection is refused on bonds");
+    Modifier unknown = lengths;
+    unknown.property = "Nope";
+    throwsWith([&] { (void)evaluateFrom(resultOf(taggedChain()), {unknown}, 0); }, "Unknown bond property", "an unknown bond property is reported");
+    throwsWith([&] { (void)evaluateFrom(resultOf(fcc(1)), {lengths}, 0); }, "needs bonds", "a bond histogram needs bonds");
+    Modifier longest{Op::ReduceProperty};
+    longest.clusterByBonds = true;
+    longest.property = "Length";
+    longest.reduceOperation = 1;
+    near(evaluateFrom(resultOf(taggedChain()), {longest}, 0).data.globalAttributes.at("ReduceProperty.Bond.Length.max"), 2, 1e-9, "Reduce property reads bond lengths");
+
+    const auto outputs = modifierOutputs(cnaNode(3), 0);
+    check(std::any_of(outputs.begin(), outputs.end(), [](const DataObject &o) { return o.kind == DataObject::Kind::Bonds && o.name == "CNA indices"; }), "the node lists its bond output");
+    const std::vector<Modifier> stack{createFcc, cnaNode(3), lengths};
+    check(pipelineInputBondPropertyChoices(fcc(1), stack, 1) == std::vector<std::string>{"Length"}, "upstream of CNA only Length is offered");
+    check(pipelineInputBondPropertyChoices(fcc(1), stack, 2).size() == 4, "downstream of bond-based CNA its columns are offered");
+}
+
+// ---- Trajectory lines and coordination polyhedra ------------------------------------
+static PipelineResult runOverFrames(const std::vector<Dataset> &frames, const Modifier &node, int current,
+                                    const std::vector<uint8_t> *firstSelection = nullptr) {
+    ModifierFrameState state;
+    state.frameCount = int(frames.size());
+    state.frameBefore = [&](size_t, int frame) { return frames.at(size_t(frame)); };
+    if (firstSelection) state.selectionBefore = [&](size_t, int) { return *firstSelection; };
+    return evaluateFrom(resultOf(frames.at(size_t(current))), {node}, 0, nullptr, nullptr, SIZE_MAX, {}, {}, current, state);
+}
+static std::vector<Dataset> movingPair() {
+    // Particle 0 moves +0.5 per frame across the x boundary of a 10-unit periodic cell.
+    std::vector<Dataset> frames;
+    for (int f = 0; f < 4; ++f) {
+        Dataset d;
+        d.species = {"X"};
+        d.pbc = {true, true, true};
+        d.cell = {10, 0, 0, 0, 10, 0, 0, 0, 10};
+        float x = 9.0f + .5f * float(f);
+        if (x >= 10) x -= 10;
+        d.atoms = {{x, 1, 1, 0}, {3, float(f), 5, 0}};
+        d.scalarProperties["Particle Identifier"] = {1, 2};
+        d.scalarProperties["Energy"] = {double(f), 10.0 * f};
+        d.bounds();
+        frames.push_back(std::move(d));
+    }
+    return frames;
+}
+static size_t countSegments(const Dataset &d) {
+    size_t n = 0;
+    forEachTrajectorySegment(d, 1000, [&](const auto &, const auto &, float) { ++n; });
+    return n;
+}
+static void testTrajectoryLines() {
+    const auto frames = movingPair();
+    Modifier node{Op::GenerateTrajectoryLines};
+    node.property.clear();
+    node.adaptive = true;
+    node.cspNeighbors = 1;
+    auto lines = runOverFrames(frames, node, 2).data;
+    check(lines.trajectoryLines.set && lines.trajectoryLines.set->lineCount == 2 && lines.trajectoryLines.set->points.size() == 8, "one line per particle and one point per frame");
+    near(attribute(lines, "TrajectoryLines.count"), 2, 0, "line count attribute");
+    near(lines.trajectoryLines.set->points[3].x, 10.5, 1e-5, "unwrapping continues across the boundary");
+    near(double(countSegments(lines)), 6, 0, "three segments per line");
+    near(double(lines.atoms.size()), 2, 0, "particles are untouched");
+
+    Modifier raw = node;
+    raw.adaptive = false;
+    near(runOverFrames(frames, raw, 0).data.trajectoryLines.set->points[3].x, .5, 1e-5, "wrapped input stays wrapped when unwrapping is off");
+
+    // Particle order changes between frames: lines follow the identifiers.
+    auto shuffled = frames;
+    std::swap(shuffled[1].atoms[0], shuffled[1].atoms[1]);
+    shuffled[1].scalarProperties["Particle Identifier"] = {2, 1};
+    near(runOverFrames(shuffled, node, 0).data.trajectoryLines.set->points[1].x, 9.5, 1e-5, "lines follow particle identifiers");
+
+    Modifier chosen = node;
+    chosen.cspOnlySelected = true;
+    const std::vector<uint8_t> second{0, 1}, none{0, 0};
+    const auto picked = runOverFrames(frames, chosen, 3, &second).data;
+    check(picked.trajectoryLines.set->lineCount == 1 && picked.trajectoryLines.set->points[0].x == 3.f, "the selection of the first frame picks the particles");
+    throwsWith([&] { (void)runOverFrames(frames, chosen, 0, &none); }, "No particles are selected", "an empty selection is reported");
+
+    Modifier range = node;
+    range.clusterByBonds = true;
+    range.replicateN[0] = 1;
+    range.replicateN[1] = 3;
+    range.cspNeighbors = 2;
+    check(runOverFrames(frames, range, 0).data.trajectoryLines.set->frames == std::vector<int>{1, 3}, "frame range and sampling choose the frames");
+    range.replicateN[1] = 9;
+    throwsWith([&] { (void)runOverFrames(frames, range, 0); }, "frame range", "a range past the end is reported");
+    Modifier sparse = node;
+    sparse.cspNeighbors = 10;
+    throwsWith([&] { (void)runOverFrames(frames, sparse, 0); }, "at least two", "one sampled frame is not a line");
+
+    Modifier sampled = node;
+    sampled.property = "Energy";
+    const auto colored = runOverFrames(frames, sampled, 0).data;
+    near(colored.trajectoryLines.set->valueMax, 30, 1e-5, "sampled values span all frames");
+    near(colored.trajectoryLines.set->values[7], 30, 1e-5, "values are stored per point");
+    std::vector<float> shades;
+    forEachTrajectorySegment(colored, 1000, [&](const auto &, const auto &, float u) { shades.push_back(u); });
+    near(shades.back(), 25.0 / 30.0, 1e-5, "a segment takes the mean of its end values");
+    Modifier missing = node;
+    missing.property = "Nope";
+    throwsWith([&] { (void)runOverFrames(frames, missing, 0); }, "Nope", "an unknown sampled property is reported");
+
+    Modifier partial = node;
+    partial.overlapUseRadii = true;
+    near(double(countSegments(runOverFrames(frames, partial, 0).data)), 0, 0, "nothing is drawn at the first frame");
+    near(double(countSegments(runOverFrames(frames, partial, 2).data)), 4, 0, "segments grow with the current frame");
+
+    Modifier wrapped = node;
+    wrapped.histogramSelectRange = true;
+    // Offset so that one segment crosses x = 10 instead of ending exactly on it.
+    auto crossing = frames;
+    for (auto &f : crossing) { f.atoms[0].x += .25f; if (f.atoms[0].x >= 10) f.atoms[0].x -= 10; }
+    const auto folded = runOverFrames(crossing, wrapped, 0).data;
+    std::vector<std::array<double, 2>> firstLine;
+    forEachTrajectorySegment(folded, 1000, [&](const auto &a, const auto &b, float) { if (a[1] < 1.5 && b[1] < 1.5 && a[2] < 2) firstLine.push_back({a[0], b[0]}); });
+    check(firstLine.size() == 4, "a segment is cut at the periodic boundary");
+    bool inside = true;
+    for (const auto &piece : firstLine) inside = inside && piece[0] >= -1e-6 && piece[0] <= 10 + 1e-6 && piece[1] >= -1e-6 && piece[1] <= 10 + 1e-6;
+    check(inside, "wrapped pieces stay in the cell");
+
+    throwsWith([&] { (void)runOverFrames({frames[0]}, node, 0); }, "at least two", "a single frame cannot make lines");
+    Dataset huge;
+    huge.species = {"X"};
+    huge.atoms.resize(trajectorySegmentLimit + 1);
+    throwsWith([&] { (void)runOverFrames({huge, huge}, node, 0); }, "2,000,000", "the segment budget is enforced before reading frames");
+    std::atomic<bool> stop{true};
+    throwsWith([&] { (void)sweepTrajectoryLines({}, 4, [&](int f) { return frames[size_t(f)]; }, {}, &stop); }, "Cancelled", "the sweep can be cancelled");
+}
+
+// A central particle (index 0) plus neighbors at the given offsets, bonded to the center.
+static PipelineResult shellAround(const std::vector<std::array<float, 3>> &offsets, std::array<float, 3> center = {10, 10, 10}) {
+    Dataset d;
+    d.species = {"X"};
+    d.cell = {40, 0, 0, 0, 40, 0, 0, 0, 40};
+    d.atoms.push_back({center[0], center[1], center[2], 0});
+    for (uint32_t i = 0; i < offsets.size(); ++i) {
+        d.atoms.push_back({center[0] + offsets[i][0], center[1] + offsets[i][1], center[2] + offsets[i][2], 0});
+        d.bonds.push_back({0, i + 1, {}, 1});
+    }
+    d.bounds();
+    PipelineResult r = resultOf(d);
+    std::fill(r.selected.begin(), r.selected.end(), uint8_t(0));
+    r.selected[0] = 1;
+    return r;
+}
+static const std::vector<std::array<float, 3>> octahedron{{2, 0, 0}, {-2, 0, 0}, {0, 2, 0}, {0, -2, 0}, {0, 0, 2}, {0, 0, -2}};
+static bool facesPointOutward(const Dataset &d) {
+    const auto &c = d.polyhedra.corners;
+    for (size_t k = 0; k + 2 < c.size(); k += 3) {
+        std::array<double, 3> p[3];
+        if (!polyhedronCorner(d, c[k], p[0]) || !polyhedronCorner(d, c[k + 1], p[1]) || !polyhedronCorner(d, c[k + 2], p[2])) return false;
+        const std::array<double, 3> u{p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]}, v{p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+        const std::array<double, 3> n{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
+        const Atom &a = d.atoms[c[k].a];
+        if (n[0] * (p[0][0] - a.x) + n[1] * (p[0][1] - a.y) + n[2] * (p[0][2] - a.z) <= 0) return false;
+    }
+    return true;
+}
+static void testCoordinationPolyhedra() {
+    Modifier node{Op::CoordinationPolyhedra};
+    node.value = .3f;
+    node.adaptive = true;
+    const auto run = [&](const PipelineResult &r) { return evaluateFrom(r, {node}, 0).data; };
+    const auto octa = run(shellAround(octahedron));
+    near(attribute(octa, "CoordinationPolyhedra.count"), 1, 0, "one polyhedron");
+    near(double(octa.polyhedra.corners.size() / 3), 8, 0, "an octahedron has 8 faces");
+    near(double(octa.polyhedra.edges.size() / 2), 12, 0, "an octahedron has 12 edges");
+    near(octa.polyhedra.alpha, .7, 1e-6, "transparency sets the opacity");
+    check(facesPointOutward(octa), "triangles wind outward");
+
+    std::vector<std::array<float, 3>> cube;
+    for (float x : {-1.f, 1.f}) for (float y : {-1.f, 1.f}) for (float z : {-1.f, 1.f}) cube.push_back({x, y, z});
+    const auto box = run(shellAround(cube));
+    near(double(box.polyhedra.corners.size() / 3), 12, 0, "a cube is 12 triangles");
+    near(double(box.polyhedra.edges.size() / 2), 12, 0, "face diagonals are not edges");
+    check(facesPointOutward(box), "cube triangles wind outward");
+
+    // A neighbor strictly inside the hull adds nothing.
+    auto withInner = octahedron;
+    withInner.push_back({.2f, .1f, .1f});
+    near(double(run(shellAround(withInner)).polyhedra.corners.size() / 3), 8, 0, "interior neighbors are not corners");
+
+    const auto square = run(shellAround({{2, 0, 0}, {-2, 0, 0}, {0, 2, 0}, {0, -2, 0}}));
+    near(attribute(square, "CoordinationPolyhedra.skipped"), 1, 0, "coplanar neighbors are skipped");
+    check(square.polyhedra.corners.empty(), "no faces for a flat shell");
+    near(attribute(run(shellAround({{2, 0, 0}, {0, 2, 0}, {0, 0, 2}})), "CoordinationPolyhedra.skipped"), 1, 0, "three neighbors are skipped");
+
+    PipelineResult noneSelected = shellAround(octahedron);
+    std::fill(noneSelected.selected.begin(), noneSelected.selected.end(), uint8_t(0));
+    near(attribute(run(noneSelected), "CoordinationPolyhedra.count"), 0, 0, "without a selection there are no polyhedra");
+    PipelineResult unbonded = shellAround(octahedron);
+    unbonded.data.bonds.clear();
+    throwsWith([&] { (void)run(unbonded); }, "needs bonds", "missing bonds are reported");
+    Modifier bad = node;
+    bad.value = 2;
+    throwsWith([&] { (void)evaluateFrom(shellAround(octahedron), {bad}, 0); }, "Transparency", "an out-of-range transparency is rejected");
+
+    // Across a periodic boundary the shell stays attached to its center.
+    PipelineResult wrapped = shellAround(octahedron, {1, 10, 10});
+    wrapped.data.pbc = {true, true, true};
+    wrapped.data.atoms[2].x = 39;
+    wrapped.data.bonds[1].image = {-1, 0, 0};
+    const auto across = run(wrapped);
+    near(double(across.polyhedra.corners.size() / 3), 8, 0, "a shell across the boundary is complete");
+    double lowest = 1e9;
+    for (const Bond &corner : across.polyhedra.corners) { std::array<double, 3> p; check(polyhedronCorner(across, corner, p), "corner resolves"); lowest = std::min(lowest, p[0]); }
+    near(lowest, -1, 1e-5, "the corner sits at the image next to the center");
+
+    // A bond listed from the neighbor's side counts in the opposite image direction.
+    PipelineResult reversed = wrapped;
+    Bond &flip = reversed.data.bonds[1];
+    std::swap(flip.a, flip.b);
+    flip.image = {1, 0, 0};
+    lowest = 1e9;
+    const auto flipped = run(reversed);
+    for (const Bond &corner : flipped.polyhedra.corners) { std::array<double, 3> p; check(polyhedronCorner(flipped, corner, p), "reversed corner resolves"); lowest = std::min(lowest, p[0]); }
+    near(lowest, -1, 1e-5, "a reversed bond reaches the same image");
+
+    // Later nodes keep the polyhedra consistent.
+    Modifier move{Op::Rotate};
+    move.axis = 2;
+    move.value = 90;
+    const auto turned = evaluateFrom(shellAround(octahedron), {node, move}, 0).data;
+    std::array<double, 3> corner;
+    check(polyhedronCorner(turned, turned.polyhedra.corners[0], corner), "a rotated corner resolves");
+    const Atom &middle = turned.atoms[0];
+    near(std::hypot(corner[0] - middle.x, corner[1] - middle.y, corner[2] - middle.z), 2, 1e-4, "polyhedra follow a rotation");
+
+    Modifier replicate{Op::Replicate};
+    replicate.replicateN[0] = 2;
+    const auto doubled = evaluateFrom(shellAround(octahedron), {node, replicate}, 0).data;
+    near(double(doubled.polyhedra.corners.size() / 3), 16, 0, "Replicate copies polyhedra");
+    near(double(doubled.polyhedra.corners.back().a), 7, 0, "copies belong to the copied center");
+    check(facesPointOutward(doubled), "replicated polyhedra keep their winding");
+
+    // Two shells: deleting one corner removes only the polyhedron that used it.
+    PipelineResult pair = shellAround(octahedron);
+    Dataset &two = pair.data;
+    const uint32_t base = uint32_t(two.atoms.size());
+    two.atoms.push_back({30, 30, 30, 0});
+    for (uint32_t i = 0; i < octahedron.size(); ++i) {
+        two.atoms.push_back({30 + octahedron[i][0], 30 + octahedron[i][1], 30 + octahedron[i][2], 0});
+        two.bonds.push_back({base, base + i + 1, {}, 1});
+    }
+    pair.selected.assign(two.atoms.size(), 0);
+    pair.colorSelected.assign(two.atoms.size(), 1);
+    pair.selected[0] = pair.selected[base] = 1;
+    two.bounds();
+    Modifier clearAndPick{Op::ExpressionSelect};
+    clearAndPick.property = "Position.X > 11.5 && Position.X < 12.5";
+    const auto remaining = evaluateFrom(pair, {node, clearAndPick, Modifier{Op::Delete}}, 0).data;
+    near(double(remaining.polyhedra.corners.size() / 3), 8, 0, "a polyhedron that lost a corner is removed");
+    near(double(remaining.polyhedra.corners[0].a), double(base - 1), 0, "the surviving polyhedron is reindexed");
+    check(facesPointOutward(remaining), "the surviving polyhedron is intact");
+
+    const auto outputs = modifierOutputs(node, 0);
+    check(outputs[0].kind == DataObject::Kind::Surface, "the node lists a surface output");
+}
+
 static void testPartialRdf() {
     // A rock-salt arrangement of two types.
     Dataset d = simpleCubic(6, 2.0);
@@ -2495,6 +2869,9 @@ int main() {
     testCombineDatasets();
     testMeasure();
     testPartialRdf();
+    testBondProperties();
+    testTrajectoryLines();
+    testCoordinationPolyhedra();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";

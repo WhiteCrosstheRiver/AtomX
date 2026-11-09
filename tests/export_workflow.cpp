@@ -2368,6 +2368,59 @@ int main(int argc,char **argv) {
                 requireExport(app.error.empty(),("interval CNA runs: "+app.error).c_str());
                 while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
                 frame();
+                // Trajectory lines sweep the file and reach the GPU. The paths are longer than
+                // the particles are wide, so they are visible in the rendered image.
+                const auto linesPath=dir/"lines.xyz";
+                {
+                    std::ofstream out(linesPath);
+                    for (int f=0;f<4;++f) {
+                        out<<"3\nframe "<<f<<"\n";
+                        for (int i=0;i<3;++i) out<<"C "<<i*8<<' '<<f*6<<' '<<f*f<<"\n";
+                    }
+                }
+                {
+                    Dataset paths;
+                    paths.species={"C"};
+                    paths.atoms={{0,0,0,0},{8,0,0,0},{16,0,0,0}};
+                    paths.sourceCount=3;
+                    paths.bounds();
+                    app.source=paths;
+                }
+                app.path=linesPath;
+                app.frames=io::index(linesPath);
+                strcpy_s(app.modifierSearch,"Generate trajectory lines");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Generate trajectory lines");
+                settlePipeline();
+                requireExport(app.mods.size()==1 && app.mods[0].op==Op::GenerateTrajectoryLines && app.mods[0].adaptive,"catalog adds Generate trajectory lines");
+                app.selectPipeline=true;
+                app.modifierGraph.selected=0;
+                frame();
+                frame();
+                requireExport(app.error.empty() && app.result.data.trajectoryLines.set && app.result.data.trajectoryLines.set->frames.size()==4,("trajectory lines cover the file: "+app.error).c_str());
+                requireExport(app.gpu.trajectoryLineVertices()==18,"the trajectory segments are uploaded");
+                requireExport(app.uiTestItems.contains("pipeline.lines-every."+app.mods[0].id),"the trajectory line panel draws its controls");
+                const auto linePixels=[&]() {
+                    const auto &target=app.targets[3]; D3D11_TEXTURE2D_DESC desc{}; target.texture->GetDesc(&desc);
+                    desc.Usage=D3D11_USAGE_STAGING; desc.BindFlags=0; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                    ComPtr<ID3D11Texture2D> copy; check(app.gpu.device->CreateTexture2D(&desc,nullptr,&copy),"Scene readback");
+                    app.gpu.context->CopyResource(copy.Get(),target.texture.Get());
+                    D3D11_MAPPED_SUBRESOURCE map{}; check(app.gpu.context->Map(copy.Get(),0,D3D11_MAP_READ,0,&map),"Scene pixels");
+                    std::vector<uint8_t> pixels(size_t(target.w)*target.h*4);
+                    for(int y=0;y<target.h;++y) memcpy(pixels.data()+size_t(y)*target.w*4,static_cast<const uint8_t *>(map.pData)+y*map.RowPitch,size_t(target.w)*4);
+                    app.gpu.context->Unmap(copy.Get(),0); return pixels;
+                };
+                frame();
+                const auto withLines=linePixels();
+                app.mods[0].enabled=false;
+                app.update(0);
+                settlePipeline();
+                frame();
+                frame();
+                requireExport(app.gpu.trajectoryLineVertices()==0 && linePixels()!=withLines,"the trajectory lines change the rendered image");
+                while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
+                frame();
                 app.frames=savedFrames;
                 app.path=savedPath;
                 app.source=savedSource;
@@ -2378,6 +2431,122 @@ int main(int argc,char **argv) {
                     for (int wait=0;wait<12 && (app.busy || app.pipelineBusy || app.pendingFrame>=0);++wait) { app.poll(); if(app.busy && app.job.valid())app.job.wait(); app.poll(); settlePipeline(); }
                 }
                 frame();
+            }
+            {
+                // Coordination polyhedra reach the GPU.
+                requireExport(app.mods.empty(),"polyhedra fixture starts from an empty pipeline");
+                const Dataset savedPolyhedraSource=app.source;
+                Dataset shell;
+                shell.species={"M","O"};
+                shell.cell={20,0,0,0,20,0,0,0,20};
+                shell.atoms={{5,5,5,0},{7,5,5,1},{3,5,5,1},{5,7,5,1},{5,3,5,1},{5,5,7,1},{5,5,3,1}};
+                shell.sourceCount=shell.atoms.size();
+                shell.bounds();
+                app.source=shell;
+                app.update(0);
+                settlePipeline();
+                app.add(Op::CreateBonds);
+                app.mods.back().value=2.5f;
+                app.update(0);
+                settlePipeline();
+                app.add(Op::ExpressionSelect);
+                app.mods.back().property="`Particle Type` == 0";
+                app.update(0);
+                settlePipeline();
+                strcpy_s(app.modifierSearch,"Coordination polyhedra");
+                click("pipeline.add-modification");
+                frame();
+                click("catalog.Coordination polyhedra");
+                settlePipeline();
+                requireExport(app.mods.size()==3 && app.mods[2].op==Op::CoordinationPolyhedra && app.mods[2].adaptive,"catalog adds Coordination polyhedra");
+                app.selectPipeline=true;
+                app.modifierGraph.selected=2;
+                frame();
+                frame();
+                requireExport(app.error.empty() && app.result.data.polyhedra.corners.size()==24,("the octahedron is built: "+app.error).c_str());
+                requireExport(app.gpu.polyhedronVertices()==24,"the polyhedron faces are uploaded");
+                requireExport(app.uiTestItems.contains("pipeline.polyhedra-transparency."+app.mods[2].id),"the polyhedra panel draws its controls");
+                const auto polyhedraPixels=[&]() {
+                    const auto &target=app.targets[3]; D3D11_TEXTURE2D_DESC desc{}; target.texture->GetDesc(&desc);
+                    desc.Usage=D3D11_USAGE_STAGING; desc.BindFlags=0; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                    ComPtr<ID3D11Texture2D> copy; check(app.gpu.device->CreateTexture2D(&desc,nullptr,&copy),"Scene readback");
+                    app.gpu.context->CopyResource(copy.Get(),target.texture.Get());
+                    D3D11_MAPPED_SUBRESOURCE map{}; check(app.gpu.context->Map(copy.Get(),0,D3D11_MAP_READ,0,&map),"Scene pixels");
+                    std::vector<uint8_t> pixels(size_t(target.w)*target.h*4);
+                    for(int y=0;y<target.h;++y) memcpy(pixels.data()+size_t(y)*target.w*4,static_cast<const uint8_t *>(map.pData)+y*map.RowPitch,size_t(target.w)*4);
+                    app.gpu.context->Unmap(copy.Get(),0); return pixels;
+                };
+                frame();
+                const auto withPolyhedra=polyhedraPixels();
+                app.mods[2].enabled=false;
+                app.update(0);
+                settlePipeline();
+                frame();
+                frame();
+                requireExport(app.gpu.polyhedronVertices()==0 && polyhedraPixels()!=withPolyhedra,"the polyhedra change the rendered image");
+                while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
+                app.source=savedPolyhedraSource;
+                app.update(0);
+                settlePipeline();
+                frame();
+                requireExport(app.gpu.polyhedronVertices()==0,"removing the node clears the polyhedra");
+                app.undo.clear();
+                app.redo.clear();
+                // Bond properties reach the Histogram node and the Data inspector.
+                requireExport(app.mods.empty(),"bond property fixture starts from an empty pipeline");
+                const Dataset savedBondSource=app.source;
+                Dataset cube;
+                cube.species={"X"};
+                cube.cell={20,0,0,0,20,0,0,0,20};
+                for (int z=0;z<2;++z) for (int y=0;y<2;++y) for (int x=0;x<2;++x)
+                    cube.atoms.push_back({float(2*x),float(2*y),float(2*z),0});
+                cube.sourceCount=cube.atoms.size();
+                cube.bounds();
+                app.source=cube;
+                app.update(0);
+                settlePipeline();
+                app.add(Op::CreateBonds);
+                app.mods.back().value=3.0f;
+                app.update(0);
+                settlePipeline();
+                app.add(Op::CommonNeighborAnalysis);
+                app.mods.back().type=3;
+                app.mods.back().overlapUseRadii=false;
+                app.update(0);
+                settlePipeline();
+                app.add(Op::Histogram);
+                settlePipeline();
+                requireExport(app.mods.size()==3 && app.mods[0].op==Op::CreateBonds && app.mods[1].op==Op::CommonNeighborAnalysis && app.mods[2].op==Op::Histogram,"bond property fixture builds its pipeline in order");
+                requireExport(app.error.empty() && app.result.data.bondProperties.contains("CNA indices.3"),("bond-based CNA publishes per-bond columns: "+app.error).c_str());
+                const auto histogramId=app.mods[2].id;
+                app.selectPipeline=true;
+                app.modifierGraph.selected=2;
+                frame();
+                frame();
+                requireExport(app.uiTestItems.contains("pipeline.analysis-element."+histogramId),"Histogram offers Operate on");
+                click("pipeline.analysis-element."+histogramId);
+                guiIO.AddKeyEvent(ImGuiKey_DownArrow,true); frame();
+                guiIO.AddKeyEvent(ImGuiKey_DownArrow,false); frame();
+                guiIO.AddKeyEvent(ImGuiKey_Enter,true); frame();
+                guiIO.AddKeyEvent(ImGuiKey_Enter,false); frame();
+                settlePipeline();
+                requireExport(app.mods[2].clusterByBonds && app.mods[2].property=="Length" && app.error.empty(),("Operate on switches Histogram to bond lengths: "+app.error).c_str());
+                const bool bondTable=std::any_of(app.result.data.tables.begin(),app.result.data.tables.end(),[](const DataTable &t){return t.name=="Histogram: Bond.Length";});
+                requireExport(bondTable,"the bond histogram table is published");
+                app.showTable=true;
+                app.bondsTab=true;
+                frame();
+                frame();
+                requireExport(app.uiTestItems.contains("inspector.count.bonds"),"the Bonds page renders the per-bond columns");
+                app.showTable=false;
+                frame();
+                while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
+                app.source=savedBondSource;
+                app.update(0);
+                settlePipeline();
+                frame();
+                app.undo.clear(); // Later steps count undo entries from a clean history.
+                app.redo.clear();
             }
             {
                 // Modifier templates use a private file, never the user's own template list.

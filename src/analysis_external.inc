@@ -179,6 +179,7 @@ inline void combineDatasets(PipelineResult &r, const Dataset &other, std::atomic
         bond.b += uint32_t(first);
         data.bonds.push_back(bond);
     }
+    data.padBondProperties();
     r.selected.resize(total, 0);
     r.colorSelected.resize(total, 1);
     data.sourceCount += added;

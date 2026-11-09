@@ -388,7 +388,10 @@ inline void computeVoronoi(PipelineResult &r, const VoronoiOptions &options, std
     data.scalarProperties["Max Face Order"] = expand(std::move(maxOrder));
     data.globalAttributes["Voronoi.max_face_order"] = double(highestOrder);
     data.globalAttributes["Voronoi.total_volume"] = totalVolume;
-    if (options.neighborBonds) data.bonds.insert(data.bonds.end(), bonds.begin(), bonds.end());
+    if (options.neighborBonds) {
+        data.bonds.insert(data.bonds.end(), bonds.begin(), bonds.end());
+        data.padBondProperties();
+    }
     std::vector<std::pair<std::string, uint64_t>> ranked(signatures.begin(), signatures.end());
     std::sort(ranked.begin(), ranked.end(), [](const auto &a, const auto &b) {
         return a.second != b.second ? a.second > b.second : a.first < b.first;

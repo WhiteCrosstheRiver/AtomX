@@ -172,6 +172,57 @@ inline Vec3 structureColor(uint8_t type) {
     const auto &c = colors[type < 5 ? type : 0];
     return Vec3{c[0], c[1], c[2]};
 }
+
+// Writes the three CNA indices of every bond into data.bondProperties. adjacency holds sorted
+// neighbor lists; remap maps a dataset particle to its adjacency slot (-1 when excluded).
+// Index 1 counts common neighbors, 2 the bonds among them and 3 the longest chain of those
+// bonds, each used once. The chain is searched for up to 6 bonds and is -1 above that.
+// Self bonds and bonds with an excluded particle get 0 0 0.
+inline void publishBondIndices(Dataset &data, const std::vector<std::vector<uint32_t>> &adjacency,
+                               const std::vector<int64_t> &remap, std::atomic<bool> *cancel) {
+    const size_t bondCount = data.bonds.size();
+    std::array<std::vector<double>, 3> columns;
+    for (auto &column : columns) column.assign(bondCount, 0.0);
+    std::atomic<size_t> next{0};
+    std::atomic<bool> stopped{false};
+    const auto work = [&] {
+        std::vector<uint32_t> common;
+        for (;;) {
+            const size_t start = next.fetch_add(4096);
+            if (start >= bondCount || stopped) return;
+            if (cancel && *cancel) { stopped = true; return; }
+            for (size_t row = start; row < std::min(bondCount, start + 4096); ++row) {
+                const int64_t a = remap[data.bonds[row].a], b = remap[data.bonds[row].b];
+                if (a < 0 || b < 0 || a == b) continue;
+                common.clear();
+                std::set_intersection(adjacency[size_t(a)].begin(), adjacency[size_t(a)].end(), adjacency[size_t(b)].begin(),
+                                      adjacency[size_t(b)].end(), std::back_inserter(common));
+                std::array<std::array<uint8_t, 2>, 6> edges{};
+                int edgeCount = 0;
+                for (size_t i = 0; i < common.size(); ++i)
+                    for (size_t j = i + 1; j < common.size(); ++j) {
+                        if (!std::binary_search(adjacency[common[i]].begin(), adjacency[common[i]].end(), common[j])) continue;
+                        if (edgeCount < 6) edges[size_t(edgeCount)] = {uint8_t(i), uint8_t(j)};
+                        ++edgeCount;
+                    }
+                columns[0][row] = double(common.size());
+                columns[1][row] = double(edgeCount);
+                columns[2][row] = edgeCount <= 6 ? double(longestChain(edges, edgeCount)) : -1.0;
+            }
+        }
+    };
+    const unsigned threads = std::clamp(std::thread::hardware_concurrency(), 1u, 16u);
+    if (bondCount < 4096 || threads == 1) work();
+    else {
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < threads; ++t) pool.emplace_back(work);
+        for (auto &thread : pool) thread.join();
+    }
+    if (stopped || (cancel && *cancel)) throw std::runtime_error("Cancelled");
+    data.bondProperties["CNA indices.1"] = std::move(columns[0]);
+    data.bondProperties["CNA indices.2"] = std::move(columns[1]);
+    data.bondProperties["CNA indices.3"] = std::move(columns[2]);
+}
 } // namespace cna_detail
 
 inline void computeCommonNeighborAnalysis(Dataset &data, const CnaOptions &options,
@@ -199,8 +250,14 @@ inline void computeCommonNeighborAnalysis(Dataset &data, const CnaOptions &optio
             adjacency[size_t(a)].push_back(uint32_t(b));
             adjacency[size_t(b)].push_back(uint32_t(a));
         }
-        bondResult = classifyCommonNeighborAdjacency(std::move(adjacency), cancel);
+        // The classifier validates the neighbor limits that the per-bond search relies on.
+        bondResult = classifyCommonNeighborAdjacency(adjacency, cancel);
         structure = bondResult.structure;
+        for (auto &neighbors : adjacency) {
+            std::sort(neighbors.begin(), neighbors.end());
+            neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+        }
+        publishBondIndices(data, adjacency, remap, cancel);
     } else {
         const auto lists = nearestNeighborsWithImages(input, 15, cancel);
         std::atomic<size_t> next{0};
@@ -249,7 +306,7 @@ inline void computeCommonNeighborAnalysis(Dataset &data, const CnaOptions &optio
     }
     data.tables.push_back(std::move(table));
     if (options.mode == CnaMode::BondBased) {
-        // AtomX has no per-bond properties yet, so bonds are summarized by their CNA indices.
+        // Totals per distinct particle pair; the values per bond are in bondProperties.
         // Keys of the shared engine count path steps; the labels are the conventional indices.
         const std::array<std::pair<std::tuple<int, int, int>, const char *>, 5> known{{
             {{4, 2, 1}, "421"}, {{4, 2, 2}, "422"}, {{4, 4, 3}, "444"}, {{5, 5, 4}, "555"}, {{6, 6, 5}, "666"}}};

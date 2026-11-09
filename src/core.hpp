@@ -11,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <set>
@@ -113,6 +114,31 @@ struct BondStyle {
     bool colorByType = false;
     bool showPeriodicImages = true;
 };
+// Sampled paths of Generate trajectory lines. Shared between frames and pipeline stages.
+struct TrajectoryLineSet {
+    std::vector<int> frames;   // Trajectory frame of each point along a line.
+    size_t lineCount = 0;
+    std::vector<Vec3> points;  // lineCount * frames.size() positions, line by line.
+    std::vector<float> values; // Same layout as points; empty without a sampled property.
+    float valueMin = 0, valueMax = 1;
+};
+struct TrajectoryLineStyle {
+    std::shared_ptr<const TrajectoryLineSet> set;
+    int currentFrame = 0;
+    float width = 1.5f;
+    std::array<float, 3> color{.95f, .55f, .2f};
+    int gradient = 0;
+    bool upToCurrent = false, wrap = false;
+};
+// Coordination polyhedra as particle references, so they follow later position changes.
+// Each corner is the bond from the central particle (a) to a neighbor (b).
+struct PolyhedronMesh {
+    std::vector<Bond> corners; // Three per triangle, counter-clockwise seen from outside.
+    std::vector<Bond> edges;   // Two per drawn edge.
+    float alpha = .7f;
+    bool showEdges = true;
+    std::array<float, 3> edgeColor{.12f, .12f, .14f};
+};
 inline constexpr size_t interactiveBondBudget = 200000;
 inline constexpr size_t cylinderBondBudget = 20000;
 struct Dataset {
@@ -135,10 +161,32 @@ struct Dataset {
     std::vector<DataTable> tables;
     // Explicit pair topology published by bond-producing modifiers.
     std::vector<Bond> bonds;
+    // Per-bond scalar columns with one value per entry of bonds. A property with several
+    // components is stored as columns "Name.1", "Name.2", ... Produced by pipeline nodes and
+    // not saved in source documents. Code that rewrites bonds must keep the columns aligned.
+    std::map<std::string, std::vector<double>> bondProperties;
+    TrajectoryLineStyle trajectoryLines;
+    PolyhedronMesh polyhedra;
     BondStyle bondStyle;
     std::vector<Vec3> particleColors;
     bool sampled() const {
         return stride > 1;
+    }
+    // Gives bonds appended since the last call the value 0 in every column.
+    void padBondProperties() {
+        for (auto &[name, values] : bondProperties) values.resize(bonds.size(), 0.0);
+    }
+    // Reduces every column to the listed rows, in that order.
+    void keepBondPropertyRows(const std::vector<size_t> &rows) {
+        for (auto &[name, values] : bondProperties) {
+            std::vector<double> kept;
+            kept.reserve(rows.size());
+            for (const size_t row : rows) kept.push_back(values[row]);
+            values = std::move(kept);
+        }
+    }
+    void dropStaleBondProperties() {
+        std::erase_if(bondProperties, [&](const auto &entry) { return entry.second.size() != bonds.size(); });
     }
     void bounds() {
         if (atoms.empty()) {
@@ -822,6 +870,8 @@ enum class Op {
     ,LoadTrajectory
     ,CombineDatasets
     ,Measure
+    ,GenerateTrajectoryLines
+    ,CoordinationPolyhedra
 };
 struct Modifier {
     Op op;
@@ -930,6 +980,13 @@ struct Modifier {
     // Load trajectory and Combine datasets: property is the UTF-8 file path (empty passes through).
     // Measure: property is the particle path text (empty passes through), adaptive minimum image.
     // Radial distribution: clusterByBonds adds the partial RDF table.
+    // Histogram and Reduce property: clusterByBonds reads the bond property named by property.
+    // Generate trajectory lines: cspOnlySelected particles chosen in the first sampled frame,
+    // adaptive unwrap, clusterByBonds custom frame range (replicateN[0..1] first and last),
+    // cspNeighbors sampling interval, property sampled property (empty none), type gradient,
+    // bondWidth and bondColor line style, overlapUseRadii show up to the current time,
+    // histogramSelectRange wrap at periodic boundaries.
+    // Coordination polyhedra: value transparency, adaptive show edges, bondColor edge color.
     // Grain segmentation: type algorithm (0 automatic, 1 manual graph clustering, 2 MST),
     // value log merge threshold, rdfBins minimum grain size, adaptive adopt orphans,
     // clusterByBonds handle stacking faults, overlapUseRadii color particles by grain.
@@ -1092,7 +1149,7 @@ inline std::vector<std::string> pipelineFreezablePropertyChoices(
     return choices;
 }
 struct DataObject {
-    enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels, GlobalAttributes };
+    enum class Kind { Particles, Bonds, Cell, Surface, Dislocations, VoxelGrid, Table, Labels, GlobalAttributes, Lines };
     Kind kind = Kind::Particles;
     std::string name;
     bool visible = true;
@@ -1104,6 +1161,14 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
     std::vector<DataObject> outputs;
     auto add=[&](Kind kind,std::string name){outputs.push_back({kind,std::move(name),true,sourceNode});};
     if (modifier.op==Op::CreateBonds) add(Kind::Bonds,"Bonds");
+    if (modifier.op==Op::GenerateTrajectoryLines) {
+        add(Kind::Lines,"Trajectory lines");
+        add(Kind::GlobalAttributes,"Trajectory line counts");
+    }
+    if (modifier.op==Op::CoordinationPolyhedra) {
+        add(Kind::Surface,"Coordination polyhedra");
+        add(Kind::GlobalAttributes,"Polyhedron counts");
+    }
     if (modifier.op==Op::EditCell) add(Kind::Cell,"Simulation cell");
     if (modifier.op==Op::ManualSelection) add(Kind::Particles,"Manual selection");
     if (modifier.op==Op::Histogram && modifier.histogramSelectRange)
@@ -1113,6 +1178,7 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
     if (modifier.op==Op::ComputeProperty) add(Kind::Particles,modifier.outputProperty);
     if (modifier.op==Op::CommonNeighborAnalysis) {
         add(Kind::Particles,"CNA structure types");
+        if (modifier.type==3) add(Kind::Bonds,"CNA indices");
         add(Kind::GlobalAttributes,"Structure counts");
         add(Kind::Table,"Common neighbor analysis");
     }
@@ -2332,6 +2398,8 @@ inline const char *opName(Op op) {
     case Op::LoadTrajectory: return "Load trajectory";
     case Op::CombineDatasets: return "Combine datasets";
     case Op::Measure: return "Measure";
+    case Op::GenerateTrajectoryLines: return "Generate trajectory lines";
+    case Op::CoordinationPolyhedra: return "Coordination polyhedra";
     default:
         return "Color by type";
     }
@@ -2365,6 +2433,11 @@ inline bool pipelineResultWithinCacheBudget(const PipelineResult &result,
         if (!add(sizeof(name)+name.size(),1) || !add(values.size(),sizeof(double))) return false;
     for (const auto &[name,values]:data.vectorProperties)
         if (!add(sizeof(name)+name.size(),1) || !add(values.size(),sizeof(Vec3))) return false;
+    for (const auto &[name,values]:data.bondProperties)
+        if (!add(sizeof(name)+name.size(),1) || !add(values.size(),sizeof(double))) return false;
+    if (!add(data.polyhedra.corners.size(),sizeof(Bond)) || !add(data.polyhedra.edges.size(),sizeof(Bond))) return false;
+    if (data.trajectoryLines.set && (!add(data.trajectoryLines.set->points.size(),sizeof(Vec3)) ||
+                                     !add(data.trajectoryLines.set->values.size(),sizeof(float)))) return false;
     if (!add(data.globalAttributes.size(),sizeof(std::pair<std::string,double>))) return false;
     for (const auto &entry:data.globalAttributes)
         if (!add(entry.first.size(),sizeof(char))) return false;
@@ -2377,6 +2450,43 @@ inline bool pipelineResultWithinCacheBudget(const PipelineResult &result,
         }
     }
     return true;
+}
+// Values of a stored bond property, or of "Length", which is always available and is
+// computed from the current positions in the input length unit.
+inline std::vector<double> bondPropertyValues(const Dataset &data, const std::string &name,
+                                              std::atomic<bool> *cancel = nullptr) {
+    if (data.bonds.empty()) throw std::runtime_error("This node needs bonds; add Create bonds first");
+    if (const auto found = data.bondProperties.find(name); found != data.bondProperties.end()) {
+        if (found->second.size() != data.bonds.size())
+            throw std::runtime_error("Bond property length does not match the bond count: " + name);
+        return found->second;
+    }
+    if (name != "Length") throw std::runtime_error("Unknown bond property: " + name);
+    if (data.bonds.size() > 20'000'000) throw std::runtime_error("Bond lengths are limited to 20 million bonds");
+    std::vector<double> lengths(data.bonds.size());
+    for (size_t i = 0; i < data.bonds.size(); ++i) {
+        if ((i & 4095) == 0 && cancel && *cancel) throw std::runtime_error("Cancelled");
+        const auto vector = bondVector(data, data.bonds[i]);
+        lengths[i] = std::hypot(vector[0], vector[1], vector[2]);
+    }
+    return lengths;
+}
+// Bond properties a node at position count can read, from the node settings alone.
+template <class Node>
+inline std::vector<std::string> pipelineInputBondPropertyChoices(const Dataset &source, const std::vector<Node> &mods,
+                                                                 size_t count) {
+    std::set<std::string> stored;
+    for (const auto &[name, values] : source.bondProperties) stored.insert(name);
+    for (size_t i = 0; i < std::min(count, mods.size()); ++i) {
+        const auto &m = mods[i];
+        if (!m.enabled) continue;
+        if (m.op == Op::CreateBonds && m.discardExistingBonds) stored.clear();
+        if (m.op == Op::CommonNeighborAnalysis && m.type == 3)
+            for (const char *name : {"CNA indices.1", "CNA indices.2", "CNA indices.3"}) stored.insert(name);
+    }
+    std::vector<std::string> choices{"Length"};
+    choices.insert(choices.end(), stored.begin(), stored.end());
+    return choices;
 }
 struct ModifierExecutionError : std::runtime_error {
     size_t nodeIndex;
@@ -2394,6 +2504,7 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_cna.inc"
 #include "analysis_external.inc"
 #include "analysis_measure.inc"
+#include "analysis_scene.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -2595,6 +2706,8 @@ struct ModifierFrameState {
     // Whole-trajectory access: the output of the nodes before `node` at any frame.
     int frameCount = 0;
     std::function<Dataset(size_t node, int frame)> frameBefore;
+    // The particle selection reaching `node` at that frame.
+    std::function<std::vector<uint8_t>(size_t node, int frame)> selectionBefore;
     // Finished sweeps, valid until the pipeline is edited.
     std::function<std::optional<TrajectoryOutput>(size_t node)> cachedSweep;
     std::function<void(size_t node, TrajectoryOutput output)> storeSweep;
@@ -2609,6 +2722,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                                    const ModifierFrameState &frameState={}) {
     if (firstNode>mods.size())
         throw std::runtime_error("Pipeline checkpoint starts after the final node");
+    r.data.dropStaleBondProperties();
     for (size_t modifierIndex = firstNode; modifierIndex < mods.size(); ++modifierIndex) {
         if (activeNode) *activeNode = modifierIndex + 1;
         if (modifierIndex==checkpointNode && checkpoint)
@@ -2794,8 +2908,10 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 throw std::runtime_error("Choose a property and a valid reduction operation");
             if (m.op==Op::ScatterPlot && (m.scatterXProperty.empty() || m.scatterYProperty.empty()))
                 throw std::runtime_error("Choose both scatter-plot properties");
-            if (m.op == Op::Histogram || m.op == Op::ReduceProperty)
+            if ((m.op == Op::Histogram || m.op == Op::ReduceProperty) && !m.clusterByBonds)
                 (void)numericParticlePropertyView(r.data,m.property);
+            if (m.op == Op::Histogram && m.clusterByBonds && m.histogramSelectRange)
+                throw std::runtime_error("Select value range works on particles only; AtomX has no bond selection");
             if (m.op == Op::RemoveProperty) {
                 if (m.property.empty() || m.property == "Position" || m.property == "Particle Type")
                     throw std::runtime_error("Choose an auxiliary particle property to remove");
@@ -2935,29 +3051,40 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     for (size_t copy=1;copy<total;++copy)
                         r.data.particleColors.insert(r.data.particleColors.end(),original.begin(),original.end());
                 }
-                r.data.bonds.clear();
-                r.data.bonds.reserve(originalBonds.size() * total);
-                for (int cz = 0; cz < copies[2]; ++cz)
-                    for (int cy = 0; cy < copies[1]; ++cy)
-                        for (int cx = 0; cx < copies[0]; ++cx) {
-                            const int image[3]{cx, cy, cz};
-                            for (auto bond : originalBonds) {
-                                if (bond.a >= n || bond.b >= n)
-                                    throw std::runtime_error("Cannot replicate invalid bond topology");
-                                uint32_t target = bond.b;
-                                for (int axis = 0; axis < 3; ++axis) {
-                                    const int64_t unwrapped = int64_t(image[axis]) + bond.image[axis];
-                                    const int64_t targetCopy =
-                                        (unwrapped % copies[axis] + copies[axis]) % copies[axis];
-                                    bond.image[axis] = int32_t((unwrapped - targetCopy) / copies[axis]);
-                                    target += uint32_t(targetCopy * copyStride[axis] * n);
+                const auto replicateTopology = [&](const std::vector<Bond> &original, std::vector<Bond> &output) {
+                    output.clear();
+                    output.reserve(original.size() * total);
+                    for (int cz = 0; cz < copies[2]; ++cz)
+                        for (int cy = 0; cy < copies[1]; ++cy)
+                            for (int cx = 0; cx < copies[0]; ++cx) {
+                                const int image[3]{cx, cy, cz};
+                                for (auto bond : original) {
+                                    if (bond.a >= n || bond.b >= n)
+                                        throw std::runtime_error("Cannot replicate invalid bond topology");
+                                    uint32_t target = bond.b;
+                                    for (int axis = 0; axis < 3; ++axis) {
+                                        const int64_t unwrapped = int64_t(image[axis]) + bond.image[axis];
+                                        const int64_t targetCopy =
+                                            (unwrapped % copies[axis] + copies[axis]) % copies[axis];
+                                        bond.image[axis] = int32_t((unwrapped - targetCopy) / copies[axis]);
+                                        target += uint32_t(targetCopy * copyStride[axis] * n);
+                                    }
+                                    bond.b = target;
+                                    bond.a += uint32_t((size_t(cx) * copyStride[0] + size_t(cy) * copyStride[1] +
+                                                       size_t(cz) * copyStride[2]) * n);
+                                    output.push_back(bond);
                                 }
-                                bond.b = target;
-                                bond.a += uint32_t((size_t(cx) * copyStride[0] + size_t(cy) * copyStride[1] +
-                                                   size_t(cz) * copyStride[2]) * n);
-                                r.data.bonds.push_back(bond);
                             }
-                        }
+                };
+                replicateTopology(originalBonds, r.data.bonds);
+                for (auto *list : {&r.data.polyhedra.corners, &r.data.polyhedra.edges})
+                    if (!list->empty()) { const auto original = *list; replicateTopology(original, *list); }
+                // Bonds were rebuilt copy by copy in their original order, so columns repeat.
+                for (auto &[name, values] : r.data.bondProperties) {
+                    const auto original = values;
+                    for (size_t copy = 1; copy < total; ++copy)
+                        values.insert(values.end(), original.begin(), original.end());
+                }
                 continue;
             }
             if (m.op == Op::Wrap) {
@@ -3193,6 +3320,10 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 hideSelectedParticles(r);
                 continue;
             }
+            if (m.op == Op::CoordinationPolyhedra) {
+                computeCoordinationPolyhedra(r.data, r.selected, m.value, m.adaptive, m.bondColor, cancel);
+                continue;
+            }
             if (m.op == Op::Measure) {
                 computeMeasure(r.data, m.property, m.adaptive, cancel);
                 continue;
@@ -3251,7 +3382,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 continue;
             }
             if (m.op == Op::TimeSeries || m.op == Op::TimeAveraging || m.op == Op::SmoothTrajectory ||
-                m.op == Op::DiffusionCoefficient) {
+                m.op == Op::DiffusionCoefficient || m.op == Op::GenerateTrajectoryLines) {
                 if ((m.op == Op::TimeSeries || m.op == Op::TimeAveraging) && m.property.empty())
                     continue; // Nothing chosen yet.
                 if (!frameState.frameBefore)
@@ -3265,13 +3396,35 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 auto swept = frameState.cachedSweep ? frameState.cachedSweep(modifierIndex)
                                                     : std::optional<TrajectoryOutput>{};
                 if (!swept) {
-                    swept = m.op == Op::TimeSeries ? sweepTimeSeries(m.property, frames, evaluateFrame, cancel)
+                    TrajectoryLineOptions lineOptions;
+                    lineOptions.onlySelected = m.cspOnlySelected;
+                    lineOptions.unwrap = m.adaptive;
+                    lineOptions.customRange = m.clusterByBonds;
+                    lineOptions.firstFrame = m.replicateN[0];
+                    lineOptions.lastFrame = m.replicateN[1];
+                    lineOptions.every = m.cspNeighbors;
+                    lineOptions.sampledProperty = m.property;
+                    const auto selectionAt = [&](int frame) {
+                        return frameState.selectionBefore ? frameState.selectionBefore(modifierIndex, frame) : r.selected;
+                    };
+                    swept = m.op == Op::GenerateTrajectoryLines ? sweepTrajectoryLines(lineOptions, frames, evaluateFrame, selectionAt, cancel)
+                          : m.op == Op::TimeSeries ? sweepTimeSeries(m.property, frames, evaluateFrame, cancel)
                           : m.op == Op::TimeAveraging ? sweepTimeAverage(m.property, m.adaptive, frames, evaluateFrame, cancel)
                           : sweepDiffusion(frames, m.cspNeighbors, m.value, m.histogramRangeStart, m.histogramRangeEnd,
                                            evaluateFrame, cancel);
                     if (frameState.storeSweep) frameState.storeSweep(modifierIndex, *swept);
                 }
                 applyTrajectoryOutput(r.data, *swept, cancel);
+                if (m.op == Op::GenerateTrajectoryLines) {
+                    if (!(m.bondWidth >= .5f && m.bondWidth <= 12.f)) throw std::runtime_error("Line width must be between 0.5 and 12 pixels");
+                    auto &style = r.data.trajectoryLines;
+                    style.currentFrame = currentFrame;
+                    style.width = m.bondWidth;
+                    style.color = {m.bondColor[0], m.bondColor[1], m.bondColor[2]};
+                    style.gradient = m.type;
+                    style.upToCurrent = m.overlapUseRadii;
+                    style.wrap = m.histogramSelectRange;
+                }
                 continue;
             }
             if (m.op == Op::SpatialBinning) {
@@ -3449,9 +3602,19 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 continue;
             }
             if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
-                const auto propertyView=numericParticlePropertyView(r.data,m.property);
-                const size_t valueCount = r.data.atoms.size();
-                auto valueAt = [&](size_t index) { return propertyView.value(r.data,index); };
+                const bool onBonds = m.clusterByBonds;
+                const std::vector<double> bondValues = onBonds ? bondPropertyValues(r.data,m.property,cancel) : std::vector<double>{};
+                NumericParticlePropertyView propertyView;
+                if (!onBonds) propertyView = numericParticlePropertyView(r.data,m.property);
+                const std::string propertyLabel = (onBonds ? "Bond." : "") + m.property;
+                const size_t valueCount = onBonds ? bondValues.size() : r.data.atoms.size();
+                auto valueAt = [&](size_t index) { return onBonds ? bondValues[index] : propertyView.value(r.data,index); };
+                // A bond counts as selected when both of its particles are.
+                auto elementSelected = [&](size_t index) {
+                    if (!onBonds) return r.selected[index] != 0;
+                    const Bond &bond = r.data.bonds[index];
+                    return r.selected[bond.a] != 0 && r.selected[bond.b] != 0;
+                };
                 auto checkCancelled = [&](size_t index) {
                     if (cancel && (index & 4095) == 0 && *cancel)
                         throw std::runtime_error("Cancelled");
@@ -3488,20 +3651,20 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                         if (!std::isfinite(reduced))
                             throw std::runtime_error("Reduction result is outside the finite numeric range");
                     }
-                    r.data.globalAttributes["ReduceProperty." + m.property + "." +
+                    r.data.globalAttributes["ReduceProperty." + propertyLabel + "." +
                         (m.reduceOperation == 0 ? "min" : m.reduceOperation == 1 ? "max" : m.reduceOperation == 2 ? "mean" : "sum")] = reduced;
                 } else {
-                    DataTable table; table.name = "Histogram: " + m.property;
+                    DataTable table; table.name = "Histogram: " + propertyLabel;
                     table.columns = {"Bin center", m.histogramNormalization == 0 ? "Count" :
                         m.histogramNormalization == 1 ? "Relative frequency" : "Probability density"};
-                    if (m.histogramSelectedOnly && r.selected.size() != valueCount)
+                    if (m.histogramSelectedOnly && r.selected.size() != r.data.atoms.size())
                         throw std::runtime_error("Selection length does not match the particle count");
                     double lo = 0, hi = 0;
                     bool first = true;
                     uint64_t sampleCount = 0;
                     for (size_t i = 0; i < valueCount; ++i) {
                         checkCancelled(i);
-                        if (m.histogramSelectedOnly && !r.selected[i]) continue;
+                        if (m.histogramSelectedOnly && !elementSelected(i)) continue;
                         const double value = valueAt(i);
                         if (!std::isfinite(value)) continue;
                         ++sampleCount;
@@ -3532,7 +3695,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     std::vector<uint64_t> counts(size_t(m.type));
                     for (size_t i = 0; i < valueCount; ++i) {
                         checkCancelled(i);
-                        if (m.histogramSelectedOnly && !r.selected[i]) continue;
+                        if (m.histogramSelectedOnly && !elementSelected(i)) continue;
                         const double value = valueAt(i);
                         if (!std::isfinite(value)) continue;
                         const double fraction = constantRange ? .5 :
@@ -3719,7 +3882,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     r.data.bondStyle.color = m.bondColor;
                     r.data.bondStyle.colorByType = m.bondColorByType;
                     r.data.bondStyle.showPeriodicImages = m.bondShowPeriodicImages;
-                    if (m.discardExistingBonds) r.data.bonds.clear();
+                    if (m.discardExistingBonds) { r.data.bonds.clear(); r.data.bondProperties.clear(); }
                     if (r.data.bonds.size() > interactiveBondBudget)
                         throw std::runtime_error("Too many bonds for interactive display; reduce the cutoff or filter the structure");
                     double searchCutoff=m.value;
@@ -3751,6 +3914,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                                                  r.data.bonds.push_back({i, j, image});
                                             }, cancel);
                     }
+                    r.data.padBondProperties();
                     auto key = [](Bond &bond) {
                         if (bond.a > bond.b) {
                             std::swap(bond.a, bond.b);
@@ -3768,10 +3932,16 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     std::set<std::tuple<uint32_t, uint32_t, int32_t, int32_t, int32_t>> seen;
                     std::vector<Bond> unique;
                     unique.reserve(r.data.bonds.size());
-                    for (auto bond : r.data.bonds) {
+                    std::vector<size_t> uniqueRows;
+                    for (size_t row = 0; row < r.data.bonds.size(); ++row) {
+                        auto bond = r.data.bonds[row];
                         (void)bondVector(r.data,bond);
-                        if (seen.insert(key(bond)).second) unique.push_back(bond);
+                        if (seen.insert(key(bond)).second) {
+                            unique.push_back(bond);
+                            if (!r.data.bondProperties.empty()) uniqueRows.push_back(row);
+                        }
                     }
+                    r.data.keepBondPropertyRows(uniqueRows);
                     r.data.bonds = std::move(unique);
                     // OVITO parity: the Create bonds modifier publishes the
                     // produced topology as a global attribute so the Data
@@ -3878,7 +4048,9 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             if (m.op == Op::Delete || m.op == Op::Slice) {
                 std::vector<Bond> remapped;
                 remapped.reserve(r.data.bonds.size());
-                for (auto bond : r.data.bonds) {
+                std::vector<size_t> keptRows;
+                for (size_t row = 0; row < r.data.bonds.size(); ++row) {
+                    auto bond = r.data.bonds[row];
                     if (bond.a >= particleMap.size() || bond.b >= particleMap.size())
                         throw std::runtime_error("Invalid bond endpoint in particle topology");
                     const int64_t a = particleMap[bond.a], b = particleMap[bond.b];
@@ -3886,8 +4058,28 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                     bond.a = uint32_t(a);
                     bond.b = uint32_t(b);
                     remapped.push_back(bond);
+                    if (!r.data.bondProperties.empty()) keptRows.push_back(row);
                 }
+                r.data.keepBondPropertyRows(keptRows);
                 r.data.bonds = std::move(remapped);
+                if (!r.data.polyhedra.corners.empty()) {
+                    // A polyhedron that lost its center or any corner no longer exists.
+                    std::vector<uint8_t> lost(particleMap.size());
+                    auto &mesh = r.data.polyhedra;
+                    for (const auto *list : {&mesh.corners, &mesh.edges})
+                        for (const Bond &corner : *list)
+                            if (particleMap[corner.a] < 0 || particleMap[corner.b] < 0) lost[corner.a] = 1;
+                    for (auto *list : {&mesh.corners, &mesh.edges}) {
+                        size_t kept = 0;
+                        for (Bond corner : *list) {
+                            if (lost[corner.a]) continue;
+                            corner.a = uint32_t(particleMap[corner.a]);
+                            corner.b = uint32_t(particleMap[corner.b]);
+                            (*list)[kept++] = corner;
+                        }
+                        list->resize(kept);
+                    }
+                }
             }
             if (m.op == Op::Rotate) {
                 int u = (m.axis+1)%3, v = (m.axis+2)%3;

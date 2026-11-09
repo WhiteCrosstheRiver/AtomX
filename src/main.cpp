@@ -609,7 +609,9 @@ static const char *opCategory(Op op) {
                                op == Op::PolyhedralTemplateMatching || op == Op::GrainSegmentation ||
                                op == Op::ElasticStrain || op == Op::Measure
                          ? "Analysis"
-                         : "Modification";
+                         : op == Op::GenerateTrajectoryLines || op == Op::CoordinationPolyhedra
+                               ? "Visualization"
+                               : "Modification";
 }
 
 // Nodes that read a raw reference frame of the loaded trajectory.
@@ -621,13 +623,13 @@ static bool usesReferenceFrame(Op op) {
 // Nodes whose result depends on every frame of the trajectory, or on a window of them.
 static bool readsWholeTrajectory(Op op) {
     return op == Op::TimeSeries || op == Op::TimeAveraging || op == Op::SmoothTrajectory ||
-           op == Op::DiffusionCoefficient;
+           op == Op::DiffusionCoefficient || op == Op::GenerateTrajectoryLines;
 }
 // The output of the nodes before `node` at any frame. Reference frames are resolved for
 // that frame, so a time series of strain measures each frame against its own reference.
-static Dataset evaluateNodesAtFrame(const std::vector<Modifier> &nodes, size_t node, int frame,
-                                    const std::filesystem::path &file, const std::vector<Frame> &frames,
-                                    const Dataset &single, int budget, std::atomic<bool> *cancel) {
+static PipelineResult evaluateResultAtFrame(const std::vector<Modifier> &nodes, size_t node, int frame,
+                                            const std::filesystem::path &file, const std::vector<Frame> &frames,
+                                            const Dataset &single, int budget, std::atomic<bool> *cancel) {
     const std::vector<Modifier> prefix(nodes.begin(), nodes.begin() + node);
     Dataset raw = frames.empty() ? single : io::read(file, frames.at(size_t(frame)), budget, nullptr, cancel);
     std::map<size_t, Dataset> references;
@@ -642,7 +644,12 @@ static Dataset evaluateNodesAtFrame(const std::vector<Modifier> &nodes, size_t n
     };
     const size_t count = raw.atoms.size();
     PipelineResult input{std::move(raw), std::vector<uint8_t>(count), std::vector<uint8_t>(count, 1)};
-    return evaluateFrom(std::move(input), prefix, 0, cancel, nullptr, SIZE_MAX, {}, provider, frame).data;
+    return evaluateFrom(std::move(input), prefix, 0, cancel, nullptr, SIZE_MAX, {}, provider, frame);
+}
+static Dataset evaluateNodesAtFrame(const std::vector<Modifier> &nodes, size_t node, int frame,
+                                    const std::filesystem::path &file, const std::vector<Frame> &frames,
+                                    const Dataset &single, int budget, std::atomic<bool> *cancel) {
+    return evaluateResultAtFrame(nodes, node, frame, file, frames, single, budget, cancel).data;
 }
 // Frame differences need upstream properties, so the reference frame runs the nodes before it.
 static Dataset evaluatePrefixOn(Dataset frame, const std::vector<Modifier> &nodes, size_t node,
@@ -1484,6 +1491,9 @@ struct App {
         state.frameBefore = [&nodes, &file, &frameList, &single, readBudget, cancel](size_t node, int frame) {
             return evaluateNodesAtFrame(nodes, node, frame, file, frameList, single, readBudget, cancel);
         };
+        state.selectionBefore = [&nodes, &file, &frameList, &single, readBudget, cancel](size_t node, int frame) {
+            return evaluateResultAtFrame(nodes, node, frame, file, frameList, single, readBudget, cancel).selected;
+        };
         state.cachedSweep = [this, &nodeIds, revision](size_t node) -> std::optional<TrajectoryOutput> {
             const std::lock_guard lock(trajectoryMutex);
             if (revision != trajectoryRevision) return std::nullopt;
@@ -1886,6 +1896,12 @@ struct App {
         if (op == Op::CommonNeighborAnalysis) { m.type = 1; m.overlapUseRadii = true; }
         if (op == Op::LoadTrajectory || op == Op::CombineDatasets) m.property.clear();
         if (op == Op::Measure) { m.property.clear(); m.adaptive = true; }
+        if (op == Op::GenerateTrajectoryLines) {
+            m.property.clear(); m.adaptive = true; m.cspOnlySelected = false; m.clusterByBonds = false;
+            m.cspNeighbors = 1; m.type = 0; m.bondWidth = 1.5f; m.bondColor = {.95f, .55f, .2f, 1.f};
+            m.overlapUseRadii = false; m.histogramSelectRange = false; m.replicateN[0] = 0; m.replicateN[1] = 0;
+        }
+        if (op == Op::CoordinationPolyhedra) { m.value = .3f; m.adaptive = true; m.bondColor = {.12f, .12f, .14f, 1.f}; }
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
         if (op == Op::BondLengthDistribution) m.type = 64;
         if (op == Op::BondAngleDistribution) m.type = 90;
@@ -1967,6 +1983,16 @@ struct App {
                 }
                 if (selected) ImGui::SetItemDefaultFocus();
             }
+            ImGui::EndCombo();
+        }
+        return changed;
+    }
+    bool bondPropertyCombo(const char *label, std::string &property) {
+        const auto choices = pipelineInputBondPropertyChoices(source, mods, std::min(modifierGraph.selected, mods.size()));
+        bool changed = false;
+        if (ImGui::BeginCombo(loc::label(label), property.c_str())) {
+            for (const auto &name : choices)
+                if (ImGui::Selectable(name.c_str(), name == property)) { property = name; changed = true; }
             ImGui::EndCombo();
         }
         return changed;
@@ -8712,6 +8738,8 @@ struct App {
                             const char *kind=output.kind==DataObject::Kind::Particles ? "Particles" :
                                 output.kind==DataObject::Kind::Bonds ? "Bonds" :
                                 output.kind==DataObject::Kind::Cell ? "Simulation cell" :
+                                output.kind==DataObject::Kind::Surface ? "Surface mesh" :
+                                output.kind==DataObject::Kind::Lines ? "Lines" :
                                 output.kind==DataObject::Kind::Table ? "Data table" :
                                 output.kind==DataObject::Kind::GlobalAttributes ? "Global attributes" : "Data object";
                             ImGui::TextDisabled(loc::text("↳ %s (%s)"),output.name.c_str(),loc::text(kind));
@@ -8834,19 +8862,24 @@ struct App {
                                                         bond.a, bond.b, bond.image[0],
                                                         bond.image[1], bond.image[2]);
                                                text += value;
+                                               for (const auto &[name, values] : inspected->data.bondProperties)
+                                                   if (i < values.size()) { text += ' '; text += formatDataNumber(values[i]); }
                                            });
                     const bool filtering = bondFilter[0];
                     const size_t shown = filtering ? filteredBonds.size() : bondCount;
                     inspectorToolRow("##bond-filter", bondFilter, shown, bondCount, "bonds");
                     if (!bondCount) {
                         ImGui::TextDisabled(loc::text("No bonds have been created at this output."));
-                    } else if (ImGui::BeginTable("Bond rows", 4,
-                                                 ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                    } else if (ImGui::BeginTable("Bond rows", 5 + int(inspected->data.bondProperties.size()),
+                                                 ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX |
                                                      ImGuiTableFlags_BordersInnerV)) {
                         ImGui::TableSetupColumn(loc::text("#"), ImGuiTableColumnFlags_WidthFixed, U(74));
                         ImGui::TableSetupColumn(loc::text("Topology [A B]"), ImGuiTableColumnFlags_WidthFixed, U(140));
                         ImGui::TableSetupColumn(loc::text("Periodic Image [X Y Z]"), ImGuiTableColumnFlags_WidthFixed, U(170));
-                        ImGui::TableSetupColumn(loc::text("Bond Order"));
+                        ImGui::TableSetupColumn(loc::text("Bond Order"), ImGuiTableColumnFlags_WidthFixed, U(90));
+                        ImGui::TableSetupColumn(loc::text("Length"), ImGuiTableColumnFlags_WidthFixed, U(100));
+                        for (const auto &[name, values] : inspected->data.bondProperties)
+                            ImGui::TableSetupColumn(name.c_str(), ImGuiTableColumnFlags_WidthFixed, U(110));
                         ImGui::TableHeadersRow();
                         ImGuiListClipper clip;
                         clip.Begin(int(shown));
@@ -8865,6 +8898,18 @@ struct App {
                                 colorSwatch(inspected->data.bondStyle.color);
                                 ImGui::SameLine();
                                 ImGui::Text(loc::text("%u"),unsigned(bond.order));
+                                ImGui::TableNextColumn();
+                                try {
+                                    const auto vector = bondVector(inspected->data, bond);
+                                    ImGui::Text("%.6g", std::hypot(vector[0], vector[1], vector[2]));
+                                } catch (const std::exception &) {
+                                    ImGui::TextDisabled("-");
+                                }
+                                for (const auto &[name, values] : inspected->data.bondProperties) {
+                                    ImGui::TableNextColumn();
+                                    if (size_t(j) < values.size()) ImGui::Text("%.6g", values[size_t(j)]);
+                                    else ImGui::TextDisabled("-");
+                                }
                             }
                         ImGui::EndTable();
                     }
@@ -11587,9 +11632,79 @@ struct App {
                             update();
                         }
                     }
+                    if (m.op == Op::GenerateTrajectoryLines) {
+                        auto edited = m;
+                        bool changed = ui_design::checkbox(loc::label("Only selected particles"), &edited.cspOnlySelected);
+                        recordUiTestItem(std::string("pipeline.lines-selected.")+m.id,"Only selected particles");
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        changed |= ui_design::checkbox(loc::label("Unwrap trajectories"), &edited.adaptive);
+                        changed |= ui_design::checkbox(loc::label("Custom frame range"), &edited.clusterByBonds);
+                        if (edited.clusterByBonds) {
+                            fitNextField("First frame");
+                            changed |= ImGui::InputInt(loc::label("First frame"), &edited.replicateN[0]);
+                            fitNextField("Last frame");
+                            changed |= ImGui::InputInt(loc::label("Last frame"), &edited.replicateN[1]);
+                        }
+                        fitNextField("Every Nth frame");
+                        if (ImGui::InputInt(loc::label("Every Nth frame"), &edited.cspNeighbors)) { edited.cspNeighbors = std::max(edited.cspNeighbors, 1); changed = true; }
+                        recordUiTestItem(std::string("pipeline.lines-every.")+m.id,"Every Nth frame");
+                        const auto choices = pipelineInputPropertyChoices(source, mods, std::min(modifierGraph.selected, mods.size()), true);
+                        fitNextField("Sample particle property");
+                        if (ImGui::BeginCombo(loc::label("Sample particle property"), edited.property.empty() ? loc::text("None") : edited.property.c_str())) {
+                            if (ImGui::Selectable(loc::text("None"), edited.property.empty())) { edited.property.clear(); changed = true; }
+                            for (const auto &name : choices)
+                                if (ImGui::Selectable(name.c_str(), name == edited.property)) { edited.property = name; changed = true; }
+                            ImGui::EndCombo();
+                        }
+                        if (!edited.property.empty()) {
+                            fitNextField("Gradient");
+                            changed |= ImGui::Combo(loc::label("Gradient"), &edited.type, loc::items("Rainbow\0Blue-White-Red\0Cyclic Rainbow\0Fast\0Grayscale\0Hot\0Jet\0Magma\0"));
+                        } else {
+                            changed |= ImGui::ColorEdit3(loc::label("Line color"), edited.bondColor.data());
+                        }
+                        fitNextField("Line width (px)");
+                        if (ImGui::InputFloat(loc::label("Line width (px)"), &edited.bondWidth, 0, 0, "%.1f")) { edited.bondWidth = std::clamp(edited.bondWidth, .5f, 12.f); changed = true; }
+                        changed |= ui_design::checkbox(loc::label("Wrap lines at periodic boundaries"), &edited.histogramSelectRange);
+                        changed |= ui_design::checkbox(loc::label("Show up to current time only"), &edited.overlapUseRadii);
+                        ImGui::TextDisabled(loc::text("Lines use the input length unit. Unwrapping assumes less than half a cell of motion between samples. Later nodes do not move the lines."));
+                        if (gpu.trajectoryLinesTruncated()) ImGui::TextDisabled(loc::text("Only the first 3,000,000 wrapped segments are drawn."));
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
+                    }
+                    if (m.op == Op::CoordinationPolyhedra) {
+                        auto edited = m;
+                        float percent = edited.value * 100.f;
+                        fitNextField("Transparency (%)", true);
+                        bool changed = false;
+                        if (ImGui::SliderFloat(loc::label("Transparency (%)"), &percent, 0.f, 100.f, "%.0f")) { edited.value = percent / 100.f; changed = true; }
+                        recordUiTestItem(std::string("pipeline.polyhedra-transparency.")+m.id,"Transparency");
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        changed |= ui_design::checkbox(loc::label("Show edges"), &edited.adaptive);
+                        if (edited.adaptive) changed |= ImGui::ColorEdit3(loc::label("Edge color"), edited.bondColor.data());
+                        ImGui::TextDisabled(loc::text("Built for selected particles with bonds: the convex hull of the bonded neighbors. Faces take the central particle's color. Fewer than four non-coplanar neighbors give no polyhedron."));
+                        const auto count = result.data.globalAttributes.find("CoordinationPolyhedra.count");
+                        const auto skipped = result.data.globalAttributes.find("CoordinationPolyhedra.skipped");
+                        if (count != result.data.globalAttributes.end() && skipped != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("%.0f polyhedra, %.0f particles skipped."), count->second, skipped->second);
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
+                    }
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
                         auto edited = m;
-                        bool changed = colorPropertyCombo("Input property", edited.property, true);
+                        bool changed = false;
+                        int element = edited.clusterByBonds ? 1 : 0;
+                        fitNextField("Operate on", true);
+                        if (ImGui::Combo(loc::label("Operate on"), &element, loc::items("Particles\0Bonds\0"))) {
+                            edited.clusterByBonds = element == 1;
+                            edited.property = element == 1 ? "Length" : "Position.X";
+                            edited.histogramSelectRange = false;
+                            changed = true;
+                        }
+                        recordUiTestItem(std::string("pipeline.analysis-element.")+m.id,"Operate on");
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        if (edited.clusterByBonds) changed |= bondPropertyCombo("Input property", edited.property);
+                        else changed |= colorPropertyCombo("Input property", edited.property, true);
                         recordUiTestItem(std::string("pipeline.analysis-property.")+m.id,"Input property");
                         if (m.op == Op::Histogram) {
                             int bins = edited.type;
@@ -11602,7 +11717,9 @@ struct App {
                                 edited.histogramNormalization = normalization;
                                 changed = true;
                             }
-                            if (ui_design::checkbox(loc::label("Select value range"), &edited.histogramSelectRange))
+                            if (edited.clusterByBonds)
+                                ImGui::TextDisabled(loc::text("A bond counts as selected when both of its particles are. Length uses the input length unit."));
+                            else if (ui_design::checkbox(loc::label("Select value range"), &edited.histogramSelectRange))
                                 changed = true;
                             if (edited.histogramSelectRange) {
                                 changed |= ImGui::InputDouble(loc::label("Range start"), &edited.histogramRangeStart,
@@ -11622,6 +11739,7 @@ struct App {
                         if (changed) {
                             checkpoint();
                             m.property = edited.property;
+                            m.clusterByBonds = edited.clusterByBonds;
                             m.type = edited.type;
                             m.reduceOperation = edited.reduceOperation;
                             m.histogramSelectedOnly = edited.histogramSelectedOnly;
@@ -12913,9 +13031,11 @@ struct App {
                 planned("VoroTop analysis");
                 endCard();
                 beginCard("Visualization");
-                for (auto name : {"Add text labels", "Construct surface mesh", "Coordination polyhedra"}) planned(name);
+                for (auto name : {"Add text labels", "Construct surface mesh"}) planned(name);
+                operation(Op::CoordinationPolyhedra,"Draw the convex hull of the bonded neighbors around every selected particle as a shaded, optionally transparent polyhedron.");
                 operation(Op::CreateBonds,"Create and GPU-render cutoff neighbor bonds as screen-space lines or 3D cylinders with periodic image shifts.");
-                for (auto name : {"Create isosurface", "Generate trajectory lines"}) planned(name);
+                planned("Create isosurface");
+                operation(Op::GenerateTrajectoryLines,"Draw the paths of all or selected particles over the trajectory, with periodic unwrapping and optional coloring by a sampled property.");
                 endCard();
                 beginCard("Modifier templates");
                 ensureModifierTemplates();

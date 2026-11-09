@@ -8,12 +8,14 @@ struct TrajectoryOutput {
     std::map<std::string, double> attributes;
     std::map<std::string, std::vector<double>> scalars;
     std::vector<double> identifiers; // Particle order of `scalars`, when the file has identifiers.
+    std::shared_ptr<const TrajectoryLineSet> lines;
 };
 using FrameEvaluator = std::function<Dataset(int frame)>;
 
 inline void applyTrajectoryOutput(Dataset &data, const TrajectoryOutput &output, std::atomic<bool> *cancel) {
     for (const auto &[name, value] : output.attributes) data.globalAttributes[name] = value;
     data.tables.insert(data.tables.end(), output.tables.begin(), output.tables.end());
+    if (output.lines) data.trajectoryLines.set = output.lines;
     if (output.scalars.empty()) return;
     std::vector<uint32_t> order;
     if (const auto ids = data.scalarProperties.find("Particle Identifier");

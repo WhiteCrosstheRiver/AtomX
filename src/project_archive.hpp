@@ -199,7 +199,7 @@ inline ModifierNode readModifier(Reader &r) {
     field(r,m.expandNeighbors);
     field(r,m.selectedTypes);
     field(r,m.id);field(r,m.displayName);field(r,m.category);
-    valid(int(m.op)>=0 && m.op<=Op::Measure);m.dirty=true;return m;
+    valid(int(m.op)>=0 && m.op<=Op::CoordinationPolyhedra);m.dirty=true;return m;
 }
 inline void writeGraph(Writer &w,const std::vector<ModifierNode> &nodes) {
     valid(nodes.size()<=1000);w.value(uint64_t(nodes.size()));for(const auto &m:nodes)writeModifier(w,m);
