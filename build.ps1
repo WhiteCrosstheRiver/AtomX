@@ -26,7 +26,7 @@ cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /I third_party\imgui test
 if %errorlevel% neq 0 exit /b 1
 build\native_font_tests.exe
 if %errorlevel% neq 0 exit /b 1
-cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /D SPG_STATIC_LIBRARY tests\core_tests.cpp /Fo:build\ /Fe:build\core_tests.exe /link build\spglib.lib
+cl /nologo /std:c++20 /O2 /EHsc /utf-8 /MD /W4 /bigobj /D SPG_STATIC_LIBRARY tests\core_tests.cpp /Fo:build\ /Fe:build\core_tests.exe /link /STACK:16777216 build\spglib.lib
 if %errorlevel% neq 0 exit /b 1
 build\core_tests.exe
 if %errorlevel% neq 0 exit /b 1

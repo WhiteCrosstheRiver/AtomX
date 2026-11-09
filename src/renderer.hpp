@@ -56,6 +56,12 @@ struct ParticleStyle {
     bool operator==(const ParticleStyle &) const = default;
 };
 static_assert(sizeof(ParticleStyle) == 48);
+// A text label placed on an exported image, centered at x, y in pixels of the image.
+struct PngTextLabel {
+    float x = 0, y = 0, size = 13;
+    std::string text;
+    std::array<float, 3> color{1, 1, 1};
+};
 struct ColorLegendOptions {
     bool visible = false;
     std::string property;
@@ -115,7 +121,11 @@ class Renderer {
     ComPtr<ID3D11Buffer> meshBuffer;
     ComPtr<ID3D11ShaderResourceView> meshView;
     ComPtr<ID3D11Buffer> bondBuffer, bondConstants;
-    ComPtr<ID3D11Buffer> sceneLineBuffer, polyhedronBuffer, polyhedronConstants;
+    ComPtr<ID3D11Buffer> sceneLineBuffer, polyhedronBuffer, polyhedronConstants, surfaceBuffer;
+    struct SurfaceDraw { UINT first, count; float alpha; };
+    std::vector<SurfaceDraw> surfaceDraws;
+    UINT surfaceVertexCount = 0;
+    bool surfacesOverBudget = false;
     ComPtr<ID3D11VertexShader> polyhedronVS;
     ComPtr<ID3D11PixelShader> polyhedronPS;
     ComPtr<ID3D11InputLayout> polyhedronLayout;
@@ -147,6 +157,8 @@ class Renderer {
     bool bondsUploaded() const { return bondVertexCount != 0; }
     UINT trajectoryLineVertices() const { return trajectoryVertexCount; }
     UINT polyhedronVertices() const { return polyhedronVertexCount; }
+    UINT surfaceVertices() const { return surfaceVertexCount; }
+    bool surfacesTruncated() const { return surfacesOverBudget; }
     bool trajectoryLinesTruncated() const { return trajectorySegmentsTruncated; }
     bool bondsOmittedForPerformance() const { return bondDisplayOmitted; }
     size_t renderedBondLaneCount() const { return bondLaneCount; }
@@ -711,6 +723,25 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             D3D11_SUBRESOURCE_DATA initial{polyhedronVertices.data(),0,0};
             check(device->CreateBuffer(&desc,&initial,&polyhedronBuffer),"Polyhedron buffer");
         }
+        // All surface meshes share one buffer, at most 2,000,000 triangles in total.
+        surfaceBuffer.Reset(); surfaceDraws.clear(); surfacesOverBudget=false;
+        std::vector<PolyhedronVertex> surfaceVertexData;
+        for(const auto &surface:d.surfaces) {
+            if(!surface.mesh || surface.mesh->positions.empty()) continue;
+            const auto &positions=surface.mesh->positions;
+            const auto &normals=surface.mesh->normals;
+            if(surfaceVertexData.size()+positions.size()>6000000) { surfacesOverBudget=true; continue; }
+            surfaceDraws.push_back({UINT(surfaceVertexData.size()),UINT(positions.size()),surface.alpha});
+            const DirectX::XMFLOAT3 color{surface.color[0],surface.color[1],surface.color[2]};
+            for(size_t k=0;k<positions.size();++k)
+                surfaceVertexData.push_back({{positions[k][0],positions[k][1],positions[k][2]},{normals[k][0],normals[k][1],normals[k][2]},color});
+        }
+        surfaceVertexCount=UINT(surfaceVertexData.size());
+        if(!surfaceVertexData.empty()) {
+            D3D11_BUFFER_DESC desc{}; desc.ByteWidth=UINT(surfaceVertexData.size()*sizeof(PolyhedronVertex)); desc.Usage=D3D11_USAGE_IMMUTABLE; desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA initial{surfaceVertexData.data(),0,0};
+            check(device->CreateBuffer(&desc,&initial,&surfaceBuffer),"Surface buffer");
+        }
         bondBuffer.Reset(); bondVertexCount=UINT(bondVertices.size());
         if (!bondVertices.empty()) {
             D3D11_BUFFER_DESC bondDesc{}; bondDesc.ByteWidth=UINT(bondVertices.size()*sizeof(BondVertex)); bondDesc.Usage=D3D11_USAGE_IMMUTABLE; bondDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
@@ -1040,6 +1071,36 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             drawLines(1.f,edgeVertexCount,trajectoryVertexCount);
             context->GSSetShader(nullptr,nullptr,0);
         }
+        if (visible && surfaceBuffer) {
+            PolyhedronConstants camera;
+            DirectX::XMStoreFloat4x4(&camera.viewProjection, view * proj);
+            DirectX::XMStoreFloat3(&camera.toViewer,DirectX::XMVector3Normalize(DirectX::XMVector3TransformNormal(
+                DirectX::XMVectorSet(0,0,1,0),DirectX::XMMatrixInverse(nullptr,view))));
+            UINT stride=sizeof(PolyhedronVertex), offset=0;
+            ID3D11Buffer *buffer=surfaceBuffer.Get();
+            context->IASetInputLayout(polyhedronLayout.Get());
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
+            context->VSSetShader(polyhedronVS.Get(),nullptr,0);
+            context->PSSetShader(polyhedronPS.Get(),nullptr,0);
+            context->GSSetShader(nullptr,nullptr,0);
+            context->VSSetConstantBuffers(0,1,polyhedronConstants.GetAddressOf());
+            context->PSSetConstantBuffers(0,1,polyhedronConstants.GetAddressOf());
+            context->RSSetState(raster.Get());
+            const auto drawPass=[&](const SurfaceDraw &surface,float facing) {
+                camera.alpha=surface.alpha;
+                camera.facing=facing;
+                context->UpdateSubresource(polyhedronConstants.Get(),0,nullptr,&camera,0,0);
+                context->Draw(surface.count,surface.first);
+            };
+            for(const auto &surface:surfaceDraws) if(surface.alpha>=.999f) drawPass(surface,0);
+            // Opaque meshes first; transparent ones then blend over them, far sides before near sides.
+            context->OMSetDepthStencilState(planeDepth.Get(),0);
+            context->OMSetBlendState(planeBlend.Get(),nullptr,~0u);
+            for(const auto &surface:surfaceDraws) if(surface.alpha<.999f) { drawPass(surface,-1); drawPass(surface,1); }
+            context->OMSetBlendState(nullptr,nullptr,~0u);
+            context->OMSetDepthStencilState(depthState.Get(),0);
+        }
         if (visible && polyhedronBuffer) {
             PolyhedronConstants camera;
             DirectX::XMStoreFloat4x4(&camera.viewProjection, view * proj);
@@ -1104,7 +1165,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         context->PSSetShaderResources(2, 1, &empty);
         context->OMSetRenderTargets(0, nullptr, nullptr);
     }
-    void png(Target &t, const std::filesystem::path &path, const ColorLegendOptions &legend = {}) {
+    void png(Target &t, const std::filesystem::path &path, const ColorLegendOptions &legend = {},
+             const std::vector<PngTextLabel> &labels = {}) {
         D3D11_TEXTURE2D_DESC td{};
         t.texture->GetDesc(&td);
         td.Usage = D3D11_USAGE_STAGING;
@@ -1138,7 +1200,8 @@ float4 slicePlanePixel():SV_TARGET { return color; }
         check(frame->SetPixelFormat(&fmt), "PNG format");
         if (fmt != GUID_WICPixelFormat32bppBGRA)
             throw std::runtime_error("Unsupported PNG pixel format");
-        if (legend.visible && t.w >= 240 && t.h >= 120) {
+        const bool drawLegend = legend.visible && t.w >= 240 && t.h >= 120;
+        if (drawLegend || !labels.empty()) {
             for (size_t i = 0; i < pixels.size(); i += 4)
                 std::swap(pixels[i], pixels[i + 2]); // RGBA readback to top-down BGRA DIB.
             BITMAPINFO info{};
@@ -1158,6 +1221,7 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             }
             HGDIOBJ oldBitmap = SelectObject(dc, dib);
             memcpy(bits, pixels.data(), pixels.size());
+            if (drawLegend) {
             const float scale = std::clamp(std::min(t.w / 1280.f, t.h / 720.f), .65f, 2.5f);
             const int margin = int(std::round(14 * scale));
             const int boxW = int(std::round(258 * scale));
@@ -1216,6 +1280,39 @@ float4 slicePlanePixel():SV_TARGET { return color; }
             DrawTextW(dc, highText.str().c_str(), -1, &highLabel, DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS);
             if (oldFont) SelectObject(dc, oldFont);
             if (font) DeleteObject(font);
+            }
+            if (!labels.empty()) {
+                // GDI clears alpha where it draws, so changed pixels are made opaque afterwards.
+                std::vector<BYTE> before(static_cast<BYTE *>(bits), static_cast<BYTE *>(bits) + pixels.size());
+                SetBkMode(dc, TRANSPARENT);
+                HFONT labelFont = nullptr;
+                HGDIOBJ previousFont = nullptr;
+                float currentSize = -1;
+                for (const auto &label : labels) {
+                    if (label.size != currentSize) {
+                        if (labelFont) { SelectObject(dc, previousFont); DeleteObject(labelFont); }
+                        labelFont = CreateFontW(std::max(6, int(std::round(label.size))), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                                                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                        previousFont = labelFont ? SelectObject(dc, labelFont) : nullptr;
+                        currentSize = label.size;
+                    }
+                    const int length = MultiByteToWideChar(CP_UTF8, 0, label.text.c_str(), -1, nullptr, 0);
+                    if (length <= 1) continue;
+                    std::wstring text(size_t(length - 1), L' ');
+                    MultiByteToWideChar(CP_UTF8, 0, label.text.c_str(), -1, text.data(), length);
+                    SIZE extent{};
+                    GetTextExtentPoint32W(dc, text.c_str(), int(text.size()), &extent);
+                    SetTextColor(dc, RGB(BYTE(std::clamp(label.color[0], 0.f, 1.f) * 255), BYTE(std::clamp(label.color[1], 0.f, 1.f) * 255),
+                                         BYTE(std::clamp(label.color[2], 0.f, 1.f) * 255)));
+                    TextOutW(dc, int(std::round(label.x - extent.cx * .5f)), int(std::round(label.y - extent.cy * .5f)), text.c_str(), int(text.size()));
+                }
+                if (labelFont) { SelectObject(dc, previousFont); DeleteObject(labelFont); }
+                GdiFlush();
+                auto *now = static_cast<BYTE *>(bits);
+                for (size_t i = 0; i < before.size(); i += 4)
+                    if (now[i] != before[i] || now[i+1] != before[i+1] || now[i+2] != before[i+2]) now[i+3] = 255;
+            }
             memcpy(pixels.data(), bits, pixels.size());
             SelectObject(dc, oldBitmap);
             DeleteObject(dib);

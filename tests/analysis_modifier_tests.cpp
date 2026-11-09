@@ -2638,6 +2638,418 @@ static bool facesPointOutward(const Dataset &d) {
     }
     return true;
 }
+// ---- Text labels, isosurfaces, surface meshes -------------------------------------
+
+static Dataset evaluateSurface(const Dataset &data, const std::vector<Modifier> &nodes) {
+    PipelineResult source;
+    source.data = data;
+    source.selected.assign(data.atoms.size(), 1);
+    return evaluateFrom(source, nodes, 0).data;
+}
+static Dataset openCubeLattice(int n, double spacing) {
+    Dataset d;
+    d.species = {"X"};
+    for (int z = 0; z < n; ++z) for (int y = 0; y < n; ++y) for (int x = 0; x < n; ++x)
+        d.atoms.push_back({float(x * spacing), float(y * spacing), float(z * spacing), 0});
+    d.sourceCount = d.atoms.size();
+    d.bounds();
+    return d;
+}
+static double surfaceAttribute(const Dataset &d, const std::string &name) {
+    const auto found = d.globalAttributes.find(name);
+    check(found != d.globalAttributes.end(), "attribute exists: " + name);
+    return found == d.globalAttributes.end() ? std::nan("") : found->second;
+}
+// Field on a grid from a function of position, for closed-form isosurface checks.
+template <class F> static Dataset gridDataset(const std::array<int, 3> &n, double box, const std::array<bool, 3> &periodic, F &&field) {
+    Dataset d;
+    d.species = {"X"};
+    d.cell = {box, 0, 0, 0, box, 0, 0, 0, box};
+    d.pbc = periodic;
+    auto grid = std::make_shared<VoxelGrid>();
+    grid->size = n;
+    grid->periodic = periodic;
+    grid->name = "field";
+    const double hx = box / n[0], hy = box / n[1], hz = box / n[2];
+    grid->step = {hx, 0, 0, 0, hy, 0, 0, 0, hz};
+    grid->first = {0.0, 0.0, 0.0};
+    for (int z = 0; z < n[2]; ++z) for (int y = 0; y < n[1]; ++y) for (int x = 0; x < n[0]; ++x)
+        grid->values.push_back(field(x * hx, y * hy, z * hz));
+    d.voxelGrid = grid;
+    return d;
+}
+
+static void testDelaunay() {
+    std::mt19937_64 random(7);
+    std::uniform_real_distribution<double> uniform(0, 10);
+    std::vector<surface_detail::P3> points;
+    for (int i = 0; i < 400; ++i) points.push_back({uniform(random), uniform(random), uniform(random)});
+    surface_detail::Tessellation t;
+    t.build(points, nullptr);
+    check(t.skipped == 0, "every random point is inserted");
+    size_t real = 0, violations = 0, badLinks = 0;
+    double total = 0;
+    for (size_t id = 0; id < t.tets.size(); ++id) {
+        const auto &tet = t.tets[id];
+        if (!tet.alive) continue;
+        for (size_t f = 0; f < 4; ++f) {
+            const int other = tet.n[f];
+            if (other < 0) continue;
+            bool back = false;
+            for (const int link : t.tets[size_t(other)].n) back = back || link == int(id);
+            badLinks += !back;
+        }
+        if (t.touchesSuper(tet)) continue;
+        ++real;
+        total += t.volume(tet.v);
+        for (size_t p = 0; p < points.size(); ++p) {
+            if (int(p) == tet.v[0] || int(p) == tet.v[1] || int(p) == tet.v[2] || int(p) == tet.v[3]) continue;
+            const auto d = surface_detail::sub(points[p], tet.center);
+            if (surface_detail::dot(d, d) < tet.radius2 * (1 - 1e-9)) ++violations;
+        }
+    }
+    check(real > 400, "the tessellation has tetrahedra");
+    check(violations == 0, "no point lies inside a Delaunay circumsphere: " + std::to_string(violations));
+    check(badLinks == 0, "neighbor links are symmetric");
+    check(total > 0.5 * 1000 && total <= 1000 + 1e-6, "tetrahedra stay inside the bounding cube: " + std::to_string(total));
+}
+
+static void testAlphaShapeSurface() {
+    Modifier node{Op::ConstructSurfaceMesh};
+    node.type = 0;
+    node.value = 2.5f;
+    node.cspNeighbors = 0;
+    node.bondWidth = 0;
+    node.histogramRangeStart = 1;
+    // A 5x5x5 lattice of spacing 2 fills an 8x8x8 cube; its Delaunay cells have circumradius sqrt(3).
+    const auto cube = evaluateSurface(openCubeLattice(5, 2), {node});
+    near(surfaceAttribute(cube, "ConstructSurfaceMesh.surface_area"), 384, .05, "cube surface area");
+    near(surfaceAttribute(cube, "ConstructSurfaceMesh.filled_volume"), 512, .05, "cube filled volume");
+    check(cube.surfaces.size() == 1 && cube.surfaces[0].mesh, "the cube publishes one surface");
+    check(cube.surfaces[0].alpha == 1.f, "zero transparency is opaque");
+    check(!cube.globalAttributes.contains("ConstructSurfaceMesh.empty_volume"), "no empty volume without full periodicity");
+    // Probe below the face radius sqrt(2): even the flat slivers on cube faces are empty.
+    Modifier tiny = node;
+    tiny.value = 1.3f;
+    const auto none = evaluateSurface(openCubeLattice(5, 2), {tiny});
+    near(surfaceAttribute(none, "ConstructSurfaceMesh.filled_volume"), 0, 1e-9, "a small probe leaves no solid");
+    check(none.surfaces[0].mesh->positions.empty(), "a small probe gives no faces");
+
+    // Slab: periodic in x and y, vacuum along z. Two faces of 16 x 16.
+    Dataset slab;
+    slab.species = {"X"};
+    slab.cell = {16, 0, 0, 0, 16, 0, 0, 0, 30};
+    slab.pbc = {true, true, false};
+    for (int z = 0; z < 4; ++z) for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
+        slab.atoms.push_back({float(x * 2 + .3), float(y * 2 + .3), float(z * 2 + 10), 0});
+    slab.sourceCount = slab.atoms.size();
+    slab.bounds();
+    const auto flat = evaluateSurface(slab, {node});
+    near(surfaceAttribute(flat, "ConstructSurfaceMesh.surface_area"), 2 * 16 * 16, .1, "slab area counts each periodic face once");
+    near(surfaceAttribute(flat, "ConstructSurfaceMesh.filled_volume"), 16 * 16 * 6, .1, "slab filled volume");
+    near(surfaceAttribute(flat, "ConstructSurfaceMesh.cell_volume"), 16 * 16 * 30, 1e-6, "slab cell volume");
+    near(surfaceAttribute(flat, "ConstructSurfaceMesh.filled_fraction"), 6.0 / 30, 1e-3, "slab filled fraction");
+    near(surfaceAttribute(flat, "ConstructSurfaceMesh.specific_surface_area"), 2.0 / 30, 1e-3, "specific surface area");
+    // The mesh stays inside the periodic cell and on the two planes.
+    const auto &positions = flat.surfaces[0].mesh->positions;
+    bool inside = !positions.empty(), onPlanes = true;
+    for (const auto &p : positions) {
+        inside = inside && p[0] >= -1e-3 && p[0] <= 16.001 && p[1] >= -1e-3 && p[1] <= 16.001;
+        onPlanes = onPlanes && (std::abs(p[2] - 10) < .01 || std::abs(p[2] - 16) < .01);
+    }
+    check(inside, "periodic triangles are folded into the cell");
+    check(onPlanes, "slab vertices lie on the two surfaces");
+
+    // Fully periodic and dense: no surface, the whole cell is solid.
+    Dataset bulk = slab;
+    bulk.atoms.clear();
+    bulk.cell = {16, 0, 0, 0, 16, 0, 0, 0, 16};
+    bulk.pbc = {true, true, true};
+    for (int z = 0; z < 8; ++z) for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
+        bulk.atoms.push_back({float(x * 2 + .3), float(y * 2 + .3), float(z * 2 + .3), 0});
+    bulk.sourceCount = bulk.atoms.size();
+    bulk.bounds();
+    const auto dense = evaluateSurface(bulk, {node});
+    near(surfaceAttribute(dense, "ConstructSurfaceMesh.surface_area"), 0, 1e-9, "dense periodic bulk has no surface");
+    near(surfaceAttribute(dense, "ConstructSurfaceMesh.filled_fraction"), 1, 1e-3, "dense periodic bulk is all solid");
+    near(surfaceAttribute(dense, "ConstructSurfaceMesh.empty_volume"), 0, .1, "dense periodic bulk has no empty space");
+
+    // Small periodic cell: images repeat beyond one cell without double counting.
+    Dataset small;
+    small.species = {"X"};
+    small.cell = {4, 0, 0, 0, 4, 0, 0, 0, 4};
+    small.pbc = {true, true, true};
+    for (int z = 0; z < 2; ++z) for (int y = 0; y < 2; ++y) for (int x = 0; x < 2; ++x)
+        small.atoms.push_back({float(x * 2 + .1), float(y * 2 + .1), float(z * 2 + .1), 0});
+    small.sourceCount = small.atoms.size();
+    small.bounds();
+    near(surfaceAttribute(evaluateSurface(small, {node}), "ConstructSurfaceMesh.filled_volume"), 64, .05, "a cell smaller than the skin is counted once");
+
+    // Selection: outer shell of the cube is exactly the surface.
+    Modifier selecting = node;
+    selecting.adaptive = true;
+    PipelineResult source;
+    source.data = openCubeLattice(5, 2);
+    source.selected.assign(source.data.atoms.size(), 0);
+    ModifierNode selectingNode;
+    static_cast<Modifier &>(selectingNode) = selecting;
+    const auto selectedResult = evaluateFrom(source, {selectingNode}, 0);
+    size_t marked = 0;
+    for (const auto flag : selectedResult.selected) marked += flag != 0;
+    check(marked <= 125 - 27 && marked >= 8, "only outer particles are selected: " + std::to_string(marked));
+    bool innerUntouched = true;
+    for (size_t i = 0; i < selectedResult.selected.size(); ++i) {
+        const auto &a = selectedResult.data.atoms[i];
+        const bool interior = a.x > 1 && a.x < 7 && a.y > 1 && a.y < 7 && a.z > 1 && a.z < 7;
+        if (interior && selectedResult.selected[i]) innerUntouched = false;
+    }
+    check(innerUntouched, "interior particles are not on the surface");
+
+    // Only selected particles: nothing selected gives no surface.
+    Modifier onlySelected = node;
+    onlySelected.cspOnlySelected = true;
+    PipelineResult noneSelected;
+    noneSelected.data = openCubeLattice(5, 2);
+    noneSelected.selected.assign(noneSelected.data.atoms.size(), 0);
+    ModifierNode onlyNode;
+    static_cast<Modifier &>(onlyNode) = onlySelected;
+    near(surfaceAttribute(evaluateFrom(noneSelected, {onlyNode}, 0).data, "ConstructSurfaceMesh.filled_volume"), 0, 0, "an empty selection has no surface");
+
+    // Fairing keeps a flat face flat and shrinks a rough one only slightly.
+    Modifier smoothNode = node;
+    smoothNode.cspNeighbors = 8;
+    const auto smoothFlat = evaluateSurface(slab, {smoothNode});
+    near(surfaceAttribute(smoothFlat, "ConstructSurfaceMesh.surface_area"), 2 * 16 * 16, .5, "fairing preserves flat periodic faces");
+    Modifier invalid = node;
+    invalid.value = 0;
+    throwsWith([&] { evaluateSurface(slab, {invalid}); }, "probe sphere radius", "probe radius must be positive");
+
+    std::atomic<bool> cancelled{true};
+    Dataset cancelData = openCubeLattice(5, 2);
+    std::vector<uint8_t> selected(cancelData.atoms.size(), 1);
+    SurfaceMeshOptions options;
+    throwsWith([&] { constructAlphaShapeSurface(cancelData, selected, options, &cancelled); }, "Cancelled", "alpha shape honors cancellation");
+}
+
+static void testGaussianSurface() {
+    const double pi = std::acos(-1.0);
+    Modifier node{Op::ConstructSurfaceMesh};
+    node.type = 1;
+    node.rdfBins = 96;
+    node.upper = .6f;
+    node.histogramRangeStart = 1;
+    node.bondWidth = 0;
+    // Species X has no element entry, so the radius is 1 and rho(r) = exp(-r^2 / 2).
+    const double radius = std::sqrt(2 * std::log(1 / .6));
+    Dataset one;
+    one.species = {"X"};
+    one.atoms.push_back({3, 4, 5, 0});
+    one.sourceCount = 1;
+    one.bounds();
+    const auto sphere = evaluateSurface(one, {node});
+    near(surfaceAttribute(sphere, "ConstructSurfaceMesh.filled_volume"), 4.0 / 3 * pi * std::pow(radius, 3), .03, "Gaussian sphere volume");
+    near(surfaceAttribute(sphere, "ConstructSurfaceMesh.surface_area"), 4 * pi * radius * radius, .3, "Gaussian sphere area");
+    // Lower iso values expand the surface.
+    Modifier lower = node;
+    lower.upper = .3f;
+    check(surfaceAttribute(evaluateSurface(one, {lower}), "ConstructSurfaceMesh.filled_volume") >
+          surfaceAttribute(sphere, "ConstructSurfaceMesh.filled_volume"), "a lower iso value expands the surface");
+    // Radius scaling is the standard deviation: volume grows with its cube.
+    Modifier wide = node;
+    wide.histogramRangeStart = 1.5;
+    near(surfaceAttribute(evaluateSurface(one, {wide}), "ConstructSurfaceMesh.filled_volume") / surfaceAttribute(sphere, "ConstructSurfaceMesh.filled_volume"), 3.375, .05, "radius scaling sets the Gaussian width");
+    // A particle on a periodic corner is summed across the boundary and counted once.
+    Dataset corner;
+    corner.species = {"X"};
+    corner.cell = {12, 0, 0, 0, 12, 0, 0, 0, 12};
+    corner.pbc = {true, true, true};
+    corner.atoms.push_back({0, 0, 0, 0});
+    corner.sourceCount = 1;
+    corner.bounds();
+    const auto wrapped = evaluateSurface(corner, {node});
+    near(surfaceAttribute(wrapped, "ConstructSurfaceMesh.filled_volume"), 4.0 / 3 * pi * std::pow(radius, 3), .05, "periodic corner volume");
+    near(surfaceAttribute(wrapped, "ConstructSurfaceMesh.surface_area"), 4 * pi * radius * radius, .3, "periodic corner area");
+    near(surfaceAttribute(wrapped, "ConstructSurfaceMesh.empty_fraction"), 1 - 4.0 / 3 * pi * std::pow(radius, 3) / 1728, 1e-3, "periodic empty fraction");
+    bool inCell = !wrapped.surfaces[0].mesh->positions.empty();
+    for (const auto &p : wrapped.surfaces[0].mesh->positions)
+        for (const float c : p) inCell = inCell && c >= -1e-3f && c <= 12.001f;
+    check(inCell, "the corner sphere is cut into the cell");
+    // A particle's radius comes from the element table when the type is an element.
+    Dataset copper = one;
+    copper.species = {"Cu"};
+    near(surfaceAttribute(evaluateSurface(copper, {node}), "ConstructSurfaceMesh.filled_volume"),
+         4.0 / 3 * pi * std::pow(radius * 1.32, 3), .15, "element covalent radius sets the width");
+    Modifier bad = node;
+    bad.upper = 0;
+    throwsWith([&] { evaluateSurface(one, {bad}); }, "iso value", "iso value must be positive");
+    Modifier coarse = node;
+    coarse.rdfBins = 2;
+    throwsWith([&] { evaluateSurface(one, {coarse}); }, "resolution", "resolution is bounded");
+    std::atomic<bool> cancelled{true};
+    std::vector<uint8_t> selected(1, 1);
+    SurfaceMeshOptions options;
+    options.gaussian = true;
+    throwsWith([&] { constructGaussianSurface(one, selected, options, &cancelled); }, "Cancelled", "Gaussian density honors cancellation");
+}
+
+static void testIsosurface() {
+    const double pi = std::acos(-1.0);
+    Modifier node{Op::CreateIsosurface};
+    node.cspNeighbors = 0;
+    node.bondWidth = .25f;
+    // Plane x = 4.3 across a non-periodic box of 10: grid points span 9.5 in y and z at spacing 0.5.
+    node.value = 4.3f;
+    const auto plane = evaluateSurface(gridDataset({20, 20, 20}, 10, {false, false, false}, [](double x, double, double) { return x; }), {node});
+    near(surfaceAttribute(plane, "CreateIsosurface.surface_area"), 9.5 * 9.5, 1e-3, "plane area");
+    near(surfaceAttribute(plane, "CreateIsosurface.volume_above"), (9.5 - 4.3) * 9.5 * 9.5, 1e-2, "linear field volume above the level");
+    near(plane.surfaces[0].alpha, .75, 1e-6, "transparency sets the surface alpha");
+    // Sphere of radius 3 from the distance field.
+    node.value = 3;
+    const auto ball = evaluateSurface(gridDataset({64, 64, 64}, 10, {false, false, false}, [](double x, double y, double z) {
+        return -std::hypot(x - 5, y - 5, z - 5); }), {[&] { Modifier m = node; m.value = -3; return m; }()});
+    near(surfaceAttribute(ball, "CreateIsosurface.surface_area"), 4 * pi * 9, .6, "sphere area");
+    near(surfaceAttribute(ball, "CreateIsosurface.volume_above"), 4.0 / 3 * pi * 27, .6, "sphere volume");
+    // Outward normals point from high values to low values.
+    const auto &mesh = *ball.surfaces[0].mesh;
+    bool outward = !mesh.positions.empty();
+    for (size_t i = 0; i < mesh.positions.size(); ++i) {
+        const double dx = mesh.positions[i][0] - 5, dy = mesh.positions[i][1] - 5, dz = mesh.positions[i][2] - 5;
+        outward = outward && dx * mesh.normals[i][0] + dy * mesh.normals[i][1] + dz * mesh.normals[i][2] > 0;
+    }
+    check(outward, "isosurface normals point away from the region above the level");
+    // Periodic: a plane wave has two sheets; each is a full periodic face.
+    node.value = 0;
+    const double box = 12;
+    const auto wave = evaluateSurface(gridDataset({48, 48, 48}, box, {true, true, true}, [&](double x, double, double) {
+        return std::sin(2 * pi * x / box + .4); }), {node});
+    near(surfaceAttribute(wave, "CreateIsosurface.surface_area"), 2 * box * box, .05, "periodic sheets are counted once");
+    near(surfaceAttribute(wave, "CreateIsosurface.volume_above"), box * box * box / 2, .3, "half of a periodic wave is above zero");
+    // Smoothing stays close to a smooth sheet.
+    Modifier smoothed = node;
+    smoothed.cspNeighbors = 5;
+    near(surfaceAttribute(evaluateSurface(gridDataset({48, 48, 48}, box, {true, true, true}, [&](double x, double, double) {
+        return std::sin(2 * pi * x / box + .4); }), {smoothed}), "CreateIsosurface.surface_area"), 2 * box * box, .5, "smoothing preserves flat periodic sheets");
+    // A level outside the data gives no surface.
+    node.value = 5;
+    check(evaluateSurface(gridDataset({8, 8, 8}, 4, {false, false, false}, [](double, double, double) { return 1.0; }), {node}).surfaces[0].mesh->positions.empty(), "a level outside the data has no surface");
+    // No grid is a clear error.
+    throwsWith([&] { evaluateSurface(openCubeLattice(2, 1), {node}); }, "voxel grid", "isosurface requires a voxel grid");
+    // Spatial binning provides the grid: bin centers, periodic flags and counts.
+    Dataset data;
+    data.species = {"X"};
+    data.cell = {8, 0, 0, 0, 8, 0, 0, 0, 8};
+    data.pbc = {true, true, false};
+    data.atoms.push_back({1, 1, 1, 0});
+    data.atoms.push_back({1.5f, 1.5f, 1.5f, 0});
+    data.sourceCount = 2;
+    data.bounds();
+    Modifier binning{Op::SpatialBinning};
+    binning.property.clear();
+    binning.replicateN[0] = 4;
+    binning.replicateN[1] = 2;
+    binning.replicateN[2] = 2;
+    binning.reduceOperation = 3;
+    const auto binned = evaluateSurface(data, {binning});
+    check(bool(binned.voxelGrid), "3D binning publishes a voxel grid");
+    if (binned.voxelGrid) {
+        const auto &grid = *binned.voxelGrid;
+        check(grid.size == std::array<int, 3>{4, 2, 2} && grid.values.size() == 16, "grid dimensions follow the bins");
+        near(grid.values[0], 2, 0, "both particles fall in the first voxel");
+        near(grid.maximum, 2, 0, "grid maximum");
+        near(grid.first[0], 1, 1e-12, "voxel a center");
+        near(grid.first[1], 2, 1e-12, "voxel b center");
+        near(grid.step[0], 2, 1e-12, "voxel step");
+        check(grid.periodic == std::array<bool, 3>{true, true, false}, "grid periodicity follows the cell");
+        check(grid.histogram.size() == 64 && grid.histogram[63] == 1 && grid.histogram[0] == 15, "grid histogram");
+    }
+    binning.replicateN[2] = 1;
+    check(!evaluateSurface(data, {binning}).voxelGrid, "2D binning has no voxel grid");
+    Dataset cancelData = gridDataset({8, 8, 8}, 4, {false, false, false}, [](double x, double, double) { return x; });
+    std::atomic<bool> cancelled{true};
+    throwsWith([&] { computeIsosurface(cancelData, 1, 0, {1, 1, 1}, 0, &cancelled); }, "Cancelled", "isosurface honors cancellation");
+}
+
+static void testTextLabels() {
+    Dataset d;
+    d.species = {"Cu", "Zr"};
+    d.cell = {10, 0, 0, 0, 10, 0, 0, 0, 10};
+    d.atoms.push_back({1, 1, 1, 0});
+    d.atoms.push_back({2, 2, 2, 1});
+    d.atoms.push_back({3, 3, 3, 0});
+    d.sourceCount = 3;
+    d.scalarProperties["Charge"] = {1.25, -.5, 0};
+    d.scalarProperties["Particle Identifier"] = {7, 8, 9};
+    d.vectorProperties["Velocity"] = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
+    d.bounds();
+    const auto labels = [&](const std::string &property, const std::string &format) {
+        Modifier node{Op::TextLabels};
+        node.property = property;
+        node.outputProperty = format;
+        return evaluateSurface(d, {node}).textLabels.at(0).text;
+    };
+    check(labels("Charge", "%.2f eV") == std::vector<std::string>{"1.25 eV", "-0.50 eV", "0.00 eV"}, "scalar with literal unit");
+    check(labels("Charge", "%.6g")[0] == "1.25", "general format");
+    check(labels("Charge", "100%% %.1f")[1] == "100% -0.5", "escaped percent");
+    check(labels("Particle Type", "%g") == std::vector<std::string>{"Cu", "Zr", "Cu"}, "types show their names");
+    check(labels("Particle Type", "[%s]")[1] == "[Zr]", "type names keep literal text");
+    check(labels("Particle Identifier", "#%g") == std::vector<std::string>{"#7", "#8", "#9"}, "identifiers are plain integers");
+    check(labels("Charge", "Label")[2] == "Label", "no specifier gives constant text");
+    check(labels("Velocity", "(%.1f, %g, %g)")[1] == "(4.0, 5, 6)", "one specifier per component");
+    check(labels("Velocity", "%g")[2] == "7, 8, 9", "a single specifier repeats for each component");
+    check(labels("Position.X", "%.1f")[2] == "3.0", "virtual position components");
+    check(labels("Charge", "%5.1f|")[0] == "  1.2|" || labels("Charge", "%5.1f|")[0] == "  1.3|", "width and precision");
+    check(labels("Charge", "%d")[0] == "1", "integer conversions round a double");
+    throwsWith([&] { labels("Charge", "%g %g"); }, "exactly one", "a scalar takes one specifier");
+    throwsWith([&] { labels("Velocity", "%g %g"); }, "one format specifier", "a vector takes one or three specifiers");
+    throwsWith([&] { labels("Charge", "%n"); }, "Unsupported", "dangerous conversions are refused");
+    throwsWith([&] { labels("Charge", "%*d"); }, "Unsupported", "star widths are refused");
+    throwsWith([&] { labels("Charge", "%s"); }, "text", "%s is for text");
+    throwsWith([&] { labels("Charge", "%99999f"); }, "too large", "huge widths are refused");
+    throwsWith([&] { labels("Charge", "%"); }, "Unsupported", "a lone percent is refused");
+
+    // Only selected particles; a later Delete keeps labels on their particles.
+    PipelineResult source;
+    source.data = d;
+    source.colorSelected.assign(d.atoms.size(), 0);
+    source.selected = {1, 0, 1};
+    Modifier labelNode{Op::TextLabels};
+    labelNode.property = "Particle Identifier";
+    labelNode.outputProperty = "%g";
+    labelNode.cspOnlySelected = true;
+    ModifierNode only;
+    static_cast<Modifier &>(only) = labelNode;
+    const auto selectedLabels = evaluateFrom(source, {only}, 0).data.textLabels.at(0);
+    check(selectedLabels.atoms == std::vector<uint32_t>{0, 2} && selectedLabels.text == std::vector<std::string>{"7", "9"}, "only selected particles are labeled");
+
+    source.selected = {0, 1, 0};
+    labelNode.cspOnlySelected = false;
+    static_cast<Modifier &>(only) = labelNode;
+    ModifierNode remove;
+    static_cast<Modifier &>(remove) = Modifier{Op::Delete};
+    const auto deleted = evaluateFrom(source, {only, remove}, 0).data;
+    check(deleted.textLabels.at(0).atoms == std::vector<uint32_t>{0, 1} && deleted.textLabels.at(0).text == std::vector<std::string>{"7", "9"}, "Delete keeps labels on their particles");
+
+    Modifier replicate{Op::Replicate};
+    replicate.replicateN[0] = 2;
+    ModifierNode copy;
+    static_cast<Modifier &>(copy) = replicate;
+    const auto copied = evaluateFrom(source, {only, copy}, 0).data;
+    check(copied.textLabels.at(0).atoms.size() == 6 && copied.textLabels.at(0).atoms[3] == 3 && copied.textLabels.at(0).text[5] == "9", "Replicate copies labels");
+    bool matches = true;
+    for (size_t k = 0; k < 6; ++k) matches = matches && copied.textLabels.at(0).atoms[k] < copied.atoms.size();
+    check(matches, "replicated labels name valid particles");
+
+    // Several instances coexist, each with its own style.
+    Modifier first{Op::TextLabels};
+    first.property = "Charge";
+    first.outputProperty = "%g";
+    first.bondWidth = 20;
+    Modifier second = first;
+    second.bondWidth = 9;
+    const auto both = evaluateSurface(d, {first, second});
+    check(both.textLabels.size() == 2 && both.textLabels[0].size == 20 && both.textLabels[1].size == 9, "several label nodes keep their own style");
+}
+
 static void testCoordinationPolyhedra() {
     Modifier node{Op::CoordinationPolyhedra};
     node.value = .3f;
@@ -2872,6 +3284,11 @@ int main() {
     testBondProperties();
     testTrajectoryLines();
     testCoordinationPolyhedra();
+    testDelaunay();
+    testAlphaShapeSurface();
+    testGaussianSurface();
+    testIsosurface();
+    testTextLabels();
     testCancellation();
     if (failures) {
         std::cerr << failures << " of " << checks << " checks failed\n";

@@ -33,6 +33,8 @@
 #include <bit>
 #include <charconv>
 #include <numeric>
+#include <random>
+#include "elements.hpp"
 
 namespace atomx {
 struct Vec3 {
@@ -139,6 +141,36 @@ struct PolyhedronMesh {
     bool showEdges = true;
     std::array<float, 3> edgeColor{.12f, .12f, .14f};
 };
+// Scalar field on a regular grid. first is the position of grid point 0; step holds the three
+// grid vectors as consecutive rows. values has size[0]*size[1]*size[2] entries, x fastest.
+struct VoxelGrid {
+    std::string name;
+    std::array<int, 3> size{};
+    std::array<double, 3> first{};
+    std::array<double, 9> step{};
+    std::array<bool, 3> periodic{};
+    std::vector<double> values;
+    double minimum = 0, maximum = 0;
+    std::vector<uint32_t> histogram; // Equal-width bins from minimum to maximum.
+};
+// Triangle soup in Cartesian coordinates, three entries per triangle, already cut at the
+// periodic cell faces. Later pipeline nodes do not move it.
+struct SurfaceMeshData {
+    std::vector<std::array<float, 3>> positions, normals;
+};
+struct SurfaceMeshStyle {
+    std::shared_ptr<const SurfaceMeshData> mesh;
+    std::array<float, 3> color{.45f, .68f, .88f};
+    float alpha = 1;
+};
+// One label per listed particle, in pixels at the viewport's interface scale.
+struct TextLabelSet {
+    std::vector<uint32_t> atoms;
+    std::vector<std::string> text;
+    float size = 13;
+    std::array<float, 3> color{1, 1, 1};
+    float offsetX = 0, offsetY = 0;
+};
 inline constexpr size_t interactiveBondBudget = 200000;
 inline constexpr size_t cylinderBondBudget = 20000;
 struct Dataset {
@@ -167,6 +199,9 @@ struct Dataset {
     std::map<std::string, std::vector<double>> bondProperties;
     TrajectoryLineStyle trajectoryLines;
     PolyhedronMesh polyhedra;
+    std::shared_ptr<const VoxelGrid> voxelGrid;
+    std::vector<SurfaceMeshStyle> surfaces;
+    std::vector<TextLabelSet> textLabels;
     BondStyle bondStyle;
     std::vector<Vec3> particleColors;
     bool sampled() const {
@@ -872,6 +907,9 @@ enum class Op {
     ,Measure
     ,GenerateTrajectoryLines
     ,CoordinationPolyhedra
+    ,TextLabels
+    ,CreateIsosurface
+    ,ConstructSurfaceMesh
 };
 struct Modifier {
     Op op;
@@ -987,6 +1025,12 @@ struct Modifier {
     // bondWidth and bondColor line style, overlapUseRadii show up to the current time,
     // histogramSelectRange wrap at periodic boundaries.
     // Coordination polyhedra: value transparency, adaptive show edges, bondColor edge color.
+    // Add text labels: property, outputProperty format, cspOnlySelected, bondWidth font size,
+    // bondColor color, replicateN[0..1] pixel offset.
+    // Create isosurface: value iso-level, cspNeighbors smoothing, bondColor color, bondWidth transparency.
+    // Construct surface mesh: type method (0 alpha shape, 1 Gaussian density), value probe radius,
+    // cspNeighbors smoothing, adaptive select surface particles, rdfBins resolution, upper iso
+    // value, histogramRangeStart radius scaling, cspOnlySelected, bondColor color, bondWidth transparency.
     // Grain segmentation: type algorithm (0 automatic, 1 manual graph clustering, 2 MST),
     // value log merge threshold, rdfBins minimum grain size, adaptive adopt orphans,
     // clusterByBonds handle stacking faults, overlapUseRadii color particles by grain.
@@ -1169,6 +1213,16 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Surface,"Coordination polyhedra");
         add(Kind::GlobalAttributes,"Polyhedron counts");
     }
+    if (modifier.op==Op::TextLabels) add(Kind::Labels,"Text labels");
+    if (modifier.op==Op::CreateIsosurface) {
+        add(Kind::Surface,"Isosurface");
+        add(Kind::GlobalAttributes,"Isosurface area and volume");
+    }
+    if (modifier.op==Op::ConstructSurfaceMesh) {
+        add(Kind::Surface,"Surface mesh");
+        add(Kind::GlobalAttributes,"Surface area and volumes");
+        if (modifier.adaptive && modifier.type==0) add(Kind::Particles,"Surface particle selection");
+    }
     if (modifier.op==Op::EditCell) add(Kind::Cell,"Simulation cell");
     if (modifier.op==Op::ManualSelection) add(Kind::Particles,"Manual selection");
     if (modifier.op==Op::Histogram && modifier.histogramSelectRange)
@@ -1220,7 +1274,10 @@ inline std::vector<DataObject> modifierOutputs(const Modifier &modifier, size_t 
         add(Kind::Particles,modifier.property+" (Difference)");
         add(Kind::GlobalAttributes,"Attribute differences");
     }
-    if (modifier.op==Op::SpatialBinning) add(Kind::Table,"Spatial binning");
+    if (modifier.op==Op::SpatialBinning) {
+        add(Kind::Table,"Spatial binning");
+        if (modifier.replicateN[0]>1 && modifier.replicateN[1]>1 && modifier.replicateN[2]>1) add(Kind::VoxelGrid,"Spatial binning grid");
+    }
     if (modifier.op==Op::TimeSeries) add(Kind::Table,"Time series");
     if (modifier.op==Op::TimeAveraging) add(Kind::Particles,modifier.property+" Average");
     if (modifier.op==Op::SmoothTrajectory) add(Kind::Particles,"Smoothed positions");
@@ -2400,6 +2457,9 @@ inline const char *opName(Op op) {
     case Op::Measure: return "Measure";
     case Op::GenerateTrajectoryLines: return "Generate trajectory lines";
     case Op::CoordinationPolyhedra: return "Coordination polyhedra";
+    case Op::TextLabels: return "Add text labels";
+    case Op::CreateIsosurface: return "Create isosurface";
+    case Op::ConstructSurfaceMesh: return "Construct surface mesh";
     default:
         return "Color by type";
     }
@@ -2436,6 +2496,13 @@ inline bool pipelineResultWithinCacheBudget(const PipelineResult &result,
     for (const auto &[name,values]:data.bondProperties)
         if (!add(sizeof(name)+name.size(),1) || !add(values.size(),sizeof(double))) return false;
     if (!add(data.polyhedra.corners.size(),sizeof(Bond)) || !add(data.polyhedra.edges.size(),sizeof(Bond))) return false;
+    if (data.voxelGrid && !add(data.voxelGrid->values.size(),sizeof(double))) return false;
+    for (const auto &surface:data.surfaces)
+        if (surface.mesh && !add(surface.mesh->positions.size()*2,sizeof(std::array<float,3>))) return false;
+    for (const auto &labels:data.textLabels) {
+        if (!add(labels.atoms.size(),sizeof(uint32_t)+sizeof(std::string))) return false;
+        for (const auto &text:labels.text) if (!add(text.size(),1)) return false;
+    }
     if (data.trajectoryLines.set && (!add(data.trajectoryLines.set->points.size(),sizeof(Vec3)) ||
                                      !add(data.trajectoryLines.set->values.size(),sizeof(float)))) return false;
     if (!add(data.globalAttributes.size(),sizeof(std::pair<std::string,double>))) return false;
@@ -2505,6 +2572,7 @@ struct ModifierExecutionError : std::runtime_error {
 #include "analysis_external.inc"
 #include "analysis_measure.inc"
 #include "analysis_scene.inc"
+#include "analysis_surface.inc"
 // Resolves the reference frame requested by a Calculate displacements node:
 // an absolute animation frame number, or the current frame plus an offset.
 // Both are clamped into the valid frame range.
@@ -3079,6 +3147,17 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 replicateTopology(originalBonds, r.data.bonds);
                 for (auto *list : {&r.data.polyhedra.corners, &r.data.polyhedra.edges})
                     if (!list->empty()) { const auto original = *list; replicateTopology(original, *list); }
+                for (auto &labels : r.data.textLabels) {
+                    const auto atoms = labels.atoms;
+                    const auto text = labels.text;
+                    labels.atoms.reserve(atoms.size() * total);
+                    labels.text.reserve(text.size() * total);
+                    for (size_t copy = 1; copy < total; ++copy)
+                        for (size_t k = 0; k < atoms.size(); ++k) {
+                            labels.atoms.push_back(uint32_t(size_t(atoms[k]) + copy * n));
+                            labels.text.push_back(text[k]);
+                        }
+                }
                 // Bonds were rebuilt copy by copy in their original order, so columns repeat.
                 for (auto &[name, values] : r.data.bondProperties) {
                     const auto original = values;
@@ -3324,6 +3403,39 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                 computeCoordinationPolyhedra(r.data, r.selected, m.value, m.adaptive, m.bondColor, cancel);
                 continue;
             }
+            if (m.op == Op::TextLabels) {
+                TextLabelOptions options;
+                options.property = m.property;
+                options.format = m.outputProperty;
+                options.onlySelected = m.cspOnlySelected;
+                options.size = m.bondWidth;
+                options.color = {m.bondColor[0], m.bondColor[1], m.bondColor[2]};
+                options.offsetX = float(m.replicateN[0]);
+                options.offsetY = float(m.replicateN[1]);
+                computeTextLabels(r.data, r.selected, options, cancel);
+                continue;
+            }
+            if (m.op == Op::CreateIsosurface) {
+                computeIsosurface(r.data, m.value, m.cspNeighbors, {m.bondColor[0], m.bondColor[1], m.bondColor[2]}, m.bondWidth, cancel);
+                continue;
+            }
+            if (m.op == Op::ConstructSurfaceMesh) {
+                if (r.data.sampled()) throw std::runtime_error("Construct surface mesh requires full data, not a sampled preview");
+                SurfaceMeshOptions options;
+                options.gaussian = m.type == 1;
+                options.onlySelected = m.cspOnlySelected;
+                options.selectSurface = m.adaptive;
+                options.probeRadius = m.value;
+                options.smoothing = m.cspNeighbors;
+                options.resolution = m.rdfBins;
+                options.radiusScale = m.histogramRangeStart;
+                options.isoValue = m.upper;
+                options.color = {m.bondColor[0], m.bondColor[1], m.bondColor[2]};
+                options.transparency = m.bondWidth;
+                if (options.gaussian) constructGaussianSurface(r.data, r.selected, options, cancel);
+                else constructAlphaShapeSurface(r.data, r.selected, options, cancel);
+                continue;
+            }
             if (m.op == Op::Measure) {
                 computeMeasure(r.data, m.property, m.adaptive, cancel);
                 continue;
@@ -3429,7 +3541,7 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
             }
             if (m.op == Op::SpatialBinning) {
                 r.data.tables.push_back(binParticles(r.data, m.property, m.replicateN, m.reduceOperation,
-                                                     m.cspOnlySelected ? &r.selected : nullptr, m.adaptive, cancel));
+                                                     m.cspOnlySelected ? &r.selected : nullptr, m.adaptive, cancel, &r.data.voxelGrid));
                 continue;
             }
             if (m.op == Op::StructureFactor) {
@@ -4079,6 +4191,18 @@ inline PipelineResult evaluateFrom(PipelineResult r,const std::vector<Modifier> 
                         }
                         list->resize(kept);
                     }
+                }
+                for (auto &labels : r.data.textLabels) {
+                    size_t kept = 0;
+                    for (size_t k = 0; k < labels.atoms.size(); ++k) {
+                        const int64_t mapped = particleMap[labels.atoms[k]];
+                        if (mapped < 0) continue;
+                        labels.atoms[kept] = uint32_t(mapped);
+                        if (kept != k) labels.text[kept] = std::move(labels.text[k]);
+                        ++kept;
+                    }
+                    labels.atoms.resize(kept);
+                    labels.text.resize(kept);
                 }
             }
             if (m.op == Op::Rotate) {

@@ -58,7 +58,7 @@ inline void computeFrameDifference(PipelineResult &r, const Dataset &reference, 
 // property counts particles.
 inline DataTable binParticles(const Dataset &data, const std::string &property, const int binCounts[3],
                               int operation, const std::vector<uint8_t> *selection, bool derivative,
-                              std::atomic<bool> *cancel) {
+                              std::atomic<bool> *cancel, std::shared_ptr<const VoxelGrid> *gridOutput = nullptr) {
     size_t total = 1;
     int dimensions = 0, firstAxis = 0;
     for (int axis = 2; axis >= 0; --axis) {
@@ -106,6 +106,30 @@ inline DataTable binParticles(const Dataset &data, const std::string &property, 
         result[b] = operation == 0 ? lowest[b] : operation == 1 ? highest[b]
                   : operation == 2 ? sum[b] / double(population[b])
                   : operation == 3 ? sum[b] : sum[b] / binVolume;
+    }
+    if (gridOutput && dimensions == 3) {
+        // Grid points sit at the bin centers. The histogram is read by Create isosurface.
+        auto grid = std::make_shared<VoxelGrid>();
+        grid->name = counting ? "Count" : property;
+        grid->size = {binCounts[0], binCounts[1], binCounts[2]};
+        std::array<double, 3> first{data.origin.x, data.origin.y, data.origin.z};
+        for (size_t axis = 0; axis < 3; ++axis) {
+            grid->periodic[axis] = data.pbc[axis];
+            for (size_t k = 0; k < 3; ++k) {
+                grid->step[axis * 3 + k] = data.cell[axis * 3 + k] / binCounts[axis];
+                first[k] += .5 * grid->step[axis * 3 + k];
+            }
+        }
+        grid->first = first;
+        const auto [low, high] = std::minmax_element(result.begin(), result.end());
+        grid->minimum = *low;
+        grid->maximum = *high;
+        grid->histogram.assign(64, 0);
+        const double range = grid->maximum - grid->minimum;
+        for (const double value : result)
+            ++grid->histogram[range > 0 ? std::min(size_t((value - grid->minimum) / range * 64), size_t(63)) : 0];
+        grid->values = result;
+        *gridOutput = std::move(grid);
     }
     DataTable table;
     table.name = "Spatial binning";

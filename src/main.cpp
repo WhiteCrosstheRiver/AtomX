@@ -609,7 +609,8 @@ static const char *opCategory(Op op) {
                                op == Op::PolyhedralTemplateMatching || op == Op::GrainSegmentation ||
                                op == Op::ElasticStrain || op == Op::Measure
                          ? "Analysis"
-                         : op == Op::GenerateTrajectoryLines || op == Op::CoordinationPolyhedra
+                         : op == Op::GenerateTrajectoryLines || op == Op::CoordinationPolyhedra ||
+                                   op == Op::TextLabels || op == Op::CreateIsosurface || op == Op::ConstructSurfaceMesh
                                ? "Visualization"
                                : "Modification";
 }
@@ -1902,6 +1903,18 @@ struct App {
             m.overlapUseRadii = false; m.histogramSelectRange = false; m.replicateN[0] = 0; m.replicateN[1] = 0;
         }
         if (op == Op::CoordinationPolyhedra) { m.value = .3f; m.adaptive = true; m.bondColor = {.12f, .12f, .14f, 1.f}; }
+        if (op == Op::TextLabels) {
+            m.property = "Particle Type"; m.outputProperty = "%.6g"; m.bondWidth = 13.f;
+            m.bondColor = {1.f, 1.f, 1.f, 1.f}; m.replicateN[0] = 0; m.replicateN[1] = 0;
+        }
+        if (op == Op::CreateIsosurface) {
+            m.cspNeighbors = 0; m.bondWidth = 0; m.bondColor = {.45f, .68f, .88f, 1.f};
+            if (result.data.voxelGrid) m.value = float((result.data.voxelGrid->minimum + result.data.voxelGrid->maximum) * .5);
+        }
+        if (op == Op::ConstructSurfaceMesh) {
+            m.type = 0; m.value = 3.f; m.cspNeighbors = 8; m.adaptive = false; m.rdfBins = 50; m.upper = .6f;
+            m.histogramRangeStart = 1; m.bondWidth = 0; m.bondColor = {.45f, .68f, .88f, 1.f};
+        }
         if (op == Op::Histogram) { m.type = 64; m.property = "Position.X"; }
         if (op == Op::BondLengthDistribution) m.type = 64;
         if (op == Op::BondAngleDistribution) m.type = 90;
@@ -4159,6 +4172,57 @@ struct App {
     void openUrl(const char *url) {
         ShellExecuteA(window, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
     }
+    // Calls emit(x, y, set, row) for each visible label, x and y from 0 to 1 across the view,
+    // until limit labels were found. Returns false if more labels remained.
+    template <class Emit>
+    bool forEachVisibleTextLabel(const Camera &camera, float aspect, size_t limit, Emit &&emit) {
+        const bool compact = result.data.bondStyle.visible && result.data.bondStyle.radius > 0 && gpu.bondsUploaded();
+        const auto matrix = gpu.matrix(result.data, camera, aspect, cell, radius, nullptr, nullptr, compact ? .50f : 1.f);
+        size_t found = 0;
+        for (const auto &set : result.data.textLabels)
+            for (size_t row = 0; row < set.atoms.size(); ++row) {
+                const size_t atom = set.atoms[row];
+                if (atom >= result.data.atoms.size() || (atom < pipelineHidden.size() && pipelineHidden[atom])) continue;
+                const auto &at = result.data.atoms[atom];
+                DirectX::XMFLOAT4 q;
+                DirectX::XMStoreFloat4(&q, DirectX::XMVector4Transform(DirectX::XMVectorSet(at.x, at.y, at.z, 1), matrix));
+                if (q.w <= 0 || q.z <= 0 || q.z >= q.w) continue;
+                const float x = (q.x / q.w + 1) * .5f, y = (1 - q.y / q.w) * .5f;
+                if (x < 0 || x > 1 || y < 0 || y > 1) continue;
+                if (found++ == limit) return false;
+                emit(x, y, set, row);
+            }
+        return true;
+    }
+    static constexpr size_t textLabelDrawLimit = 4000;
+    bool textLabelsTruncated = false;
+    size_t textLabelsDrawn = 0;
+    void drawTextLabels(ImDrawList *draw, ImVec2 p, ImVec2 size, const Camera &camera) {
+        ImFont *font = ImGui::GetFont();
+        size_t drawn = 0;
+        draw->PushClipRect(p, {p.x + size.x, p.y + size.y}, true);
+        textLabelsTruncated = !forEachVisibleTextLabel(camera, size.x / std::max(size.y, 1.f), textLabelDrawLimit,
+            [&](float x, float y, const TextLabelSet &set, size_t row) {
+                const float pixels = U(set.size);
+                const char *text = set.text[row].c_str();
+                const ImVec2 extent = font->CalcTextSizeA(pixels, FLT_MAX, 0.f, text);
+                const ImVec2 at{std::round(p.x + x * size.x + U(set.offsetX) - extent.x * .5f), std::round(p.y + y * size.y + U(set.offsetY) - extent.y * .5f)};
+                draw->AddText(font, pixels, {at.x + 1, at.y + 1}, IM_COL32(0, 0, 0, 170), text);
+                draw->AddText(font, pixels, at, ImGui::ColorConvertFloat4ToU32({set.color[0], set.color[1], set.color[2], 1.f}), text);
+                ++drawn;
+            });
+        draw->PopClipRect();
+        textLabelsDrawn = drawn;
+    }
+    // Labels for a rendered image. Sizes and offsets scale like the color legend does.
+    std::vector<PngTextLabel> exportTextLabels(const Camera &camera, int width, int height) {
+        std::vector<PngTextLabel> labels;
+        const float scale = std::clamp(std::min(width / 1280.f, height / 720.f), .65f, 2.5f);
+        forEachVisibleTextLabel(camera, float(width) / std::max(height, 1), 20000, [&](float x, float y, const TextLabelSet &set, size_t row) {
+            labels.push_back({x * width + set.offsetX * scale, y * height + set.offsetY * scale, set.size * scale, set.text[row], set.color});
+        });
+        return labels;
+    }
     void exportImage() {
         auto p = dialog(window, true, fileFilter("PNG image",L"*.png").c_str(), L"png");
         if (p.empty())
@@ -4174,7 +4238,7 @@ struct App {
             const auto &r=creationDisplay.defaultColor;
             legend={r.kind==creation::ColorKind::Property && r.legend,r.property,r.gradient,r.low,r.high,r.reverse,r.discrete};
         }
-        gpu.png(t, p, legend);
+        gpu.png(t, p, legend, creationMode ? std::vector<PngTextLabel>{} : exportTextLabels(cameras[active], exportW, exportH));
         status = loc::format("Rendered %s",utf8(p.filename().wstring()).c_str());
     }
     void fixed(const char *name, float x, float y, float w, float h) {
@@ -7980,6 +8044,7 @@ struct App {
             case ViewportCursor::Arrow: break;
             }
         }
+        if (!creationMode && !result.data.textLabels.empty()) drawTextLabels(draw, p, avail, cam);
         if (creationMode) {
             const auto projection=creationProjection(result.data,cam,avail);
             auto mvp=projection.combined;
@@ -11689,6 +11754,128 @@ struct App {
                             ImGui::TextDisabled(loc::text("%.0f polyhedra, %.0f particles skipped."), count->second, skipped->second);
                         if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
                     }
+                    if (m.op == Op::TextLabels) {
+                        auto edited = m;
+                        bool changed = false;
+                        std::vector<std::string> choices{"Particle Type"};
+                        for (auto &name : pipelineInputPropertyChoices(source, mods, std::min(modifierGraph.selected, mods.size()), true))
+                            if (name != "Particle Type") choices.push_back(std::move(name));
+                        for (const auto &[name, values] : result.data.vectorProperties)
+                            if (std::find(choices.begin(), choices.end(), name) == choices.end()) choices.push_back(name);
+                        fitNextField("Property", true);
+                        if (ImGui::BeginCombo(loc::label("Property"), edited.property.c_str())) {
+                            for (const auto &name : choices)
+                                if (ImGui::Selectable(name.c_str(), name == edited.property)) { edited.property = name; changed = true; }
+                            ImGui::EndCombo();
+                        }
+                        recordUiTestItem(std::string("pipeline.label-property.")+m.id,"Property");
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        char format[128];
+                        snprintf(format, sizeof(format), "%s", edited.outputProperty.c_str());
+                        fitNextField("Format");
+                        if (ImGui::InputText(loc::label("Format"), format, sizeof(format))) {
+                            // Half-typed specifiers are simply not applied yet.
+                            try { std::string tail; label_detail::parseFormat(format, tail); edited.outputProperty = format; changed = true; }
+                            catch (const std::exception &) {}
+                        }
+                        recordUiTestItem(std::string("pipeline.label-format.")+m.id,"Format");
+                        ImGui::TextDisabled(loc::text("printf style, for example %%.2f eV. Types and identifiers show their own text."));
+                        changed |= ui_design::checkbox(loc::label("Label only selected particles"), &edited.cspOnlySelected);
+                        fitNextField("Font size (px)");
+                        changed |= ImGui::SliderFloat(loc::label("Font size (px)"), &edited.bondWidth, 6.f, 48.f, "%.0f");
+                        changed |= ImGui::ColorEdit3(loc::label("Label color"), edited.bondColor.data());
+                        fitNextField("Offset X (px)");
+                        changed |= ImGui::SliderInt(loc::label("Offset X (px)"), &edited.replicateN[0], -100, 100);
+                        fitNextField("Offset Y (px)");
+                        changed |= ImGui::SliderInt(loc::label("Offset Y (px)"), &edited.replicateN[1], -100, 100);
+                        if (textLabelsTruncated) ImGui::TextDisabled(loc::text("Only the first 4,000 labels in view are drawn."));
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
+                    }
+                    if (m.op == Op::CreateIsosurface) {
+                        auto edited = m;
+                        bool changed = false;
+                        fitNextField("Iso-level", true);
+                        const auto grid = result.data.voxelGrid;
+                        const float speed = grid && grid->maximum > grid->minimum ? float(grid->maximum - grid->minimum) / 200.f : .01f;
+                        changed |= ImGui::DragFloat(loc::label("Iso-level"), &edited.value, speed, 0.f, 0.f, "%.6g");
+                        recordUiTestItem(std::string("pipeline.iso-level.")+m.id,"Iso-level");
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        if (!grid) ImGui::TextDisabled(loc::text("Needs a voxel grid: add Spatial binning with more than one bin in every direction above this node."));
+                        else {
+                            std::vector<float> counts(grid->histogram.begin(), grid->histogram.end());
+                            // Bin counts span orders of magnitude, so the plot uses a logarithmic height.
+                            for (float &count : counts) count = std::log1p(count);
+                            ImGui::PlotHistogram("##iso-histogram", counts.data(), int(counts.size()), 0, nullptr, 0.f, FLT_MAX, ImVec2(-1.f, U(56)));
+                            recordUiTestItem(std::string("pipeline.iso-histogram.")+m.id);
+                            const ImVec2 low = ImGui::GetItemRectMin(), high = ImGui::GetItemRectMax();
+                            const double range = grid->maximum - grid->minimum;
+                            if (ImGui::IsItemClicked() && range > 0) {
+                                edited.value = float(grid->minimum + std::clamp((ImGui::GetIO().MousePos.x - low.x) / std::max(high.x - low.x, 1.f), 0.f, 1.f) * range);
+                                changed = true;
+                            }
+                            if (range > 0) {
+                                const float x = low.x + float(std::clamp((double(edited.value) - grid->minimum) / range, 0.0, 1.0)) * (high.x - low.x);
+                                ImGui::GetWindowDrawList()->AddLine({x, low.y}, {x, high.y}, IM_COL32(255, 196, 64, 255), U(1.5f));
+                            }
+                            ImGui::TextDisabled(loc::text("%s from %.6g to %.6g. Click the histogram to set the level."), grid->name.c_str(), grid->minimum, grid->maximum);
+                        }
+                        fitNextField("Smoothing level");
+                        changed |= ImGui::SliderInt(loc::label("Smoothing level"), &edited.cspNeighbors, 0, 30);
+                        changed |= ImGui::ColorEdit3(loc::label("Surface color"), edited.bondColor.data());
+                        float percent = edited.bondWidth * 100.f;
+                        fitNextField("Transparency (%)");
+                        if (ImGui::SliderFloat(loc::label("Transparency (%)"), &percent, 0.f, 100.f, "%.0f")) { edited.bondWidth = percent / 100.f; changed = true; }
+                        const auto area = result.data.globalAttributes.find("CreateIsosurface.surface_area");
+                        const auto volume = result.data.globalAttributes.find("CreateIsosurface.volume_above");
+                        if (area != result.data.globalAttributes.end() && volume != result.data.globalAttributes.end())
+                            ImGui::TextDisabled(loc::text("Area %.6g, volume at or above the level %.6g (input length units)."), area->second, volume->second);
+                        if (gpu.surfacesTruncated()) ImGui::TextDisabled(loc::text("Some surfaces are not drawn: at most 2,000,000 triangles in total."));
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
+                    }
+                    if (m.op == Op::ConstructSurfaceMesh) {
+                        auto edited = m;
+                        bool changed = false;
+                        fitNextField("Method", true);
+                        changed |= ImGui::Combo(loc::label("Method"), &edited.type, loc::items("Alpha-shape\0Gaussian density\0"));
+                        recordUiTestItem(std::string("pipeline.surface-method.")+m.id,"Method");
+                        ImGui::SameLine();
+                        referenceHelp("analysis");
+                        if (edited.type == 0) {
+                            fitNextField("Probe sphere radius");
+                            changed |= ImGui::DragFloat(loc::label("Probe sphere radius"), &edited.value, .02f, .01f, 1000.f, "%.3f");
+                            ImGui::TextDisabled(loc::text("A value near the nearest-neighbor distance is a good start; below about half of it, artificial holes appear."));
+                            fitNextField("Smoothing level");
+                            changed |= ImGui::SliderInt(loc::label("Smoothing level"), &edited.cspNeighbors, 0, 30);
+                            changed |= ui_design::checkbox(loc::label("Select particles on the surface"), &edited.adaptive);
+                        } else {
+                            fitNextField("Resolution");
+                            changed |= ImGui::SliderInt(loc::label("Resolution"), &edited.rdfBins, 4, 512);
+                            float scale = float(edited.histogramRangeStart) * 100.f;
+                            fitNextField("Radius scaling (%)");
+                            if (ImGui::SliderFloat(loc::label("Radius scaling (%)"), &scale, 10.f, 500.f, "%.0f")) { edited.histogramRangeStart = scale / 100.f; changed = true; }
+                            fitNextField("Iso value");
+                            changed |= ImGui::DragFloat(loc::label("Iso value"), &edited.upper, .01f, .001f, 100.f, "%.3f");
+                            ImGui::TextDisabled(loc::text("Gaussian width is the element's covalent radius (1 for unknown types) times the scaling."));
+                        }
+                        changed |= ui_design::checkbox(loc::label("Use only selected particles"), &edited.cspOnlySelected);
+                        changed |= ImGui::ColorEdit3(loc::label("Surface color"), edited.bondColor.data());
+                        float percent = edited.bondWidth * 100.f;
+                        fitNextField("Transparency (%)");
+                        if (ImGui::SliderFloat(loc::label("Transparency (%)"), &percent, 0.f, 100.f, "%.0f")) { edited.bondWidth = percent / 100.f; changed = true; }
+                        const auto &attributes = result.data.globalAttributes;
+                        const auto area = attributes.find("ConstructSurfaceMesh.surface_area");
+                        const auto filled = attributes.find("ConstructSurfaceMesh.filled_volume");
+                        if (area != attributes.end() && filled != attributes.end())
+                            ImGui::TextDisabled(loc::text("Surface area %.6g, filled volume %.6g (input length units)."), area->second, filled->second);
+                        if (const auto fraction = attributes.find("ConstructSurfaceMesh.filled_fraction"); fraction != attributes.end())
+                            ImGui::TextDisabled(loc::text("Filled fraction of the cell: %.4f"), fraction->second);
+                        if (const auto skipped = attributes.find("ConstructSurfaceMesh.skipped_points"); skipped != attributes.end())
+                            ImGui::TextDisabled(loc::text("%.0f points could not be inserted."), skipped->second);
+                        if (gpu.surfacesTruncated()) ImGui::TextDisabled(loc::text("Some surfaces are not drawn: at most 2,000,000 triangles in total."));
+                        if (changed) { checkpoint(); static_cast<Modifier &>(m) = static_cast<const Modifier &>(edited); update(); }
+                    }
                     if (m.op == Op::Histogram || m.op == Op::ReduceProperty) {
                         auto edited = m;
                         bool changed = false;
@@ -13031,10 +13218,11 @@ struct App {
                 planned("VoroTop analysis");
                 endCard();
                 beginCard("Visualization");
-                for (auto name : {"Add text labels", "Construct surface mesh"}) planned(name);
+                operation(Op::TextLabels,"Write a property of every particle, or of the selected ones, as text at its position, with a printf-style format.");
+                operation(Op::ConstructSurfaceMesh,"Build the surface of a particle set with the alpha-shape or Gaussian density method, and report its area and filled volume.");
                 operation(Op::CoordinationPolyhedra,"Draw the convex hull of the bonded neighbors around every selected particle as a shaded, optionally transparent polyhedron.");
                 operation(Op::CreateBonds,"Create and GPU-render cutoff neighbor bonds as screen-space lines or 3D cylinders with periodic image shifts.");
-                planned("Create isosurface");
+                operation(Op::CreateIsosurface,"Draw the surface of constant value of the voxel grid from 3D Spatial binning.");
                 operation(Op::GenerateTrajectoryLines,"Draw the paths of all or selected particles over the trajectory, with periodic unwrapping and optional coloring by a sampled property.");
                 endCard();
                 beginCard("Modifier templates");

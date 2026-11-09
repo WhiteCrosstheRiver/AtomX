@@ -2492,6 +2492,107 @@ int main(int argc,char **argv) {
                 requireExport(app.gpu.polyhedronVertices()==0,"removing the node clears the polyhedra");
                 app.undo.clear();
                 app.redo.clear();
+                // Surface meshes, isosurfaces and text labels: catalog, panels and drawing.
+                requireExport(app.mods.empty(),"surface fixture starts from an empty pipeline");
+                const Dataset savedSurfaceSource=app.source;
+                Dataset lump;
+                lump.species={"X"};
+                lump.cell={40,0,0,0,40,0,0,0,40}; // Wide spacing: touching spheres would hide the mesh.
+                for (int z=0;z<5;++z) for (int y=0;y<5;++y) for (int x=0;x<5;++x)
+                    lump.atoms.push_back({float(12+4*x),float(12+4*y),float(12+4*z),0});
+                lump.sourceCount=lump.atoms.size();
+                lump.bounds();
+                app.source=lump;
+                app.update(0);
+                settlePipeline();
+                const auto addFromCatalog=[&](const char *name) {
+                    strcpy_s(app.modifierSearch,name);
+                    click("pipeline.add-modification");
+                    frame();
+                    click(std::string("catalog.")+name);
+                    settlePipeline();
+                };
+                const auto clearSurfacePipeline=[&]() {
+                    while (!app.mods.empty()) { app.modifierGraph.erase(app.mods.size()-1); app.update(0); settlePipeline(); }
+                    frame();
+                };
+                addFromCatalog("Construct surface mesh");
+                requireExport(app.mods.size()==1 && app.mods[0].op==Op::ConstructSurfaceMesh && app.mods[0].cspNeighbors==8,"catalog adds Construct surface mesh");
+                app.mods[0].value=5.f;
+                app.update(0);
+                settlePipeline();
+                app.selectPipeline=true;
+                app.modifierGraph.selected=0;
+                frame();
+                frame();
+                requireExport(app.error.empty() && app.result.data.surfaces.size()==1,("the surface mesh is built: "+app.error).c_str());
+                requireExport(app.gpu.surfaceVertices()>0,"the surface mesh is uploaded");
+                requireExport(app.uiTestItems.contains("pipeline.surface-method."+app.mods[0].id),"the surface panel draws its controls");
+                frame();
+                const auto withSurface=polyhedraPixels();
+                app.mods[0].enabled=false;
+                app.update(0);
+                settlePipeline();
+                frame();
+                frame();
+                requireExport(app.gpu.surfaceVertices()==0 && polyhedraPixels()!=withSurface,"the surface mesh changes the rendered image");
+                app.mods[0].enabled=true;
+                app.mods[0].type=1;
+                app.mods[0].rdfBins=32;
+                app.update(0);
+                settlePipeline();
+                frame();
+                requireExport(app.error.empty() && app.gpu.surfaceVertices()>0,("the Gaussian method draws: "+app.error).c_str());
+                clearSurfacePipeline();
+                addFromCatalog("Add text labels");
+                requireExport(app.mods.size()==1 && app.mods[0].op==Op::TextLabels,"catalog adds Add text labels");
+                app.modifierGraph.selected=0;
+                frame();
+                frame();
+                requireExport(app.error.empty() && app.result.data.textLabels.size()==1 && app.result.data.textLabels[0].text.size()==125 && app.result.data.textLabels[0].text[0]=="X",("labels are generated: "+app.error).c_str());
+                requireExport(app.uiTestItems.contains("pipeline.label-format."+app.mods[0].id),"the label panel draws its controls");
+                requireExport(app.textLabelsDrawn>0 && !app.textLabelsTruncated,"labels are drawn in the viewport");
+                {
+                    const auto labels=app.exportTextLabels(app.cameras[app.active],640,360);
+                    requireExport(!labels.empty(),"a rendered image receives the labels");
+                    Target labelTarget;
+                    app.gpu.target(labelTarget,640,360);
+                    const auto plain=dir/"labels-plain.png", marked=dir/"labels-marked.png";
+                    app.gpu.png(labelTarget,plain);
+                    app.gpu.png(labelTarget,marked,{},labels);
+                    requireExport(std::filesystem::file_size(plain)!=std::filesystem::file_size(marked),"labels are written into the PNG");
+                }
+                clearSurfacePipeline();
+                addFromCatalog("Spatial binning");
+                app.mods[0].property.clear();
+                app.mods[0].reduceOperation=3;
+                app.mods[0].replicateN[0]=app.mods[0].replicateN[1]=app.mods[0].replicateN[2]=8;
+                app.update(0);
+                settlePipeline();
+                requireExport(app.error.empty() && app.result.data.voxelGrid,("3D binning publishes a voxel grid: "+app.error).c_str());
+                addFromCatalog("Create isosurface");
+                requireExport(app.mods.size()==2 && app.mods[1].op==Op::CreateIsosurface && app.mods[1].value>0,"the new isosurface starts in the middle of the data range");
+                app.modifierGraph.selected=1;
+                frame();
+                frame();
+                requireExport(app.error.empty() && app.gpu.surfaceVertices()>0,("the isosurface draws: "+app.error).c_str());
+                frame();
+                requireExport(app.uiTestItems.contains("pipeline.iso-histogram."+app.mods[1].id),"the isosurface panel shows its histogram");
+                {
+                    app.mods[1].value=float(app.result.data.voxelGrid->maximum); // The click lands mid-range, away from this.
+                    const float before=app.mods[1].value;
+                    click("pipeline.iso-histogram."+app.mods[1].id);
+                    settlePipeline();
+                    requireExport(app.mods[1].value<before,"clicking the histogram sets the level");
+                }
+                clearSurfacePipeline();
+                app.source=savedSurfaceSource;
+                app.update(0);
+                settlePipeline();
+                frame();
+                requireExport(app.gpu.surfaceVertices()==0 && app.result.data.textLabels.empty(),"removing the nodes clears surfaces and labels");
+                app.undo.clear();
+                app.redo.clear();
                 // Bond properties reach the Histogram node and the Data inspector.
                 requireExport(app.mods.empty(),"bond property fixture starts from an empty pipeline");
                 const Dataset savedBondSource=app.source;
